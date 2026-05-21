@@ -1,0 +1,54 @@
+html[data-abchat-content-selector-active="1"],
+html[data-abchat-content-selector-active="1"] * {
+  cursor: crosshair !important;
+}
+
+html[data-abchat-content-selector-active="1"] .abchat-content-selector-highlight {
+  outline: 2px dashed #2563eb !important;
+  box-shadow: inset 0 0 0 9999px rgba(37, 99, 235, 0.08) !important;
+  transition: box-shadow 120ms ease, outline-color 120ms ease;
+}
+
+html[data-abchat-content-selector-active="0"] .abchat-content-selector-highlight {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.abchat-content-selector-tooltip {
+  position: fixed;
+  z-index: 2147483647;
+  pointer-events: none;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: rgba(30, 30, 30, 0.92);
+  color: #e4e4e7;
+  font: 12px/1.4 SFMono-Regular, Menlo, Consolas, monospace;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.28);
+  max-width: min(480px, 45vw);
+}
+.abchat-content-selector-tooltip-selector {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.abchat-content-selector-tooltip-wordcount {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: rgba(228, 228, 231, 0.85);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.abchat-content-selector-tooltip-hint,
+.abchat-content-selector-tooltip-rightclick-hint {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: rgba(228, 228, 231, 0.7);
+  font-style: italic;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

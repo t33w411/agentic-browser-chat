@@ -1,0 +1,117 @@
+{
+  "name": "Agentic Browser Chat",
+  "version": "1.0.0",
+  "manifest_version": 3,
+  "description": "Your AI assistant in the browser. Chat with any page's content, manage notes and tasks, attach files, and keep full chat history.",
+  "permissions": [
+    "contextMenus",
+    "activeTab",
+    "tabs",
+    "scripting",
+    "clipboardWrite",
+    "clipboardRead",
+    "storage",
+    "alarms",
+    "notifications",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js"
+  },
+  "icons": {
+    "16": "icon.png",
+    "32": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content/keyboardShield.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content/preInit.js",
+        "shared/messages.js",
+        "shared/toolRegistry.js",
+        "shared/domainConfig.js",
+        "shared/storage.js",
+        "lib/flexsearch.min.js",
+        "shared/panelDataRepo.js",
+        "shared/search.js",
+        "utils/dom.js",
+        "utils/clipboard.js",
+        "ui/toast.js",
+        "lib/mathjax-startup.js",
+        "lib/tex-svg.js",
+        "lib/marked.min.js",
+        "lib/highlight.min.js",
+        "lib/purify.min.js",
+        "lib/mermaid-guard.js",
+        "lib/mermaid.min.js",
+        "lib/xlsx.min.js",
+        "lib/jszip.min.js",
+        "panel/panelIcons.js",
+        "panel/panelTemplate.js",
+        "panel/panelData.js",
+        "agent/apiLogger.js",
+        "agent/tools.js",
+        "agent/documentGeneration.js",
+        "agent/toolExec.js",
+        "agent/contextBuilder.js",
+        "agent/client.js",
+        "agent/compactor.js",
+        "panel/panelRuntime.js",
+        "panel/panel.js",
+        "panel/panelStateSync.js",
+        "ui/floatingPanel.js",
+        "tools/selectionContextActions.js",
+        "tools/flattenedContent.js",
+        "tools/contentSelector.js",
+        "content/agentLeaveWarning.js",
+        "content/main.js"
+      ],
+      "css": [
+        "styles.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Agentic Browser Chat",
+    "default_icon": {
+      "16": "icon.png",
+      "32": "icon.png"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "panel/panel.css",
+        "lib/github-dark.min.css",
+        "icon.png",
+        "lib/papaparse.min.js",
+        "lib/xlsx.min.js",
+        "lib/mammoth.min.js",
+        "lib/pdf.min.js",
+        "lib/pdf.worker.min.js",
+        "lib/jszip.min.js",
+        "panel/images/*"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ]
+}

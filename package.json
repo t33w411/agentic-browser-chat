@@ -1,0 +1,17 @@
+{
+  "name": "agentic-browser-chat",
+  "version": "1.0.0",
+  "description": "Local-first AI assistant Chrome extension: chat with any page, take agent actions, manage notes, tasks, and quizzes, with full chat history.",
+  "main": "index.js",
+  "keywords": [
+    "chrome-extension",
+    "ai",
+    "llm",
+    "browser",
+    "agent",
+    "productivity"
+  ],
+  "author": "Tayo Olusiyan",
+  "license": "MIT",
+  "type": "commonjs"
+}
