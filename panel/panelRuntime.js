@@ -2226,6 +2226,11 @@
       let i = 0;
       let lastUserMsgIndex = null;
 
+      // Tracks memory/skill write tool calls observed since the last user message,
+      // so the assistant bubble can show a "Saved to memory" / "Saved as skill" badge
+      // when one or more of those tool calls actually fired this turn.
+      let memoryActionsSinceLastUserMsgForRender = { memory: false, skill: false };
+
       // Buffer for merging consecutive assistant text messages into one bubble.
       let asstMergeBuffer = [];
       function flushAsstBuffer() {
@@ -2233,6 +2238,15 @@
         const mergedMd = asstMergeBuffer.map(function (b) { return resolveImageBlobRefsForPanelRuntime(b.md); }).join('\n\n');
         const last = asstMergeBuffer[asstMergeBuffer.length - 1];
         const hasGenImageForFlush = asstMergeBuffer.some(function (b) { return /__blob:\d+__/.test(b.md); });
+        const showSavedMemoryBadgeForFlush = asstMergeBuffer.some(function (b) { return b.savedMemory; });
+        const showSavedSkillBadgeForFlush = asstMergeBuffer.some(function (b) { return b.savedSkill; });
+        const memoryBadgeHtmlForFlush =
+          (showSavedMemoryBadgeForFlush
+            ? '<div class="msg-memory-badge" title="A memory entry was saved this turn"><span class="msg-memory-badge-dot"></span> Saved to memory</div>'
+            : '')
+          + (showSavedSkillBadgeForFlush
+            ? '<div class="msg-memory-badge" title="A skill was saved this turn"><span class="msg-memory-badge-dot"></span> Saved as skill</div>'
+            : '');
         const allSourcesForFlush = [];
         asstMergeBuffer.forEach(function(b) {
           if (Array.isArray(b.searchSources)) {
@@ -2268,6 +2282,7 @@
             '<div class="msg-bubble asst has-options">' +
               ddHtml +
               '<div class="msg-text">' + renderMarkdown(mergedMd) + '</div>' +
+              memoryBadgeHtmlForFlush +
               sourcesHtml +
             '</div>' +
           '</div>';
@@ -2301,6 +2316,13 @@
           && Array.isArray(msg.tool_calls)
           && msg.tool_calls.length > 0;
         if (isToolRoleMessageForPanelRuntime || hasToolCallAssistantPayloadForPanelRuntime) {
+          if (hasToolCallAssistantPayloadForPanelRuntime) {
+            for (var tcIdxForBadge = 0; tcIdxForBadge < msg.tool_calls.length; tcIdxForBadge++) {
+              const classifiedForBadge = classifyToolCallForMemoryGuardForPanelRuntime(msg.tool_calls[tcIdxForBadge]);
+              if (classifiedForBadge === 'memory') memoryActionsSinceLastUserMsgForRender.memory = true;
+              else if (classifiedForBadge === 'skill') memoryActionsSinceLastUserMsgForRender.skill = true;
+            }
+          }
           i++;
           continue;
         }
@@ -2317,6 +2339,7 @@
         // Collect a run of consecutive hidden pairs and emit one indicator for them
         if (msg.role === 'user' && S.hiddenPairIds.has(msg.id)) {
           flushAsstBuffer();
+          memoryActionsSinceLastUserMsgForRender = { memory: false, skill: false };
           const hiddenIds = [];
           while (i < messages.length && messages[i].role === 'user' && S.hiddenPairIds.has(messages[i].id)) {
             hiddenIds.push(messages[i].id);
@@ -2340,7 +2363,14 @@
         if (!isUser) {
           const mdText = String(msg.md || msg.content || '').trim();
           if (mdText) {
-            asstMergeBuffer.push({ md: mdText, pairMsgId: pairMsgId, msgId: msg.id, searchSources: Array.isArray(msg.searchSources) ? msg.searchSources : [] });
+            asstMergeBuffer.push({
+              md: mdText,
+              pairMsgId: pairMsgId,
+              msgId: msg.id,
+              searchSources: Array.isArray(msg.searchSources) ? msg.searchSources : [],
+              savedMemory: memoryActionsSinceLastUserMsgForRender.memory,
+              savedSkill: memoryActionsSinceLastUserMsgForRender.skill
+            });
           }
           i++;
           continue;
@@ -2348,6 +2378,8 @@
 
         // User message: flush any buffered assistant text first, then render user bubble.
         flushAsstBuffer();
+        // Reset the per-turn memory/skill tracker now that we've entered a new turn.
+        memoryActionsSinceLastUserMsgForRender = { memory: false, skill: false };
 
         const isEditingMessageForPanelRuntime = S.chatEditingMsgId === msg.id;
 
@@ -9423,6 +9455,41 @@
       }
     }
 
+    // Classifies a tool call as a memory or skill write. Used by the renderer to
+    // attach the "Saved to memory" / "Saved as skill" badge to the assistant bubble.
+    // Kept in sync with classifyMemoryToolCallForMemoryClaimGuard in
+    // agent/hooks/builtin/memoryClaimGuard.js.
+    function classifyToolCallForMemoryGuardForPanelRuntime(toolCallForGuard) {
+      if (!toolCallForGuard || !toolCallForGuard.function) return null;
+      const nameForGuard = toolCallForGuard.function.name;
+      if (nameForGuard !== 'memory' && nameForGuard !== 'skill') return null;
+      let argsForGuard = {};
+      try { argsForGuard = JSON.parse(toolCallForGuard.function.arguments || '{}'); } catch (e) { argsForGuard = {}; }
+      const opForGuard = argsForGuard && typeof argsForGuard.operation === 'string' ? argsForGuard.operation : '';
+      if (nameForGuard === 'memory') {
+        if (opForGuard === 'upsert' || opForGuard === 'delete_entry') return 'memory';
+        return null;
+      }
+      if (nameForGuard === 'skill') {
+        if (opForGuard === 'create' || opForGuard === 'update' || opForGuard === 'delete') return 'skill';
+        return null;
+      }
+      return null;
+    }
+
+    function getOriginatingUserTextForMemoryGuardForPanelRuntime(chatIdForGuard, fallbackTextForGuard) {
+      if (fallbackTextForGuard && String(fallbackTextForGuard).trim()) return String(fallbackTextForGuard);
+      const chatRecordForGuard = CHAT_STORE_FOR_PANEL_RUNTIME[chatIdForGuard];
+      const messagesForGuard = (chatRecordForGuard && chatRecordForGuard.messages) || [];
+      for (var idxForGuard = messagesForGuard.length - 1; idxForGuard >= 0; idxForGuard--) {
+        const candidateForGuard = messagesForGuard[idxForGuard];
+        if (candidateForGuard && candidateForGuard.role === 'user') {
+          return String(candidateForGuard.content || candidateForGuard.md || '');
+        }
+      }
+      return '';
+    }
+
     async function sendChatForPanelRuntime(optionsForPanelRuntime) {
       const optsForPanelRuntime = optionsForPanelRuntime || {};
 
@@ -9503,15 +9570,38 @@
       syncMainChatListItemForPanelRuntime(chatId);
 
       const MAX_TOOL_ITERS = 20;
-      const MAX_TOTAL_TOOL_CALLS_FOR_SEND = 40;
       let iterCount = 0;
-      let totalToolCallsForSend = 0;
       let consecutiveEmptyItersForSend = 0;
-      let imageCallsThisRunForSend = 0;
       let sideCallCostForSend = 0;
       let turnMainCostAccumForSend = 0;
       let accumulatedSearchSourcesForSend = [];
       const seenSearchUrlsForSend = new Set();
+      // Hook system state. turnContextForSend is shared across all hook dispatches
+      // for this send. pendingSystemNotesForSend buffers strings from hooks that
+      // returned continueWithSystemNote; they are injected as a single system
+      // message at the start of the next iteration.
+      const hooksForSend = ((globalThis.ABChatAgent || {}).hooks) || null;
+      const turnContextForSend = (hooksForSend && typeof hooksForSend.createTurnContext === 'function')
+        ? hooksForSend.createTurnContext({
+            chatId: chatId,
+            userText: getOriginatingUserTextForMemoryGuardForPanelRuntime(chatId, text)
+          })
+        : null;
+      let pendingSystemNotesForSend = [];
+      const turnHookFiringsByIterForSend = [];
+      async function dispatchHookForSend(eventNameForDispatch, payloadForDispatch) {
+        if (!hooksForSend || typeof hooksForSend.dispatch !== 'function' || !turnContextForSend) {
+          return { block: null, continueWithSystemNote: null, annotate: null, firings: [] };
+        }
+        const resultForDispatch = await hooksForSend.dispatch(eventNameForDispatch, payloadForDispatch, turnContextForSend);
+        if (resultForDispatch && Array.isArray(resultForDispatch.firings) && resultForDispatch.firings.length > 0) {
+          turnHookFiringsByIterForSend.push({ iter: turnContextForSend.iterIndex, event: eventNameForDispatch, firings: resultForDispatch.firings });
+        }
+        if (resultForDispatch && typeof resultForDispatch.continueWithSystemNote === 'string' && resultForDispatch.continueWithSystemNote) {
+          pendingSystemNotesForSend.push(resultForDispatch.continueWithSystemNote);
+        }
+        return resultForDispatch;
+      }
 
       const logStartTimeForSend = Date.now();
       let logFirstMessagesForSend = null;
@@ -9732,9 +9822,26 @@
         // Best-effort; the iteration loop will retry persistence below.
       }
 
+      // UserPromptSubmit fires once per send, before the iteration loop. A hook
+      // returning block: { reason } skips the model call and surfaces a system
+      // message to the user (the user message is left persisted as a record).
+      let userPromptBlockedForSend = false;
+      if (hooksForSend && turnContextForSend) {
+        const userPromptResultForSend = await dispatchHookForSend('UserPromptSubmit', {
+          userText: turnContextForSend.userText,
+          chatId: chatId
+        });
+        if (userPromptResultForSend && userPromptResultForSend.block) {
+          userPromptBlockedForSend = true;
+          if (S.activeChatId === chatId) {
+            appendSystemMsgToContainerForPanelRuntime(userPromptResultForSend.block.reason);
+          }
+        }
+      }
+
       createLiveTurnBubbleForPanelRuntime(chatId);
       broadcastStreamEventForPanelRuntime("stream_start", chatId, null);
-        while (iterCount < MAX_TOOL_ITERS) {
+        while (!userPromptBlockedForSend && iterCount < MAX_TOOL_ITERS) {
           iterCount++;
           const turnStartTimeForSend = Date.now();
 
@@ -9772,6 +9879,15 @@
                 }
                 return msgsForFallback;
               }());
+
+          if (pendingSystemNotesForSend.length > 0) {
+            apiMessages.push({ role: 'system', content: pendingSystemNotesForSend.join('\n\n') });
+            pendingSystemNotesForSend = [];
+          }
+
+          if (turnContextForSend) {
+            turnContextForSend.iterIndex = iterCount - 1;
+          }
 
           if (iterCount === 1) {
             logFirstMessagesForSend = apiMessages;
@@ -9936,7 +10052,55 @@
           // streaming bubble's text (which clears on the next iteration).
           broadcastStreamEventForPanelRuntime("stream_message_persisted", chatId, null);
 
+          // Make this iter's tool calls visible to Stop/PostModelResponse hooks
+          // (the memory-claim guard reads turnContext.toolCallsThisTurn to decide
+          // whether a memory/skill write happened anywhere in the send).
+          if (turnContextForSend && hasToolCalls) {
+            for (var tcPushIdxForCtx = 0; tcPushIdxForCtx < toolCallsForLoop.length; tcPushIdxForCtx++) {
+              turnContextForSend.toolCallsThisTurn.push(toolCallsForLoop[tcPushIdxForCtx]);
+            }
+          }
+
+          // PostModelResponse fires after every model response, whether it emitted
+          // tool calls or final text. Handlers can block (abort the turn) or, on
+          // final-reply iterations, return continueWithSystemNote to re-loop.
+          const postModelResponseResultForSend = await dispatchHookForSend('PostModelResponse', {
+            assistantMessage: assistantMsg,
+            toolCalls: toolCallsForLoop || [],
+            isFinalReply: !hasToolCalls,
+            chatId: chatId
+          });
+          if (postModelResponseResultForSend && postModelResponseResultForSend.block) {
+            if (S.activeChatId === chatId) {
+              appendSystemMsgToContainerForPanelRuntime(postModelResponseResultForSend.block.reason);
+            }
+            break;
+          }
+          if (postModelResponseResultForSend && postModelResponseResultForSend.continueWithSystemNote) {
+            // Note was pushed into pendingSystemNotesForSend by dispatchHookForSend.
+            // Re-enter the loop so the model sees the corrective note.
+            continue;
+          }
+
           if (!hasToolCalls) {
+            // Stop fires only on the terminal turn (final text reply, no tool calls).
+            // A handler returning continueWithSystemNote re-enters the loop instead
+            // of breaking; a handler returning block aborts the turn.
+            const stopResultForSend = await dispatchHookForSend('Stop', {
+              assistantMessage: assistantMsg,
+              toolCalls: [],
+              isFinalReply: true,
+              chatId: chatId
+            });
+            if (stopResultForSend && stopResultForSend.block) {
+              if (S.activeChatId === chatId) {
+                appendSystemMsgToContainerForPanelRuntime(stopResultForSend.block.reason);
+              }
+              break;
+            }
+            if (stopResultForSend && stopResultForSend.continueWithSystemNote) {
+              continue;
+            }
             if (assistantMsg.content) { logFinalResponseForSend = assistantMsg.content; }
             break;
           }
@@ -9948,18 +10112,12 @@
             toolCalls: toolCallsForLoop
           });
 
-          // Lifetime tool-call cap: prevents runaway parallel-call abuse across all iterations
-          if (totalToolCallsForSend + toolCallsForLoop.length > MAX_TOTAL_TOOL_CALLS_FOR_SEND) {
-            if (S.activeChatId === chatId) {
-              appendSystemMsgToContainerForPanelRuntime('Session tool-call limit reached (' + MAX_TOTAL_TOOL_CALLS_FOR_SEND + ' total). Stopping to prevent runaway execution.');
-            }
-            break;
-          }
-          totalToolCallsForSend += toolCallsForLoop.length;
+          // Lifetime tool-call cap enforced by agent/hooks/builtin/toolCallCap.js
+          // (PostModelResponse handler), and per-send image-generation cap enforced
+          // by agent/hooks/builtin/imageGenerationCap.js (PreToolUse handler).
 
           // Execute all tool calls in parallel, then append results in order
           const toolLogEntriesForLoop = [];
-          let imageCallsInBatchForSend = 0;
           const wrapToolPromiseWithAbortForSend = function (toolPromiseForSend) {
             return new Promise(function (resolveForToolAbort) {
               if (controllerForSend.signal.aborted) {
@@ -9986,19 +10144,24 @@
               });
             });
           };
-          const toolExecPromisesForLoop = toolCallsForLoop.map(function (tc) {
+          const toolExecPromisesForLoop = toolCallsForLoop.map(async function (tc) {
             let toolArgs = {};
             try { toolArgs = JSON.parse(tc.function.arguments || "{}"); } catch (e) {}
             const tcNameForExec = tc.function ? tc.function.name : '';
             const logEntry = { name: tcNameForExec, args: toolArgs };
             logAllToolCallsForSend.push(logEntry);
             toolLogEntriesForLoop.push(logEntry);
-            if (tcNameForExec === 'generate_image') {
-              imageCallsInBatchForSend++;
-              if (imageCallsThisRunForSend >= 2 || imageCallsInBatchForSend > 1) {
-                const dupErr = { ok: false, error: 'Maximum of 2 image generations per send reached. Do not call generate_image again.' };
-                return Promise.resolve(dupErr);
-              }
+            // PreToolUse: a hook returning block: { reason } skips execution and
+            // surfaces a synthetic error result to the model for this tool call.
+            const preToolUseResultForLoop = await dispatchHookForSend('PreToolUse', {
+              toolName: tcNameForExec,
+              args: toolArgs,
+              callId: tc.id,
+              chatId: chatId,
+              iterIndex: turnContextForSend ? turnContextForSend.iterIndex : 0
+            });
+            if (preToolUseResultForLoop && preToolUseResultForLoop.block) {
+              return { ok: false, error: preToolUseResultForLoop.block.reason };
             }
             if (typeof executeToolForSend === "function") {
               return wrapToolPromiseWithAbortForSend(
@@ -10012,7 +10175,7 @@
                 })
               );
             }
-            return Promise.resolve({ error: "Tool executor not available." });
+            return { error: "Tool executor not available." };
           });
 
           const hasImageGenInBatchForTimeout = toolCallsForLoop.some(function (tcForTimeout) {
@@ -10146,6 +10309,20 @@
               content: toolResultStrForApi,
               md: ''
             }, { skipChatUpdate: true });
+            // PostToolUse: handlers may only annotate here (no block, no
+            // continueWithSystemNote). The tool already ran and its result is
+            // persisted; this event is for observers (logging, metrics, etc.).
+            let parsedToolArgsForPostHook = {};
+            try { parsedToolArgsForPostHook = JSON.parse(tc.function.arguments || '{}'); } catch (e) {}
+            await dispatchHookForSend('PostToolUse', {
+              toolName: tcNameForResult,
+              args: parsedToolArgsForPostHook,
+              result: toolResultForModel,
+              callId: tc.id,
+              chatId: chatId,
+              iterIndex: turnContextForSend ? turnContextForSend.iterIndex : 0,
+              ok: !(toolResult && typeof toolResult === 'object' && toolResult.error)
+            });
           }
           if (controllerForSend.signal.aborted) {
             logCancelledForSend = true;
@@ -10206,7 +10383,6 @@
               if (blobRecordForImage && blobRecordForImage.id != null) {
                 const blobIdForImage = Number(blobRecordForImage.id);
                 setImageBlobCacheForPanelRuntime(blobIdForImage, toolResultForImage.dataUrl);
-                imageCallsThisRunForSend++;
                 sideCallCostForSend += imageGenCostForSend;
                 // content must stay '' so the chat renderer shows only the image (via md) and the
                 // context builder falls through to md, giving the agent the __blob:N__ ref it needs
@@ -10366,6 +10542,7 @@
             responseContent: logFinalResponseForSend,
             toolCalls: logAllToolCallsForSend,
             turns: logTurnsForSend,
+            hookFirings: turnHookFiringsByIterForSend,
             usage: logUsageForSend
           }).catch(function () {});
         }

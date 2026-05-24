@@ -50,8 +50,14 @@
 
 /* ============================================================
    PANEL — CSS CUSTOM PROPERTIES (dark theme overrides)
+   Applied to all four shadow-root top-level containers so that
+   descendants of the overlays (which are siblings of #panel-host,
+   not descendants) also resolve the dark theme variables.
 ============================================================ */
-.panel-host[data-theme="dark"] {
+.panel-host[data-theme="dark"],
+#attach-preview-overlay[data-theme="dark"],
+#inline-overlay[data-theme="dark"],
+#picker-overlay[data-theme="dark"] {
   --abchat-bg-panel:       #1e293b;
   --abchat-bg-sidebar:     #0f1a28;
   --abchat-bg-input:       #17223a;
@@ -3502,3 +3508,9 @@ img.ecs-icon {
 .panel-host[data-theme="dark"] .msg-sources { border-top-color: #2d3f55; }
 .panel-host[data-theme="dark"] .msg-source-link { color: #6ab4ff; }
 .panel-host[data-theme="dark"] .msg-source-link:hover { color: #90cdff; }
+
+/* "Saved to memory" / "Saved as skill" badge under the assistant bubble */
+.msg-memory-badge { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; margin-right: 6px; padding: 2px 8px; font-size: 11px; font-weight: 500; line-height: 1.4; color: #166534; background: #dcfce7; border: 1px solid #bbf7d0; border-radius: 999px; font-family: var(--abchat-font); }
+.msg-memory-badge-dot { width: 6px; height: 6px; border-radius: 50%; background: #16a34a; display: inline-block; }
+.panel-host[data-theme="dark"] .msg-memory-badge { color: #86efac; background: rgba(34, 197, 94, 0.12); border-color: rgba(34, 197, 94, 0.35); }
+.panel-host[data-theme="dark"] .msg-memory-badge-dot { background: #4ade80; }
