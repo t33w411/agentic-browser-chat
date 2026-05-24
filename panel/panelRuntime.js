@@ -1001,6 +1001,11 @@
       // we don't gate on activeChatId.
       if (tabNameForPane === 'chats') return true;
       if (tabNameForPane === 'notes') {
+        // A new (unsaved) note has no activeNoteId yet but the editor form is
+        // visible — treat that as detail so the reduced-view pane switches.
+        const noteFormForCheck = root.getElementById('note-editor-form');
+        const noteFormOpenForCheck = noteFormForCheck && !noteFormForCheck.classList.contains('hidden');
+        if (noteFormOpenForCheck) return true;
         return S.activeNoteId != null && Boolean(NOTE_STORE_FOR_PANEL_RUNTIME[S.activeNoteId]);
       }
       if (tabNameForPane === 'tasks') {
