@@ -30,6 +30,9 @@
   var _exposedSetChatSubTabForPanelRuntime = null;
   var _exposedSetTaskFilterForPanelRuntime = null;
   var _exposedSetQuizFilterForPanelRuntime = null;
+  var _exposedSetChatSearchQueryForPanelRuntime = null;
+  var _exposedSetNotesSearchQueryForPanelRuntime = null;
+  var _exposedSetTaskSearchQueryForPanelRuntime = null;
 
   function initializePanelRuntimeForPanel() {
     if (globalScopeForPanelRuntime.__abchatPanelRuntimeInitialized) {
@@ -2884,12 +2887,18 @@
         labelForPanelRuntime.remove();
       });
       let currentGroupForPanelRuntime = null;
+      // Iterate the full CHAT_ORDER (not just the renderedChatCount prefix). Items
+      // already in the DOM are processed regardless of where they sit relative to
+      // the window cursor; items not yet in the DOM are only lazily created when
+      // they fall inside the current window. This self-heals any drift between
+      // renderedChatCount and the actual rendered DOM so a stale prepend or a
+      // cross-tab refresh can never leave an orphaned chat item above its label.
       CHAT_ORDER_FOR_PANEL_RUNTIME.forEach(function (idForPanelRuntime, idxForChatGroup) {
-        if (idxForChatGroup >= renderedChatCountForPanelRuntime) return;
         const chatDataForPanelRuntime = CHAT_STORE_FOR_PANEL_RUNTIME[idForPanelRuntime];
         if (!chatDataForPanelRuntime) return;
         let chatItemForPanelRuntime = chatListForPanelRuntime.querySelector(`.chat-item[data-chat-id="${idForPanelRuntime}"]`);
         if (!chatItemForPanelRuntime) {
+          if (idxForChatGroup >= renderedChatCountForPanelRuntime) return;
           syncMainChatListItemForPanelRuntime(idForPanelRuntime);
           chatItemForPanelRuntime = chatListForPanelRuntime.querySelector(`.chat-item[data-chat-id="${idForPanelRuntime}"]`);
         }
@@ -3401,7 +3410,7 @@
         favsBtn.innerHTML = ic.starEmpty12 + ' Favs';
       }
       if (!optsForChatTypeForPanelRuntime.skipStateSync) {
-        writePanelStateSyncForPanelRuntime({ chatSubTab: normalizedTypeForChatType });
+        writePanelStateSyncForPanelRuntime({ chatSubTab: normalizedTypeForChatType, chatSearchQuery: '' });
       }
     }
 
@@ -4649,14 +4658,16 @@
         // Expand the rendered window to cover newly arrived chats. When cross-tab sync
         // adds chats at the top of CHAT_ORDER, renderedChatCountForPanelRuntime must grow
         // by the same count or the item at the old boundary falls outside the rebuild's
-        // scope, leaving it stranded in the DOM without a group label.
+        // scope, leaving it stranded in the DOM without a group label. Capping at the
+        // initial page size here would shrink the window below its current value when
+        // the user had already scrolled past one page, so cap at the total instead.
         var newChatCountForRefresh = CHAT_ORDER_FOR_PANEL_RUNTIME.filter(function (id) {
           return !oldChatIdSetForRefresh.has(id);
         }).length;
         if (newChatCountForRefresh > 0) {
           renderedChatCountForPanelRuntime = Math.min(
             renderedChatCountForPanelRuntime + newChatCountForRefresh,
-            SIDEBAR_PAGE_SIZE_FOR_PANEL_RUNTIME
+            CHAT_ORDER_FOR_PANEL_RUNTIME.length
           );
         }
 
@@ -4726,6 +4737,7 @@
             syncSearchIndexForPanelRuntime('chats', 'update', idForSearchRefresh, chatForSearchRefresh);
           }
         });
+        reapplyActiveSearchForListTypeForPanelRuntime('chats');
 
         var refreshedActiveChatIdForRefresh = S.activeChatId;
         // Skip re-rendering the active chat during a remote-mirrored stream.
@@ -4816,7 +4828,7 @@
         if (newNoteCountForRefresh > 0) {
           renderedNoteCountForPanelRuntime = Math.min(
             renderedNoteCountForPanelRuntime + newNoteCountForRefresh,
-            SIDEBAR_PAGE_SIZE_FOR_PANEL_RUNTIME
+            NOTE_ORDER_FOR_PANEL_RUNTIME.length
           );
         }
 
@@ -4830,6 +4842,7 @@
             syncSearchIndexForPanelRuntime('notes', 'update', idForSearchRefresh, noteForSearchRefresh);
           }
         });
+        reapplyActiveSearchForListTypeForPanelRuntime('notes');
         var activeNoteIdForRefresh = Number(S.activeNoteId);
         if (Number.isFinite(activeNoteIdForRefresh) && NOTE_STORE_FOR_PANEL_RUNTIME[activeNoteIdForRefresh]) {
           var mainFormForNoteRefresh = root.getElementById('note-editor-form');
@@ -4900,7 +4913,7 @@
         if (newTaskCountForRefresh > 0) {
           renderedTaskCountForPanelRuntime = Math.min(
             renderedTaskCountForPanelRuntime + newTaskCountForRefresh,
-            SIDEBAR_PAGE_SIZE_FOR_PANEL_RUNTIME
+            TASK_ORDER_FOR_PANEL_RUNTIME.length
           );
         }
 
@@ -4914,6 +4927,7 @@
             syncSearchIndexForPanelRuntime('tasks', 'update', idForSearchRefresh, taskForSearchRefresh);
           }
         });
+        reapplyActiveSearchForListTypeForPanelRuntime('tasks');
         return;
       }
 
@@ -4953,7 +4967,7 @@
         if (newQuizCountForRefresh > 0) {
           renderedQuizCountForPanelRuntime = Math.min(
             renderedQuizCountForPanelRuntime + newQuizCountForRefresh,
-            SIDEBAR_PAGE_SIZE_FOR_PANEL_RUNTIME
+            QUIZ_ORDER_FOR_PANEL_RUNTIME.length
           );
         }
 
@@ -7792,6 +7806,48 @@
       });
     }
 
+    function applySearchInputMirrorForPanelRuntime(inputIdForMirror, queryForMirror, filterFnForMirror) {
+      const inputForMirror = root.getElementById(inputIdForMirror);
+      if (!inputForMirror) return;
+      const valueForMirror = typeof queryForMirror === 'string' ? queryForMirror : '';
+      if (inputForMirror.value !== valueForMirror) {
+        inputForMirror.value = valueForMirror;
+        const wrapForMirror = inputForMirror.closest('.sidebar-search,.ns-search,.task-search');
+        if (wrapForMirror) wrapForMirror.classList.toggle('has-value', valueForMirror.length > 0);
+      }
+      if (typeof filterFnForMirror === 'function') filterFnForMirror(valueForMirror);
+    }
+
+    // Re-apply whichever search input is active for the given list type. Called at the
+    // tail of each store-refresh branch so a re-render (which resets chat-item display
+    // via syncMainChatListItem) doesn't strand the user with an unfiltered list when
+    // the search input still holds a query.
+    function reapplyActiveSearchForListTypeForPanelRuntime(listTypeForReapply) {
+      const inputIdForReapply =
+        listTypeForReapply === 'chats' ? 'chat-search-input' :
+        listTypeForReapply === 'notes' ? 'notes-search-input' :
+        listTypeForReapply === 'tasks' ? 'task-search-input' : null;
+      if (!inputIdForReapply) return;
+      const inputForReapply = root.getElementById(inputIdForReapply);
+      if (!inputForReapply) return;
+      const queryForReapply = inputForReapply.value || '';
+      if (listTypeForReapply === 'chats') filterChatListForPanelRuntime(queryForReapply);
+      else if (listTypeForReapply === 'notes') filterNotesListForPanelRuntime(queryForReapply);
+      else if (listTypeForReapply === 'tasks') filterTasksListForPanelRuntime(queryForReapply);
+    }
+
+    function setChatSearchQueryForMirrorForPanelRuntime(queryForMirror) {
+      applySearchInputMirrorForPanelRuntime('chat-search-input', queryForMirror, filterChatListForPanelRuntime);
+    }
+
+    function setNotesSearchQueryForMirrorForPanelRuntime(queryForMirror) {
+      applySearchInputMirrorForPanelRuntime('notes-search-input', queryForMirror, filterNotesListForPanelRuntime);
+    }
+
+    function setTaskSearchQueryForMirrorForPanelRuntime(queryForMirror) {
+      applySearchInputMirrorForPanelRuntime('task-search-input', queryForMirror, filterTasksListForPanelRuntime);
+    }
+
     /* ============================================================
       AGENTIC CHAT SEND
     ============================================================ */
@@ -8794,13 +8850,21 @@
       function autoLabel(n) {
         return String(n || 'tool').replace(/_/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); });
       }
+      function isAgentNoteForLiveTurnLabel(typeForAgentCheck, idForAgentCheck) {
+        if (typeForAgentCheck !== 'note' || !idForAgentCheck) return false;
+        var noteRecordForAgentCheck = NOTE_STORE_FOR_PANEL_RUNTIME[idForAgentCheck];
+        return !!(noteRecordForAgentCheck && noteRecordForAgentCheck.noteType === 'agent');
+      }
       switch (name) {
         case 'read':
+          if (isAgentNoteForLiveTurnLabel(args.type, args.id)) return 'Introspecting';
           return 'Reading ' + (args.type || 'item') + (args.id ? ' #' + args.id : '');
         case 'write':
+          if (isAgentNoteForLiveTurnLabel(args.type, args.id)) return 'Working';
           if (args.id) return 'Updating ' + (args.type || 'item') + (args.title ? ' “' + trunc(args.title, 20) + '”' : ' #' + args.id);
           return 'Creating ' + (args.type || 'item') + (args.title ? ' “' + trunc(args.title, 20) + '”' : '');
         case 'edit':
+          if (isAgentNoteForLiveTurnLabel(args.type, args.id)) return 'Working';
           return 'Editing ' + (args.type || 'item') + (args.id ? ' #' + args.id : '');
         case 'glob':
           return 'Finding “' + trunc(args.pattern, 24) + '”';
@@ -12911,9 +12975,9 @@
               inputForClear.value = '';
               const wrapForClear = tgtForRuntime.closest('.sidebar-search,.ns-search,.task-search,.pk-search-wrap');
               if (wrapForClear) wrapForClear.classList.remove('has-value');
-              if (searchIdForClear === 'chat-search-input') filterChatListForPanelRuntime('');
-              else if (searchIdForClear === 'notes-search-input') filterNotesListForPanelRuntime('');
-              else if (searchIdForClear === 'task-search-input') filterTasksListForPanelRuntime('');
+              if (searchIdForClear === 'chat-search-input') { filterChatListForPanelRuntime(''); writePanelStateSyncForPanelRuntime({ chatSearchQuery: '' }); }
+              else if (searchIdForClear === 'notes-search-input') { filterNotesListForPanelRuntime(''); writePanelStateSyncForPanelRuntime({ notesSearchQuery: '' }); }
+              else if (searchIdForClear === 'task-search-input') { filterTasksListForPanelRuntime(''); writePanelStateSyncForPanelRuntime({ taskSearchQuery: '' }); }
               else inputForClear.dispatchEvent(new Event('input'));
               inputForClear.focus();
               break;
@@ -13000,9 +13064,9 @@
           if (!tgtForRuntime) return;
           const action = tgtForRuntime.dataset.action;
           switch (action) {
-            case 'search-chats':    filterChatListForPanelRuntime(tgtForRuntime.value); tgtForRuntime.closest('.sidebar-search,.ns-search,.task-search').classList.toggle('has-value', tgtForRuntime.value.length > 0); break;
-            case 'search-notes':    filterNotesListForPanelRuntime(tgtForRuntime.value); tgtForRuntime.closest('.sidebar-search,.ns-search,.task-search').classList.toggle('has-value', tgtForRuntime.value.length > 0); break;
-            case 'search-tasks':    filterTasksListForPanelRuntime(tgtForRuntime.value); tgtForRuntime.closest('.sidebar-search,.ns-search,.task-search').classList.toggle('has-value', tgtForRuntime.value.length > 0); break;
+            case 'search-chats':    filterChatListForPanelRuntime(tgtForRuntime.value); tgtForRuntime.closest('.sidebar-search,.ns-search,.task-search').classList.toggle('has-value', tgtForRuntime.value.length > 0); writePanelStateSyncForPanelRuntime({ chatSearchQuery: tgtForRuntime.value }); break;
+            case 'search-notes':    filterNotesListForPanelRuntime(tgtForRuntime.value); tgtForRuntime.closest('.sidebar-search,.ns-search,.task-search').classList.toggle('has-value', tgtForRuntime.value.length > 0); writePanelStateSyncForPanelRuntime({ notesSearchQuery: tgtForRuntime.value }); break;
+            case 'search-tasks':    filterTasksListForPanelRuntime(tgtForRuntime.value); tgtForRuntime.closest('.sidebar-search,.ns-search,.task-search').classList.toggle('has-value', tgtForRuntime.value.length > 0); writePanelStateSyncForPanelRuntime({ taskSearchQuery: tgtForRuntime.value }); break;
           }
         });
       }
@@ -13687,6 +13751,9 @@
     _exposedSetChatSubTabForPanelRuntime = setChatSubTabForMirrorForPanelRuntime;
     _exposedSetTaskFilterForPanelRuntime = setTaskFilterForMirrorForPanelRuntime;
     _exposedSetQuizFilterForPanelRuntime = setQuizFilterForMirrorForPanelRuntime;
+    _exposedSetChatSearchQueryForPanelRuntime = setChatSearchQueryForMirrorForPanelRuntime;
+    _exposedSetNotesSearchQueryForPanelRuntime = setNotesSearchQueryForMirrorForPanelRuntime;
+    _exposedSetTaskSearchQueryForPanelRuntime = setTaskSearchQueryForMirrorForPanelRuntime;
 
     // Kick off the libs ready gate as the final step of initialisation so all
     // other setup (event bindings, MutationObserver, etc.) is complete before
@@ -13781,6 +13848,15 @@
     },
     setQuizFilter: function setQuizFilterRelayForPanelRuntime(filterForRelay) {
       if (_exposedSetQuizFilterForPanelRuntime) _exposedSetQuizFilterForPanelRuntime(filterForRelay);
+    },
+    setChatSearchQuery: function setChatSearchQueryRelayForPanelRuntime(queryForRelay) {
+      if (_exposedSetChatSearchQueryForPanelRuntime) _exposedSetChatSearchQueryForPanelRuntime(queryForRelay);
+    },
+    setNotesSearchQuery: function setNotesSearchQueryRelayForPanelRuntime(queryForRelay) {
+      if (_exposedSetNotesSearchQueryForPanelRuntime) _exposedSetNotesSearchQueryForPanelRuntime(queryForRelay);
+    },
+    setTaskSearchQuery: function setTaskSearchQueryRelayForPanelRuntime(queryForRelay) {
+      if (_exposedSetTaskSearchQueryForPanelRuntime) _exposedSetTaskSearchQueryForPanelRuntime(queryForRelay);
     },
     // Called by content/main.js before the shadow host is removed on extension reload.
     // Cancels pending timers and removes the storage listener so they do not fire

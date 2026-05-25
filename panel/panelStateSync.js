@@ -24,6 +24,9 @@
 //   chatSubTab           ('chats' | 'quickq'; sub-tab inside Chats)
 //   taskFilter           ('all' | 'pending' | 'completed')
 //   quizFilter           ('all' | 'due' | 'paused')
+//   chatSearchQuery      (text in the Chats sidebar search input)
+//   notesSearchQuery     (text in the Notes sidebar search input)
+//   taskSearchQuery      (text in the Tasks search input)
 //
 // NOT mirrored here:
 //   - picker and attachment preview modals: per-tab interaction state.
@@ -69,7 +72,10 @@
     "paneQuestions",
     "chatSubTab",
     "taskFilter",
-    "quizFilter"
+    "quizFilter",
+    "chatSearchQuery",
+    "notesSearchQuery",
+    "taskSearchQuery"
   ];
 
   let applyingFromRemoteForPanelStateSync = false;
@@ -433,6 +439,24 @@
         typeof runtimeForPanelStateSync.setQuizFilter === "function"
       ) {
         runtimeForPanelStateSync.setQuizFilter(stateForPanelStateSync.quizFilter);
+      }
+      if (hasField("chatSearchQuery") &&
+        typeof stateForPanelStateSync.chatSearchQuery === "string" &&
+        typeof runtimeForPanelStateSync.setChatSearchQuery === "function"
+      ) {
+        runtimeForPanelStateSync.setChatSearchQuery(stateForPanelStateSync.chatSearchQuery);
+      }
+      if (hasField("notesSearchQuery") &&
+        typeof stateForPanelStateSync.notesSearchQuery === "string" &&
+        typeof runtimeForPanelStateSync.setNotesSearchQuery === "function"
+      ) {
+        runtimeForPanelStateSync.setNotesSearchQuery(stateForPanelStateSync.notesSearchQuery);
+      }
+      if (hasField("taskSearchQuery") &&
+        typeof stateForPanelStateSync.taskSearchQuery === "string" &&
+        typeof runtimeForPanelStateSync.setTaskSearchQuery === "function"
+      ) {
+        runtimeForPanelStateSync.setTaskSearchQuery(stateForPanelStateSync.taskSearchQuery);
       }
     } finally {
       // Release the guard on the next tick so any DOM events triggered by the
