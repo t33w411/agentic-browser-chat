@@ -3950,7 +3950,9 @@
     if (apiKey) {
       try {
         var bodyForSummarizer = { stream: false, max_tokens: 2048 };
-        if (fallbackModel && fallbackModel !== WEB_FETCH_SUMMARIZER_PRIMARY_MODEL_FOR_TOOL_EXEC) {
+        if (fallbackModel === 'openrouter/free') {
+          bodyForSummarizer.model = 'openrouter/free';
+        } else if (fallbackModel && fallbackModel !== WEB_FETCH_SUMMARIZER_PRIMARY_MODEL_FOR_TOOL_EXEC) {
           bodyForSummarizer.models = [WEB_FETCH_SUMMARIZER_PRIMARY_MODEL_FOR_TOOL_EXEC, fallbackModel];
           bodyForSummarizer.route = 'fallback';
         } else {

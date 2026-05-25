@@ -204,7 +204,9 @@
     var newMessagesTextForCompactor = String(paramsForCompactor.newMessagesText || "");
 
     var bodyForCompactor = {};
-    if (fallbackModelForCompactor && fallbackModelForCompactor !== SUMMARIZER_PRIMARY_MODEL_FOR_COMPACTOR) {
+    if (fallbackModelForCompactor === 'openrouter/free') {
+      bodyForCompactor.model = 'openrouter/free';
+    } else if (fallbackModelForCompactor && fallbackModelForCompactor !== SUMMARIZER_PRIMARY_MODEL_FOR_COMPACTOR) {
       bodyForCompactor.models = [SUMMARIZER_PRIMARY_MODEL_FOR_COMPACTOR, fallbackModelForCompactor];
       bodyForCompactor.route = "fallback";
     } else {

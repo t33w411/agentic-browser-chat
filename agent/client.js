@@ -261,7 +261,9 @@
     if (!apiKey || !userMessage) return null;
     const PRIMARY_TITLE_MODEL = 'openai/gpt-4.1-nano';
     const bodyForTitle = {};
-    if (fallbackModel && fallbackModel !== PRIMARY_TITLE_MODEL) {
+    if (fallbackModel === 'openrouter/free') {
+      bodyForTitle.model = 'openrouter/free';
+    } else if (fallbackModel && fallbackModel !== PRIMARY_TITLE_MODEL) {
       bodyForTitle.models = [PRIMARY_TITLE_MODEL, fallbackModel];
       bodyForTitle.route = 'fallback';
     } else {
