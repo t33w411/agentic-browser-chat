@@ -73,40 +73,23 @@
     {
       type: 'function',
       function: {
-        name: 'glob',
-        description: 'Find items by title pattern. Use * to match any sequence of characters and ? to match one character. Returns IDs, types, titles, and the total number of matches before any limit. Does not return content.',
-        parameters: {
-          type: 'object',
-          properties: {
-            pattern: { type: 'string', description: "Glob pattern matched case-insensitively against item titles. Examples: '*closure*', 'React*', '?uick*'." },
-            type: { type: 'string', enum: ['note', 'chat', 'task', 'question'], description: 'Restrict to one data type. Omit to search all types.' },
-            noteType: { type: 'string', enum: ['user', 'agent'], description: "When type is 'note', further filter by noteType. Omit to match notes of both types." },
-            limit: { type: 'integer', description: 'Maximum number of matches to return. Must be a positive integer if provided; omit to return all matches. The response always includes the total count before this limit.' }
-          },
-          required: ['pattern']
-        }
-      }
-    },
-
-    {
-      type: 'function',
-      function: {
         name: 'grep',
-        description: 'Search item content with a regular expression. Results are grouped by item: each entry in matches has id, type, title, and a lines array of matching line objects (ln: line number, lc: line content). In content mode (default), the response includes total_lines and total_items. In items_with_matches mode, the top-level count key is total_matches (not total_lines) and no line content is returned. When max_words is set, each matched line is trimmed to that many words centered on the first match; truncated: true and match_count (when > 1) are added to the line object. Use read with lines afterward to fetch full content of specific matched lines.',
+        description: 'Search items with a JavaScript regular expression. By default searches the body content of items; set scope: "title" to search titles instead (use this to find items by name when you do not know an ID). Content scope (default): results are grouped by item and each entry in matches has id, type, title, and a lines array of matching line objects (ln: line number, lc: line content). In content output_mode (default), the response includes total_lines and total_items. In items_with_matches output_mode, the top-level count key is total_matches and no line content is returned. When max_words is set, each matched line is trimmed to that many words centered on the first match; truncated: true and match_count (when > 1) are added to the line object. Use read with lines afterward to fetch full content of specific matched lines. Title scope: returns { ok, total, matches } where each match is { id, type, title } with no line content; context_lines, max_words, and output_mode are ignored. In title scope, type is optional (omit to search titles across all types).',
         parameters: {
           type: 'object',
           properties: {
-            pattern: { type: 'string', description: "JavaScript regular expression. Examples: 'closure', 'TODO:', '^##\\\\s'." },
-            type: { type: 'string', enum: ['note', 'chat', 'task', 'question'], description: 'The data type to search.' },
-            id: { type: 'integer', description: 'Restrict to one specific item by ID. Omit to search all items of the given type.' },
+            pattern: { type: 'string', description: "JavaScript regular expression. Examples: 'closure', 'TODO:', '^##\\\\s', 'TODO|FIXME|HACK' (alternation to match any of several terms in one call). In title scope, also: 'meeting|standup' (alternation across title keywords), '^Q[1-4] ' (anchored prefix)." },
+            scope: { type: 'string', enum: ['content', 'title'], description: 'What to search. "content" (default): match the pattern against item body text and return matching lines. "title": match the pattern against item titles and return matching items with no line content. Use "title" when looking up items by name without knowing an ID.' },
+            type: { type: 'string', enum: ['note', 'chat', 'task', 'question'], description: 'The data type to search. Required when scope is "content". Optional when scope is "title" (omit to search titles across all types).' },
+            id: { type: 'integer', description: 'Content scope only: restrict to one specific item by ID. Omit to search all items of the given type. Ignored in title scope.' },
             noteType: { type: 'string', enum: ['user', 'agent'], description: "When type is 'note', further filter by noteType. Omit to search notes of both types." },
             case_insensitive: { type: 'boolean', description: 'Match case-insensitively. Defaults to true.' },
-            limit: { type: 'integer', description: 'Maximum total number of matching lines to return across all items. Must be a positive integer if provided. The loop stops as soon as the limit is reached.' },
-            context_lines: { type: 'integer', description: 'Number of lines to include before and after each matching line (like grep -C). Each match gains context_before and context_after arrays. Defaults to 0.' },
-            max_words: { type: 'integer', description: 'When set, truncate each matched line to this many words centered on the first match. Results include truncated: true and match_count when the pattern appears more than once on the line. Use read with lines to retrieve the full line.' },
-            output_mode: { type: 'string', enum: ['content', 'items_with_matches'], description: '"content" (default): returns matching lines grouped by item. "items_with_matches": returns only item metadata and a match_count per item with no line content: use this for broad searches to avoid loading all matched lines into context.' }
+            limit: { type: 'integer', description: 'Content scope: maximum total number of matching lines to return across all items; the loop stops as soon as the limit is reached. Title scope: maximum number of matching items to return; the response always includes the pre-limit total count.' },
+            context_lines: { type: 'integer', description: 'Content scope only: number of lines to include before and after each matching line (like grep -C). Each match gains context_before and context_after arrays. Defaults to 0. Ignored in title scope.' },
+            max_words: { type: 'integer', description: 'Content scope only: truncate each matched line to this many words centered on the first match. Results include truncated: true and match_count when the pattern appears more than once on the line. Use read with lines to retrieve the full line. Ignored in title scope.' },
+            output_mode: { type: 'string', enum: ['content', 'items_with_matches'], description: 'Content scope only: "content" (default) returns matching lines grouped by item; "items_with_matches" returns only item metadata and a match_count per item with no line content (use for broad searches to avoid loading all matched lines into context). Ignored in title scope.' }
           },
-          required: ['pattern', 'type']
+          required: ['pattern']
         }
       }
     },
@@ -143,7 +126,7 @@
       type: 'function',
       function: {
         name: 'page_query',
-        description: 'Your first resort when a question could be about content on the current page. Explore and read web page content through structured category-based discovery. getSelection and getPageContext need no parameters. getPageOverview returns a structured inventory of all recognizable element categories on the page. findPageElements in discovery mode lists all elements in a category; in detail mode performs operations on a specific element. findText locates elements by text pattern.',
+        description: 'Your first resort when a question could be about content on the current page. Explore and read web page content through structured category-based discovery. IMPORTANT: getSelection, getPageContext, getPageOverview, findPageElements, and findText are NOT standalone tools; they are values of the `operation` parameter on this single `page_query` tool. Always invoke as `page_query` with the chosen operation, e.g. `page_query({ operation: "findText", pattern: "..." })`, never as a tool literally named `findText` or `findPageElements`. getSelection and getPageContext need no other parameters. getPageOverview returns a structured inventory of all recognizable element categories on the page. findPageElements in discovery mode lists all elements in a category; in detail mode performs operations on a specific element. findText locates elements by text pattern.',
         parameters: {
           type: 'object',
           properties: {
@@ -197,7 +180,7 @@
             },
             attribute_name: { type: 'string', description: 'For findPageElements with sub_operation get_attribute: the exact attribute name to read (e.g. "href", "data-id", "aria-label").' },
             button: { type: 'string', enum: ['left', 'right'], description: 'For findPageElements with sub_operation click: which mouse button to use. Defaults to "left". "right" dispatches a contextmenu event (page handlers only; the native browser context menu cannot be opened programmatically).' },
-            pattern: { type: 'string', description: 'For findText: JavaScript regular expression to search for in visible text nodes. Must not match the empty string. Examples: "climate change", "\\\\d{4}-\\\\d{2}-\\\\d{2}", "error|warning".' },
+            pattern: { type: 'string', description: 'For findText: JavaScript regular expression to search for in visible text nodes. Must not match the empty string. Examples: "climate change", "\\\\d{4}-\\\\d{2}-\\\\d{2}", "return policy|refund|exchange" (alternation to cover synonyms in one call instead of multiple findText calls).' },
             case_insensitive: { type: 'boolean', description: 'For findText: match case-insensitively. Defaults to true.' },
             direction: {
               type: 'string',

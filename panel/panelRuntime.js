@@ -479,6 +479,7 @@
         usagePromptTokens: Number.isFinite(Number(safeMessageForPanelRuntime.usagePromptTokens)) ? Number(safeMessageForPanelRuntime.usagePromptTokens) : 0,
         usageCompletionTokens: Number.isFinite(Number(safeMessageForPanelRuntime.usageCompletionTokens)) ? Number(safeMessageForPanelRuntime.usageCompletionTokens) : 0,
         usageTotalTokens: Number.isFinite(Number(safeMessageForPanelRuntime.usageTotalTokens)) ? Number(safeMessageForPanelRuntime.usageTotalTokens) : 0,
+        usageReasoningTokens: Number.isFinite(Number(safeMessageForPanelRuntime.usageReasoningTokens)) ? Number(safeMessageForPanelRuntime.usageReasoningTokens) : 0,
         usageCost: Number.isFinite(Number(safeMessageForPanelRuntime.usageCost)) ? Number(safeMessageForPanelRuntime.usageCost) : 0,
         searchSources: Array.isArray(safeMessageForPanelRuntime.searchSources)
           ? safeMessageForPanelRuntime.searchSources.map(function(s) {
@@ -5910,13 +5911,23 @@
           userMessage: bodyTextForAutoTitle,
           fallbackModel: DEFAULT_MODEL_FOR_PANEL_RUNTIME
         });
-        if (!titleResultForNoteTitle) titleLogStatusForNoteTitle = 'error';
+        if (!titleResultForNoteTitle || !titleResultForNoteTitle.title) titleLogStatusForNoteTitle = 'error';
       } catch (e) {
         titleLogStatusForNoteTitle = 'error';
-        return;
+        titleResultForNoteTitle = { title: null, model: null, error: 'exception', status: null, body: String((e && e.message) || e || '').slice(0, 500) };
       } finally {
         const titleApiLoggerForNote = (globalThis.ABChatContent || {}).apiLogger;
         if (titleApiLoggerForNote && typeof titleApiLoggerForNote.writeLog === 'function') {
+          var titleResponseContentForNoteLog;
+          if (titleResultForNoteTitle && titleResultForNoteTitle.title) {
+            titleResponseContentForNoteLog = titleResultForNoteTitle.title;
+          } else if (titleResultForNoteTitle && titleResultForNoteTitle.error) {
+            titleResponseContentForNoteLog = '[' + titleResultForNoteTitle.error + ']'
+              + (titleResultForNoteTitle.status != null ? ' status=' + titleResultForNoteTitle.status : '')
+              + (titleResultForNoteTitle.body ? ' body=' + titleResultForNoteTitle.body : '');
+          } else {
+            titleResponseContentForNoteLog = null;
+          }
           titleApiLoggerForNote.writeLog({
             requestType: 'title',
             timestamp: new Date(titleLogStartForNoteTitle).toISOString(),
@@ -5924,11 +5935,11 @@
             iterationCount: 1,
             totalLatencyMs: Date.now() - titleLogStartForNoteTitle,
             status: titleLogStatusForNoteTitle,
-            responseContent: (titleResultForNoteTitle && titleResultForNoteTitle.title) || null
+            responseContent: titleResponseContentForNoteLog
           }).catch(function () {});
         }
       }
-      if (!titleResultForNoteTitle) return;
+      if (!titleResultForNoteTitle || !titleResultForNoteTitle.title) return;
       const generatedTitleForAutoTitle = titleResultForNoteTitle.title;
       const noteAfterFetchForAutoTitle = NOTE_STORE_FOR_PANEL_RUNTIME[numericNoteIdForAutoTitle];
       if (!noteAfterFetchForAutoTitle || noteAfterFetchForAutoTitle.title) return;
@@ -7479,6 +7490,7 @@
       let inlineLogErrorForPanelRuntime = '';
       let inlineLogRequestMsgsForPanelRuntime = null;
       let inlineLogResponseForPanelRuntime = '';
+      let inlineLogResolvedModelForPanelRuntime = null;
 
       S.inlineMessages.push({ role: 'user', content: inlineInputForModel });
 
@@ -7519,6 +7531,9 @@
           ? resultForInline.message.content
           : accInlineForPanelRuntime;
         inlineLogResponseForPanelRuntime = finalInlineTextForPanelRuntime || '';
+        if (resultForInline && typeof resultForInline.resolvedModel === 'string' && resultForInline.resolvedModel) {
+          inlineLogResolvedModelForPanelRuntime = resultForInline.resolvedModel;
+        }
         const finalAssistantNodeForInline = conv.querySelector('.im-msg.asst[data-inline-streaming="1"]');
         if (finalAssistantNodeForInline) {
           finalAssistantNodeForInline.removeAttribute('data-inline-streaming');
@@ -7575,7 +7590,7 @@
               requestType: 'inline-chat',
               timestamp: new Date(inlineLogStartTimeForPanelRuntime).toISOString(),
               chatId: quickChatIdForInline,
-              model: modelForInline,
+              model: inlineLogResolvedModelForPanelRuntime || modelForInline,
               iterationCount: 1,
               totalLatencyMs: Date.now() - inlineLogStartTimeForPanelRuntime,
               status: inlineLogStatusForPanelRuntime,
@@ -8589,6 +8604,7 @@
       let lastTotalTokensForRebuild = 0;
       let lastPromptTokensForRebuild = 0;
       let lastCompletionTokensForRebuild = 0;
+      let lastReasoningTokensForRebuild = 0;
       for (let iForRebuild = 0; iForRebuild < chatRecordForRebuild.messages.length; iForRebuild++) {
         const msgForRebuild = chatRecordForRebuild.messages[iForRebuild];
         if (!msgForRebuild || msgForRebuild.role !== 'assistant') continue;
@@ -8597,6 +8613,7 @@
           lastTotalTokensForRebuild = msgForRebuild.usageTotalTokens;
           lastPromptTokensForRebuild = msgForRebuild.usagePromptTokens || 0;
           lastCompletionTokensForRebuild = msgForRebuild.usageCompletionTokens || 0;
+          lastReasoningTokensForRebuild = msgForRebuild.usageReasoningTokens || 0;
         }
       }
       if (!lastTotalTokensForRebuild && !totalCostForRebuild) {
@@ -8604,7 +8621,12 @@
         return;
       }
       updateSessionTokenDisplayForPanelRuntime(
-        { total_tokens: lastTotalTokensForRebuild, prompt_tokens: lastPromptTokensForRebuild, completion_tokens: lastCompletionTokensForRebuild },
+        {
+          total_tokens: lastTotalTokensForRebuild,
+          prompt_tokens: lastPromptTokensForRebuild,
+          completion_tokens: lastCompletionTokensForRebuild,
+          completion_tokens_details: { reasoning_tokens: lastReasoningTokensForRebuild }
+        },
         totalCostForRebuild
       );
     }
@@ -8624,7 +8646,11 @@
           inputBottomForCounter.appendChild(counterElForDisplay);
         }
       }
-      const totalTokensForDisplay = (usageObj && usageObj.total_tokens) ? Number(usageObj.total_tokens) : 0;
+      const rawTotalTokensForDisplay = (usageObj && usageObj.total_tokens) ? Number(usageObj.total_tokens) : 0;
+      const reasoningTokensForDisplay = (usageObj && usageObj.completion_tokens_details && Number(usageObj.completion_tokens_details.reasoning_tokens))
+        ? Number(usageObj.completion_tokens_details.reasoning_tokens)
+        : 0;
+      const totalTokensForDisplay = Math.max(0, rawTotalTokensForDisplay - reasoningTokensForDisplay);
       const numCumulativeCost = Number(cumulativeCost) || 0;
       if (!totalTokensForDisplay && !numCumulativeCost) { counterElForDisplay.textContent = ''; counterElForDisplay.style.color = 'var(--text-muted,#888)'; return; }
       const tokensLabelForDisplay = totalTokensForDisplay >= 1000
@@ -8866,17 +8892,16 @@
         case 'edit':
           if (isAgentNoteForLiveTurnLabel(args.type, args.id)) return 'Working';
           return 'Editing ' + (args.type || 'item') + (args.id ? ' #' + args.id : '');
-        case 'glob':
-          return 'Finding “' + trunc(args.pattern, 24) + '”';
         case 'grep': {
           var grepTypePluralByKindForLt = { note: 'notes', chat: 'chats', task: 'tasks', question: 'questions' };
           var grepKindForLt = args.type;
           var grepTypeLabelForLt = grepTypePluralByKindForLt[grepKindForLt] || (grepKindForLt ? String(grepKindForLt) + 's' : 'items');
           var grepPatternRawForLt = args.pattern != null ? String(args.pattern) : '';
+          var grepScopeForLt = args.scope === 'title' ? 'Finding ' : 'Searching ';
           if (grepPatternRawForLt.trim()) {
-            return 'Searching ' + grepTypeLabelForLt + ': "' + trunc(grepPatternRawForLt, 24) + '"';
+            return grepScopeForLt + grepTypeLabelForLt + ': "' + trunc(grepPatternRawForLt, 24) + '"';
           }
-          return 'Searching ' + grepTypeLabelForLt + '…';
+          return grepScopeForLt + grepTypeLabelForLt + '…';
         }
         case 'ls':
           return args.type ? 'Listing ' + args.type + 's' : 'Listing workspace';
@@ -9482,13 +9507,23 @@
           userMessage: userMessageForAutoTitle,
           fallbackModel: fallbackModelForAutoTitle
         });
-        if (!titleResultForChatTitle) titleLogStatusForChatTitle = 'error';
+        if (!titleResultForChatTitle || !titleResultForChatTitle.title) titleLogStatusForChatTitle = 'error';
       } catch (e) {
         titleLogStatusForChatTitle = 'error';
-        return;
+        titleResultForChatTitle = { title: null, model: null, error: 'exception', status: null, body: String((e && e.message) || e || '').slice(0, 500) };
       } finally {
         const titleApiLoggerForChat = (globalThis.ABChatContent || {}).apiLogger;
         if (titleApiLoggerForChat && typeof titleApiLoggerForChat.writeLog === 'function') {
+          var titleResponseContentForLog;
+          if (titleResultForChatTitle && titleResultForChatTitle.title) {
+            titleResponseContentForLog = titleResultForChatTitle.title;
+          } else if (titleResultForChatTitle && titleResultForChatTitle.error) {
+            titleResponseContentForLog = '[' + titleResultForChatTitle.error + ']'
+              + (titleResultForChatTitle.status != null ? ' status=' + titleResultForChatTitle.status : '')
+              + (titleResultForChatTitle.body ? ' body=' + titleResultForChatTitle.body : '');
+          } else {
+            titleResponseContentForLog = null;
+          }
           titleApiLoggerForChat.writeLog({
             requestType: 'title',
             timestamp: new Date(titleLogStartForChatTitle).toISOString(),
@@ -9497,11 +9532,11 @@
             iterationCount: 1,
             totalLatencyMs: Date.now() - titleLogStartForChatTitle,
             status: titleLogStatusForChatTitle,
-            responseContent: (titleResultForChatTitle && titleResultForChatTitle.title) || null
+            responseContent: titleResponseContentForLog
           }).catch(function () {});
         }
       }
-      if (!titleResultForChatTitle) return;
+      if (!titleResultForChatTitle || !titleResultForChatTitle.title) return;
       const generatedTitleForAutoTitle = titleResultForChatTitle.title;
       const chatAfterFetchForAutoTitle = CHAT_STORE_FOR_PANEL_RUNTIME[numericChatIdForAutoTitle];
       if (!chatAfterFetchForAutoTitle || chatAfterFetchForAutoTitle.hasCustomTitle) return;
@@ -9674,6 +9709,7 @@
       const logTurnsForSend = [];
       let logFinalResponseForSend = '';
       let logUsageForSend = null;
+      let logResolvedModelForSend = null;
       let logStatusForSend = 'success';
       let logErrorMsgForSend = '';
       let logCancelledForSend = false;
@@ -9809,7 +9845,7 @@
             messages: chatRecordForCompactionForSend.messages,
             existingSummary: compactionSummaryForSend,
             compactedThroughMessageId: compactedThroughMessageIdForSend,
-            systemOverheadTokens: 1500,
+            systemOverheadTokens: 10000,
             signal: controllerForSend.signal
           });
           compactionSummaryForSend = compactionResultForSend && typeof compactionResultForSend.summaryText === 'string'
@@ -10026,6 +10062,9 @@
                 }
               }
             });
+            if (resultForLoop && typeof resultForLoop.resolvedModel === 'string' && resultForLoop.resolvedModel) {
+              logResolvedModelForSend = resultForLoop.resolvedModel;
+            }
             // Wait for the typing animation to drain naturally so the user sees streaming
             // even when the entire response arrived in one packet. Cancelled requests skip the wait.
             await finalizeLiveTurnTextRenderForPanelRuntime(chatId, controllerForSend.signal);
@@ -10090,6 +10129,9 @@
             usagePromptTokens: logUsageForSend ? (Number(logUsageForSend.prompt_tokens) || 0) : 0,
             usageCompletionTokens: logUsageForSend ? (Number(logUsageForSend.completion_tokens) || 0) : 0,
             usageTotalTokens: logUsageForSend ? (Number(logUsageForSend.total_tokens) || 0) : 0,
+            usageReasoningTokens: logUsageForSend && logUsageForSend.completion_tokens_details
+              ? (Number(logUsageForSend.completion_tokens_details.reasoning_tokens) || 0)
+              : 0,
             usageCost: !hasToolCalls
               ? (thisLLMCostForRecord + sideCallCostForSend)
               : thisLLMCostForRecord,
@@ -10596,7 +10638,7 @@
             requestType: 'chat',
             timestamp: new Date(logStartTimeForSend).toISOString(),
             chatId: chatId,
-            model: model,
+            model: logResolvedModelForSend || model,
             iterationCount: iterCount,
             totalLatencyMs: Date.now() - logStartTimeForSend,
             status: logStatusForSend,
@@ -11036,8 +11078,18 @@
     /* ============================================================
       INIT
     ============================================================ */
-    setMode('reduced', { skipStateSync: true });
-    setTheme('light'); // overwritten async below once stored preference loads
+    // Seed mode and theme from the current shadow DOM, not hardcoded
+    // defaults. panel.js pre-applies the user's stored mode/theme to the
+    // markup before unhiding the shadow host, so the host class and
+    // data-theme already reflect the saved state by the time we get here.
+    // Reading them back instead of hardcoding 'reduced' / 'light' keeps
+    // S.mode and S.theme in sync with the visible DOM, avoiding a transient
+    // mismatch window before panelStateSync.init (deferred via setTimeout
+    // at the end of this function) re-applies stored state.
+    const initialModeForPanelRuntime = host.classList.contains('mode-expanded') ? 'expanded' : 'reduced';
+    const initialThemeForPanelRuntime = host.dataset.theme === 'dark' ? 'dark' : 'light';
+    setMode(initialModeForPanelRuntime, { skipStateSync: true });
+    setTheme(initialThemeForPanelRuntime); // overwritten async below if stored theme differs
     setTab('chats', { skipStateSync: true });
 
     // Start from the "new" state for each module

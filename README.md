@@ -148,7 +148,7 @@ The agent calls these tools mid-conversation. Grouped by purpose, with safeguard
 
 **Filesystem-style operations on the notes corpus**
 - `read`, `write`, `edit` — read, create, and modify note content.
-- `glob`, `grep`, `ls` — discover notes by pattern or list them.
+- `grep`, `ls` — discover notes by regex (content or title scope) or list them.
 
 **Page interaction**
 - `page_query` — query elements on the current page using selectors and return their content / state.

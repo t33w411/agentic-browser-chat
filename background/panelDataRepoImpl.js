@@ -222,6 +222,7 @@
       usagePromptTokens: Number.isFinite(Number(inputForPanelDataRepo.usagePromptTokens)) ? Number(inputForPanelDataRepo.usagePromptTokens) : 0,
       usageCompletionTokens: Number.isFinite(Number(inputForPanelDataRepo.usageCompletionTokens)) ? Number(inputForPanelDataRepo.usageCompletionTokens) : 0,
       usageTotalTokens: Number.isFinite(Number(inputForPanelDataRepo.usageTotalTokens)) ? Number(inputForPanelDataRepo.usageTotalTokens) : 0,
+      usageReasoningTokens: Number.isFinite(Number(inputForPanelDataRepo.usageReasoningTokens)) ? Number(inputForPanelDataRepo.usageReasoningTokens) : 0,
       usageCost: Number.isFinite(Number(inputForPanelDataRepo.usageCost)) ? Number(inputForPanelDataRepo.usageCost) : 0,
       searchSources: Array.isArray(inputForPanelDataRepo.searchSources)
         ? inputForPanelDataRepo.searchSources.map(function(s) {
@@ -926,6 +927,7 @@
     if (updatesForPanelDataRepo.usagePromptTokens != null) safeUpdatesForPanelDataRepo.usagePromptTokens = Number(updatesForPanelDataRepo.usagePromptTokens) || 0;
     if (updatesForPanelDataRepo.usageCompletionTokens != null) safeUpdatesForPanelDataRepo.usageCompletionTokens = Number(updatesForPanelDataRepo.usageCompletionTokens) || 0;
     if (updatesForPanelDataRepo.usageTotalTokens != null) safeUpdatesForPanelDataRepo.usageTotalTokens = Number(updatesForPanelDataRepo.usageTotalTokens) || 0;
+    if (updatesForPanelDataRepo.usageReasoningTokens != null) safeUpdatesForPanelDataRepo.usageReasoningTokens = Number(updatesForPanelDataRepo.usageReasoningTokens) || 0;
     if (updatesForPanelDataRepo.usageCost != null) safeUpdatesForPanelDataRepo.usageCost = Number(updatesForPanelDataRepo.usageCost) || 0;
     if (updatesForPanelDataRepo.isHidden != null) safeUpdatesForPanelDataRepo.isHidden = Boolean(updatesForPanelDataRepo.isHidden);
     await dbForPanelDataRepo.messages.update(numericIdForPanelDataRepo, safeUpdatesForPanelDataRepo);

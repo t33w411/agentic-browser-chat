@@ -205,7 +205,12 @@
 
     var bodyForCompactor = {};
     if (fallbackModelForCompactor === 'openrouter/free') {
-      bodyForCompactor.model = 'openrouter/free';
+      bodyForCompactor.models = [
+        'openrouter/free',
+        'meta-llama/llama-3.3-70b-instruct:free',
+        'nvidia/nemotron-nano-9b-v2:free'
+      ];
+      bodyForCompactor.route = 'fallback';
     } else if (fallbackModelForCompactor && fallbackModelForCompactor !== SUMMARIZER_PRIMARY_MODEL_FOR_COMPACTOR) {
       bodyForCompactor.models = [SUMMARIZER_PRIMARY_MODEL_FOR_COMPACTOR, fallbackModelForCompactor];
       bodyForCompactor.route = "fallback";

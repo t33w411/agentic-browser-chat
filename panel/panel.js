@@ -5,15 +5,29 @@
   contentNamespaceForPanelBoot.state = contentNamespaceForPanelBoot.state || {};
   contentNamespaceForPanelBoot.ui = contentNamespaceForPanelBoot.ui || {};
 
-  // Track whether panel.css has finished loading. The shadow host must not become
-  // visible before CSS is applied — doing so causes a FOUC where the panel briefly
-  // renders unstyled (full-screen white flash) before snapping to reduced mode.
+  // Two readiness gates must both fire before the shadow host is made visible:
+  //  - panelCssReadyForPanelBoot: panel.css has finished loading (prevents the
+  //    unstyled-white-flash FOUC).
+  //  - panelStateReadyForPanelBoot: the user's saved paint-affecting UI state
+  //    (mode, theme, reduced-view panel anchor) has been pre-applied to the
+  //    markup, so first paint matches their preferences (prevents the
+  //    expanded→reduced, light→dark, and snap-from-default-corner flashes).
   let panelCssReadyForPanelBoot = false;
+  let panelStateReadyForPanelBoot = false;
   let showPendingForPanelBoot = false;
   let pendingVisibleCallbacksForPanelBoot = [];
+  // Anchor stash: anchor needs offsetWidth/Height which require display:block,
+  // so we hold the stored anchor here and apply it inside the show flip.
+  let pendingPaintAnchorForPanelBoot = null;
   let inOverlayOnlyModeForPanelBoot = false;
   let panelClosedAtForPanelBoot = 0;
   const SYNC_ON_OPEN_THRESHOLD_MS_FOR_PANEL_BOOT = 10000;
+
+  // Storage keys must stay in sync with panelStateSync.js (mode, panelAnchor)
+  // and the THEME_KEY_FOR_PANEL_RUNTIME constant in panelRuntime.js (theme).
+  const PANEL_UI_FIELD_KEY_PREFIX_FOR_PANEL_BOOT = 'abchat_panel_ui_state_field_';
+  const LEGACY_PANEL_UI_STATE_KEY_FOR_PANEL_BOOT = 'abchat_panel_ui_state';
+  const THEME_KEY_FOR_PANEL_BOOT = 'abchat_theme';
 
   function reclampPanelPositionAfterOpenForPanelBoot() {
     requestAnimationFrame(function () {
@@ -25,20 +39,168 @@
     });
   }
 
+  function isValidAnchorForPanelBoot(anchorForCheck) {
+    return Boolean(
+      anchorForCheck && typeof anchorForCheck === 'object' &&
+      (anchorForCheck.ax === 'left' || anchorForCheck.ax === 'right') &&
+      (anchorForCheck.ay === 'top' || anchorForCheck.ay === 'bottom') &&
+      Number.isFinite(anchorForCheck.ox) && Number.isFinite(anchorForCheck.oy)
+    );
+  }
+
+  function readStoredPaintStateForPanelBoot(callbackForPanelBoot) {
+    try {
+      const modeKeyForPanelBoot = PANEL_UI_FIELD_KEY_PREFIX_FOR_PANEL_BOOT + 'mode';
+      const anchorKeyForPanelBoot = PANEL_UI_FIELD_KEY_PREFIX_FOR_PANEL_BOOT + 'panelAnchor';
+      const keysForPanelBoot = [
+        modeKeyForPanelBoot,
+        anchorKeyForPanelBoot,
+        LEGACY_PANEL_UI_STATE_KEY_FOR_PANEL_BOOT,
+        THEME_KEY_FOR_PANEL_BOOT
+      ];
+      chrome.storage.local.get(keysForPanelBoot, function (resForPanelBoot) {
+        const outForPanelBoot = { mode: null, theme: null, panelAnchor: null };
+        const modeRecordForPanelBoot = resForPanelBoot && resForPanelBoot[modeKeyForPanelBoot];
+        if (
+          modeRecordForPanelBoot && typeof modeRecordForPanelBoot === 'object' &&
+          (modeRecordForPanelBoot.value === 'expanded' || modeRecordForPanelBoot.value === 'reduced')
+        ) {
+          outForPanelBoot.mode = modeRecordForPanelBoot.value;
+        }
+        const anchorRecordForPanelBoot = resForPanelBoot && resForPanelBoot[anchorKeyForPanelBoot];
+        if (
+          anchorRecordForPanelBoot && typeof anchorRecordForPanelBoot === 'object' &&
+          isValidAnchorForPanelBoot(anchorRecordForPanelBoot.value)
+        ) {
+          const aForPanelBoot = anchorRecordForPanelBoot.value;
+          outForPanelBoot.panelAnchor = {
+            ax: aForPanelBoot.ax, ay: aForPanelBoot.ay,
+            ox: aForPanelBoot.ox, oy: aForPanelBoot.oy
+          };
+        }
+        const legacyForPanelBoot = resForPanelBoot && resForPanelBoot[LEGACY_PANEL_UI_STATE_KEY_FOR_PANEL_BOOT];
+        if (legacyForPanelBoot && typeof legacyForPanelBoot === 'object') {
+          if (outForPanelBoot.mode === null &&
+              (legacyForPanelBoot.mode === 'expanded' || legacyForPanelBoot.mode === 'reduced')) {
+            outForPanelBoot.mode = legacyForPanelBoot.mode;
+          }
+          if (outForPanelBoot.panelAnchor === null && isValidAnchorForPanelBoot(legacyForPanelBoot.panelAnchor)) {
+            outForPanelBoot.panelAnchor = {
+              ax: legacyForPanelBoot.panelAnchor.ax,
+              ay: legacyForPanelBoot.panelAnchor.ay,
+              ox: legacyForPanelBoot.panelAnchor.ox,
+              oy: legacyForPanelBoot.panelAnchor.oy
+            };
+          }
+        }
+        const themeRawForPanelBoot = resForPanelBoot && resForPanelBoot[THEME_KEY_FOR_PANEL_BOOT];
+        if (themeRawForPanelBoot === 'dark' || themeRawForPanelBoot === 'light') {
+          outForPanelBoot.theme = themeRawForPanelBoot;
+        } else if (themeRawForPanelBoot === 'system') {
+          try {
+            outForPanelBoot.theme =
+              window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+          } catch (errorForPanelBoot) {
+            outForPanelBoot.theme = null;
+          }
+        }
+        try { callbackForPanelBoot(outForPanelBoot); } catch (errorForPanelBoot) {}
+      });
+    } catch (errorForPanelBoot) {
+      try {
+        callbackForPanelBoot({ mode: null, theme: null, panelAnchor: null });
+      } catch (innerErrorForPanelBoot) {}
+    }
+  }
+
+  function applyPrePaintModeForPanelBoot(shadowRootForPanelBoot, modeForPanelBoot) {
+    if (modeForPanelBoot !== 'expanded' && modeForPanelBoot !== 'reduced') return;
+    const panelHostForPanelBoot = shadowRootForPanelBoot.getElementById('panel-host');
+    if (!panelHostForPanelBoot) return;
+    panelHostForPanelBoot.classList.remove('mode-expanded', 'mode-reduced');
+    panelHostForPanelBoot.classList.add('mode-' + modeForPanelBoot);
+  }
+
+  function applyPrePaintThemeForPanelBoot(shadowRootForPanelBoot, themeForPanelBoot) {
+    if (themeForPanelBoot !== 'light' && themeForPanelBoot !== 'dark') return;
+    // All four shadow-root top-level elements carry data-theme (panel + the
+    // three modal overlays + the feature-tour overlay). See CLAUDE.md §20.
+    const idsForPanelBoot = [
+      'panel-host', 'inline-overlay', 'picker-overlay',
+      'attach-preview-overlay', 'feature-tour-overlay'
+    ];
+    idsForPanelBoot.forEach(function (idForPanelBoot) {
+      const elForPanelBoot = shadowRootForPanelBoot.getElementById(idForPanelBoot);
+      if (elForPanelBoot) elForPanelBoot.dataset.theme = themeForPanelBoot;
+    });
+  }
+
+  function applyPendingPaintAnchorForPanelBoot(shadowHostForPanelBoot) {
+    if (!pendingPaintAnchorForPanelBoot) return;
+    const anchorForPanelBoot = pendingPaintAnchorForPanelBoot;
+    pendingPaintAnchorForPanelBoot = null;
+    const shadowRootForPanelBoot = shadowHostForPanelBoot.shadowRoot;
+    if (!shadowRootForPanelBoot) return;
+    const panelHostForPanelBoot = shadowRootForPanelBoot.getElementById('panel-host');
+    if (!panelHostForPanelBoot) return;
+    // Anchor only applies in reduced mode; expanded uses CSS centering.
+    if (!panelHostForPanelBoot.classList.contains('mode-reduced')) return;
+    const widthForPanelBoot = panelHostForPanelBoot.offsetWidth || 520;
+    const heightForPanelBoot = panelHostForPanelBoot.offsetHeight || 0;
+    const viewportWidthForPanelBoot = window.innerWidth;
+    const viewportHeightForPanelBoot = window.innerHeight;
+    const rawLeftForPanelBoot = anchorForPanelBoot.ax === 'left'
+      ? anchorForPanelBoot.ox
+      : viewportWidthForPanelBoot - widthForPanelBoot - anchorForPanelBoot.ox;
+    const rawTopForPanelBoot = anchorForPanelBoot.ay === 'top'
+      ? anchorForPanelBoot.oy
+      : viewportHeightForPanelBoot - heightForPanelBoot - anchorForPanelBoot.oy;
+    const maxLeftForPanelBoot = Math.max(0, viewportWidthForPanelBoot - widthForPanelBoot);
+    const maxTopForPanelBoot = Math.max(0, viewportHeightForPanelBoot - heightForPanelBoot);
+    const leftForPanelBoot = Math.max(0, Math.min(maxLeftForPanelBoot, rawLeftForPanelBoot));
+    const topForPanelBoot = Math.max(0, Math.min(maxTopForPanelBoot, rawTopForPanelBoot));
+    panelHostForPanelBoot.style.left = leftForPanelBoot + 'px';
+    panelHostForPanelBoot.style.top = topForPanelBoot + 'px';
+    panelHostForPanelBoot.style.right = 'auto';
+  }
+
+  function startPrePaintStateApplyForPanelBoot(shadowRootForPanelBoot) {
+    readStoredPaintStateForPanelBoot(function (stateForPanelBoot) {
+      applyPrePaintModeForPanelBoot(shadowRootForPanelBoot, stateForPanelBoot.mode);
+      applyPrePaintThemeForPanelBoot(shadowRootForPanelBoot, stateForPanelBoot.theme);
+      if (stateForPanelBoot.panelAnchor && stateForPanelBoot.mode === 'reduced') {
+        pendingPaintAnchorForPanelBoot = stateForPanelBoot.panelAnchor;
+      }
+      onPanelStateReadyForPanelBoot();
+    });
+  }
+
+  function maybeShowVisibleForPanelBoot() {
+    if (!showPendingForPanelBoot) return;
+    if (!panelCssReadyForPanelBoot || !panelStateReadyForPanelBoot) return;
+    showPendingForPanelBoot = false;
+    const shadowHostForPanelBoot = document.getElementById('abchat-panel-shadow-host');
+    if (!shadowHostForPanelBoot) return;
+    shadowHostForPanelBoot.style.display = 'block';
+    // Anchor application reads offsetWidth/Height, which require layout, so
+    // it must happen after display:block. Same synchronous task, so the
+    // browser only paints once with all final styles in place.
+    applyPendingPaintAnchorForPanelBoot(shadowHostForPanelBoot);
+    const callbacksForPanelBoot = pendingVisibleCallbacksForPanelBoot.splice(0);
+    callbacksForPanelBoot.forEach(function (cbForPanelBoot) {
+      try { cbForPanelBoot(); } catch (eForPanelBoot) {}
+    });
+    reclampPanelPositionAfterOpenForPanelBoot();
+  }
+
   function onPanelCssReadyForPanelBoot() {
     panelCssReadyForPanelBoot = true;
-    if (showPendingForPanelBoot) {
-      showPendingForPanelBoot = false;
-      const shadowHostForPanelBoot = document.getElementById('abchat-panel-shadow-host');
-      if (shadowHostForPanelBoot) {
-        shadowHostForPanelBoot.style.display = 'block';
-      }
-      const callbacksForPanelBoot = pendingVisibleCallbacksForPanelBoot.splice(0);
-      callbacksForPanelBoot.forEach(function (cbForPanelBoot) {
-        try { cbForPanelBoot(); } catch (eForPanelBoot) {}
-      });
-      reclampPanelPositionAfterOpenForPanelBoot();
-    }
+    maybeShowVisibleForPanelBoot();
+  }
+
+  function onPanelStateReadyForPanelBoot() {
+    panelStateReadyForPanelBoot = true;
+    maybeShowVisibleForPanelBoot();
   }
 
   function ensurePanelMarkupForPanelBoot() {
@@ -66,6 +228,10 @@
           existingCssLinkForPanelBoot.addEventListener('error', onPanelCssReadyForPanelBoot);
         }
       }
+      // Re-injection (extension reload, not page reload): the shadow root
+      // carries the mode/theme/anchor from the previous session, so the
+      // state gate can be flipped immediately without a fresh storage read.
+      panelStateReadyForPanelBoot = true;
       return true;
     }
 
@@ -171,6 +337,12 @@
     // internal DOM queries instead of document.getElementById/querySelector.
     contentNamespaceForPanelBoot.ui.panelShadowRoot = shadowRootForPanelBoot;
 
+    // Kick off the async pre-paint state apply: read mode/theme/anchor from
+    // chrome.storage and patch the just-built markup before the shadow host
+    // is unhidden. This eliminates the expanded→reduced, light→dark, and
+    // top-right→saved-anchor first-paint flashes on page navigation.
+    startPrePaintStateApplyForPanelBoot(shadowRootForPanelBoot);
+
     return true;
   }
 
@@ -226,15 +398,23 @@
     if (!shadowHostForPanelBoot) {
       return;
     }
-    // If showing and CSS hasn't loaded yet, queue the show until it does.
-    // This prevents the FOUC where the panel briefly renders unstyled.
-    if (isVisibleForPanelBoot && !panelCssReadyForPanelBoot) {
+    // If showing and either readiness gate is not yet open (CSS not loaded
+    // or pre-paint state not yet applied), queue the show until both are.
+    // This prevents the FOUC where the panel briefly renders unstyled or in
+    // the wrong mode/theme/position before snapping to the saved state.
+    if (isVisibleForPanelBoot && (!panelCssReadyForPanelBoot || !panelStateReadyForPanelBoot)) {
       showPendingForPanelBoot = true;
       return;
     }
     showPendingForPanelBoot = false;
     const wasHiddenForPanelBoot = shadowHostForPanelBoot.style.display === 'none';
     shadowHostForPanelBoot.style.display = isVisibleForPanelBoot ? 'block' : 'none';
+    if (isVisibleForPanelBoot) {
+      // Apply any anchor stashed by pre-paint apply now that the host has
+      // layout (offsetWidth/Height are non-zero). Same synchronous task as
+      // the display flip, so the browser only paints once.
+      applyPendingPaintAnchorForPanelBoot(shadowHostForPanelBoot);
+    }
     if (!isVisibleForPanelBoot) {
       panelClosedAtForPanelBoot = Date.now();
     }
@@ -281,12 +461,13 @@
       const panelHostForHideForPanelBoot = srForHideForPanelBoot.getElementById('panel-host');
       if (panelHostForHideForPanelBoot) panelHostForHideForPanelBoot.style.display = 'none';
     }
-    if (!panelCssReadyForPanelBoot) {
+    if (!panelCssReadyForPanelBoot || !panelStateReadyForPanelBoot) {
       showPendingForPanelBoot = true;
       pendingVisibleCallbacksForPanelBoot.push(hidePanelHostNodeForPanelBoot);
       return;
     }
     shadowHostForInlineOnlyForPanelBoot.style.display = 'block';
+    applyPendingPaintAnchorForPanelBoot(shadowHostForInlineOnlyForPanelBoot);
     hidePanelHostNodeForPanelBoot();
   }
 

@@ -140,6 +140,7 @@
     let finishReasonForClient = null;
     let usageForClient = null;
     let doneReceivedForClient = false;
+    let resolvedModelForClient = null;
 
     while (true) {
       let readResultForClient;
@@ -168,6 +169,9 @@
         const chunkForClient = parsedForClient.chunk;
         if (chunkForClient && chunkForClient.usage) {
           usageForClient = chunkForClient.usage;
+        }
+        if (chunkForClient && typeof chunkForClient.model === 'string' && chunkForClient.model) {
+          resolvedModelForClient = chunkForClient.model;
         }
         const choiceForClient = chunkForClient && chunkForClient.choices && chunkForClient.choices[0];
         if (!choiceForClient) continue;
@@ -211,7 +215,7 @@
       finish_reason: finishReasonForClient
     };
 
-    return { cancelled: false, message: messageForClient, usage: usageForClient, incompleteStream: !doneReceivedForClient };
+    return { cancelled: false, message: messageForClient, usage: usageForClient, incompleteStream: !doneReceivedForClient, resolvedModel: resolvedModelForClient };
   }
 
   const OPENROUTER_MODELS_URL_FOR_CLIENT = "https://openrouter.ai/api/v1/models";
@@ -262,7 +266,12 @@
     const PRIMARY_TITLE_MODEL = 'openai/gpt-4.1-nano';
     const bodyForTitle = {};
     if (fallbackModel === 'openrouter/free') {
-      bodyForTitle.model = 'openrouter/free';
+      bodyForTitle.models = [
+        'openrouter/free',
+        'meta-llama/llama-3.3-70b-instruct:free',
+        'nvidia/nemotron-nano-9b-v2:free'
+      ];
+      bodyForTitle.route = 'fallback';
     } else if (fallbackModel && fallbackModel !== PRIMARY_TITLE_MODEL) {
       bodyForTitle.models = [PRIMARY_TITLE_MODEL, fallbackModel];
       bodyForTitle.route = 'fallback';
@@ -280,7 +289,6 @@
       }
     ];
     bodyForTitle.stream = false;
-    bodyForTitle.max_tokens = 20;
     const MAX_RETRIES_FOR_TITLE = 2;
     const RETRY_DELAYS_FOR_TITLE = [1500, 3000];
     const RETRYABLE_FOR_TITLE = [429, 502, 503, 504];
@@ -313,14 +321,32 @@
         if (retryForTitle >= MAX_RETRIES_FOR_TITLE) break;
       }
     }
-    if (lastErrForTitle || !responseForTitle || !responseForTitle.ok) return null;
+    if (lastErrForTitle) {
+      return { title: null, model: null, error: 'fetch_failed', status: null, body: String((lastErrForTitle && lastErrForTitle.message) || lastErrForTitle || '').slice(0, 500) };
+    }
+    if (!responseForTitle) {
+      return { title: null, model: null, error: 'no_response', status: null, body: '' };
+    }
+    if (!responseForTitle.ok) {
+      let errBodyForTitle = '';
+      try { errBodyForTitle = await responseForTitle.text(); } catch (e) {}
+      return { title: null, model: null, error: 'http_error', status: responseForTitle.status, body: String(errBodyForTitle).slice(0, 500) };
+    }
     let jsonForTitle;
-    try { jsonForTitle = await responseForTitle.json(); } catch (e) { return null; }
+    try { jsonForTitle = await responseForTitle.json(); } catch (e) {
+      return { title: null, model: null, error: 'json_parse_failed', status: responseForTitle.status, body: String((e && e.message) || e || '').slice(0, 500) };
+    }
     const rawTitleForClient = jsonForTitle && jsonForTitle.choices && jsonForTitle.choices[0] &&
       jsonForTitle.choices[0].message && jsonForTitle.choices[0].message.content;
-    if (!rawTitleForClient) return null;
+    if (!rawTitleForClient) {
+      let rawJsonForTitle = '';
+      try { rawJsonForTitle = JSON.stringify(jsonForTitle); } catch (e) {}
+      return { title: null, model: jsonForTitle && jsonForTitle.model || null, error: 'empty_content', status: responseForTitle.status, body: String(rawJsonForTitle).slice(0, 500) };
+    }
     const titleTextForClient = String(rawTitleForClient).trim().slice(0, 80) || null;
-    if (!titleTextForClient) return null;
+    if (!titleTextForClient) {
+      return { title: null, model: jsonForTitle.model || null, error: 'blank_title', status: responseForTitle.status, body: String(rawTitleForClient).slice(0, 500) };
+    }
     return { title: titleTextForClient, model: jsonForTitle.model || PRIMARY_TITLE_MODEL };
   }
 
