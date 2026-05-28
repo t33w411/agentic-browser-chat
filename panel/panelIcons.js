@@ -15,6 +15,8 @@
 
   var xPaths = '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>';
   var plusPaths = '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>';
+  var minusPaths = '<line x1="5" y1="12" x2="19" y2="12"/>';
+  var refreshPaths = '<polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>';
   var chevronLeftPath = '<polyline points="15 18 9 12 15 6"/>';
   var chevronRightPath = '<polyline points="9 18 15 12 9 6"/>';
   var chevronDownPath = '<polyline points="6 9 12 15 18 9"/>';
@@ -61,6 +63,8 @@
   icons.x13 = svgForPanelIcon(13, 2.5, xPaths);
   icons.plus12 = svgForPanelIcon(12, 2.5, plusPaths);
   icons.plus14 = svgForPanelIcon(14, 2.2, plusPaths);
+  icons.minus12 = svgForPanelIcon(12, 2.5, minusPaths);
+  icons.refresh12 = svgForPanelIcon(12, 2.2, refreshPaths);
   icons.chevronLeft12 = svgForPanelIcon(12, 2.5, chevronLeftPath);
   icons.chevronRight12 = svgForPanelIcon(12, 2.5, chevronRightPath);
   icons.chevronDown10 = svgForPanelIcon(10, 2.5, chevronDownPath);

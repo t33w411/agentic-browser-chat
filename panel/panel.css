@@ -59,6 +59,7 @@
 #inline-overlay[data-theme="dark"],
 #picker-overlay[data-theme="dark"] {
   --abchat-bg-panel:       #1e293b;
+  --abchat-mermaid-bg:     #1e293b;
   --abchat-bg-sidebar:     #0f1a28;
   --abchat-bg-input:       #17223a;
   --abchat-bg-hover:       #2a3d55;
@@ -2443,8 +2444,8 @@ mjx-container svg { overflow: visible; max-width: 6px; min-height: 17px; }
 .im-msg.asst .mermaid,
 .ap-body .mermaid {
   margin: 8px 0;
-  overflow-x: auto;
-  background: #ffffff;
+  overflow: auto;
+  background: var(--abchat-mermaid-bg, #ffffff);
   border-radius: 6px;
   padding: 12px;
 }
@@ -2473,6 +2474,32 @@ mjx-container svg { overflow: visible; max-width: 6px; min-height: 17px; }
 .panel-host[data-theme="dark"] .mermaid-error {
   color: #fca5a5;
 }
+.mermaid-error-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.mermaid-error-btn {
+  background: rgba(0,0,0,0.08);
+  color: var(--abchat-text-primary);
+  border: 1px solid var(--abchat-border);
+  border-radius: 5px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: background 0.12s;
+}
+.mermaid-error-btn:hover { background: rgba(0,0,0,0.15); }
+.panel-host[data-theme="dark"] .mermaid-error-btn {
+  background: rgba(255,255,255,0.08);
+}
+.panel-host[data-theme="dark"] .mermaid-error-btn:hover {
+  background: rgba(255,255,255,0.16);
+}
 .mermaid-export-wrap { position: relative; max-width: 100%; }
 .mermaid-export-toolbar {
   position: absolute;
@@ -2485,6 +2512,7 @@ mjx-container svg { overflow: visible; max-width: 6px; min-height: 17px; }
   transition: opacity 0.15s ease;
 }
 .mermaid-export-wrap:hover .mermaid-export-toolbar { opacity: 1; pointer-events: auto; }
+.mermaid-export-wrap:focus-within .mermaid-export-toolbar { opacity: 1; pointer-events: auto; }
 .mermaid-export-btn {
   background: rgba(0,0,0,0.6);
   color: #fff;
@@ -2501,6 +2529,10 @@ mjx-container svg { overflow: visible; max-width: 6px; min-height: 17px; }
   transition: background 0.12s;
 }
 .mermaid-export-btn:hover { background: rgba(0,0,0,0.82); }
+.mermaid-export-btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+.mermaid-export-btn--icon {
+  padding: 4px 7px;
+}
 .copy-code-btn {
   position: absolute;
   top: 7px;

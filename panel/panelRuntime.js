@@ -1863,14 +1863,23 @@
       if (callback) callback();
     }
 
-    let mermaidInitializedForPanelRuntime = false;
-    let mermaidRenderSequenceForPanelRuntime = 0;
+    let mermaidAppliedThemeForPanelRuntime = null;
     let mermaidRenderReadyPromiseForPanelRuntime = null;
+    function getCurrentMermaidThemeNameForPanelRuntime() {
+      const dt = host && host.dataset ? host.dataset.theme : '';
+      return dt === 'dark' ? 'dark' : 'light';
+    }
     function initializeMermaidForPanelRuntime() {
-      if (mermaidInitializedForPanelRuntime) return true;
       if (typeof window === 'undefined' || !window.mermaid || typeof window.mermaid.initialize !== 'function') return false;
+      const themeNameForInit = getCurrentMermaidThemeNameForPanelRuntime();
+      if (mermaidAppliedThemeForPanelRuntime === themeNameForInit) return true;
+      const isDarkForInit = themeNameForInit === 'dark';
       window.mermaid.initialize({
         startOnLoad: false,
+        // strict is mermaid's default but pin it explicitly: SVG content originates
+        // from LLM output and we don't want a future default change to widen this.
+        securityLevel: 'strict',
+        theme: isDarkForInit ? 'dark' : 'default',
         // Pin font so the host page's CSS cascade cannot affect text measurement
         // or node sizing in the temporary scratch element Mermaid appends to document.body.
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
@@ -1882,8 +1891,15 @@
           fontSize: '14px',
         },
       });
-      mermaidInitializedForPanelRuntime = true;
+      mermaidAppliedThemeForPanelRuntime = themeNameForInit;
       return true;
+    }
+
+    function generateMermaidRenderIdForPanelRuntime() {
+      if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return 'abchat-mermaid-' + crypto.randomUUID();
+      }
+      return 'abchat-mermaid-' + String(Date.now()) + '-' + String(Math.floor(Math.random() * 1e9));
     }
 
     function getMermaidRenderReadyPromiseForPanelRuntime() {
@@ -1924,8 +1940,11 @@
       mermaidNodesForPanelRuntime.forEach(function (nodeForPanelRuntime) {
         const sourceForPanelRuntime = (nodeForPanelRuntime.textContent || '').trim();
         if (!sourceForPanelRuntime) return;
+        // Preserve the original source so toolbar copy and the error-state Retry
+        // button can recover it after textContent has been replaced by the SVG.
+        nodeForPanelRuntime.dataset.abchatMermaidSource = sourceForPanelRuntime;
         nodeForPanelRuntime.dataset.abchatMermaidRendering = '1';
-        const renderIdForPanelRuntime = 'abchat-mermaid-' + String(mermaidRenderSequenceForPanelRuntime++);
+        const renderIdForPanelRuntime = generateMermaidRenderIdForPanelRuntime();
         const nodePromiseForMermaid = getMermaidRenderReadyPromiseForPanelRuntime()
           .then(function () {
             // Mermaid appends a hidden scratch element to document.body during render.
@@ -1965,6 +1984,14 @@
             if (!svgForPanelRuntime) {
               throw new Error('Mermaid returned an empty SVG payload');
             }
+            // Sanitisation note: mermaid.initialize is called with securityLevel:
+            // 'strict' (above), which escapes user-supplied label text inside the
+            // SVG it returns. A second pass through DOMPurify was tried as
+            // defence-in-depth but breaks label rendering: mermaid emits its CSS
+            // inside <style> and its node text inside <foreignObject><div>, and at
+            // least one of those (CSS rules, foreignObject HTML children, or the
+            // id-targeted CSS selectors) does not survive DOMPurify's combined
+            // SVG+HTML profile cleanly. Trust mermaid's strict mode here.
             nodeForPanelRuntime.innerHTML = svgForPanelRuntime;
             if (
               renderResultForPanelRuntime &&
@@ -1974,6 +2001,7 @@
             }
             nodeForPanelRuntime.dataset.abchatMermaidRendered = '1';
             delete nodeForPanelRuntime.dataset.abchatMermaidRendering;
+            captureMermaidBaseDimensionsForPanelRuntime(nodeForPanelRuntime);
             wrapMermaidWithExportToolbarForPanelRuntime(nodeForPanelRuntime);
           })
           .catch(function (errorForPanelRuntime) {
@@ -1983,11 +2011,22 @@
                 ? errorForPanelRuntime.message
                 : String(errorForPanelRuntime || 'Unknown Mermaid error');
             nodeForPanelRuntime.innerHTML =
-              '<pre><code>' +
+              '<pre><code class="language-mermaid">' +
               escHtml(sourceForPanelRuntime) +
               '</code></pre><div class="mermaid-error">Mermaid render failed: ' +
               escHtml(errorTextForPanelRuntime) +
+              '</div>' +
+              '<div class="mermaid-error-actions">' +
+                '<button type="button" class="mermaid-error-btn" data-action="copy-mermaid-source" title="Copy diagram source">' + ic.copy12 + ' Copy source</button>' +
+                '<button type="button" class="mermaid-error-btn" data-action="retry-mermaid" title="Retry render">' + ic.refresh12 + ' Retry</button>' +
               '</div>';
+            // Highlight the source pre/code so debugging is easier.
+            if (typeof window !== 'undefined' && window.hljs && typeof window.hljs.highlightElement === 'function') {
+              const codeForHighlight = nodeForPanelRuntime.querySelector('pre > code.language-mermaid');
+              if (codeForHighlight) {
+                try { window.hljs.highlightElement(codeForHighlight); } catch (_) {}
+              }
+            }
             nodeForPanelRuntime.dataset.abchatMermaidRendered = '0';
             nodeForPanelRuntime.dataset.abchatMermaidError = '1';
             delete nodeForPanelRuntime.dataset.abchatMermaidRendering;
@@ -2016,7 +2055,18 @@
         const panelApiForMermaid = (globalScopeForPanelRuntime.ABChatContent || {}).ui &&
           globalScopeForPanelRuntime.ABChatContent.ui.panel;
         if (panelApiForMermaid && typeof panelApiForMermaid.whenVisible === 'function') {
+          const capturedGenForMermaidWhenVisible = (typeof window !== 'undefined' && window.abchatListenerGeneration) || 0;
           panelApiForMermaid.whenVisible(function () {
+            // Bail if a re-injection has superseded this callback or the extension
+            // context is gone (orphaned listener from before re-injection).
+            if ((typeof window !== 'undefined' && (window.abchatListenerGeneration || 0)) !== capturedGenForMermaidWhenVisible) {
+              return;
+            }
+            try {
+              if (!chrome || !chrome.runtime || !chrome.runtime.id) return;
+            } catch (_) {
+              return;
+            }
             if (containerForPanelRuntime.isConnected) {
               renderMermaidForContainerForPanelRuntime(containerForPanelRuntime);
             }
@@ -2048,6 +2098,193 @@
       nodeForInlineCopy.appendChild(btnForInlineCopy);
     }
 
+    function isTransparentColorForMermaidFlattenForPanelRuntime(colorStrForTransparent) {
+      if (!colorStrForTransparent) return true;
+      const trimmedForTransparent = colorStrForTransparent.trim().toLowerCase();
+      if (trimmedForTransparent === 'transparent') return true;
+      const rgbaMatchForTransparent = trimmedForTransparent.match(/^rgba?\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*(?:,\s*([\d.]+))?\s*\)$/);
+      if (rgbaMatchForTransparent && rgbaMatchForTransparent[1] !== undefined && parseFloat(rgbaMatchForTransparent[1]) === 0) return true;
+      return false;
+    }
+
+    // Replace each <foreignObject> in a cloned SVG with a native <text> element
+    // carrying the same label text. Chrome taints any canvas drawn from an SVG
+    // that contains foreignObject (it could embed cross-origin content), so the
+    // PNG export path must flatten labels first. The live SVG (still attached to
+    // the shadow DOM) is read for computed font/color/background so the PNG
+    // matches the theme; the clone is what we mutate.
+    function flattenForeignObjectsForMermaidPngForPanelRuntime(liveSvgForFlatten, clonedSvgForFlatten) {
+      if (!liveSvgForFlatten || !clonedSvgForFlatten) return;
+      const SVG_NS_FOR_FLATTEN = 'http://www.w3.org/2000/svg';
+      const liveFOsForFlatten = Array.from(liveSvgForFlatten.querySelectorAll('foreignObject'));
+      const clonedFOsForFlatten = Array.from(clonedSvgForFlatten.querySelectorAll('foreignObject'));
+      liveFOsForFlatten.forEach(function (liveFoForFlatten, idxForFlatten) {
+        const clonedFoForFlatten = clonedFOsForFlatten[idxForFlatten];
+        if (!clonedFoForFlatten || !clonedFoForFlatten.parentNode) return;
+
+        // Walk live foreignObject descendants to find the element whose computed
+        // background actually paints the label chip; the immediate child div is
+        // often transparent and the background lives on a nested span.
+        const innerForFlatten = liveFoForFlatten.querySelector('span, p, div') || liveFoForFlatten.firstElementChild;
+        let textColorForFlatten = '#333333';
+        let fontSizeForFlatten = 14;
+        let fontFamilyForFlatten = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
+        let backgroundColorForFlatten = '';
+        if (innerForFlatten && typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+          try {
+            const csForFlatten = window.getComputedStyle(innerForFlatten);
+            if (csForFlatten.color) textColorForFlatten = csForFlatten.color;
+            const parsedSizeForFlatten = parseFloat(csForFlatten.fontSize);
+            if (Number.isFinite(parsedSizeForFlatten) && parsedSizeForFlatten > 0) fontSizeForFlatten = parsedSizeForFlatten;
+            if (csForFlatten.fontFamily) fontFamilyForFlatten = csForFlatten.fontFamily;
+          } catch (_) {}
+          try {
+            const liveDescendantsForFlatten = liveFoForFlatten.querySelectorAll('*');
+            for (let descIdxForFlatten = 0; descIdxForFlatten < liveDescendantsForFlatten.length; descIdxForFlatten++) {
+              const descForFlatten = liveDescendantsForFlatten[descIdxForFlatten];
+              const descCsForFlatten = window.getComputedStyle(descForFlatten);
+              const descBgForFlatten = descCsForFlatten && descCsForFlatten.backgroundColor;
+              if (descBgForFlatten && !isTransparentColorForMermaidFlattenForPanelRuntime(descBgForFlatten)) {
+                backgroundColorForFlatten = descBgForFlatten;
+                break;
+              }
+            }
+          } catch (_) {}
+        }
+
+        // innerText preserves line breaks introduced by <br> and block elements;
+        // textContent collapses them. Fall back to textContent if innerText is
+        // unavailable (e.g. detached node).
+        const rawTextForFlatten = (liveFoForFlatten.innerText || liveFoForFlatten.textContent || '').trim();
+        if (!rawTextForFlatten) {
+          clonedFoForFlatten.parentNode.removeChild(clonedFoForFlatten);
+          return;
+        }
+        const linesForFlatten = rawTextForFlatten.split(/\r?\n+/).map(function (sForFlatten) {
+          return sForFlatten.trim();
+        }).filter(Boolean);
+        if (!linesForFlatten.length) {
+          clonedFoForFlatten.parentNode.removeChild(clonedFoForFlatten);
+          return;
+        }
+
+        const widthForFlatten = parseFloat(clonedFoForFlatten.getAttribute('width') || '0');
+        const heightForFlatten = parseFloat(clonedFoForFlatten.getAttribute('height') || '0');
+        const xForFlatten = parseFloat(clonedFoForFlatten.getAttribute('x') || '0');
+        const yForFlatten = parseFloat(clonedFoForFlatten.getAttribute('y') || '0');
+        const centerXForFlatten = xForFlatten + widthForFlatten / 2;
+        const centerYForFlatten = yForFlatten + heightForFlatten / 2;
+        const lineHeightForFlatten = fontSizeForFlatten * 1.2;
+
+        const textElForFlatten = document.createElementNS(SVG_NS_FOR_FLATTEN, 'text');
+        textElForFlatten.setAttribute('text-anchor', 'middle');
+        textElForFlatten.setAttribute('dominant-baseline', 'central');
+        textElForFlatten.setAttribute('font-family', fontFamilyForFlatten);
+        textElForFlatten.setAttribute('font-size', String(fontSizeForFlatten));
+        textElForFlatten.setAttribute('fill', textColorForFlatten);
+
+        if (linesForFlatten.length === 1) {
+          textElForFlatten.setAttribute('x', String(centerXForFlatten));
+          textElForFlatten.setAttribute('y', String(centerYForFlatten));
+          textElForFlatten.textContent = linesForFlatten[0];
+        } else {
+          const totalHeightForFlatten = lineHeightForFlatten * (linesForFlatten.length - 1);
+          const startYForFlatten = centerYForFlatten - totalHeightForFlatten / 2;
+          textElForFlatten.setAttribute('x', String(centerXForFlatten));
+          textElForFlatten.setAttribute('y', String(startYForFlatten));
+          linesForFlatten.forEach(function (lineForFlatten, lineIdxForFlatten) {
+            const tspanForFlatten = document.createElementNS(SVG_NS_FOR_FLATTEN, 'tspan');
+            tspanForFlatten.setAttribute('x', String(centerXForFlatten));
+            if (lineIdxForFlatten > 0) tspanForFlatten.setAttribute('dy', String(lineHeightForFlatten));
+            tspanForFlatten.textContent = lineForFlatten;
+            textElForFlatten.appendChild(tspanForFlatten);
+          });
+        }
+
+        const parentForReplaceForFlatten = clonedFoForFlatten.parentNode;
+        if (backgroundColorForFlatten) {
+          // Edge labels and similar chips carry their fill on the inner div's
+          // background-color; SVG <text> has no equivalent, so paint a sibling
+          // <rect> behind the text to preserve the chip look in the PNG.
+          const rectElForFlatten = document.createElementNS(SVG_NS_FOR_FLATTEN, 'rect');
+          rectElForFlatten.setAttribute('x', String(xForFlatten));
+          rectElForFlatten.setAttribute('y', String(yForFlatten));
+          rectElForFlatten.setAttribute('width', String(widthForFlatten));
+          rectElForFlatten.setAttribute('height', String(heightForFlatten));
+          rectElForFlatten.setAttribute('fill', backgroundColorForFlatten);
+          rectElForFlatten.setAttribute('rx', '2');
+          rectElForFlatten.setAttribute('ry', '2');
+          parentForReplaceForFlatten.insertBefore(rectElForFlatten, clonedFoForFlatten);
+        }
+        parentForReplaceForFlatten.replaceChild(textElForFlatten, clonedFoForFlatten);
+      });
+    }
+
+    function captureMermaidBaseDimensionsForPanelRuntime(mermaidNodeForBase) {
+      if (!mermaidNodeForBase) return;
+      const svgForBase = mermaidNodeForBase.querySelector('svg');
+      if (!svgForBase) return;
+      let widthForBase = 0;
+      let heightForBase = 0;
+      // Prefer viewBox (intrinsic units) so zoom math is independent of any
+      // width/height attributes mermaid happened to set.
+      const viewBoxForBase = svgForBase.viewBox && svgForBase.viewBox.baseVal;
+      if (viewBoxForBase && viewBoxForBase.width && viewBoxForBase.height) {
+        widthForBase = viewBoxForBase.width;
+        heightForBase = viewBoxForBase.height;
+      } else {
+        const rectForBase = svgForBase.getBoundingClientRect();
+        widthForBase = rectForBase.width;
+        heightForBase = rectForBase.height;
+      }
+      if (!widthForBase || !heightForBase) return;
+      mermaidNodeForBase.dataset.abchatMermaidBaseWidth = String(widthForBase);
+      mermaidNodeForBase.dataset.abchatMermaidBaseHeight = String(heightForBase);
+    }
+
+    function applyMermaidZoomForPanelRuntime(wrapForZoom, nextZoomForPanelRuntime) {
+      if (!wrapForZoom) return;
+      const mermaidNodeForZoom = wrapForZoom.querySelector('.mermaid');
+      if (!mermaidNodeForZoom) return;
+      const svgForZoom = mermaidNodeForZoom.querySelector('svg');
+      if (!svgForZoom) return;
+      const baseWidthForZoom = parseFloat(mermaidNodeForZoom.dataset.abchatMermaidBaseWidth || '0');
+      const baseHeightForZoom = parseFloat(mermaidNodeForZoom.dataset.abchatMermaidBaseHeight || '0');
+      if (!baseWidthForZoom || !baseHeightForZoom) return;
+      // Lower bound is 0.1 so the Fit action can settle below 0.5 on wide
+      // diagrams in the reduced-view panel without getting snapped back up.
+      const clampedZoomForPanelRuntime = Math.max(0.1, Math.min(4, nextZoomForPanelRuntime));
+      svgForZoom.style.width = (baseWidthForZoom * clampedZoomForPanelRuntime) + 'px';
+      svgForZoom.style.height = (baseHeightForZoom * clampedZoomForPanelRuntime) + 'px';
+      wrapForZoom.dataset.abchatMermaidZoom = String(clampedZoomForPanelRuntime);
+    }
+
+    function fitMermaidToContainerForPanelRuntime(wrapForFit) {
+      if (!wrapForFit) return;
+      const mermaidNodeForFit = wrapForFit.querySelector('.mermaid');
+      if (!mermaidNodeForFit) return;
+      const baseWidthForFit = parseFloat(mermaidNodeForFit.dataset.abchatMermaidBaseWidth || '0');
+      if (!baseWidthForFit) return;
+      // clientWidth includes padding; subtract it so we fit to the actual
+      // content area rather than overflowing under the padding.
+      let paddingXForFit = 0;
+      try {
+        const csForFit = window.getComputedStyle(mermaidNodeForFit);
+        paddingXForFit = (parseFloat(csForFit.paddingLeft) || 0) + (parseFloat(csForFit.paddingRight) || 0);
+      } catch (_) {}
+      const availableWidthForFit = Math.max(0, mermaidNodeForFit.clientWidth - paddingXForFit);
+      if (!availableWidthForFit) return;
+      applyMermaidZoomForPanelRuntime(wrapForFit, availableWidthForFit / baseWidthForFit);
+    }
+
+    function getMermaidZoomForPanelRuntime(wrapForZoomRead) {
+      if (!wrapForZoomRead) return 1;
+      const rawZoomForPanelRuntime = parseFloat(wrapForZoomRead.dataset.abchatMermaidZoom || '1');
+      return Number.isFinite(rawZoomForPanelRuntime) && rawZoomForPanelRuntime > 0
+        ? rawZoomForPanelRuntime
+        : 1;
+    }
+
     function wrapMermaidWithExportToolbarForPanelRuntime(mermaidNodeForExport) {
       if (!mermaidNodeForExport || mermaidNodeForExport.closest('.mermaid-export-wrap')) return;
       const wrapForExport = document.createElement('div');
@@ -2056,16 +2293,53 @@
       wrapForExport.appendChild(mermaidNodeForExport);
       const toolbarForExport = document.createElement('div');
       toolbarForExport.className = 'mermaid-export-toolbar';
+
+      const btnZoomOutForExport = document.createElement('button');
+      btnZoomOutForExport.type = 'button';
+      btnZoomOutForExport.className = 'mermaid-export-btn mermaid-export-btn--icon';
+      btnZoomOutForExport.setAttribute('data-action', 'zoom-mermaid-out');
+      btnZoomOutForExport.title = 'Zoom out';
+      btnZoomOutForExport.innerHTML = ic.minus12;
+
+      const btnZoomResetForExport = document.createElement('button');
+      btnZoomResetForExport.type = 'button';
+      btnZoomResetForExport.className = 'mermaid-export-btn';
+      btnZoomResetForExport.setAttribute('data-action', 'zoom-mermaid-reset');
+      btnZoomResetForExport.title = 'Fit to width';
+      btnZoomResetForExport.textContent = 'Fit';
+
+      const btnZoomInForExport = document.createElement('button');
+      btnZoomInForExport.type = 'button';
+      btnZoomInForExport.className = 'mermaid-export-btn mermaid-export-btn--icon';
+      btnZoomInForExport.setAttribute('data-action', 'zoom-mermaid-in');
+      btnZoomInForExport.title = 'Zoom in';
+      btnZoomInForExport.innerHTML = ic.plus12;
+
+      const btnCopySourceForExport = document.createElement('button');
+      btnCopySourceForExport.type = 'button';
+      btnCopySourceForExport.className = 'mermaid-export-btn';
+      btnCopySourceForExport.setAttribute('data-action', 'copy-mermaid-source');
+      btnCopySourceForExport.title = 'Copy diagram source';
+      btnCopySourceForExport.innerHTML = ic.copy12 + ' Copy';
+
       const btnSvgForExport = document.createElement('button');
+      btnSvgForExport.type = 'button';
       btnSvgForExport.className = 'mermaid-export-btn';
       btnSvgForExport.setAttribute('data-action', 'download-mermaid-svg');
       btnSvgForExport.title = 'Download as SVG';
       btnSvgForExport.innerHTML = ic.download13 + ' SVG';
+
       const btnPngForExport = document.createElement('button');
+      btnPngForExport.type = 'button';
       btnPngForExport.className = 'mermaid-export-btn';
       btnPngForExport.setAttribute('data-action', 'download-mermaid-png');
       btnPngForExport.title = 'Download as PNG';
       btnPngForExport.innerHTML = ic.download13 + ' PNG';
+
+      toolbarForExport.appendChild(btnZoomOutForExport);
+      toolbarForExport.appendChild(btnZoomResetForExport);
+      toolbarForExport.appendChild(btnZoomInForExport);
+      toolbarForExport.appendChild(btnCopySourceForExport);
       toolbarForExport.appendChild(btnSvgForExport);
       toolbarForExport.appendChild(btnPngForExport);
       wrapForExport.appendChild(toolbarForExport);
@@ -2632,6 +2906,7 @@
       THEME
     ============================================================ */
     function setTheme(theme) {
+      const previousThemeForSet = S.theme;
       S.theme = theme;
       host.dataset.theme = theme;
       overlay.dataset.theme = theme;
@@ -2639,6 +2914,39 @@
       if (featureTourOverlayForPanelRuntime) featureTourOverlayForPanelRuntime.dataset.theme = theme;
       const btn = root.getElementById('btn-theme');
       btn.innerHTML = theme === 'dark' ? (ic.sun13 + ' Light Mode') : (ic.moon13 + ' Dark Mode');
+      if (previousThemeForSet && previousThemeForSet !== theme) {
+        refreshMermaidForThemeChangeForPanelRuntime();
+      }
+    }
+
+    function refreshMermaidForThemeChangeForPanelRuntime() {
+      if (typeof window === 'undefined' || !window.mermaid || typeof window.mermaid.initialize !== 'function') return;
+      // Force the next initializeMermaidForPanelRuntime call to reapply with the
+      // current theme; without this, the early-return on theme match skips the
+      // mermaid.initialize call that flips its internal palette.
+      mermaidAppliedThemeForPanelRuntime = null;
+      if (!initializeMermaidForPanelRuntime()) return;
+      const renderedNodesForThemeRefresh = Array.from(
+        root.querySelectorAll('.mermaid')
+      );
+      renderedNodesForThemeRefresh.forEach(function (nodeForThemeRefresh) {
+        const sourceForThemeRefresh = nodeForThemeRefresh.dataset && nodeForThemeRefresh.dataset.abchatMermaidSource;
+        if (!sourceForThemeRefresh) return;
+        nodeForThemeRefresh.textContent = sourceForThemeRefresh;
+        delete nodeForThemeRefresh.dataset.abchatMermaidRendered;
+        delete nodeForThemeRefresh.dataset.abchatMermaidRendering;
+        delete nodeForThemeRefresh.dataset.abchatMermaidError;
+        delete nodeForThemeRefresh.dataset.abchatMermaidBaseWidth;
+        delete nodeForThemeRefresh.dataset.abchatMermaidBaseHeight;
+        const wrapForThemeRefresh = nodeForThemeRefresh.closest('.mermaid-export-wrap');
+        if (wrapForThemeRefresh && wrapForThemeRefresh.dataset) {
+          delete wrapForThemeRefresh.dataset.abchatMermaidZoom;
+        }
+      });
+      // Render across the whole shadow root so all four top-level elements
+      // (#panel-host, #inline-overlay, #picker-overlay, #attach-preview-overlay)
+      // are covered, per CLAUDE.md §20.
+      renderMermaidWhenVisibleForContainerForPanelRuntime(root, 12);
     }
 
     function toggleTheme() {
@@ -13482,7 +13790,9 @@
               const aForSvg = document.createElement('a');
               aForSvg.href = urlForSvg;
               aForSvg.download = 'abchat-diagram.svg';
+              document.body.appendChild(aForSvg);
               aForSvg.click();
+              document.body.removeChild(aForSvg);
               setTimeout(function () { URL.revokeObjectURL(urlForSvg); }, 10000);
               break;
             }
@@ -13494,30 +13804,120 @@
               if (!clonedSvgForPng.getAttribute('xmlns')) {
                 clonedSvgForPng.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
               }
-              const bbox = svgElForPng.getBoundingClientRect();
-              const widthForPng = Math.max(bbox.width || 800, 1);
-              const heightForPng = Math.max(bbox.height || 600, 1);
+              // Chrome taints any canvas drawn from an SVG that contains
+              // <foreignObject>, regardless of the foreignObject's content.
+              // Flatten mermaid's HTML labels to native <text> before drawing so
+              // toDataURL() can succeed.
+              flattenForeignObjectsForMermaidPngForPanelRuntime(svgElForPng, clonedSvgForPng);
+              const bboxForPng = svgElForPng.getBoundingClientRect();
+              const widthForPng = Math.max(bboxForPng.width || 800, 1);
+              const heightForPng = Math.max(bboxForPng.height || 600, 1);
               if (!clonedSvgForPng.getAttribute('width')) clonedSvgForPng.setAttribute('width', String(widthForPng));
               if (!clonedSvgForPng.getAttribute('height')) clonedSvgForPng.setAttribute('height', String(heightForPng));
               const svgStringForPng = new XMLSerializer().serializeToString(clonedSvgForPng);
-              const svgDataUrlForPng = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgStringForPng)));
+              // Use a Blob URL for the <img> source: btoa(unescape(...)) is
+              // deprecated and fails on diagrams large enough to exceed btoa's
+              // input limits.
+              const svgBlobForPng = new Blob([svgStringForPng], { type: 'image/svg+xml;charset=utf-8' });
+              const svgBlobUrlForPng = URL.createObjectURL(svgBlobForPng);
+              // Match the panel background so PNGs read correctly when pasted
+              // into dark slide decks or notes.
+              const pngBackgroundForPng = (host && host.dataset && host.dataset.theme === 'dark') ? '#1e293b' : '#ffffff';
               const imgForPng = new Image();
               imgForPng.onload = function () {
-                const canvasForPng = document.createElement('canvas');
-                const scale = 2;
-                canvasForPng.width = widthForPng * scale;
-                canvasForPng.height = heightForPng * scale;
-                const ctxForPng = canvasForPng.getContext('2d');
-                ctxForPng.fillStyle = '#ffffff';
-                ctxForPng.fillRect(0, 0, canvasForPng.width, canvasForPng.height);
-                ctxForPng.scale(scale, scale);
-                ctxForPng.drawImage(imgForPng, 0, 0);
-                const aForPng = document.createElement('a');
-                aForPng.href = canvasForPng.toDataURL('image/png');
-                aForPng.download = 'abchat-diagram.png';
-                aForPng.click();
+                try {
+                  const canvasForPng = document.createElement('canvas');
+                  const scaleForPng = Math.max(2, (typeof window !== 'undefined' && window.devicePixelRatio) || 1);
+                  canvasForPng.width = widthForPng * scaleForPng;
+                  canvasForPng.height = heightForPng * scaleForPng;
+                  const ctxForPng = canvasForPng.getContext('2d');
+                  ctxForPng.fillStyle = pngBackgroundForPng;
+                  ctxForPng.fillRect(0, 0, canvasForPng.width, canvasForPng.height);
+                  ctxForPng.scale(scaleForPng, scaleForPng);
+                  ctxForPng.drawImage(imgForPng, 0, 0);
+                  const aForPng = document.createElement('a');
+                  aForPng.href = canvasForPng.toDataURL('image/png');
+                  aForPng.download = 'abchat-diagram.png';
+                  document.body.appendChild(aForPng);
+                  aForPng.click();
+                  document.body.removeChild(aForPng);
+                } catch (errForPng) {
+                  console.warn('Mermaid PNG export failed:', errForPng);
+                  const toastForPngError = ABChatContent && ABChatContent.ui && ABChatContent.ui.toast;
+                  if (toastForPngError && typeof toastForPngError.show === 'function') {
+                    toastForPngError.show('PNG export failed: ' + (errForPng && errForPng.message ? errForPng.message : 'unknown error'), { durationMs: 4500 });
+                  }
+                } finally {
+                  URL.revokeObjectURL(svgBlobUrlForPng);
+                }
               };
-              imgForPng.src = svgDataUrlForPng;
+              imgForPng.onerror = function (errForPngLoad) {
+                URL.revokeObjectURL(svgBlobUrlForPng);
+                console.warn('Mermaid PNG export: image failed to decode SVG.', errForPngLoad);
+                const toastForPngDecode = ABChatContent && ABChatContent.ui && ABChatContent.ui.toast;
+                if (toastForPngDecode && typeof toastForPngDecode.show === 'function') {
+                  toastForPngDecode.show('PNG export failed: SVG could not be decoded.', { durationMs: 4500 });
+                }
+              };
+              imgForPng.src = svgBlobUrlForPng;
+              break;
+            }
+            case 'copy-mermaid-source': {
+              // The button can live either inside the toolbar (success path)
+              // or inside the in-node error block; both paths sit inside a
+              // .mermaid element with the original source on dataset.
+              const wrapForCopySource = tgtForRuntime.closest('.mermaid-export-wrap');
+              const mermaidNodeForCopySource = wrapForCopySource
+                ? wrapForCopySource.querySelector('.mermaid')
+                : tgtForRuntime.closest('.mermaid');
+              const sourceForCopy = mermaidNodeForCopySource && mermaidNodeForCopySource.dataset
+                ? (mermaidNodeForCopySource.dataset.abchatMermaidSource || '')
+                : '';
+              if (!sourceForCopy) break;
+              const toastForCopySource = ABChatContent && ABChatContent.ui && ABChatContent.ui.toast;
+              const showCopyToastForPanelRuntime = function (msgForCopyToast, opts) {
+                if (toastForCopySource && typeof toastForCopySource.show === 'function') {
+                  toastForCopySource.show(msgForCopyToast, opts || { durationMs: 2000 });
+                }
+              };
+              if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(sourceForCopy)
+                  .then(function () { showCopyToastForPanelRuntime('Mermaid source copied'); })
+                  .catch(function () { fallbackCopy(sourceForCopy, function () { showCopyToastForPanelRuntime('Mermaid source copied'); }); });
+              } else {
+                fallbackCopy(sourceForCopy, function () { showCopyToastForPanelRuntime('Mermaid source copied'); });
+              }
+              break;
+            }
+            case 'retry-mermaid': {
+              const mermaidNodeForRetry = tgtForRuntime.closest('.mermaid');
+              if (!mermaidNodeForRetry || !mermaidNodeForRetry.dataset) break;
+              const sourceForRetry = mermaidNodeForRetry.dataset.abchatMermaidSource || '';
+              if (!sourceForRetry) break;
+              mermaidNodeForRetry.textContent = sourceForRetry;
+              delete mermaidNodeForRetry.dataset.abchatMermaidRendered;
+              delete mermaidNodeForRetry.dataset.abchatMermaidRendering;
+              delete mermaidNodeForRetry.dataset.abchatMermaidError;
+              const retryContainerForMermaid = mermaidNodeForRetry.parentElement || mermaidNodeForRetry;
+              renderMermaidForContainerForPanelRuntime(retryContainerForMermaid);
+              break;
+            }
+            case 'zoom-mermaid-in': {
+              const wrapForZoomIn = tgtForRuntime.closest('.mermaid-export-wrap');
+              if (!wrapForZoomIn) break;
+              applyMermaidZoomForPanelRuntime(wrapForZoomIn, getMermaidZoomForPanelRuntime(wrapForZoomIn) + 0.25);
+              break;
+            }
+            case 'zoom-mermaid-out': {
+              const wrapForZoomOut = tgtForRuntime.closest('.mermaid-export-wrap');
+              if (!wrapForZoomOut) break;
+              applyMermaidZoomForPanelRuntime(wrapForZoomOut, getMermaidZoomForPanelRuntime(wrapForZoomOut) - 0.25);
+              break;
+            }
+            case 'zoom-mermaid-reset': {
+              const wrapForZoomReset = tgtForRuntime.closest('.mermaid-export-wrap');
+              if (!wrapForZoomReset) break;
+              fitMermaidToContainerForPanelRuntime(wrapForZoomReset);
               break;
             }
             case 'fork-chat-from-message': forkChatFromMessageForPanelRuntime(Number(tgtForRuntime.dataset.messageId)); break;
