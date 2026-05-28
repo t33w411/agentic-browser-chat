@@ -1751,9 +1751,42 @@
       return templateForPanelRuntime.innerHTML;
     }
 
+    // Safety net for models that ignore the system-prompt rule against single $...$ inline math.
+    // MathJax is configured with inlineMath: [['\\(', '\\)']] only, so $...$ would render as raw text.
+    // We rewrite likely-math $...$ spans to \(...\) before marked sees them. Skip regions (code,
+    // existing math delimiters) are preserved verbatim; currency-style prose (e.g. "$5 to $10") fails
+    // both tier checks and is left alone.
+    function rewriteDollarInlineMathForPanelRuntime(mdText) {
+      if (!mdText || mdText.indexOf('$') < 0) return mdText;
+      const skipOrCandidateForDollarRewrite = /(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]+`|\$\$[\s\S]*?\$\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\])|\$([^$\n]+?)\$/g;
+      let transformCountForDollarRewrite = 0;
+      const tier2PatternForDollarRewrite = /^[A-Za-z(]([A-Za-z0-9\s,+\-*/=<>!|().]*[A-Za-z0-9)])?$/;
+      const rewrittenForDollarRewrite = mdText.replace(skipOrCandidateForDollarRewrite, function (full, skipRegionForDollarRewrite, innerForDollarRewrite) {
+        if (skipRegionForDollarRewrite != null) return full;
+        if (innerForDollarRewrite == null) return full;
+        if (/[\\^_{}]/.test(innerForDollarRewrite)) {
+          transformCountForDollarRewrite++;
+          return '\\(' + innerForDollarRewrite + '\\)';
+        }
+        if (innerForDollarRewrite.length <= 30
+            && !/^\s|\s$/.test(innerForDollarRewrite)
+            && !/^\d/.test(innerForDollarRewrite)
+            && tier2PatternForDollarRewrite.test(innerForDollarRewrite)) {
+          transformCountForDollarRewrite++;
+          return '\\(' + innerForDollarRewrite + '\\)';
+        }
+        return full;
+      });
+      if (transformCountForDollarRewrite > 0) {
+        console.debug('[abchat] rewrote ' + transformCountForDollarRewrite + ' single-dollar inline math span(s) to \\(...\\)');
+      }
+      return rewrittenForDollarRewrite;
+    }
+
     function renderMarkdown(mdText) {
       if (!mdText || !mdText.trim()) return '';
-      const rawHtml = marked.parse(mdText);
+      const mdTextForRender = rewriteDollarInlineMathForPanelRuntime(mdText);
+      const rawHtml = marked.parse(mdTextForRender);
       const htmlWithMermaidContainers = mapMermaidCodeBlocksToContainersForPanelRuntime(rawHtml);
       return DOMPurify.sanitize(htmlWithMermaidContainers);
     }
