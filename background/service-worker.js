@@ -449,6 +449,115 @@ const dbOpMutationStoreMapForServiceWorker = {
   deleteQuestion:               'questions'
 };
 
+// Per-mutation extractors that turn the dbOp result + args into ops describing
+// which record-level changes the receiver should apply.
+//
+// Op shape: { op: 'create' | 'update' | 'delete', id: <number> } | { op: 'bulk' }
+//
+// 'bulk' is a sentinel that tells receivers to fall back to a full-list
+// refresh — used for multi-row mutations where a per-id payload would be
+// either misleading (deleteChatsOlderThan) or unbounded.
+//
+// REGRESSION RISK: when a new mutating function is added to
+// dbOpMutationStoreMapForServiceWorker above, also add an extractor here.
+// Without one, the receiver sees an empty ops array and falls back to a full
+// refresh (correct but slow); with one, the receiver applies the change
+// surgically.
+const dbOpRecordExtractorForServiceWorker = {
+  createChat: function (resultForExtractor) {
+    if (!resultForExtractor || resultForExtractor.id == null) return [];
+    return [{ op: 'create', id: Number(resultForExtractor.id) }];
+  },
+  updateChat: function (resultForExtractor, argsForExtractor) {
+    var idForExtractor = Number(argsForExtractor[0]);
+    if (!Number.isFinite(idForExtractor)) return [{ op: 'bulk' }];
+    return [{ op: 'update', id: idForExtractor }];
+  },
+  deleteChat: function (resultForExtractor, argsForExtractor) {
+    var idForExtractor = Number(argsForExtractor[0]);
+    if (!Number.isFinite(idForExtractor)) return [{ op: 'bulk' }];
+    return [{ op: 'delete', id: idForExtractor }];
+  },
+  deleteChatsOlderThan: function () {
+    // Multiple chat ids deleted at once; receivers fall back to full refresh.
+    return [{ op: 'bulk' }];
+  },
+  createMessage: function (resultForExtractor, argsForExtractor) {
+    // Affects the chat row (its updatedAt + derived summary). Receivers
+    // only need a chat-level update; the active-chat re-render handles
+    // per-message work downstream if the receiver is viewing the chat.
+    var chatIdForExtractor = Number(argsForExtractor[0]);
+    if (!Number.isFinite(chatIdForExtractor)) return [{ op: 'bulk' }];
+    return [{ op: 'update', id: chatIdForExtractor }];
+  },
+  updateMessage: function (resultForExtractor) {
+    if (!resultForExtractor || resultForExtractor.chatId == null) {
+      return [{ op: 'bulk' }];
+    }
+    var chatIdForExtractor = Number(resultForExtractor.chatId);
+    if (!Number.isFinite(chatIdForExtractor)) return [{ op: 'bulk' }];
+    return [{ op: 'update', id: chatIdForExtractor }];
+  },
+  bulkReplaceMessagesFromIndex: function (resultForExtractor, argsForExtractor) {
+    var chatIdForExtractor = Number(argsForExtractor[0]);
+    if (!Number.isFinite(chatIdForExtractor)) return [{ op: 'bulk' }];
+    return [{ op: 'update', id: chatIdForExtractor }];
+  },
+  createNote: function (resultForExtractor) {
+    if (!resultForExtractor || resultForExtractor.id == null) return [];
+    return [{ op: 'create', id: Number(resultForExtractor.id) }];
+  },
+  updateNote: function (resultForExtractor, argsForExtractor) {
+    var idForExtractor = Number(argsForExtractor[0]);
+    if (!Number.isFinite(idForExtractor)) return [{ op: 'bulk' }];
+    return [{ op: 'update', id: idForExtractor }];
+  },
+  deleteNote: function (resultForExtractor, argsForExtractor) {
+    var idForExtractor = Number(argsForExtractor[0]);
+    if (!Number.isFinite(idForExtractor)) return [{ op: 'bulk' }];
+    return [{ op: 'delete', id: idForExtractor }];
+  },
+  createTask: function (resultForExtractor) {
+    if (!resultForExtractor || resultForExtractor.id == null) return [];
+    return [{ op: 'create', id: Number(resultForExtractor.id) }];
+  },
+  updateTask: function (resultForExtractor, argsForExtractor) {
+    var idForExtractor = Number(argsForExtractor[0]);
+    if (!Number.isFinite(idForExtractor)) return [{ op: 'bulk' }];
+    return [{ op: 'update', id: idForExtractor }];
+  },
+  toggleTaskCompleted: function (resultForExtractor, argsForExtractor) {
+    var idForExtractor = Number(argsForExtractor[0]);
+    if (!Number.isFinite(idForExtractor)) return [{ op: 'bulk' }];
+    return [{ op: 'update', id: idForExtractor }];
+  },
+  deleteTask: function (resultForExtractor, argsForExtractor) {
+    var idForExtractor = Number(argsForExtractor[0]);
+    if (!Number.isFinite(idForExtractor)) return [{ op: 'bulk' }];
+    return [{ op: 'delete', id: idForExtractor }];
+  },
+  createQuestion: function (resultForExtractor) {
+    if (!resultForExtractor || resultForExtractor.id == null) return [];
+    return [{ op: 'create', id: Number(resultForExtractor.id) }];
+  },
+  updateQuestion: function (resultForExtractor, argsForExtractor) {
+    var idForExtractor = Number(argsForExtractor[0]);
+    if (!Number.isFinite(idForExtractor)) return [{ op: 'bulk' }];
+    return [{ op: 'update', id: idForExtractor }];
+  },
+  deleteQuestion: function (resultForExtractor, argsForExtractor) {
+    var idForExtractor = Number(argsForExtractor[0]);
+    if (!Number.isFinite(idForExtractor)) return [{ op: 'bulk' }];
+    return [{ op: 'delete', id: idForExtractor }];
+  }
+};
+
+// Cap on ops carried in a single coalesced signal. Beyond this the pending
+// array is collapsed to a 'bulk' marker — receivers fall back to a full
+// refresh, which is cheaper than serialising / applying hundreds of small
+// ops individually.
+const MAX_OPS_PER_SIGNAL_FOR_SERVICE_WORKER = 50;
+
 function pruneRuntimeRequestCachesForServiceWorker() {
   const nowForServiceWorker = Date.now();
   runtimeRequestResponseCacheForServiceWorker.forEach((entryForServiceWorker, keyForServiceWorker) => {
@@ -615,13 +724,117 @@ async function broadcastDbChangeForServiceWorker(storeForBroadcast, excludeTabId
   }
 }
 
-function notifyDbChangeViaStorageForServiceWorker(storeForNotify) {
-  const keyForNotify = DB_CHANGE_SIGNAL_KEY_PREFIX_FOR_SERVICE_WORKER + storeForNotify;
+// Originator-side debounce for DB change signals. AI streaming writes
+// `createMessage` on every token chunk — without coalescing here, each chunk
+// would write to chrome.storage.local and wake every tab's onChanged listener.
+// 60 ms is enough to fold a streaming burst into a single signal while still
+// feeling instant for discrete writes. Receiver-side debounce is dropped to
+// 50 ms now that bursts are flattened here.
+const DB_SIGNAL_DEBOUNCE_MS_FOR_SERVICE_WORKER = 60;
+const dbSignalDebounceTimersForServiceWorker = Object.create(null);
+const dbSignalPendingForServiceWorker = Object.create(null);
+
+function flushDbSignalForServiceWorker(storeForFlush) {
+  const pendingForFlush = dbSignalPendingForServiceWorker[storeForFlush];
+  dbSignalPendingForServiceWorker[storeForFlush] = null;
+  dbSignalDebounceTimersForServiceWorker[storeForFlush] = null;
+  if (!pendingForFlush) return;
+  const keyForFlush = DB_CHANGE_SIGNAL_KEY_PREFIX_FOR_SERVICE_WORKER + storeForFlush;
   try {
-    chrome.storage.local.set({ [keyForNotify]: Date.now() });
-  } catch (errForNotify) {
-    // Ignore — storage unavailable
+    chrome.storage.local.set({
+      [keyForFlush]: {
+        ts: Date.now(),
+        sourceId: pendingForFlush.sourceId || '',
+        ops: Array.isArray(pendingForFlush.ops) ? pendingForFlush.ops : []
+      }
+    });
+  } catch (errForFlush) {
+    // Ignore — storage unavailable.
   }
+}
+
+// Merge a new batch of ops into the pending array for a store. Handles the
+// duplicate-id collapses that arise inside a single debounce window:
+//   create + update → keep create (net effect is still a new record)
+//   create + delete → cancel (record never propagated externally)
+//   update + delete → delete
+//   update + update → keep last
+//   anything + bulk → bulk (forces receiver-side full refresh)
+//   pending length exceeds MAX_OPS_PER_SIGNAL_FOR_SERVICE_WORKER → collapse to bulk
+function mergeOpsIntoPendingForServiceWorker(pendingArrayForMerge, incomingOpsForMerge) {
+  if (!Array.isArray(incomingOpsForMerge) || incomingOpsForMerge.length === 0) return;
+  for (let iForMerge = 0; iForMerge < incomingOpsForMerge.length; iForMerge++) {
+    const opForMerge = incomingOpsForMerge[iForMerge];
+    if (!opForMerge || !opForMerge.op) continue;
+
+    if (opForMerge.op === 'bulk') {
+      pendingArrayForMerge.length = 0;
+      pendingArrayForMerge.push({ op: 'bulk' });
+      return;
+    }
+
+    if (pendingArrayForMerge.length === 1 && pendingArrayForMerge[0].op === 'bulk') {
+      return;
+    }
+
+    const idForMerge = Number(opForMerge.id);
+    if (!Number.isFinite(idForMerge)) continue;
+
+    let existingIndexForMerge = -1;
+    for (let jForMerge = 0; jForMerge < pendingArrayForMerge.length; jForMerge++) {
+      if (Number(pendingArrayForMerge[jForMerge].id) === idForMerge) {
+        existingIndexForMerge = jForMerge;
+        break;
+      }
+    }
+
+    if (existingIndexForMerge === -1) {
+      pendingArrayForMerge.push({ op: opForMerge.op, id: idForMerge });
+    } else {
+      const existingForMerge = pendingArrayForMerge[existingIndexForMerge];
+      if (opForMerge.op === 'delete') {
+        if (existingForMerge.op === 'create') {
+          pendingArrayForMerge.splice(existingIndexForMerge, 1);
+        } else {
+          pendingArrayForMerge[existingIndexForMerge] = { op: 'delete', id: idForMerge };
+        }
+      } else if (existingForMerge.op === 'create' && opForMerge.op === 'update') {
+        // keep the create — net effect is still "new record exists"
+      } else if (existingForMerge.op === 'delete' && opForMerge.op === 'create') {
+        // id reuse should not happen with autoIncrement; treat as unexpected → bulk
+        pendingArrayForMerge.length = 0;
+        pendingArrayForMerge.push({ op: 'bulk' });
+        return;
+      } else {
+        pendingArrayForMerge[existingIndexForMerge] = { op: opForMerge.op, id: idForMerge };
+      }
+    }
+
+    if (pendingArrayForMerge.length > MAX_OPS_PER_SIGNAL_FOR_SERVICE_WORKER) {
+      pendingArrayForMerge.length = 0;
+      pendingArrayForMerge.push({ op: 'bulk' });
+      return;
+    }
+  }
+}
+
+function notifyDbChangeViaStorageForServiceWorker(storeForNotify, sourceIdForNotify, opsForNotify) {
+  // Latest-writer-wins for the sourceId stamped on the signal: if two tabs write
+  // within the debounce window, the later sourceId is what receivers see. Both
+  // sender tabs handle their own in-process refresh anyway, so the only effect
+  // is which of them skips the echo — not which side is "authoritative".
+  if (!dbSignalPendingForServiceWorker[storeForNotify]) {
+    dbSignalPendingForServiceWorker[storeForNotify] = { sourceId: '', ops: [] };
+  }
+  const pendingForNotify = dbSignalPendingForServiceWorker[storeForNotify];
+  pendingForNotify.sourceId = typeof sourceIdForNotify === 'string' ? sourceIdForNotify : '';
+  mergeOpsIntoPendingForServiceWorker(pendingForNotify.ops, opsForNotify);
+  if (dbSignalDebounceTimersForServiceWorker[storeForNotify]) {
+    clearTimeout(dbSignalDebounceTimersForServiceWorker[storeForNotify]);
+  }
+  dbSignalDebounceTimersForServiceWorker[storeForNotify] = setTimeout(function () {
+    flushDbSignalForServiceWorker(storeForNotify);
+  }, DB_SIGNAL_DEBOUNCE_MS_FOR_SERVICE_WORKER);
 }
 
 async function captureVisibleTabForServiceWorker(windowIdForServiceWorker) {
@@ -2150,9 +2363,12 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
     const senderTabIdForFullSync = senderForServiceWorker && senderForServiceWorker.tab
       ? senderForServiceWorker.tab.id
       : undefined;
+    const sourceIdForFullSync = typeof messageForServiceWorker.sourceId === 'string'
+      ? messageForServiceWorker.sourceId
+      : '';
     ['chats', 'notes', 'tasks', 'questions'].forEach(function (storeForFullSync) {
       if (USE_STORAGE_BROADCAST_FOR_DB_SYNC) {
-        notifyDbChangeViaStorageForServiceWorker(storeForFullSync);
+        notifyDbChangeViaStorageForServiceWorker(storeForFullSync, sourceIdForFullSync);
       } else {
         broadcastDbChangeForServiceWorker(storeForFullSync, senderTabIdForFullSync);
       }
@@ -2275,13 +2491,28 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
     const fnNameForDbOp = typeof messageForServiceWorker.fn === 'string' ? messageForServiceWorker.fn : '';
     const senderTabIdForDbOp = senderForServiceWorker && senderForServiceWorker.tab &&
       typeof senderForServiceWorker.tab.id === 'number' ? senderForServiceWorker.tab.id : null;
+    const sourceIdForDbOp = typeof messageForServiceWorker.sourceId === 'string'
+      ? messageForServiceWorker.sourceId
+      : '';
+    const argsForDbOp = Array.isArray(messageForServiceWorker.args) ? messageForServiceWorker.args : [];
     dbHandlerForServiceWorker.handleDbOp(messageForServiceWorker, function (responseForDbOp) {
       sendResponseForServiceWorker(responseForDbOp);
       if (responseForDbOp && responseForDbOp.ok && fnNameForDbOp) {
         const storeForDbOp = dbOpMutationStoreMapForServiceWorker[fnNameForDbOp];
         if (storeForDbOp) {
+          let opsForDbOp = null;
+          const extractorForDbOp = dbOpRecordExtractorForServiceWorker[fnNameForDbOp];
+          if (extractorForDbOp) {
+            try {
+              opsForDbOp = extractorForDbOp(responseForDbOp.result, argsForDbOp);
+            } catch (errForDbOpExtract) {
+              // Defensive: any extractor bug → force a full refresh on receivers
+              // rather than dropping the signal entirely.
+              opsForDbOp = [{ op: 'bulk' }];
+            }
+          }
           if (USE_STORAGE_BROADCAST_FOR_DB_SYNC) {
-            notifyDbChangeViaStorageForServiceWorker(storeForDbOp);
+            notifyDbChangeViaStorageForServiceWorker(storeForDbOp, sourceIdForDbOp, opsForDbOp);
           } else {
             broadcastDbChangeForServiceWorker(storeForDbOp, senderTabIdForDbOp);
           }

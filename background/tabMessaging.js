@@ -11,6 +11,15 @@
   const retryDelaysMsForTabMessaging = [80, 160, 320];
   const actionResponseTimeoutMsForTabMessaging = 700;
   const reInjectPerTabTimeoutMsForTabMessaging = 2500;
+  // Bounded concurrency for re-injection across all supported tabs after an
+  // extension reload. A fully sequential loop (which is the most conservative
+  // path) makes recovery scale linearly with the number of open tabs; a small
+  // pool gives an N/K speedup while staying well inside what
+  // chrome.scripting.executeScript handles comfortably.
+  // Per-tab failures still isolate via the same Promise.race timeout +
+  // try/catch as before, so a misbehaving tab cannot stall a worker for more
+  // than reInjectPerTabTimeoutMsForTabMessaging.
+  const reInjectConcurrencyForTabMessaging = 4;
 
   const injectableJsFilesForTabMessaging = [
     "content/preInit.js",
@@ -417,10 +426,12 @@
   // Lessons learned:
   // - "checkInjected" is insufficient by itself; require explicit context validity.
   // - Per-tab timeouts are necessary so one hung tab cannot block all recovery.
-  // - Sequential reinjection is slower but more reliable under Chrome scripting limits.
+  // - Bounded-concurrency (small worker pool) is faster than fully sequential
+  //   while remaining safely under chrome.scripting.executeScript limits.
   //
-  // Sequential for...of (not Promise.all) to avoid Chrome scripting rate limits.
-  // Per-tab try/catch so a single failing tab does not abort the rest.
+  // Bounded worker pool over a shared cursor. Per-tab try/catch so a single
+  // failing tab does not abort the rest, and a Promise.race timeout so one
+  // hung tab cannot stall its worker past reInjectPerTabTimeoutMsForTabMessaging.
   async function reInjectIntoAllSupportedTabsForTabMessaging() {
     const allTabsForTabMessaging = await new Promise((resolveForTabMessaging) => {
       chrome.tabs.query({}, (tabsForTabMessaging) => {
@@ -428,23 +439,47 @@
       });
     });
 
-    for (const tabForTabMessaging of allTabsForTabMessaging) {
-      if (!isSupportedUrlForTabMessaging(tabForTabMessaging.url)) {
-        continue;
-      }
-      try {
-        await Promise.race([
-          ensureContentInjectedForTabMessaging(tabForTabMessaging.id),
-          new Promise((resolveForTabMessaging) => {
-            setTimeout(() => {
-              resolveForTabMessaging(false);
-            }, reInjectPerTabTimeoutMsForTabMessaging);
-          })
-        ]);
-      } catch (errForTabMessaging) {
-        // Skip tabs that fail injection silently
+    const supportedTabsForTabMessaging = allTabsForTabMessaging.filter((tabForTabMessaging) => {
+      return isSupportedUrlForTabMessaging(tabForTabMessaging.url);
+    });
+
+    if (supportedTabsForTabMessaging.length === 0) {
+      return;
+    }
+
+    let nextIndexForTabMessaging = 0;
+    const workerCountForTabMessaging = Math.min(
+      reInjectConcurrencyForTabMessaging,
+      supportedTabsForTabMessaging.length
+    );
+
+    async function reInjectWorkerForTabMessaging() {
+      while (true) {
+        const idxForTabMessaging = nextIndexForTabMessaging++;
+        if (idxForTabMessaging >= supportedTabsForTabMessaging.length) {
+          return;
+        }
+        const tabForTabMessaging = supportedTabsForTabMessaging[idxForTabMessaging];
+        try {
+          await Promise.race([
+            ensureContentInjectedForTabMessaging(tabForTabMessaging.id),
+            new Promise((resolveForTabMessaging) => {
+              setTimeout(() => {
+                resolveForTabMessaging(false);
+              }, reInjectPerTabTimeoutMsForTabMessaging);
+            })
+          ]);
+        } catch (errForTabMessaging) {
+          // Skip tabs that fail injection silently
+        }
       }
     }
+
+    const workersForTabMessaging = [];
+    for (let workerIndexForTabMessaging = 0; workerIndexForTabMessaging < workerCountForTabMessaging; workerIndexForTabMessaging++) {
+      workersForTabMessaging.push(reInjectWorkerForTabMessaging());
+    }
+    await Promise.all(workersForTabMessaging);
   }
 
   globalScopeForTabMessaging.ABChatBackground = {

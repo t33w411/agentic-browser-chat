@@ -124,7 +124,7 @@
   function applyPrePaintThemeForPanelBoot(shadowRootForPanelBoot, themeForPanelBoot) {
     if (themeForPanelBoot !== 'light' && themeForPanelBoot !== 'dark') return;
     // All four shadow-root top-level elements carry data-theme (panel + the
-    // three modal overlays + the feature-tour overlay). See CLAUDE.md §20.
+    // three modal overlays + the feature-tour overlay).
     const idsForPanelBoot = [
       'panel-host', 'inline-overlay', 'picker-overlay',
       'attach-preview-overlay', 'feature-tour-overlay'

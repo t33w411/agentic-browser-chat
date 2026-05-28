@@ -6,6 +6,12 @@
   var _exposedAddInputChipForPanelRuntime = null;
   var _exposedSetTabForPanelRuntime = null;
   var _exposedRefreshStoreForPanelRuntime = null;
+  // Buffer for refreshStore calls that arrive before the runtime is ready
+  // (storage.onChanged and visibilitychange in content/main.js fire as soon
+  // as the listener is bound, which can be earlier than panelRuntime.initialize).
+  // The set is drained at the end of initialize, so no cross-tab signal is lost
+  // during the reload/boot window.
+  var _pendingRefreshStoresForPanelRuntime = new Set();
   var _exposedAddImageChipFromContextMenuForPanelRuntime = null;
   var _exposedAddTextChipFromContextMenuForPanelRuntime = null;
   // Relays for cross-tab UI mirroring via panelStateSync.
@@ -4601,6 +4607,11 @@
     }
 
     var _refreshTimersForPanelRuntime = {};
+    // Per-store pending data accumulated across the 50 ms scheduler debounce
+    // window. Shape: { fullRefresh: boolean, ops: [{op,id}, ...] }
+    // When fullRefresh is set or ops is empty, the flush runs the legacy
+    // full-list refresh; otherwise it goes through the incremental apply path.
+    var _pendingRefreshDataForPanelRuntime = {};
 
     async function executeStoreRefreshForPanelRuntime(storeNameForRefresh) {
       var repoForRefresh = getPanelDataRepoForPanelRuntime();
@@ -4610,6 +4621,20 @@
         var chatsFromDb;
         try { chatsFromDb = await (typeof repoForRefresh.listChatsMeta === 'function' ? repoForRefresh.listChatsMeta() : repoForRefresh.listChats()); } catch (eForChatsRefresh) { return; }
         if (!Array.isArray(chatsFromDb)) return;
+
+        // Capture the active chat's updatedAt BEFORE upserting from the DB
+        // payload. The active-chat message refetch and re-render below are
+        // gated on whether this value changes, so an unrelated chat mutation
+        // (rename, delete, etc.) no longer triggers a wasteful messages
+        // refetch + DOM rebuild for the active chat.
+        var activeChatIdAtRefreshStart = S.activeChatId;
+        var previousActiveChatUpdatedAtForGate = '';
+        if (activeChatIdAtRefreshStart) {
+          var activeChatBeforeUpsertForGate = CHAT_STORE_FOR_PANEL_RUNTIME[activeChatIdAtRefreshStart];
+          if (activeChatBeforeUpsertForGate) {
+            previousActiveChatUpdatedAtForGate = activeChatBeforeUpsertForGate.updatedAt || '';
+          }
+        }
 
         var dbChatIdSetForRefresh = new Set();
         chatsFromDb.forEach(function (cForRefresh) {
@@ -4673,31 +4698,48 @@
         }
 
         var activeChatIdForRefresh = S.activeChatId;
+        var activeChatRecordChangedForRefresh = false;
         if (activeChatIdForRefresh && dbChatIdSetForRefresh.has(activeChatIdForRefresh) && !sendingChatsForPanelRuntime.has(activeChatIdForRefresh)) {
-          try {
-            var freshMsgsForActiveRefresh = await repoForRefresh.listMessagesByChatId(activeChatIdForRefresh);
-            var activeStoreForRefresh = CHAT_STORE_FOR_PANEL_RUNTIME[activeChatIdForRefresh];
-            if (activeStoreForRefresh) {
-              var activePendingForRefresh = Array.isArray(activeStoreForRefresh.messages)
-                ? activeStoreForRefresh.messages.filter(function (m) { return m && m._persistedToDb === false; })
-                : [];
-              activeStoreForRefresh.messages = freshMsgsForActiveRefresh.map(function (m) { return Object.assign({}, m, { _persistedToDb: true }); });
-              if (activePendingForRefresh.length > 0) {
-                Array.prototype.push.apply(activeStoreForRefresh.messages, activePendingForRefresh);
-              }
-              chatMessagesLoadedSetForPanelRuntime.add(activeChatIdForRefresh);
-              // Rebuild hidden-pair set from the freshly-loaded messages so cross-tab
-              // hide/show toggles (persisted via updateMessage with { isHidden }) take
-              // effect here. Without this, the receiver's local S.hiddenPairIds stays
-              // frozen at the value selectChat captured and would drift out of sync.
-              S.hiddenPairIds = new Set();
-              activeStoreForRefresh.messages.forEach(function (mForHiddenRebuild) {
-                if (mForHiddenRebuild && mForHiddenRebuild.role === 'user' && mForHiddenRebuild.isHidden) {
-                  S.hiddenPairIds.add(mForHiddenRebuild.id);
+          // Did the active chat's row itself change? An unchanged updatedAt
+          // means messages and metadata are identical to what we already
+          // hold in memory, so listMessagesByChatId would just round-trip
+          // the same payload. Skip the refetch and the re-render that
+          // follows; model picker reconciliation still runs because that
+          // reads from the in-memory store (already upserted above) and
+          // costs nothing.
+          var activeStoreAfterUpsertForGate = CHAT_STORE_FOR_PANEL_RUNTIME[activeChatIdForRefresh];
+          var newActiveChatUpdatedAtForGate = activeStoreAfterUpsertForGate
+            ? (activeStoreAfterUpsertForGate.updatedAt || '')
+            : '';
+          activeChatRecordChangedForRefresh =
+            previousActiveChatUpdatedAtForGate !== newActiveChatUpdatedAtForGate ||
+            !chatMessagesLoadedSetForPanelRuntime.has(activeChatIdForRefresh);
+          if (activeChatRecordChangedForRefresh) {
+            try {
+              var freshMsgsForActiveRefresh = await repoForRefresh.listMessagesByChatId(activeChatIdForRefresh);
+              var activeStoreForRefresh = CHAT_STORE_FOR_PANEL_RUNTIME[activeChatIdForRefresh];
+              if (activeStoreForRefresh) {
+                var activePendingForRefresh = Array.isArray(activeStoreForRefresh.messages)
+                  ? activeStoreForRefresh.messages.filter(function (m) { return m && m._persistedToDb === false; })
+                  : [];
+                activeStoreForRefresh.messages = freshMsgsForActiveRefresh.map(function (m) { return Object.assign({}, m, { _persistedToDb: true }); });
+                if (activePendingForRefresh.length > 0) {
+                  Array.prototype.push.apply(activeStoreForRefresh.messages, activePendingForRefresh);
                 }
-              });
-            }
-          } catch (eForActiveRefresh) {}
+                chatMessagesLoadedSetForPanelRuntime.add(activeChatIdForRefresh);
+                // Rebuild hidden-pair set from the freshly-loaded messages so cross-tab
+                // hide/show toggles (persisted via updateMessage with { isHidden }) take
+                // effect here. Without this, the receiver's local S.hiddenPairIds stays
+                // frozen at the value selectChat captured and would drift out of sync.
+                S.hiddenPairIds = new Set();
+                activeStoreForRefresh.messages.forEach(function (mForHiddenRebuild) {
+                  if (mForHiddenRebuild && mForHiddenRebuild.role === 'user' && mForHiddenRebuild.isHidden) {
+                    S.hiddenPairIds.add(mForHiddenRebuild.id);
+                  }
+                });
+              }
+            } catch (eForActiveRefresh) {}
+          }
 
           // Cross-tab model-picker sync: if another tab sent a message that
           // changed this chat's lastModel, mirror it into our picker so the
@@ -4746,8 +4788,18 @@
         // receiver's live bubble (via renderChatMessages → innerHTML), causing
         // the streaming text and tool chips to flicker invisibly. The bubble
         // stays attached and event-driven; a final refresh runs on stream_end.
+        //
+        // Also skip when the active chat's record did not actually change
+        // since the refresh started (gate computed alongside the messages
+        // refetch above). An unrelated chat mutation otherwise re-runs
+        // renderChatMessages → innerHTML for no benefit, which is the main
+        // cause of visible flicker / scroll glitches on sidebar updates.
+        // Re-check the same chat id is still active so we don't carry a flag
+        // computed for a different chat if the user navigated mid-refresh.
         if (
           refreshedActiveChatIdForRefresh &&
+          refreshedActiveChatIdForRefresh === activeChatIdAtRefreshStart &&
+          activeChatRecordChangedForRefresh &&
           dbChatIdSetForRefresh.has(refreshedActiveChatIdForRefresh) &&
           !sendingChatsForPanelRuntime.has(refreshedActiveChatIdForRefresh) &&
           !remoteStreamingChatsForPanelRuntime.has(refreshedActiveChatIdForRefresh)
@@ -4986,28 +5038,554 @@
       }
     }
 
-    function scheduleStoreRefreshForPanelRuntime(storeNameForRefresh) {
+    // Same per-id collapse rules as the SW's mergeOpsIntoPendingForServiceWorker.
+    // Multiple incoming signals during the 50 ms scheduler debounce can carry
+    // ops for the same record; collapse to the net effect before applying.
+    function mergeOpsForApplyForPanelRuntime(opsArrayForMerge) {
+      var resultForMerge = [];
+      if (!Array.isArray(opsArrayForMerge)) return resultForMerge;
+      for (var iForMerge = 0; iForMerge < opsArrayForMerge.length; iForMerge++) {
+        var opForMerge = opsArrayForMerge[iForMerge];
+        if (!opForMerge || !opForMerge.op) continue;
+        var idForMerge = Number(opForMerge.id);
+        if (!Number.isFinite(idForMerge)) continue;
+        var existingIdxForMerge = -1;
+        for (var jForMerge = 0; jForMerge < resultForMerge.length; jForMerge++) {
+          if (resultForMerge[jForMerge].id === idForMerge) { existingIdxForMerge = jForMerge; break; }
+        }
+        if (existingIdxForMerge === -1) {
+          resultForMerge.push({ op: opForMerge.op, id: idForMerge });
+        } else {
+          var existingForMerge = resultForMerge[existingIdxForMerge];
+          if (opForMerge.op === 'delete') {
+            if (existingForMerge.op === 'create') {
+              resultForMerge.splice(existingIdxForMerge, 1);
+            } else {
+              resultForMerge[existingIdxForMerge] = { op: 'delete', id: idForMerge };
+            }
+          } else if (existingForMerge.op === 'create' && opForMerge.op === 'update') {
+            // keep create
+          } else {
+            resultForMerge[existingIdxForMerge] = { op: opForMerge.op, id: idForMerge };
+          }
+        }
+      }
+      return resultForMerge;
+    }
+
+    // ---- Notes incremental apply -------------------------------------------------
+
+    async function applyNotesOpsIncrementalForPanelRuntime(opsForApply, repoForApply) {
+      var rebuildOrderForApply = false;
+      for (var iForApply = 0; iForApply < opsForApply.length; iForApply++) {
+        var opForApply = opsForApply[iForApply];
+        var idForApply = opForApply.id;
+
+        if (opForApply.op === 'delete') {
+          if (NOTE_STORE_FOR_PANEL_RUNTIME[idForApply] != null) {
+            delete NOTE_STORE_FOR_PANEL_RUNTIME[idForApply];
+          }
+          var deleteIndexForApply = NOTE_ORDER_FOR_PANEL_RUNTIME.indexOf(idForApply);
+          if (deleteIndexForApply >= 0) {
+            if (deleteIndexForApply < renderedNoteCountForPanelRuntime && renderedNoteCountForPanelRuntime > 0) {
+              renderedNoteCountForPanelRuntime--;
+            }
+            NOTE_ORDER_FOR_PANEL_RUNTIME.splice(deleteIndexForApply, 1);
+          }
+          removeMainNoteListItemForPanelRuntime(idForApply);
+          syncSearchIndexForPanelRuntime('notes', 'remove', idForApply);
+          rebuildOrderForApply = true;
+          continue;
+        }
+
+        var fetchedForApply;
+        try {
+          fetchedForApply = await repoForApply.getNote(idForApply);
+        } catch (eForApply) {
+          // Record was deleted between signal and our fetch — treat as delete.
+          if (NOTE_STORE_FOR_PANEL_RUNTIME[idForApply] != null) {
+            delete NOTE_STORE_FOR_PANEL_RUNTIME[idForApply];
+          }
+          var missingIndexForApply = NOTE_ORDER_FOR_PANEL_RUNTIME.indexOf(idForApply);
+          if (missingIndexForApply >= 0) {
+            if (missingIndexForApply < renderedNoteCountForPanelRuntime && renderedNoteCountForPanelRuntime > 0) {
+              renderedNoteCountForPanelRuntime--;
+            }
+            NOTE_ORDER_FOR_PANEL_RUNTIME.splice(missingIndexForApply, 1);
+          }
+          removeMainNoteListItemForPanelRuntime(idForApply);
+          syncSearchIndexForPanelRuntime('notes', 'remove', idForApply);
+          rebuildOrderForApply = true;
+          continue;
+        }
+
+        if (!fetchedForApply) continue;
+        var wasInOrderForApply = NOTE_ORDER_FOR_PANEL_RUNTIME.indexOf(idForApply) >= 0;
+        NOTE_STORE_FOR_PANEL_RUNTIME[idForApply] = cloneNoteRecordForPanelRuntime(fetchedForApply);
+        if (fetchedForApply.noteType !== 'agent' && !wasInOrderForApply) {
+          NOTE_ORDER_FOR_PANEL_RUNTIME.push(idForApply);
+          renderedNoteCountForPanelRuntime = Math.min(
+            renderedNoteCountForPanelRuntime + 1,
+            NOTE_ORDER_FOR_PANEL_RUNTIME.length
+          );
+        }
+        if (fetchedForApply.noteType !== 'agent') {
+          syncMainNoteListItemForPanelRuntime(idForApply, false);
+        }
+        syncSearchIndexForPanelRuntime(
+          'notes',
+          wasInOrderForApply ? 'update' : 'add',
+          idForApply,
+          NOTE_STORE_FOR_PANEL_RUNTIME[idForApply]
+        );
+        rebuildOrderForApply = true;
+
+        // Active-note reconciliation, mirroring the full-refresh branch in
+        // executeStoreRefreshForPanelRuntime('notes'). Only relevant when the
+        // touched note is the active one (or in a popout).
+        if (Number(S.activeNoteId) === idForApply) {
+          var mainFormForActiveApply = root.getElementById('note-editor-form');
+          if (mainFormForActiveApply && !mainFormForActiveApply.classList.contains('hidden')) {
+            var mainDraftForActiveApply = collectMainNoteDraftForPanelRuntime();
+            var activeNoteForActiveApply = NOTE_STORE_FOR_PANEL_RUNTIME[idForApply];
+            var mainHasRemoteDraftForActiveApply = mainFormForActiveApply.dataset &&
+              mainFormForActiveApply.dataset.noteRemoteDraft === '1' &&
+              String(mainFormForActiveApply.dataset.noteBaseUpdatedAt || '') === String(activeNoteForActiveApply.updatedAt || '');
+            if (mainFormForActiveApply.classList.contains('in-edit-mode') &&
+                noteDraftHasLocalChangesForPanelRuntime(mainDraftForActiveApply, mainFormForActiveApply)) {
+              showNoteConflictNoticeForPanelRuntime(mainFormForActiveApply, 'This note was saved in another tab. Your local draft was kept; save may require resolving the newer version.');
+            } else if (!mainHasRemoteDraftForActiveApply && !isNotePoppedOutForPanelRuntime(idForApply)) {
+              applyNoteDataToMainEditorForPanelRuntime(idForApply, mainFormForActiveApply.classList.contains('in-edit-mode'));
+            }
+          }
+        }
+
+        var popoutForApply = NOTE_POPOUT_MAP_FOR_PANEL_RUNTIME[idForApply];
+        if (popoutForApply && NOTE_STORE_FOR_PANEL_RUNTIME[idForApply]) {
+          var popoutDraftForApply = collectNoteDataFromPopoutForPanelRuntime(popoutForApply);
+          var noteForPopoutApply = NOTE_STORE_FOR_PANEL_RUNTIME[idForApply];
+          var popoutHasRemoteDraftForApply = popoutForApply.dataset &&
+            popoutForApply.dataset.noteRemoteDraft === '1' &&
+            String(popoutForApply.dataset.noteBaseUpdatedAt || '') === String(noteForPopoutApply.updatedAt || '');
+          if (popoutForApply.classList.contains('in-edit-mode') &&
+              noteDraftHasLocalChangesForPanelRuntime(popoutDraftForApply, popoutForApply)) {
+            showNoteConflictNoticeForPanelRuntime(popoutForApply, 'This note was saved in another tab. Your local draft was kept; save may require resolving the newer version.');
+          } else if (!popoutHasRemoteDraftForApply) {
+            applyNoteDataToPopoutForPanelRuntime(popoutForApply, NOTE_STORE_FOR_PANEL_RUNTIME[idForApply]);
+          }
+        }
+      }
+      if (rebuildOrderForApply) {
+        refreshNoteOrderForPanelRuntime();
+        reapplyActiveSearchForListTypeForPanelRuntime('notes');
+      }
+    }
+
+    // ---- Tasks incremental apply -------------------------------------------------
+
+    async function applyTasksOpsIncrementalForPanelRuntime(opsForApply, repoForApply) {
+      var rebuildOrderForApply = false;
+      for (var iForApply = 0; iForApply < opsForApply.length; iForApply++) {
+        var opForApply = opsForApply[iForApply];
+        var idForApply = opForApply.id;
+
+        if (opForApply.op === 'delete') {
+          if (TASK_STORE_FOR_PANEL_RUNTIME[idForApply] != null) {
+            delete TASK_STORE_FOR_PANEL_RUNTIME[idForApply];
+          }
+          var deleteIndexForApply = TASK_ORDER_FOR_PANEL_RUNTIME.indexOf(idForApply);
+          if (deleteIndexForApply >= 0) {
+            if (deleteIndexForApply < renderedTaskCountForPanelRuntime && renderedTaskCountForPanelRuntime > 0) {
+              renderedTaskCountForPanelRuntime--;
+            }
+            TASK_ORDER_FOR_PANEL_RUNTIME.splice(deleteIndexForApply, 1);
+          }
+          removeMainTaskListItemForPanelRuntime(idForApply);
+          syncSearchIndexForPanelRuntime('tasks', 'remove', idForApply);
+          rebuildOrderForApply = true;
+          continue;
+        }
+
+        var fetchedForApply;
+        try {
+          fetchedForApply = await repoForApply.getTask(idForApply);
+        } catch (eForApply) {
+          if (TASK_STORE_FOR_PANEL_RUNTIME[idForApply] != null) {
+            delete TASK_STORE_FOR_PANEL_RUNTIME[idForApply];
+          }
+          var missingIndexForApply = TASK_ORDER_FOR_PANEL_RUNTIME.indexOf(idForApply);
+          if (missingIndexForApply >= 0) {
+            if (missingIndexForApply < renderedTaskCountForPanelRuntime && renderedTaskCountForPanelRuntime > 0) {
+              renderedTaskCountForPanelRuntime--;
+            }
+            TASK_ORDER_FOR_PANEL_RUNTIME.splice(missingIndexForApply, 1);
+          }
+          removeMainTaskListItemForPanelRuntime(idForApply);
+          syncSearchIndexForPanelRuntime('tasks', 'remove', idForApply);
+          rebuildOrderForApply = true;
+          continue;
+        }
+
+        if (!fetchedForApply) continue;
+        var wasInOrderForApply = TASK_ORDER_FOR_PANEL_RUNTIME.indexOf(idForApply) >= 0;
+        TASK_STORE_FOR_PANEL_RUNTIME[idForApply] = cloneTaskRecordForPanelRuntime(fetchedForApply);
+        if (!wasInOrderForApply) {
+          TASK_ORDER_FOR_PANEL_RUNTIME.push(idForApply);
+          renderedTaskCountForPanelRuntime = Math.min(
+            renderedTaskCountForPanelRuntime + 1,
+            TASK_ORDER_FOR_PANEL_RUNTIME.length
+          );
+        }
+        syncMainTaskListItemForPanelRuntime(idForApply, false);
+        syncSearchIndexForPanelRuntime(
+          'tasks',
+          wasInOrderForApply ? 'update' : 'add',
+          idForApply,
+          TASK_STORE_FOR_PANEL_RUNTIME[idForApply]
+        );
+        rebuildOrderForApply = true;
+      }
+      if (rebuildOrderForApply) {
+        refreshTaskOrderForPanelRuntime();
+        reapplyActiveSearchForListTypeForPanelRuntime('tasks');
+      }
+    }
+
+    // ---- Questions incremental apply --------------------------------------------
+
+    async function applyQuestionsOpsIncrementalForPanelRuntime(opsForApply, repoForApply) {
+      var rebuildOrderForApply = false;
+      for (var iForApply = 0; iForApply < opsForApply.length; iForApply++) {
+        var opForApply = opsForApply[iForApply];
+        var idForApply = opForApply.id;
+
+        if (opForApply.op === 'delete') {
+          if (QUIZ_STORE_FOR_PANEL_RUNTIME[idForApply] != null) {
+            delete QUIZ_STORE_FOR_PANEL_RUNTIME[idForApply];
+          }
+          var deleteIndexForApply = QUIZ_ORDER_FOR_PANEL_RUNTIME.indexOf(idForApply);
+          if (deleteIndexForApply >= 0) {
+            if (deleteIndexForApply < renderedQuizCountForPanelRuntime && renderedQuizCountForPanelRuntime > 0) {
+              renderedQuizCountForPanelRuntime--;
+            }
+            QUIZ_ORDER_FOR_PANEL_RUNTIME.splice(deleteIndexForApply, 1);
+          }
+          removeMainQuizListItemForPanelRuntime(idForApply);
+          syncSearchIndexForPanelRuntime('questions', 'remove', idForApply);
+          rebuildOrderForApply = true;
+          continue;
+        }
+
+        var fetchedForApply;
+        try {
+          fetchedForApply = await repoForApply.getQuestion(idForApply);
+        } catch (eForApply) {
+          if (QUIZ_STORE_FOR_PANEL_RUNTIME[idForApply] != null) {
+            delete QUIZ_STORE_FOR_PANEL_RUNTIME[idForApply];
+          }
+          var missingIndexForApply = QUIZ_ORDER_FOR_PANEL_RUNTIME.indexOf(idForApply);
+          if (missingIndexForApply >= 0) {
+            if (missingIndexForApply < renderedQuizCountForPanelRuntime && renderedQuizCountForPanelRuntime > 0) {
+              renderedQuizCountForPanelRuntime--;
+            }
+            QUIZ_ORDER_FOR_PANEL_RUNTIME.splice(missingIndexForApply, 1);
+          }
+          removeMainQuizListItemForPanelRuntime(idForApply);
+          syncSearchIndexForPanelRuntime('questions', 'remove', idForApply);
+          rebuildOrderForApply = true;
+          continue;
+        }
+
+        if (!fetchedForApply) continue;
+        var wasInOrderForApply = QUIZ_ORDER_FOR_PANEL_RUNTIME.indexOf(idForApply) >= 0;
+        QUIZ_STORE_FOR_PANEL_RUNTIME[idForApply] = cloneQuestionRecordForPanelRuntime(fetchedForApply);
+        if (!wasInOrderForApply) {
+          QUIZ_ORDER_FOR_PANEL_RUNTIME.push(idForApply);
+          renderedQuizCountForPanelRuntime = Math.min(
+            renderedQuizCountForPanelRuntime + 1,
+            QUIZ_ORDER_FOR_PANEL_RUNTIME.length
+          );
+        }
+        syncMainQuizListItemForPanelRuntime(idForApply, false);
+        syncSearchIndexForPanelRuntime(
+          'questions',
+          wasInOrderForApply ? 'update' : 'add',
+          idForApply,
+          QUIZ_STORE_FOR_PANEL_RUNTIME[idForApply]
+        );
+        rebuildOrderForApply = true;
+      }
+      if (rebuildOrderForApply) {
+        refreshQuizOrderForPanelRuntime();
+      }
+    }
+
+    // ---- Chats incremental apply ------------------------------------------------
+
+    async function applyChatsOpsIncrementalForPanelRuntime(opsForApply, repoForApply) {
+      var orderChangedForApply = false;
+      for (var iForApply = 0; iForApply < opsForApply.length; iForApply++) {
+        var opForApply = opsForApply[iForApply];
+        var idForApply = opForApply.id;
+
+        if (opForApply.op === 'delete') {
+          removeChatFromRuntimeStoreForPanelRuntime(idForApply);
+          removeChatUiForPanelRuntime(idForApply);
+          syncSearchIndexForPanelRuntime('chats', 'remove', idForApply);
+          chatMessagesLoadedSetForPanelRuntime.delete(idForApply);
+          orderChangedForApply = true;
+          continue;
+        }
+
+        var fetchedMetaForApply;
+        try {
+          fetchedMetaForApply = await repoForApply.getChatMeta(idForApply);
+        } catch (eForApply) {
+          // Treat fetch failure as a delete to keep the in-memory store
+          // in sync with what the SW reports.
+          removeChatFromRuntimeStoreForPanelRuntime(idForApply);
+          removeChatUiForPanelRuntime(idForApply);
+          syncSearchIndexForPanelRuntime('chats', 'remove', idForApply);
+          chatMessagesLoadedSetForPanelRuntime.delete(idForApply);
+          orderChangedForApply = true;
+          continue;
+        }
+
+        if (!fetchedMetaForApply) continue;
+        var existingChatForApply = CHAT_STORE_FOR_PANEL_RUNTIME[idForApply];
+        var previousUpdatedAtForApply = existingChatForApply ? (existingChatForApply.updatedAt || '') : '';
+        var previousIndexForApply = CHAT_ORDER_FOR_PANEL_RUNTIME.indexOf(idForApply);
+
+        // Preserve already-loaded messages (incl. unsubmitted pending ones)
+        // exactly as the full-refresh path does. Active chat re-fetch is
+        // handled below for fresh DB state.
+        var persistedMsgsForApply = (chatMessagesLoadedSetForPanelRuntime.has(idForApply) && existingChatForApply && Array.isArray(existingChatForApply.messages))
+          ? existingChatForApply.messages.filter(function (mForFilter) { return mForFilter && mForFilter._persistedToDb !== false; })
+          : [];
+        var pendingMsgsForApply = (existingChatForApply && Array.isArray(existingChatForApply.messages))
+          ? existingChatForApply.messages.filter(function (mForFilter) { return mForFilter && mForFilter._persistedToDb === false; })
+          : [];
+        CHAT_STORE_FOR_PANEL_RUNTIME[idForApply] = cloneChatRecordForPanelRuntime(fetchedMetaForApply);
+        var allMsgsForApply = persistedMsgsForApply.concat(pendingMsgsForApply);
+        CHAT_STORE_FOR_PANEL_RUNTIME[idForApply].messages = allMsgsForApply;
+        if (allMsgsForApply.length > 0) {
+          CHAT_STORE_FOR_PANEL_RUNTIME[idForApply].summary =
+            getChatSummaryFromMessagesForPanelRuntime(allMsgsForApply) ||
+            CHAT_STORE_FOR_PANEL_RUNTIME[idForApply].summary;
+        }
+
+        var newUpdatedAtForApply = CHAT_STORE_FOR_PANEL_RUNTIME[idForApply].updatedAt || '';
+
+        if (previousIndexForApply < 0) {
+          CHAT_ORDER_FOR_PANEL_RUNTIME.unshift(idForApply);
+          renderedChatCountForPanelRuntime = Math.min(
+            renderedChatCountForPanelRuntime + 1,
+            CHAT_ORDER_FOR_PANEL_RUNTIME.length
+          );
+          orderChangedForApply = true;
+        } else if (previousUpdatedAtForApply !== newUpdatedAtForApply) {
+          orderChangedForApply = true;
+        }
+
+        // Active-chat refetch + re-render. Same gates as the full-refresh path:
+        // skip during local send or during a remote-mirrored stream.
+        var activeChatChangedForApply = false;
+        if (Number(S.activeChatId) === idForApply && !sendingChatsForPanelRuntime.has(idForApply)) {
+          activeChatChangedForApply =
+            previousUpdatedAtForApply !== newUpdatedAtForApply ||
+            !chatMessagesLoadedSetForPanelRuntime.has(idForApply);
+          if (activeChatChangedForApply) {
+            try {
+              var freshMsgsForApply = await repoForApply.listMessagesByChatId(idForApply);
+              var activeStoreForApply = CHAT_STORE_FOR_PANEL_RUNTIME[idForApply];
+              if (activeStoreForApply) {
+                var activePendingForApply = Array.isArray(activeStoreForApply.messages)
+                  ? activeStoreForApply.messages.filter(function (m) { return m && m._persistedToDb === false; })
+                  : [];
+                activeStoreForApply.messages = freshMsgsForApply.map(function (mForApply) {
+                  return Object.assign({}, mForApply, { _persistedToDb: true });
+                });
+                if (activePendingForApply.length > 0) {
+                  Array.prototype.push.apply(activeStoreForApply.messages, activePendingForApply);
+                }
+                chatMessagesLoadedSetForPanelRuntime.add(idForApply);
+                S.hiddenPairIds = new Set();
+                activeStoreForApply.messages.forEach(function (mForHiddenRebuild) {
+                  if (mForHiddenRebuild && mForHiddenRebuild.role === 'user' && mForHiddenRebuild.isHidden) {
+                    S.hiddenPairIds.add(mForHiddenRebuild.id);
+                  }
+                });
+              }
+            } catch (eForActiveApply) {}
+          }
+          // Model picker reconciliation (cheap, runs even when messages didn't change)
+          var activeStoreForModelApply = CHAT_STORE_FOR_PANEL_RUNTIME[idForApply];
+          var lastModelForModelApply = activeStoreForModelApply && activeStoreForModelApply.lastModel;
+          if (lastModelForModelApply) {
+            var chatModelSelectForModelApply = root.getElementById('chat-model-select');
+            if (chatModelSelectForModelApply && chatModelSelectForModelApply.value !== lastModelForModelApply) {
+              chatModelSelectForModelApply.value = lastModelForModelApply;
+              if (chatModelSelectForModelApply.value === lastModelForModelApply) {
+                syncModelPickerLabelForPanelRuntime();
+              }
+            }
+          }
+        }
+
+        // Sidebar list item DOM sync — always, even when not active (because
+        // title/summary/updatedAt may have changed).
+        if (CHAT_ORDER_FOR_PANEL_RUNTIME.indexOf(idForApply) >= 0 &&
+            CHAT_ORDER_FOR_PANEL_RUNTIME.indexOf(idForApply) < renderedChatCountForPanelRuntime) {
+          syncMainChatListItemForPanelRuntime(idForApply, false);
+        }
+        syncSearchIndexForPanelRuntime('chats', 'update', idForApply, CHAT_STORE_FOR_PANEL_RUNTIME[idForApply]);
+
+        // Active-chat re-render (gated identically to the full-refresh path).
+        if (activeChatChangedForApply &&
+            Number(S.activeChatId) === idForApply &&
+            !sendingChatsForPanelRuntime.has(idForApply) &&
+            !remoteStreamingChatsForPanelRuntime.has(idForApply)) {
+          var convContainerForApply = root.querySelector('.messages-area');
+          var savedScrollTopForApply = convContainerForApply ? convContainerForApply.scrollTop : 0;
+          var wasAtBottomForApply = convContainerForApply
+            ? (convContainerForApply.scrollHeight - convContainerForApply.scrollTop - convContainerForApply.clientHeight) < 60
+            : true;
+          var chatIdForApplyRender = idForApply;
+          loadGeneratedBlobsForMessagesForPanelRuntime(getActiveChatMessagesForPanelRuntime()).then(function () {
+            if (S.activeChatId !== chatIdForApplyRender) return;
+            if (sendingChatsForPanelRuntime.has(chatIdForApplyRender)) return;
+            var mermaidDoneForApply = renderChatMessages();
+            rebuildTokenCounterFromMessagesForPanelRuntime(chatIdForApplyRender);
+            reattachLiveTurnBubbleForPanelRuntime(chatIdForApplyRender);
+            if (wasAtBottomForApply) {
+              scrollChatToBottomForPanelRuntime();
+            } else {
+              var convForRestoreApply = root.querySelector('.messages-area');
+              if (convForRestoreApply) convForRestoreApply.scrollTop = savedScrollTopForApply;
+            }
+            if (mermaidDoneForApply && typeof mermaidDoneForApply.then === 'function') {
+              mermaidDoneForApply.then(function () {
+                if (wasAtBottomForApply) {
+                  scrollChatToBottomForPanelRuntime();
+                } else {
+                  var convForMermaidApply = root.querySelector('.messages-area');
+                  if (convForMermaidApply) convForMermaidApply.scrollTop = savedScrollTopForApply;
+                }
+              });
+            }
+          });
+        }
+      }
+
+      if (orderChangedForApply) {
+        // The chat order is sorted by updatedAt desc inside listChatsMeta on the
+        // full-refresh path. Here we mutated CHAT_ORDER ad-hoc; re-sort it now
+        // so the sidebar grouping (Today / Yesterday / etc) renders correctly.
+        CHAT_ORDER_FOR_PANEL_RUNTIME.sort(function (aForSort, bForSort) {
+          var chatAForSort = CHAT_STORE_FOR_PANEL_RUNTIME[aForSort];
+          var chatBForSort = CHAT_STORE_FOR_PANEL_RUNTIME[bForSort];
+          var aTimeForSort = chatAForSort ? new Date(chatAForSort.updatedAt || 0).getTime() : 0;
+          var bTimeForSort = chatBForSort ? new Date(chatBForSort.updatedAt || 0).getTime() : 0;
+          if (!Number.isFinite(aTimeForSort)) aTimeForSort = 0;
+          if (!Number.isFinite(bTimeForSort)) bTimeForSort = 0;
+          return bTimeForSort - aTimeForSort;
+        });
+        rebuildChatListGroupingForPanelRuntime();
+        reapplyActiveSearchForListTypeForPanelRuntime('chats');
+      }
+    }
+
+    // Dispatcher. Throws on unknown store so scheduleStoreRefreshForPanelRuntime
+    // can catch and fall back to the full-refresh path.
+    async function applyIncrementalOpsForPanelRuntime(storeNameForApply, opsRawForApply) {
+      var opsForApply = mergeOpsForApplyForPanelRuntime(opsRawForApply);
+      if (opsForApply.length === 0) return;
+      var repoForApply = getPanelDataRepoForPanelRuntime();
+      if (!repoForApply) throw new Error('panelDataRepo unavailable for incremental apply');
+      if (storeNameForApply === 'notes') {
+        await applyNotesOpsIncrementalForPanelRuntime(opsForApply, repoForApply);
+        return;
+      }
+      if (storeNameForApply === 'tasks') {
+        await applyTasksOpsIncrementalForPanelRuntime(opsForApply, repoForApply);
+        return;
+      }
+      if (storeNameForApply === 'questions') {
+        await applyQuestionsOpsIncrementalForPanelRuntime(opsForApply, repoForApply);
+        return;
+      }
+      if (storeNameForApply === 'chats') {
+        await applyChatsOpsIncrementalForPanelRuntime(opsForApply, repoForApply);
+        return;
+      }
+      throw new Error('unknown store for incremental apply: ' + storeNameForApply);
+    }
+
+    function scheduleStoreRefreshForPanelRuntime(storeNameForRefresh, opsForRefresh) {
       if (!storeNameForRefresh) return;
+      if (!_pendingRefreshDataForPanelRuntime[storeNameForRefresh]) {
+        _pendingRefreshDataForPanelRuntime[storeNameForRefresh] = { fullRefresh: false, ops: [] };
+      }
+      var pendingForSchedule = _pendingRefreshDataForPanelRuntime[storeNameForRefresh];
+      if (!Array.isArray(opsForRefresh) || opsForRefresh.length === 0) {
+        // No ops payload = "do a full refresh". Manual sync button + legacy
+        // signal records take this path.
+        pendingForSchedule.fullRefresh = true;
+      } else {
+        var hasBulkForSchedule = false;
+        for (var iForSchedule = 0; iForSchedule < opsForRefresh.length; iForSchedule++) {
+          if (opsForRefresh[iForSchedule] && opsForRefresh[iForSchedule].op === 'bulk') {
+            hasBulkForSchedule = true;
+            break;
+          }
+        }
+        if (hasBulkForSchedule) {
+          pendingForSchedule.fullRefresh = true;
+        } else {
+          Array.prototype.push.apply(pendingForSchedule.ops, opsForRefresh);
+        }
+      }
       if (_refreshTimersForPanelRuntime[storeNameForRefresh]) {
         clearTimeout(_refreshTimersForPanelRuntime[storeNameForRefresh]);
       }
+      // 50 ms (reduced from 250). Streaming bursts are now coalesced by a
+      // 60 ms originator-side debounce in service-worker.js
+      // (notifyDbChangeViaStorageForServiceWorker), so this only needs to fold
+      // any signals that race the same paint here. Lower latency for discrete
+      // writes — cross-tab updates feel near-instant instead of always
+      // appearing after a ~quarter-second lag.
       _refreshTimersForPanelRuntime[storeNameForRefresh] = setTimeout(function () {
         _refreshTimersForPanelRuntime[storeNameForRefresh] = null;
-        executeStoreRefreshForPanelRuntime(storeNameForRefresh).catch(function () {});
-      }, 250);
+        var pendingForFlush = _pendingRefreshDataForPanelRuntime[storeNameForRefresh];
+        _pendingRefreshDataForPanelRuntime[storeNameForRefresh] = null;
+        if (!pendingForFlush || pendingForFlush.fullRefresh || pendingForFlush.ops.length === 0) {
+          executeStoreRefreshForPanelRuntime(storeNameForRefresh).catch(function () {});
+          return;
+        }
+        applyIncrementalOpsForPanelRuntime(storeNameForRefresh, pendingForFlush.ops).catch(function () {
+          // Any incremental apply error → fall back to full refresh so the
+          // receiver still converges, just more expensively.
+          executeStoreRefreshForPanelRuntime(storeNameForRefresh).catch(function () {});
+        });
+      }, 50);
     }
 
     async function triggerFullSyncForPanelRuntime(btnForSync) {
       if (btnForSync && btnForSync.classList.contains('syncing')) return;
       if (btnForSync) btnForSync.classList.add('syncing');
-      sendRuntimeMessageForPanelRuntime({ action: 'abchatBroadcastFullSync' });
+      var sourceIdForFullSync = '';
+      var repoForFullSync = getPanelDataRepoForPanelRuntime();
+      if (repoForFullSync && typeof repoForFullSync.getSourceId === 'function') {
+        sourceIdForFullSync = repoForFullSync.getSourceId() || '';
+      }
+      sendRuntimeMessageForPanelRuntime({ action: 'abchatBroadcastFullSync', sourceId: sourceIdForFullSync });
       try {
         await Promise.allSettled([
           executeStoreRefreshForPanelRuntime('chats'),
           executeStoreRefreshForPanelRuntime('notes'),
           executeStoreRefreshForPanelRuntime('tasks'),
           executeStoreRefreshForPanelRuntime('questions'),
-          new Promise(function (resolve) { setTimeout(resolve, 1500); })
+          new Promise(function (resolve) { setTimeout(resolve, 300); })
         ]);
       } finally {
         if (btnForSync) btnForSync.classList.remove('syncing');
@@ -13780,6 +14358,15 @@
     _exposedAddInputChipForPanelRuntime = addInputChipForPanelRuntime;
     _exposedSetTabForPanelRuntime = setTab;
     _exposedRefreshStoreForPanelRuntime = scheduleStoreRefreshForPanelRuntime;
+    // Drain any refresh signals that arrived before the runtime was ready
+    // (e.g. storage.onChanged firing during extension reload re-injection,
+    // before panelRuntime.initialize finished).
+    if (_pendingRefreshStoresForPanelRuntime.size > 0) {
+      _pendingRefreshStoresForPanelRuntime.forEach(function (storeForFlush) {
+        scheduleStoreRefreshForPanelRuntime(storeForFlush);
+      });
+      _pendingRefreshStoresForPanelRuntime.clear();
+    }
     _exposedAddImageChipFromContextMenuForPanelRuntime = addImageChipFromContextMenuForPanelRuntime;
     _exposedAddTextChipFromContextMenuForPanelRuntime = addTextChipFromContextMenuForPanelRuntime;
     _exposedSetSidebarCollapsedForPanelRuntime = setSidebarCollapsedForMirrorForPanelRuntime;
@@ -13822,8 +14409,18 @@
     setTab: function setTabRelayForPanelRuntime(tabForRelay) {
       if (_exposedSetTabForPanelRuntime) _exposedSetTabForPanelRuntime(tabForRelay);
     },
-    refreshStore: function refreshStoreRelayForPanelRuntime(storeForRelay) {
-      if (_exposedRefreshStoreForPanelRuntime) _exposedRefreshStoreForPanelRuntime(storeForRelay);
+    refreshStore: function refreshStoreRelayForPanelRuntime(storeForRelay, opsForRelay) {
+      if (_exposedRefreshStoreForPanelRuntime) {
+        _exposedRefreshStoreForPanelRuntime(storeForRelay, opsForRelay);
+        return;
+      }
+      // Runtime not ready yet — queue the store name. Ops are dropped on
+      // purpose: during boot we want the upcoming flush to do a complete
+      // refresh rather than try to apply ad-hoc deltas, since we don't yet
+      // know which records the in-memory store has.
+      if (typeof storeForRelay === 'string' && storeForRelay) {
+        _pendingRefreshStoresForPanelRuntime.add(storeForRelay);
+      }
     },
     addImageChipFromContextMenu: function addImageChipFromContextMenuRelayForPanelRuntime(srcUrlForRelay) {
       if (_exposedAddImageChipFromContextMenuForPanelRuntime) _exposedAddImageChipFromContextMenuForPanelRuntime(srcUrlForRelay);

@@ -299,6 +299,24 @@
     return chatForPanelDataRepo;
   }
 
+  // Per-id chat metadata fetcher, no messages join. Used by the cross-tab
+  // incremental-ops apply path on receiver tabs that aren't viewing the chat
+  // being updated — they only need the row to update the sidebar entry, not
+  // the message stream. Saves a wasted listMessagesByChatId round-trip per
+  // cross-tab chat-row mutation when the receiver has a different active chat.
+  async function getChatMetaForPanelDataRepo(idForPanelDataRepo) {
+    var dbForPanelDataRepo = requireDbForPanelDataRepo();
+    var numericChatIdForPanelDataRepo = Number(idForPanelDataRepo);
+    if (!Number.isFinite(numericChatIdForPanelDataRepo)) {
+      throw new Error('Invalid chat id');
+    }
+    var chatForPanelDataRepo = await dbForPanelDataRepo.chats.get(numericChatIdForPanelDataRepo);
+    if (!chatForPanelDataRepo) {
+      throw new Error('Item not found: chat ' + numericChatIdForPanelDataRepo);
+    }
+    return chatForPanelDataRepo;
+  }
+
   function normalizeCompactedThroughMessageIdForPanelDataRepo(rawIdForPanelDataRepo) {
     if (rawIdForPanelDataRepo == null) return null;
     var numericIdForPanelDataRepo = Number(rawIdForPanelDataRepo);
@@ -938,6 +956,7 @@
     listChats:                    listChatsForPanelDataRepo,
     listChatsMeta:                listChatsMetaForPanelDataRepo,
     getChat:                      getChatForPanelDataRepo,
+    getChatMeta:                  getChatMetaForPanelDataRepo,
     createChat:                   createChatForPanelDataRepo,
     updateChat:                   updateChatForPanelDataRepo,
     deleteChat:                   deleteChatForPanelDataRepo,

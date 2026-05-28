@@ -545,13 +545,42 @@
       if (areaNameForContentMain === "local" && USE_STORAGE_BROADCAST_FOR_DB_SYNC) {
         var panelRuntimeNsForStorageSync = contentNamespaceForContentMain.ui && contentNamespaceForContentMain.ui.panelRuntime;
         if (panelRuntimeNsForStorageSync && typeof panelRuntimeNsForStorageSync.refreshStore === 'function') {
+          var repoForStorageSync =
+            (globalScopeForContentMain.ABChatShared && globalScopeForContentMain.ABChatShared.panelDataRepo) || null;
+          var localSourceIdForStorageSync = repoForStorageSync && typeof repoForStorageSync.getSourceId === 'function'
+            ? (repoForStorageSync.getSourceId() || '')
+            : '';
           Object.keys(changesForContentMain).forEach(function (keyForStorageSync) {
-            if (keyForStorageSync.indexOf(DB_CHANGE_SIGNAL_KEY_PREFIX_FOR_CONTENT_MAIN) === 0) {
-              var storeForStorageSync = keyForStorageSync.slice(DB_CHANGE_SIGNAL_KEY_PREFIX_FOR_CONTENT_MAIN.length);
-              if (storeForStorageSync) {
-                panelRuntimeNsForStorageSync.refreshStore(storeForStorageSync);
+            if (keyForStorageSync.indexOf(DB_CHANGE_SIGNAL_KEY_PREFIX_FOR_CONTENT_MAIN) !== 0) return;
+            var storeForStorageSync = keyForStorageSync.slice(DB_CHANGE_SIGNAL_KEY_PREFIX_FOR_CONTENT_MAIN.length);
+            if (!storeForStorageSync) return;
+            // Self-echo skip: storage.onChanged fires on the writing tab too.
+            // The SW now stamps an originator sourceId into the signal record;
+            // if it matches this tab's, we already refreshed in-process and
+            // can ignore the storage echo.
+            // Tolerate legacy primitive values (pre-sourceId records).
+            var changeEntryForStorageSync = changesForContentMain[keyForStorageSync];
+            var newValueForStorageSync = changeEntryForStorageSync ? changeEntryForStorageSync.newValue : null;
+            var incomingSourceIdForStorageSync = '';
+            var opsForStorageSync = null;
+            if (newValueForStorageSync && typeof newValueForStorageSync === 'object') {
+              incomingSourceIdForStorageSync = typeof newValueForStorageSync.sourceId === 'string'
+                ? newValueForStorageSync.sourceId
+                : '';
+              // Pass through the record-level ops payload when present. An
+              // empty array (or missing array) signals "no per-id info; do a
+              // full refresh", which is the same semantic as the manual sync
+              // button. Anything containing a 'bulk' marker also forces full
+              // refresh on the panelRuntime side.
+              if (Array.isArray(newValueForStorageSync.ops)) {
+                opsForStorageSync = newValueForStorageSync.ops;
               }
             }
+            if (incomingSourceIdForStorageSync && localSourceIdForStorageSync &&
+                incomingSourceIdForStorageSync === localSourceIdForStorageSync) {
+              return;
+            }
+            panelRuntimeNsForStorageSync.refreshStore(storeForStorageSync, opsForStorageSync);
           });
         }
       }
