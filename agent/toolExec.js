@@ -1757,6 +1757,98 @@
            roleForExplicit === 'treeitem' || roleForExplicit === 'switch';
   }
 
+  // ---- select_option helpers (custom dropdown selection) ----
+
+  function isElementVisibleForSelectOption(elForVis) {
+    if (!elForVis || !elForVis.isConnected) return false;
+    if (elForVis.hidden) return false;
+    var rectsForVis = elForVis.getClientRects ? elForVis.getClientRects() : null;
+    if (!rectsForVis || rectsForVis.length === 0) return false;
+    var styleForVis = window.getComputedStyle ? window.getComputedStyle(elForVis) : null;
+    if (!styleForVis) return true;
+    return styleForVis.display !== 'none' && styleForVis.visibility !== 'hidden' &&
+      styleForVis.visibility !== 'collapse' && styleForVis.opacity !== '0';
+  }
+
+  function getOptionTextFieldsForSelectOption(elForOpt) {
+    var textForOpt = (elForOpt.innerText || elForOpt.textContent || '').replace(/\s+/g, ' ').trim();
+    var ariaForOpt = (elForOpt.getAttribute && (elForOpt.getAttribute('aria-label') || '')) || '';
+    var valueForOpt = (elForOpt.getAttribute && (elForOpt.getAttribute('data-value') || elForOpt.getAttribute('value') || '')) || '';
+    var titleForOpt = (elForOpt.getAttribute && (elForOpt.getAttribute('title') || '')) || '';
+    return {
+      text: textForOpt,
+      aria: String(ariaForOpt).replace(/\s+/g, ' ').trim(),
+      value: String(valueForOpt).trim(),
+      title: String(titleForOpt).replace(/\s+/g, ' ').trim()
+    };
+  }
+
+  // Realistic pointer+mouse sequence. Custom widgets (notably React Select) commit
+  // on mousedown, so a bare .click() can silently no-op; firing the full sequence
+  // covers pointerdown/mousedown/mouseup/click handlers alike.
+  function dispatchRealPointerSequenceForSelectOption(elForPtr) {
+    var rectForPtr = elForPtr.getBoundingClientRect();
+    var cxForPtr = rectForPtr.left + rectForPtr.width / 2;
+    var cyForPtr = rectForPtr.top + rectForPtr.height / 2;
+    function fireForPtr(typeForPtr, kindForPtr, buttonsForPtr) {
+      try {
+        var initForPtr = { bubbles: true, cancelable: true, view: window, clientX: cxForPtr, clientY: cyForPtr, button: 0, buttons: buttonsForPtr };
+        var evtForPtr;
+        if (kindForPtr === 'pointer' && typeof PointerEvent === 'function') {
+          initForPtr.pointerId = 1; initForPtr.pointerType = 'mouse'; initForPtr.isPrimary = true;
+          evtForPtr = new PointerEvent(typeForPtr, initForPtr);
+        } else {
+          evtForPtr = new MouseEvent(typeForPtr, initForPtr);
+        }
+        elForPtr.dispatchEvent(evtForPtr);
+      } catch (eForPtr) { /* ignore */ }
+    }
+    fireForPtr('pointerover', 'pointer', 0);
+    fireForPtr('mouseover', 'mouse', 0);
+    fireForPtr('pointerdown', 'pointer', 1);
+    fireForPtr('mousedown', 'mouse', 1);
+    try { if (typeof elForPtr.focus === 'function') elForPtr.focus({ preventScroll: true }); } catch (eForFocus) { /* ignore */ }
+    fireForPtr('pointerup', 'pointer', 0);
+    fireForPtr('mouseup', 'mouse', 0);
+    fireForPtr('click', 'mouse', 0);
+  }
+
+  function startMutationObserverForSelectOption() {
+    var collectedForObs = [];
+    var observerForObs = new MutationObserver(function (recordsForObs) {
+      for (var iForObs = 0; iForObs < recordsForObs.length; iForObs++) collectedForObs.push(recordsForObs[iForObs]);
+    });
+    observerForObs.observe(document.documentElement, {
+      subtree: true, childList: true, attributes: true,
+      attributeOldValue: true, characterData: true, characterDataOldValue: true
+    });
+    return {
+      getCount: function () { return collectedForObs.length; },
+      drain: function () {
+        var pendingForObs = observerForObs.takeRecords();
+        for (var pForObs = 0; pForObs < pendingForObs.length; pForObs++) collectedForObs.push(pendingForObs[pForObs]);
+        observerForObs.disconnect();
+        return collectedForObs;
+      }
+    };
+  }
+
+  function settleQuietWindowForSelectOption(getCountForSettle, quietMsForSettle, capMsForSettle) {
+    return new Promise(function (resolveForSettle) {
+      var startTimeForSettle = Date.now();
+      var lastCountForSettle = getCountForSettle();
+      var lastChangeAtForSettle = Date.now();
+      function tickForSettle() {
+        var nowForSettle = Date.now();
+        if (getCountForSettle() !== lastCountForSettle) { lastCountForSettle = getCountForSettle(); lastChangeAtForSettle = nowForSettle; }
+        if (nowForSettle - startTimeForSettle >= capMsForSettle) return resolveForSettle(true);
+        if (nowForSettle - lastChangeAtForSettle >= quietMsForSettle) return resolveForSettle(false);
+        setTimeout(tickForSettle, 40);
+      }
+      setTimeout(tickForSettle, 40);
+    });
+  }
+
   // Returns the category an element belongs to, or null if it belongs to none.
   // Must stay exactly in sync with getCategoryElementsForPageQuery's membership rules.
   function resolveCategoryForPageQuery(el) {
@@ -2007,8 +2099,11 @@
         var matchedElForFPE = matchesForFPE[0];
 
         // Membership check: element must belong to the requested category.
+        // select_option is exempt: custom dropdown triggers are frequently ARIA-less
+        // inferred widgets that resolveCategoryForPageQuery does not classify, and the
+        // open-and-find logic does not depend on the category being correct.
         var memberCatForFPE = resolveCategoryForPageQuery(matchedElForFPE);
-        if (memberCatForFPE !== categoryForFPE) {
+        if (subOpForFPE !== 'select_option' && memberCatForFPE !== categoryForFPE) {
           // Before reporting a mismatch, check if the selector hit a descendant of a
           // category element — a common mistake when copying selectors.
           var ancestorForFPE = matchedElForFPE.parentElement;
@@ -2024,7 +2119,7 @@
           return { ok: false, error: mismatchMsgForFPE };
         }
 
-        var validSubOpsForFPE = { get_inner_text: 1, get_outer_html: 1, get_attribute: 1, get_computed_style: 1, traverse: 1, click: 1 };
+        var validSubOpsForFPE = { get_inner_text: 1, get_outer_html: 1, get_attribute: 1, get_computed_style: 1, traverse: 1, click: 1, select_option: 1 };
         if (!validSubOpsForFPE[subOpForFPE]) {
           return { ok: false, error: 'Unknown sub_operation "' + subOpForFPE + '". Valid options: ' + Object.keys(validSubOpsForFPE).join(', ') };
         }
@@ -2138,7 +2233,7 @@
               var listboxAncestorForClick = matchedElForFPE.closest('[role="listbox"]');
               if (listboxAncestorForClick) {
                 var listboxIdForClick = listboxAncestorForClick.getAttribute('id') || '(no id)';
-                return { ok: false, error: 'Cannot click this role="option" element: it lives inside listbox "' + listboxIdForClick + '" which is currently closed/hidden. Open the listbox first by clicking the combobox whose aria-controls matches "' + listboxIdForClick + '" (run findPageElements category="form_fields" or category="buttons" and look for an element with aria-haspopup="listbox" and aria-controls="' + listboxIdForClick + '"). After clicking the combobox, re-run findPageElements category="buttons" to discover the now-visible options, then click the target option.' };
+                return { ok: false, error: 'Cannot click this role="option" element: it lives inside listbox "' + listboxIdForClick + '" which is currently closed/hidden. Prefer the select_option sub_operation: find the combobox/trigger whose aria-controls matches "' + listboxIdForClick + '" (run findPageElements category="form_fields" or category="buttons" and look for an element with aria-haspopup="listbox" and aria-controls="' + listboxIdForClick + '"), then call findPageElements on that trigger with sub_operation="select_option" and option set to the target label; it opens the dropdown and clicks the matching option for you. Manual fallback: click the combobox, re-run findPageElements category="buttons" to discover the now-visible options, then click the target option.' };
               }
             }
             return { ok: false, error: 'Cannot click element matching "' + selectorForFPE + '": ' + blockerForClick };
@@ -2252,6 +2347,296 @@
           };
           if (dispatchErrorForClick) resultEnvelopeForClick.dispatch_error = dispatchErrorForClick;
           return resultEnvelopeForClick;
+        }
+
+        if (subOpForFPE === 'select_option') {
+          var targetOptionForSelect = (typeof args.option === 'string') ? args.option.trim() : '';
+          if (!targetOptionForSelect) {
+            return { ok: false, error: 'select_option requires an "option" argument: the visible text (or value) of the option to choose.' };
+          }
+          var caseInsensitiveForSelect = (args.case_insensitive === false) ? false : true;
+          function normForSelect(rawForNorm) {
+            var strForNorm = String(rawForNorm == null ? '' : rawForNorm).replace(/\s+/g, ' ').trim();
+            return caseInsensitiveForSelect ? strForNorm.toLowerCase() : strForNorm;
+          }
+          var normTargetForSelect = normForSelect(targetOptionForSelect);
+
+          var triggerBlockerForSelect = checkClickableBlockerForPageQuery(matchedElForFPE);
+          if (triggerBlockerForSelect) {
+            return { ok: false, error: 'Cannot operate the dropdown matching "' + selectorForFPE + '": ' + triggerBlockerForSelect };
+          }
+
+          // Native <select> short-circuit: no open/click dance needed.
+          if (matchedElForFPE.tagName === 'SELECT') {
+            var nativeOptsForSelect = Array.from(matchedElForFPE.options || []);
+            var nativeMatchForSelect = null;
+            for (var noExactForSelect = 0; noExactForSelect < nativeOptsForSelect.length; noExactForSelect++) {
+              var optExactForSelect = nativeOptsForSelect[noExactForSelect];
+              if (normForSelect(optExactForSelect.text || optExactForSelect.label || '') === normTargetForSelect ||
+                  normForSelect(optExactForSelect.value || '') === normTargetForSelect) { nativeMatchForSelect = optExactForSelect; break; }
+            }
+            if (!nativeMatchForSelect) {
+              for (var noIncForSelect = 0; noIncForSelect < nativeOptsForSelect.length; noIncForSelect++) {
+                var optIncForSelect = nativeOptsForSelect[noIncForSelect];
+                if (normForSelect(optIncForSelect.text || optIncForSelect.label || '').indexOf(normTargetForSelect) !== -1) { nativeMatchForSelect = optIncForSelect; break; }
+              }
+            }
+            if (!nativeMatchForSelect) {
+              return { ok: false, operation: operation, sub_operation: subOpForFPE, error: 'No <option> in this native <select> matches "' + targetOptionForSelect + '". Available: ' + JSON.stringify(nativeOptsForSelect.slice(0, 30).map(function (oForList) { return oForList.text; })) + '. (For a native select you can also use page_fill_form with the option value.)' };
+            }
+            setNativeValueForPageFillForm(matchedElForFPE, nativeMatchForSelect.value);
+            matchedElForFPE.dispatchEvent(new Event('input', { bubbles: true }));
+            matchedElForFPE.dispatchEvent(new Event('change', { bubbles: true }));
+            return { ok: true, operation: operation, sub_operation: subOpForFPE, selector: selectorForFPE, selected_option: nativeMatchForSelect.text, committed: matchedElForFPE.value === nativeMatchForSelect.value, native_select: true };
+          }
+
+          var triggerElForSelect = matchedElForFPE;
+          var typeaheadInputForSelect = triggerElForSelect.tagName === 'INPUT'
+            ? triggerElForSelect
+            : (triggerElForSelect.querySelector ? triggerElForSelect.querySelector('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])') : null);
+
+          function resolveListboxForSelect() {
+            var ctrlIdForLb = triggerElForSelect.getAttribute('aria-controls') || triggerElForSelect.getAttribute('aria-owns') || '';
+            if (ctrlIdForLb) {
+              var idsForLb = ctrlIdForLb.split(/\s+/);
+              for (var liForLb = 0; liForLb < idsForLb.length; liForLb++) {
+                if (!idsForLb[liForLb]) continue;
+                var byIdForLb = document.getElementById(idsForLb[liForLb]);
+                if (byIdForLb && isElementVisibleForSelectOption(byIdForLb)) return byIdForLb;
+              }
+            }
+            function pickRichestForLb(nodesForLb) {
+              var bestForLb = null, bestCountForLb = -1;
+              for (var bi = 0; bi < nodesForLb.length; bi++) {
+                var cForLb = nodesForLb[bi].querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="treeitem"], li, [data-value]').length;
+                if (cForLb > bestCountForLb) { bestCountForLb = cForLb; bestForLb = nodesForLb[bi]; }
+              }
+              return bestForLb;
+            }
+            var roleLbsForSelect = Array.from(document.querySelectorAll('[role="listbox"], [role="menu"], [role="tree"], [role="grid"]')).filter(isElementVisibleForSelectOption);
+            if (roleLbsForSelect.length === 1) return roleLbsForSelect[0];
+            if (roleLbsForSelect.length > 1) return pickRichestForLb(roleLbsForSelect);
+            var classLbsForSelect = Array.from(document.querySelectorAll('[class*="listbox" i], [class*="dropdown-menu" i], [class*="select__menu" i], [class*="-menu" i], [class*="results" i], [class*="options" i]')).filter(isElementVisibleForSelectOption);
+            if (classLbsForSelect.length) return pickRichestForLb(classLbsForSelect);
+            return null;
+          }
+
+          function collectOptionsForSelect() {
+            var containerForCollect = resolveListboxForSelect();
+            var scopeForCollect = containerForCollect || document;
+            var rawForCollect = Array.from(scopeForCollect.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="treeitem"]'));
+            if (rawForCollect.length === 0 && containerForCollect) {
+              rawForCollect = Array.from(containerForCollect.querySelectorAll('li, a, [data-value], [class*="option" i], [class*="item" i]'));
+            }
+            var seenForCollect = []; var outForCollect = [];
+            for (var rcForCollect = 0; rcForCollect < rawForCollect.length; rcForCollect++) {
+              var nodeForCollect = rawForCollect[rcForCollect];
+              if (seenForCollect.indexOf(nodeForCollect) !== -1) continue;
+              seenForCollect.push(nodeForCollect);
+              if (isElementVisibleForSelectOption(nodeForCollect)) outForCollect.push(nodeForCollect);
+            }
+            return { container: containerForCollect, options: outForCollect };
+          }
+
+          function matchOptionsForSelect(optionsForMatch) {
+            var exactForMatch = [], startsForMatch = [], containsForMatch = [];
+            for (var omForMatch = 0; omForMatch < optionsForMatch.length; omForMatch++) {
+              var fieldsForMatch = getOptionTextFieldsForSelectOption(optionsForMatch[omForMatch]);
+              var valsForMatch = [normForSelect(fieldsForMatch.text), normForSelect(fieldsForMatch.aria), normForSelect(fieldsForMatch.value), normForSelect(fieldsForMatch.title)];
+              var tierForMatch = 0; // 1 contains, 2 starts, 3 exact
+              for (var fmForMatch = 0; fmForMatch < valsForMatch.length; fmForMatch++) {
+                var vForMatch = valsForMatch[fmForMatch];
+                if (!vForMatch) continue;
+                if (vForMatch === normTargetForSelect) { tierForMatch = 3; break; }
+                if (vForMatch.indexOf(normTargetForSelect) === 0) { if (tierForMatch < 2) tierForMatch = 2; }
+                else if (vForMatch.indexOf(normTargetForSelect) !== -1) { if (tierForMatch < 1) tierForMatch = 1; }
+              }
+              if (tierForMatch === 3) exactForMatch.push(optionsForMatch[omForMatch]);
+              else if (tierForMatch === 2) startsForMatch.push(optionsForMatch[omForMatch]);
+              else if (tierForMatch === 1) containsForMatch.push(optionsForMatch[omForMatch]);
+            }
+            if (exactForMatch.length) return { matches: exactForMatch, tier: 'exact' };
+            if (startsForMatch.length) return { matches: startsForMatch, tier: 'starts' };
+            if (containsForMatch.length) return { matches: containsForMatch, tier: 'contains' };
+            return { matches: [], tier: null };
+          }
+
+          function findScrollableForSelect(containerForScroll) {
+            if (!containerForScroll) return null;
+            var poolForScroll = [containerForScroll].concat(Array.from(containerForScroll.querySelectorAll('*')).slice(0, 300));
+            for (var psForScroll = 0; psForScroll < poolForScroll.length; psForScroll++) {
+              var elForScrollCand = poolForScroll[psForScroll];
+              if (!elForScrollCand) continue;
+              var stForScroll = window.getComputedStyle ? window.getComputedStyle(elForScrollCand) : null;
+              if (stForScroll && /(auto|scroll|overlay)/.test(stForScroll.overflowY) && elForScrollCand.scrollHeight > elForScrollCand.clientHeight + 4) return elForScrollCand;
+            }
+            return (containerForScroll.scrollHeight > containerForScroll.clientHeight + 4) ? containerForScroll : null;
+          }
+
+          function isOpenForSelect() {
+            if (triggerElForSelect.getAttribute('aria-expanded') === 'true') return true;
+            return !!resolveListboxForSelect();
+          }
+
+          function verifyCommitForSelect(labelForVerify) {
+            var aeForVerify = triggerElForSelect.getAttribute('aria-expanded');
+            var stillOpenForVerify = isOpenForSelect();
+            var triggerTextForVerify = (triggerElForSelect.innerText || triggerElForSelect.textContent || '');
+            if (typeaheadInputForSelect && typeof typeaheadInputForSelect.value === 'string') triggerTextForVerify += ' ' + typeaheadInputForSelect.value;
+            var labelMatchForVerify = labelForVerify && normForSelect(triggerTextForVerify).indexOf(normForSelect(labelForVerify)) !== -1;
+            var closedSignalForVerify = (aeForVerify === 'false') || (!stillOpenForVerify);
+            return Boolean(labelMatchForVerify || closedSignalForVerify);
+          }
+
+          try { triggerElForSelect.scrollIntoView({ block: 'center', inline: 'center' }); } catch (eSelScroll) { /* ignore */ }
+
+          var beforeSnapForSelect = {
+            url: window.location.href,
+            title: document.title,
+            activeElementSelector: describeActiveElementForPageQuery(),
+            visibleAlerts: snapshotVisibleAlertsForPageQuery()
+          };
+          var obsForSelect = startMutationObserverForSelectOption();
+
+          // Phase 1: open the dropdown if it is not already open.
+          if (!isOpenForSelect()) {
+            dispatchRealPointerSequenceForSelectOption(triggerElForSelect);
+            await settleQuietWindowForSelectOption(obsForSelect.getCount, 300, 3000);
+          }
+
+          // Phase 2: resolve + match options.
+          var scanForSelect = collectOptionsForSelect();
+          var matchForSelect = matchOptionsForSelect(scanForSelect.options);
+
+          // Phase 3: typeahead filtering when nothing matched and a text input exists.
+          var usedTypeaheadForSelect = false;
+          if (matchForSelect.matches.length === 0 && typeaheadInputForSelect && isElementVisibleForSelectOption(typeaheadInputForSelect)) {
+            usedTypeaheadForSelect = true;
+            try {
+              setNativeValueForPageFillForm(typeaheadInputForSelect, targetOptionForSelect);
+              try { typeaheadInputForSelect.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: targetOptionForSelect })); } catch (eBeforeInput) { /* ignore */ }
+              typeaheadInputForSelect.dispatchEvent(new Event('input', { bubbles: true }));
+              var lastCharForSelect = targetOptionForSelect.slice(-1);
+              typeaheadInputForSelect.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: lastCharForSelect }));
+              typeaheadInputForSelect.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: lastCharForSelect }));
+            } catch (eTypeahead) { /* ignore */ }
+            await settleQuietWindowForSelectOption(obsForSelect.getCount, 400, 3000);
+            scanForSelect = collectOptionsForSelect();
+            matchForSelect = matchOptionsForSelect(scanForSelect.options);
+          }
+
+          // Phase 4: scroll a virtualized list to render the target option.
+          var usedScrollForSelect = false;
+          if (matchForSelect.matches.length === 0) {
+            var scrollableForSelect = findScrollableForSelect(scanForSelect.container);
+            if (scrollableForSelect) {
+              usedScrollForSelect = true;
+              try { scrollableForSelect.scrollTop = 0; } catch (eScrollTop) { /* ignore */ }
+              var scrollStepsForSelect = 0;
+              var MAX_SCROLL_STEPS_FOR_SELECT = 30;
+              while (scrollStepsForSelect < MAX_SCROLL_STEPS_FOR_SELECT) {
+                await settleQuietWindowForSelectOption(obsForSelect.getCount, 120, 800);
+                scanForSelect = collectOptionsForSelect();
+                matchForSelect = matchOptionsForSelect(scanForSelect.options);
+                if (matchForSelect.matches.length > 0) break;
+                var prevTopForSelect = scrollableForSelect.scrollTop;
+                if (prevTopForSelect >= scrollableForSelect.scrollHeight - scrollableForSelect.clientHeight - 1) break;
+                try { scrollableForSelect.scrollTop = prevTopForSelect + Math.max(60, scrollableForSelect.clientHeight - 20); } catch (eScrollStep) { break; }
+                if (scrollableForSelect.scrollTop === prevTopForSelect) break;
+                scrollStepsForSelect++;
+              }
+            }
+          }
+
+          // No match: report the visible options and bail.
+          if (matchForSelect.matches.length === 0) {
+            var visibleLabelsForSelect = scanForSelect.options.slice(0, 30).map(function (oForLabels) {
+              var fForLabels = getOptionTextFieldsForSelectOption(oForLabels);
+              return fForLabels.text || fForLabels.aria || fForLabels.value;
+            }).filter(Boolean);
+            obsForSelect.drain();
+            return {
+              ok: false,
+              operation: operation,
+              sub_operation: subOpForFPE,
+              selector: selectorForFPE,
+              opened: isOpenForSelect(),
+              used_typeahead: usedTypeaheadForSelect,
+              used_scroll: usedScrollForSelect,
+              error: 'Opened the dropdown but found no option matching "' + targetOptionForSelect + '"'
+                + (usedTypeaheadForSelect ? ' (after typing to filter)' : '')
+                + (usedScrollForSelect ? ' (after scrolling the list)' : '')
+                + '. Visible options: ' + (visibleLabelsForSelect.length ? JSON.stringify(visibleLabelsForSelect) : '(none detected)')
+                + '. The option may not exist, the labels may differ from what you searched, or the list may need different filter text.'
+            };
+          }
+
+          // Ambiguous non-exact multi-match: ask the agent to disambiguate.
+          if (matchForSelect.matches.length > 1 && matchForSelect.tier !== 'exact') {
+            var candidateLabelsForSelect = matchForSelect.matches.slice(0, 20).map(function (oForCand) {
+              var fForCand = getOptionTextFieldsForSelectOption(oForCand);
+              return fForCand.text || fForCand.aria || fForCand.value;
+            }).filter(Boolean);
+            obsForSelect.drain();
+            return {
+              ok: false,
+              operation: operation,
+              sub_operation: subOpForFPE,
+              selector: selectorForFPE,
+              opened: true,
+              error: '"' + targetOptionForSelect + '" matched ' + matchForSelect.matches.length + ' options by ' + matchForSelect.tier + ': ' + JSON.stringify(candidateLabelsForSelect) + '. Re-run select_option with the exact option text to disambiguate.'
+            };
+          }
+
+          // Phase 5: commit by clicking the matched option.
+          var chosenOptionForSelect = matchForSelect.matches[0];
+          var chosenFieldsForSelect = getOptionTextFieldsForSelectOption(chosenOptionForSelect);
+          var chosenLabelForSelect = chosenFieldsForSelect.text || chosenFieldsForSelect.aria || chosenFieldsForSelect.value || targetOptionForSelect;
+          try { chosenOptionForSelect.scrollIntoView({ block: 'center', inline: 'center' }); } catch (eOptScroll) { /* ignore */ }
+          dispatchRealPointerSequenceForSelectOption(chosenOptionForSelect);
+          await settleQuietWindowForSelectOption(obsForSelect.getCount, 300, 3000);
+
+          // Phase 6: verify; keyboard fallback if the click did not commit.
+          var committedForSelect = verifyCommitForSelect(chosenLabelForSelect);
+          var usedKeyboardForSelect = false;
+          if (!committedForSelect && isOpenForSelect()) {
+            usedKeyboardForSelect = true;
+            try { if (typeof chosenOptionForSelect.focus === 'function') chosenOptionForSelect.focus({ preventScroll: true }); } catch (eKbFocus) { /* ignore */ }
+            try {
+              chosenOptionForSelect.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13 }));
+              chosenOptionForSelect.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13 }));
+            } catch (eKbEnter) { /* ignore */ }
+            await settleQuietWindowForSelectOption(obsForSelect.getCount, 300, 2000);
+            committedForSelect = verifyCommitForSelect(chosenLabelForSelect);
+          }
+
+          var collectedForSelect = obsForSelect.drain();
+          var afterSnapForSelect = {
+            url: window.location.href,
+            title: document.title,
+            activeElementSelector: describeActiveElementForPageQuery(),
+            visibleAlerts: snapshotVisibleAlertsForPageQuery()
+          };
+          var diffForSelect = summarizeMutationDiffForPageQuery(collectedForSelect, beforeSnapForSelect, afterSnapForSelect);
+
+          var envelopeForSelect = {
+            ok: true,
+            operation: operation,
+            sub_operation: subOpForFPE,
+            selector: selectorForFPE,
+            selected_option: chosenLabelForSelect,
+            match_tier: matchForSelect.tier,
+            committed: committedForSelect,
+            opened: true,
+            used_typeahead: usedTypeaheadForSelect,
+            used_scroll: usedScrollForSelect,
+            used_keyboard: usedKeyboardForSelect,
+            diff: diffForSelect
+          };
+          if (!committedForSelect) {
+            envelopeForSelect.warning = 'Clicked option "' + chosenLabelForSelect + '" but could not confirm the selection committed (aria-expanded, the trigger label, and the synced control did not change as expected). The page may apply the change asynchronously, or this widget may need a different interaction. Verify with findText (or re-read the field) before relying on it.';
+          }
+          return envelopeForSelect;
         }
       }
 
@@ -2799,7 +3184,7 @@
     // the click-based flow rather than failing with a confusing setter error.
     var fieldRoleForCombobox = elForPageFillForm.getAttribute && elForPageFillForm.getAttribute('role');
     if (fieldRoleForCombobox === 'combobox' && tagForPageFillForm !== 'input' && tagForPageFillForm !== 'select' && tagForPageFillForm !== 'textarea') {
-      return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'This is a custom combobox (role="combobox" on a <' + tagForPageFillForm + '>), not a native <select> or <input>. page_fill_form cannot set its value directly. To choose an option: (1) call findPageElements sub_operation="click" on this combobox to open its listbox; (2) re-run findPageElements category="buttons" to discover the now-visible role="option" elements (they were inside a hidden listbox before the click); (3) call findPageElements sub_operation="click" on the option whose label matches your target value. The page\'s own JavaScript will update the underlying hidden input and close the listbox.');
+      return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'This is a custom combobox (role="combobox" on a <' + tagForPageFillForm + '>), not a native <select> or <input>. page_fill_form cannot set its value directly. Use page_query findPageElements with this combobox\'s selector, sub_operation="select_option", and option set to the target value\'s visible label; it opens the dropdown, finds the matching option (handling portal-rendered lists, type-to-filter, and virtualized lists), clicks it, and reports whether the selection committed. Manual fallback: click the combobox to open it, re-run findPageElements category="buttons" to discover the now-visible role="option" elements, then click the matching option.');
     }
     if (elForPageFillForm.disabled) {
       return buildFailedResultForPageFillForm(baseForPageFillForm, 'blocked', 'Disabled fields are blocked.');

@@ -9906,7 +9906,8 @@
             get_attribute:     'Reading attribute' + (args.attribute_name ? ' “' + trunc(args.attribute_name, 16) + '”' : '') + selHintForPageQuery,
             get_computed_style:'Reading computed CSS' + selHintForPageQuery,
             traverse:          'Traversing DOM' + selHintForPageQuery + (args.direction ? ' (' + args.direction + ')' : ''),
-            click:             (args.button === 'right' ? 'Right-clicking' : 'Clicking') + ' element' + selHintForPageQuery
+            click:             (args.button === 'right' ? 'Right-clicking' : 'Clicking') + ' element' + selHintForPageQuery,
+            select_option:     'Selecting option' + (args.option ? ' “' + trunc(args.option, 20) + '”' : '') + selHintForPageQuery
           };
           if (args.operation === 'getSelection')    return 'Reading selection';
           if (args.operation === 'getPageContext')  return 'Checking page info';

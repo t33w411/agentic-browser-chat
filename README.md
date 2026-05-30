@@ -151,8 +151,8 @@ The agent calls these tools mid-conversation. Grouped by purpose, with safeguard
 - `grep`, `ls` — discover notes by regex (content or title scope) or list them.
 
 **Page interaction**
-- `page_query` — query elements on the current page using selectors and return their content / state.
-- `page_fill_form` — fill form fields and (optionally) submit. **Safeguard:** comma-separated selector lists are rejected; one confirmed selector per field. Form submission is gated by an explicit user confirmation step.
+- `page_query` — query elements on the current page using selectors and return their content / state. Its `select_option` sub-operation also drives **custom dropdowns** (div/ARIA comboboxes like React Select, MUI, Headless UI): it opens the dropdown and clicks the matching option, handling portal-rendered lists, type-to-filter, and virtualized lists.
+- `page_fill_form` — fill native form fields (inputs, textareas, single `<select>`, checkboxes, radios, contenteditable). **Safeguards:** never submits, clicks, or navigates; sensitive fields (passwords, OTP/2FA, card numbers, CVV, IBAN, SSN, etc.) plus disabled, readonly, hidden, and invisible fields are blocked; comma-separated and non-unique selectors are rejected (one confirmed selector per field); every write is verified by reading the value back. Custom div/ARIA dropdowns are set via `page_query`'s `select_option` sub-operation, not this tool.
 - `take_screenshot` — capture the current page viewport and get back a vision model's text description of it. A discretionary fallback for when the DOM tools give confusing or insufficient signal, or the problem is inherently visual (an overlay covering a field, a custom widget, a layout glitch). The extension's own panel UI is hidden during capture so it never appears in the shot.
 - `eval` — run JavaScript in a **sandboxed Web Worker**. **Safeguards:** no DOM, no `chrome` APIs, no network (fetch / XHR / WebSocket / importScripts / caches / IndexedDB / BroadcastChannel all blocked). Hard timeout of 5–30 seconds. Output capped at 200 KB; input vars capped at 1 MB.
 
