@@ -223,6 +223,22 @@
       }
     },
 
+    // ---- Visual inspection tool ----
+
+    {
+      type: 'function',
+      function: {
+        name: 'take_screenshot',
+        description: 'Capture the currently visible portion of the active page and return a vision model description of what is on screen. The extension\'s own panel UI is hidden during capture so it never appears in the screenshot. This is a discretionary visual-inspection fallback, NOT a default way to read the page: the text and DOM tools (page_query findText, findPageElements, getPageContent) are far cheaper and must remain your first resort for page content. Use take_screenshot only when those tools have given confusing or insufficient signal, or when the issue is inherently visual and not faithfully represented in the DOM. Concrete triggers: a page_fill_form or click result that contradicts what the DOM reported; a suspected overlay, modal, or cookie banner covering the target element; a custom widget such as a date picker, canvas chart, map, or slider whose rendered state the DOM does not expose; a visual layout or rendering glitch; or an error/validation state you cannot locate in the DOM. IMPORTANT: it only sees the current viewport, never off-screen or whole-page content, so scroll the relevant area into view before calling (page_query click and page_fill_form both scroll their target into view). Provide a focused prompt describing exactly what to look for to get a focused answer; omit it for a general description. Each call hides the panel, captures, and runs a vision model, so it is comparatively slow and costly: do not call it repeatedly or as a substitute for reading text. Returns { ok, content } where content is the vision model\'s text description, or { ok: false, error } when capture or analysis fails.',
+        parameters: {
+          type: 'object',
+          properties: {
+            prompt: { type: 'string', description: 'A specific question or instruction about what to look for in the screenshot (e.g. "Is an overlay covering the email input? What validation text appears under the Submit button?"). A focused prompt yields a focused answer. Omit for a general description of what is currently visible.' }
+          }
+        }
+      }
+    },
+
     // ---- Compute tool ----
 
     {

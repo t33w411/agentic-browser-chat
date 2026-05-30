@@ -153,6 +153,7 @@ The agent calls these tools mid-conversation. Grouped by purpose, with safeguard
 **Page interaction**
 - `page_query` — query elements on the current page using selectors and return their content / state.
 - `page_fill_form` — fill form fields and (optionally) submit. **Safeguard:** comma-separated selector lists are rejected; one confirmed selector per field. Form submission is gated by an explicit user confirmation step.
+- `take_screenshot` — capture the current page viewport and get back a vision model's text description of it. A discretionary fallback for when the DOM tools give confusing or insufficient signal, or the problem is inherently visual (an overlay covering a field, a custom widget, a layout glitch). The extension's own panel UI is hidden during capture so it never appears in the shot.
 - `eval` — run JavaScript in a **sandboxed Web Worker**. **Safeguards:** no DOM, no `chrome` APIs, no network (fetch / XHR / WebSocket / importScripts / caches / IndexedDB / BroadcastChannel all blocked). Hard timeout of 5–30 seconds. Output capped at 200 KB; input vars capped at 1 MB.
 
 **Web**

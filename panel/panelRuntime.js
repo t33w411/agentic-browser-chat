@@ -9921,6 +9921,8 @@
         }
         case 'page_fill_form':
           return 'Filling form fields';
+        case 'take_screenshot':
+          return 'Taking screenshot';
         case 'eval':
           return 'Computing';
         case 'web_fetch': {
@@ -11636,7 +11638,8 @@
                   messages: apiMessages,
                   model: model,
                   chatId: chatId,
-                  signal: controllerForSend.signal
+                  signal: controllerForSend.signal,
+                  captureScreenshot: captureScreenshotWithoutPanelUiForPanelRuntime
                 })
               );
             }
