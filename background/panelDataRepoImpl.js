@@ -229,6 +229,7 @@
             return { url: String((s && s.url) || ''), title: String((s && s.title) || '') };
           }).filter(function(s) { return Boolean(s.url); })
         : [],
+      incomplete: Boolean(inputForPanelDataRepo.incomplete),
       createdAt: normalizeChatTimestampForPanelDataRepo(inputForPanelDataRepo.createdAt, fallbackTimestampForPanelDataRepo || getIsoNowForPanelDataRepo())
     };
   }

@@ -148,7 +148,21 @@
         readResultForClient = await readerForClient.read();
       } catch (readErrForClient) {
         if (readErrForClient && readErrForClient.name === "AbortError") {
-          return { cancelled: true, message: null };
+          // Return whatever text streamed in before the abort so the caller can
+          // salvage a partial reply. Tool calls are intentionally omitted: a
+          // half-streamed tool_call has truncated argument JSON and cannot be
+          // executed, and persisting it would leave an assistant tool_call with
+          // no matching tool result, corrupting the conversation for later turns.
+          return {
+            cancelled: true,
+            partial: accTextForClient.length > 0,
+            message: accTextForClient.length > 0
+              ? { role: "assistant", content: accTextForClient, finish_reason: finishReasonForClient || "stop" }
+              : null,
+            usage: usageForClient,
+            incompleteStream: true,
+            resolvedModel: resolvedModelForClient
+          };
         }
         throw readErrForClient;
       }

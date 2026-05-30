@@ -492,6 +492,7 @@
               return { url: String((s && s.url) || ''), title: String((s && s.title) || '') };
             }).filter(function(s) { return Boolean(s.url); })
           : [],
+        incomplete: Boolean(safeMessageForPanelRuntime.incomplete),
         createdAt: typeof safeMessageForPanelRuntime.createdAt === 'string' ? safeMessageForPanelRuntime.createdAt : '',
         _persistedToDb: safeMessageForPanelRuntime._persistedToDb === false ? false : true
       };
@@ -2558,6 +2559,10 @@
         const hasGenImageForFlush = asstMergeBuffer.some(function (b) { return /__blob:\d+__/.test(b.md); });
         const showSavedMemoryBadgeForFlush = asstMergeBuffer.some(function (b) { return b.savedMemory; });
         const showSavedSkillBadgeForFlush = asstMergeBuffer.some(function (b) { return b.savedSkill; });
+        const isIncompleteForFlush = asstMergeBuffer.some(function (b) { return b.incomplete; });
+        const incompleteNoteHtmlForFlush = isIncompleteForFlush
+          ? '<div class="msg-incomplete-note" title="This response was stopped before it finished">Response stopped before completion</div>'
+          : '';
         const memoryBadgeHtmlForFlush =
           (showSavedMemoryBadgeForFlush
             ? '<div class="msg-memory-badge" title="A memory entry was saved this turn"><span class="msg-memory-badge-dot"></span> Saved to memory</div>'
@@ -2600,6 +2605,7 @@
             '<div class="msg-bubble asst has-options">' +
               ddHtml +
               '<div class="msg-text">' + renderMarkdown(mergedMd) + '</div>' +
+              incompleteNoteHtmlForFlush +
               memoryBadgeHtmlForFlush +
               sourcesHtml +
             '</div>' +
@@ -2687,7 +2693,8 @@
               msgId: msg.id,
               searchSources: Array.isArray(msg.searchSources) ? msg.searchSources : [],
               savedMemory: memoryActionsSinceLastUserMsgForRender.memory,
-              savedSkill: memoryActionsSinceLastUserMsgForRender.skill
+              savedSkill: memoryActionsSinceLastUserMsgForRender.skill,
+              incomplete: Boolean(msg.incomplete)
             });
           }
           i++;
@@ -9726,6 +9733,46 @@
       scrollChatToBottomForPanelRuntime();
     }
 
+    // Append a blinking block caret ("▌") at the tail of the streamed text so the
+    // user can see more content is still expected. Re-added on every paint because
+    // paintLiveTurnTextForPanelRuntime rewrites innerHTML each frame. The glyph is
+    // supplied via CSS ::after so it never pollutes textContent, selection or copy.
+    function appendLiveTurnCaretForPanelRuntime(textEl) {
+      if (!textEl) return;
+      const caretForLiveTurn = document.createElement('span');
+      caretForLiveTurn.className = 'abchat-lt-caret';
+      caretForLiveTurn.setAttribute('aria-hidden', 'true');
+      // Descend into trailing block containers (lists, blockquotes) to reach the
+      // last text-bearing leaf so the caret trails the final character inline.
+      let targetForCaret = textEl;
+      for (let depthForCaret = 0; depthForCaret < 8; depthForCaret++) {
+        const lastElForCaret = targetForCaret.lastElementChild;
+        if (!lastElForCaret) break;
+        const tagForCaret = lastElForCaret.tagName;
+        if (tagForCaret === 'UL' || tagForCaret === 'OL' || tagForCaret === 'BLOCKQUOTE') {
+          targetForCaret = lastElForCaret;
+          continue;
+        }
+        break;
+      }
+      const leafForCaret = targetForCaret.lastElementChild;
+      let isAwkwardLeafForCaret = false;
+      if (leafForCaret) {
+        const leafTagForCaret = leafForCaret.tagName;
+        if (leafTagForCaret === 'TABLE' || leafTagForCaret === 'PRE' || leafTagForCaret === 'HR' ||
+            leafTagForCaret === 'IMG' || leafTagForCaret === 'FIGURE') {
+          isAwkwardLeafForCaret = true;
+        }
+      }
+      if (leafForCaret && !isAwkwardLeafForCaret) {
+        leafForCaret.appendChild(caretForLiveTurn);
+      } else {
+        // Trailing block can't host an inline caret cleanly; drop it on its own line.
+        caretForLiveTurn.classList.add('abchat-lt-caret-block');
+        textEl.appendChild(caretForLiveTurn);
+      }
+    }
+
     function paintLiveTurnTextForPanelRuntime(state, chatId, textToShow) {
       if (!state || !state.wrap) return;
       const textEl = state.wrap.querySelector('.abchat-lt-text');
@@ -9741,6 +9788,7 @@
       tmp.innerHTML = renderedHtml;
       if (!tmp.textContent || !tmp.textContent.trim()) return;
       textEl.innerHTML = renderedHtml;
+      appendLiveTurnCaretForPanelRuntime(textEl);
       const spinner = state.wrap.querySelector('.abchat-lt-spinner');
       if (spinner && spinner.style.display !== 'none') {
         spinner.style.display = 'none';
@@ -11291,10 +11339,18 @@
               });
             }
           }
-          const iterStreamTimeoutIdForSend = setTimeout(function () {
-            if (!timeoutReasonForSend) timeoutReasonForSend = 'stream';
-            controllerForSend.abort();
-          }, ITER_STREAM_TIMEOUT_MS);
+          // Idle timeout, not an absolute cap: re-armed on every stream delta so a
+          // slow-but-progressing response is never killed. Only a genuine stall
+          // (no data for ITER_STREAM_TIMEOUT_MS) aborts the stream.
+          let iterStreamTimeoutIdForSend = null;
+          const armStreamIdleTimeoutForSend = function () {
+            if (iterStreamTimeoutIdForSend) clearTimeout(iterStreamTimeoutIdForSend);
+            iterStreamTimeoutIdForSend = setTimeout(function () {
+              if (!timeoutReasonForSend) timeoutReasonForSend = 'stream';
+              controllerForSend.abort();
+            }, ITER_STREAM_TIMEOUT_MS);
+          };
+          armStreamIdleTimeoutForSend();
           let streamRetryCountForLoop = 0;
           const MAX_STREAM_RETRIES_FOR_LOOP = 3;
           let resultForLoop;
@@ -11325,6 +11381,8 @@
               tools: toolDefsForSend.length > 0 ? toolDefsForSend : undefined,
               signal: controllerForSend.signal,
               onDelta: function (deltaForLoop) {
+                // Any activity (text, partial tool calls, retry notice) resets the idle timer.
+                armStreamIdleTimeoutForSend();
                 if (deltaForLoop.type === "text" && deltaForLoop.text) {
                   accTextForLoop += deltaForLoop.text;
                   updateLiveTurnTextForPanelRuntime(chatId, accTextForLoop);
@@ -11364,11 +11422,36 @@
 
           if (!resultForLoop || resultForLoop.cancelled) {
             logCancelledForSend = true;
+            // Salvage whatever text streamed in before the cancel/timeout so a
+            // stopped response stays visible and persisted instead of vanishing.
+            // Prefer the client's accumulated content, falling back to the local
+            // delta accumulator. Persisting it also flips hasPersistedNonUserMessages,
+            // which suppresses the user-message rollback in the finally block.
+            const salvagedPartialTextForSend = (resultForLoop && resultForLoop.message && typeof resultForLoop.message.content === 'string' && resultForLoop.message.content.trim())
+              ? resultForLoop.message.content
+              : ((accTextForLoop && accTextForLoop.trim()) ? accTextForLoop : '');
+            if (salvagedPartialTextForSend && salvagedPartialTextForSend.trim().length > 0) {
+              if (!hasPersistedNonUserMessagesForSend) {
+                await persistPendingUserMessagesForChatForPanelRuntime(chatId, { touchChat: false });
+              }
+              await appendMessageToChatForPanelRuntime(chatId, {
+                role: 'assistant',
+                content: salvagedPartialTextForSend,
+                md: salvagedPartialTextForSend,
+                incomplete: true
+              }, { skipChatUpdate: true });
+              hasPersistedNonUserMessagesForSend = true;
+              hasAppendedRenderableAssistantMessageForSend = true;
+              if (S.activeChatId === chatId) {
+                renderChatMessages();
+                scrollChatToBottomForPanelRuntime();
+              }
+            }
             if (timeoutReasonForSend && S.activeChatId === chatId) {
               const timeoutMsgForSend = timeoutReasonForSend === 'total'
                 ? 'Agent stopped: turn exceeded the 10-minute time limit.'
                 : timeoutReasonForSend === 'stream'
-                ? 'Agent stopped: model response took too long (90s limit).'
+                ? 'Agent stopped: the model stopped responding (no data for 90s).'
                 : 'Agent stopped: tool execution took too long (3-minute limit).';
               appendSystemMsgToContainerForPanelRuntime(timeoutMsgForSend);
             }
@@ -11576,7 +11659,7 @@
               const timeoutMsgForToolSend = timeoutReasonForSend === 'total'
                 ? 'Agent stopped: turn exceeded the 10-minute time limit.'
                 : timeoutReasonForSend === 'stream'
-                ? 'Agent stopped: model response took too long (90s limit).'
+                ? 'Agent stopped: the model stopped responding (no data for 90s).'
                 : 'Agent stopped: tool execution took too long (3-minute limit).';
               appendSystemMsgToContainerForPanelRuntime(timeoutMsgForToolSend);
             }
