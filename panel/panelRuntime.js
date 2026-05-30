@@ -3028,6 +3028,13 @@
         if (agentRulesTaForTab) setTimeout(function() { updateAutoExpandForTextareaForPanelRuntime(agentRulesTaForTab); }, 0);
         loadStorageEstimateForPanelRuntime();
         loadDeleteChatsOlderThanSettingForPanelRuntime();
+        refreshAgentManageCountsForPanelRuntime();
+      }
+      if (tab === 'skills') {
+        loadSkillsViewForPanelRuntime();
+      }
+      if (tab === 'memory') {
+        loadMemoryViewForPanelRuntime();
       }
     }
 
@@ -10428,6 +10435,337 @@
       await loadApiLogsViewForPanelRuntime();
     }
 
+    /* ============================================================
+      AGENT SKILLS & MEMORY MANAGEMENT (settings sub-views)
+    ============================================================ */
+    var skillEditorEditingIdForPanelRuntime = null;
+    var memoryEditorEditingIndexForPanelRuntime = -1;
+    var memoryEditorOriginalTextForPanelRuntime = '';
+    var skillSlugMaxLenForPanelRuntime = 100;
+    var skillTitleMaxLenForPanelRuntime = 100;
+    var memoryEntryMaxLenForPanelRuntime = 280;
+
+    function getAgentNotesForManageForPanelRuntime() {
+      var repoForManage = getPanelDataRepoForPanelRuntime();
+      if (!repoForManage || typeof repoForManage.listNotes !== 'function') return Promise.resolve([]);
+      return repoForManage.listNotes('agent').catch(function () { return []; });
+    }
+
+    function isSkillNoteForPanelRuntime(noteForManage) {
+      var tagsForManage = noteForManage && Array.isArray(noteForManage.tags) ? noteForManage.tags : [];
+      return tagsForManage.indexOf('skills') !== -1;
+    }
+
+    function getSkillSlugFromNoteForPanelRuntime(noteForManage) {
+      var tagsForManage = noteForManage && Array.isArray(noteForManage.tags) ? noteForManage.tags : [];
+      for (var iForSlug = 0; iForSlug < tagsForManage.length; iForSlug++) {
+        if (tagsForManage[iForSlug] !== 'skills' && tagsForManage[iForSlug] !== 'memory') return tagsForManage[iForSlug];
+      }
+      return '';
+    }
+
+    function findMemoryNoteForPanelRuntime(agentNotesForManage) {
+      for (var iForMem = 0; iForMem < agentNotesForManage.length; iForMem++) {
+        var tagsForMem = Array.isArray(agentNotesForManage[iForMem].tags) ? agentNotesForManage[iForMem].tags : [];
+        if (tagsForMem.indexOf('memory') !== -1 && tagsForMem.indexOf('skills') === -1) return agentNotesForManage[iForMem];
+      }
+      return null;
+    }
+
+    function getMemoryEntriesFromNoteForPanelRuntime(memoryNoteForManage) {
+      if (!memoryNoteForManage) return [];
+      return String(memoryNoteForManage.body || '')
+        .split('\n')
+        .map(function (lForMem) { return lForMem.trim(); })
+        .filter(function (lForMem) { return lForMem.length > 0; });
+    }
+
+    async function refreshAgentManageCountsForPanelRuntime() {
+      var skillsCountElForManage = root.getElementById('settings-skills-count');
+      var memoryCountElForManage = root.getElementById('settings-memory-count');
+      if (!skillsCountElForManage && !memoryCountElForManage) return;
+      var agentNotesForCounts = await getAgentNotesForManageForPanelRuntime();
+      var skillCountForManage = agentNotesForCounts.filter(isSkillNoteForPanelRuntime).length;
+      var memoryCountForManage = getMemoryEntriesFromNoteForPanelRuntime(findMemoryNoteForPanelRuntime(agentNotesForCounts)).length;
+      if (skillsCountElForManage) skillsCountElForManage.textContent = '(' + skillCountForManage + ')';
+      if (memoryCountElForManage) memoryCountElForManage.textContent = '(' + memoryCountForManage + ')';
+    }
+
+    /* ---- Skills ---- */
+
+    function renderSkillRowForPanelRuntime(noteForRow) {
+      var slugForRow = getSkillSlugFromNoteForPanelRuntime(noteForRow);
+      var titleForRow = String(noteForRow.title || '');
+      var previewForRow = String(noteForRow.body || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+      return '' +
+        '<div class="agent-item">' +
+          '<div class="agent-item-main" data-action="skill-edit" data-skill-id="' + noteForRow.id + '">' +
+            '<div class="agent-item-head">' +
+              '<span class="agent-item-slug">/' + escapeHtmlForPanelRuntime(slugForRow) + '</span>' +
+              (titleForRow ? '<span class="agent-item-title">' + escapeHtmlForPanelRuntime(titleForRow) + '</span>' : '') +
+            '</div>' +
+            (previewForRow ? '<div class="agent-item-preview">' + escapeHtmlForPanelRuntime(previewForRow) + '</div>' : '') +
+          '</div>' +
+          '<div class="agent-item-actions">' +
+            '<button class="btn-icon agent-item-del" data-action="skill-delete" data-skill-id="' + noteForRow.id + '" title="Delete skill">' + ic.trash11 + '</button>' +
+          '</div>' +
+        '</div>';
+    }
+
+    async function loadSkillsViewForPanelRuntime() {
+      var listElForSkills = root.getElementById('skills-list-container');
+      if (!listElForSkills) return;
+      closeSkillEditorForPanelRuntime();
+      var agentNotesForSkills = await getAgentNotesForManageForPanelRuntime();
+      var skillsForView = agentNotesForSkills.filter(isSkillNoteForPanelRuntime);
+      skillsForView.sort(function (aForSkills, bForSkills) {
+        return getSkillSlugFromNoteForPanelRuntime(aForSkills).localeCompare(getSkillSlugFromNoteForPanelRuntime(bForSkills));
+      });
+      if (skillsForView.length === 0) {
+        listElForSkills.innerHTML = '<div class="logs-empty">No skills yet. Skills are reusable instructions the agent applies on demand.</div>';
+      } else {
+        listElForSkills.innerHTML = skillsForView.map(renderSkillRowForPanelRuntime).join('');
+      }
+      refreshAgentManageCountsForPanelRuntime();
+    }
+
+    async function openSkillEditorForPanelRuntime(skillIdForEditor) {
+      var overlayForEditor = root.getElementById('skill-editor-overlay');
+      var slugElForEditor = root.getElementById('skill-editor-slug');
+      var titleElForEditor = root.getElementById('skill-editor-title-input');
+      var bodyElForEditor = root.getElementById('skill-editor-body');
+      var headingElForEditor = root.getElementById('skill-editor-heading');
+      var errElForEditor = root.getElementById('skill-editor-error');
+      if (!overlayForEditor || !slugElForEditor || !titleElForEditor || !bodyElForEditor) return;
+      if (errElForEditor) errElForEditor.textContent = '';
+      if (skillIdForEditor == null) {
+        skillEditorEditingIdForPanelRuntime = null;
+        slugElForEditor.value = '';
+        titleElForEditor.value = '';
+        bodyElForEditor.value = '';
+        slugElForEditor.removeAttribute('disabled');
+        if (headingElForEditor) headingElForEditor.textContent = 'New skill';
+      } else {
+        var agentNotesForEdit = await getAgentNotesForManageForPanelRuntime();
+        var noteForEdit = null;
+        for (var iForEdit = 0; iForEdit < agentNotesForEdit.length; iForEdit++) {
+          if (Number(agentNotesForEdit[iForEdit].id) === Number(skillIdForEditor) && isSkillNoteForPanelRuntime(agentNotesForEdit[iForEdit])) {
+            noteForEdit = agentNotesForEdit[iForEdit];
+            break;
+          }
+        }
+        if (!noteForEdit) { await loadSkillsViewForPanelRuntime(); return; }
+        skillEditorEditingIdForPanelRuntime = Number(noteForEdit.id);
+        slugElForEditor.value = getSkillSlugFromNoteForPanelRuntime(noteForEdit);
+        titleElForEditor.value = String(noteForEdit.title || '');
+        bodyElForEditor.value = String(noteForEdit.body || '');
+        slugElForEditor.removeAttribute('disabled');
+        if (headingElForEditor) headingElForEditor.textContent = 'Edit skill';
+      }
+      overlayForEditor.classList.remove('hidden');
+      updateAutoExpandForTextareaForPanelRuntime(bodyElForEditor);
+      setTimeout(function () { slugElForEditor.focus(); }, 0);
+    }
+
+    function closeSkillEditorForPanelRuntime() {
+      var overlayForEditor = root.getElementById('skill-editor-overlay');
+      if (overlayForEditor) overlayForEditor.classList.add('hidden');
+      skillEditorEditingIdForPanelRuntime = null;
+    }
+
+    async function saveSkillFromEditorForPanelRuntime() {
+      var repoForSave = getPanelDataRepoForPanelRuntime();
+      if (!repoForSave) return;
+      var slugElForSave = root.getElementById('skill-editor-slug');
+      var titleElForSave = root.getElementById('skill-editor-title-input');
+      var bodyElForSave = root.getElementById('skill-editor-body');
+      var errElForSave = root.getElementById('skill-editor-error');
+      if (!slugElForSave || !titleElForSave || !bodyElForSave) return;
+      function showSkillErr(msgForErr) { if (errElForSave) errElForSave.textContent = msgForErr; }
+      showSkillErr('');
+      var slugForSave = String(slugElForSave.value || '').trim().toLowerCase();
+      var titleForSave = String(titleElForSave.value || '').trim();
+      var bodyForSave = String(bodyElForSave.value || '');
+      if (!slugForSave) { showSkillErr('Command is required.'); return; }
+      if (!/^[a-z0-9-]+$/.test(slugForSave)) { showSkillErr('Command may contain only lowercase letters, numbers and hyphens.'); return; }
+      if (slugForSave.length > skillSlugMaxLenForPanelRuntime) { showSkillErr('Command must be ' + skillSlugMaxLenForPanelRuntime + ' characters or fewer.'); return; }
+      if (!titleForSave) { showSkillErr('Title is required.'); return; }
+      if (titleForSave.length > skillTitleMaxLenForPanelRuntime) { showSkillErr('Title must be ' + skillTitleMaxLenForPanelRuntime + ' characters or fewer.'); return; }
+      if (!bodyForSave.trim()) { showSkillErr('Instructions are required.'); return; }
+
+      var agentNotesForSave = await getAgentNotesForManageForPanelRuntime();
+      var editingIdForSave = skillEditorEditingIdForPanelRuntime;
+      for (var iForSave = 0; iForSave < agentNotesForSave.length; iForSave++) {
+        if (!isSkillNoteForPanelRuntime(agentNotesForSave[iForSave])) continue;
+        if (editingIdForSave != null && Number(agentNotesForSave[iForSave].id) === Number(editingIdForSave)) continue;
+        if (getSkillSlugFromNoteForPanelRuntime(agentNotesForSave[iForSave]) === slugForSave) {
+          showSkillErr('A skill with the command /' + slugForSave + ' already exists.');
+          return;
+        }
+      }
+
+      var nowForSave = new Date().toISOString();
+      try {
+        if (editingIdForSave == null) {
+          await repoForSave.createNote({
+            title: titleForSave, body: bodyForSave, attachments: [],
+            tags: ['skills', slugForSave], noteType: 'agent', sourceChatId: null,
+            createdAt: nowForSave, updatedAt: nowForSave
+          });
+        } else {
+          await repoForSave.updateNote(editingIdForSave, {
+            title: titleForSave, body: bodyForSave, tags: ['skills', slugForSave], updatedAt: nowForSave
+          });
+        }
+      } catch (errForSave) {
+        showSkillErr('Could not save skill. Please try again.');
+        return;
+      }
+      closeSkillEditorForPanelRuntime();
+      await loadSkillsViewForPanelRuntime();
+    }
+
+    function confirmDeleteSkillForPanelRuntime(skillIdForDelete) {
+      var listElForDelete = root.getElementById('skills-list-container');
+      if (!listElForDelete) return;
+      showConfirmPromptForPanelRuntime(listElForDelete, 'Delete this skill?', 'Delete', function () {
+        deleteSkillForPanelRuntime(skillIdForDelete);
+      });
+    }
+
+    async function deleteSkillForPanelRuntime(skillIdForDelete) {
+      var repoForDelete = getPanelDataRepoForPanelRuntime();
+      if (!repoForDelete) return;
+      try { await repoForDelete.deleteNote(Number(skillIdForDelete)); } catch (errForDelete) {}
+      await loadSkillsViewForPanelRuntime();
+    }
+
+    /* ---- Memory ---- */
+
+    function renderMemoryRowForPanelRuntime(entryForRow, indexForRow) {
+      var safeForRow = escapeHtmlForPanelRuntime(entryForRow);
+      return '' +
+        '<div class="agent-item">' +
+          '<div class="agent-item-main" data-action="memory-edit" data-memory-index="' + indexForRow + '" data-memory-text="' + safeForRow + '">' +
+            '<div class="agent-item-text">' + safeForRow + '</div>' +
+          '</div>' +
+          '<div class="agent-item-actions">' +
+            '<button class="btn-icon agent-item-del" data-action="memory-delete" data-memory-text="' + safeForRow + '" title="Delete entry">' + ic.trash11 + '</button>' +
+          '</div>' +
+        '</div>';
+    }
+
+    async function loadMemoryViewForPanelRuntime() {
+      var listElForMemory = root.getElementById('memory-list-container');
+      if (!listElForMemory) return;
+      closeMemoryEditorForPanelRuntime();
+      var agentNotesForMemView = await getAgentNotesForManageForPanelRuntime();
+      var entriesForView = getMemoryEntriesFromNoteForPanelRuntime(findMemoryNoteForPanelRuntime(agentNotesForMemView));
+      if (entriesForView.length === 0) {
+        listElForMemory.innerHTML = '<div class="logs-empty">Nothing remembered yet. Memory entries are facts the agent keeps across chats.</div>';
+      } else {
+        listElForMemory.innerHTML = entriesForView.map(renderMemoryRowForPanelRuntime).join('');
+      }
+      refreshAgentManageCountsForPanelRuntime();
+    }
+
+    function openMemoryEditorForPanelRuntime(indexForEditor, textForEditor) {
+      var overlayForMemEditor = root.getElementById('memory-editor-overlay');
+      var inputElForMemEditor = root.getElementById('memory-editor-input');
+      var headingElForMemEditor = root.getElementById('memory-editor-heading');
+      var errElForMemEditor = root.getElementById('memory-editor-error');
+      if (!overlayForMemEditor || !inputElForMemEditor) return;
+      if (errElForMemEditor) errElForMemEditor.textContent = '';
+      if (indexForEditor == null || indexForEditor < 0) {
+        memoryEditorEditingIndexForPanelRuntime = -1;
+        memoryEditorOriginalTextForPanelRuntime = '';
+        inputElForMemEditor.value = '';
+        if (headingElForMemEditor) headingElForMemEditor.textContent = 'New entry';
+      } else {
+        memoryEditorEditingIndexForPanelRuntime = indexForEditor;
+        memoryEditorOriginalTextForPanelRuntime = String(textForEditor || '');
+        inputElForMemEditor.value = memoryEditorOriginalTextForPanelRuntime;
+        if (headingElForMemEditor) headingElForMemEditor.textContent = 'Edit entry';
+      }
+      overlayForMemEditor.classList.remove('hidden');
+      updateAutoExpandForTextareaForPanelRuntime(inputElForMemEditor);
+      setTimeout(function () { inputElForMemEditor.focus(); }, 0);
+    }
+
+    function closeMemoryEditorForPanelRuntime() {
+      var overlayForMemEditor = root.getElementById('memory-editor-overlay');
+      if (overlayForMemEditor) overlayForMemEditor.classList.add('hidden');
+      memoryEditorEditingIndexForPanelRuntime = -1;
+      memoryEditorOriginalTextForPanelRuntime = '';
+    }
+
+    async function saveMemoryFromEditorForPanelRuntime() {
+      var repoForMemSave = getPanelDataRepoForPanelRuntime();
+      if (!repoForMemSave) return;
+      var inputElForMemSave = root.getElementById('memory-editor-input');
+      var errElForMemSave = root.getElementById('memory-editor-error');
+      if (!inputElForMemSave) return;
+      function showMemErr(msgForMemErr) { if (errElForMemSave) errElForMemSave.textContent = msgForMemErr; }
+      showMemErr('');
+      var entryForMemSave = String(inputElForMemSave.value || '').replace(/\s*\n\s*/g, ' ').trim();
+      if (!entryForMemSave) { showMemErr('Entry cannot be empty.'); return; }
+      if (entryForMemSave.length > memoryEntryMaxLenForPanelRuntime) { showMemErr('Entry must be ' + memoryEntryMaxLenForPanelRuntime + ' characters or fewer.'); return; }
+
+      var agentNotesForMemSave = await getAgentNotesForManageForPanelRuntime();
+      var memoryNoteForMemSave = findMemoryNoteForPanelRuntime(agentNotesForMemSave);
+      var entriesForMemSave = getMemoryEntriesFromNoteForPanelRuntime(memoryNoteForMemSave);
+      if (memoryEditorEditingIndexForPanelRuntime >= 0) {
+        var origIdxForMemSave = entriesForMemSave.indexOf(memoryEditorOriginalTextForPanelRuntime);
+        if (origIdxForMemSave !== -1) entriesForMemSave[origIdxForMemSave] = entryForMemSave;
+        else entriesForMemSave.push(entryForMemSave);
+      } else {
+        entriesForMemSave.push(entryForMemSave);
+      }
+
+      var nowForMemSave = new Date().toISOString();
+      try {
+        if (!memoryNoteForMemSave) {
+          await repoForMemSave.createNote({
+            title: 'Agent Memory', body: entriesForMemSave.join('\n'), attachments: [],
+            tags: ['memory'], noteType: 'agent', sourceChatId: null,
+            createdAt: nowForMemSave, updatedAt: nowForMemSave
+          });
+        } else {
+          await repoForMemSave.updateNote(memoryNoteForMemSave.id, { body: entriesForMemSave.join('\n'), updatedAt: nowForMemSave });
+        }
+      } catch (errForMemSave) {
+        showMemErr('Could not save entry. Please try again.');
+        return;
+      }
+      closeMemoryEditorForPanelRuntime();
+      await loadMemoryViewForPanelRuntime();
+    }
+
+    function confirmDeleteMemoryEntryForPanelRuntime(entryTextForDelete) {
+      var listElForMemDelete = root.getElementById('memory-list-container');
+      if (!listElForMemDelete) return;
+      showConfirmPromptForPanelRuntime(listElForMemDelete, 'Delete this entry?', 'Delete', function () {
+        deleteMemoryEntryForPanelRuntime(entryTextForDelete);
+      });
+    }
+
+    async function deleteMemoryEntryForPanelRuntime(entryTextForDelete) {
+      var repoForMemDelete = getPanelDataRepoForPanelRuntime();
+      if (!repoForMemDelete) return;
+      var agentNotesForMemDelete = await getAgentNotesForManageForPanelRuntime();
+      var memoryNoteForMemDelete = findMemoryNoteForPanelRuntime(agentNotesForMemDelete);
+      if (!memoryNoteForMemDelete) { await loadMemoryViewForPanelRuntime(); return; }
+      var entriesForMemDelete = getMemoryEntriesFromNoteForPanelRuntime(memoryNoteForMemDelete);
+      var idxForMemDelete = entriesForMemDelete.indexOf(String(entryTextForDelete || ''));
+      if (idxForMemDelete === -1) { await loadMemoryViewForPanelRuntime(); return; }
+      entriesForMemDelete.splice(idxForMemDelete, 1);
+      var nowForMemDelete = new Date().toISOString();
+      try {
+        await repoForMemDelete.updateNote(memoryNoteForMemDelete.id, { body: entriesForMemDelete.join('\n'), updatedAt: nowForMemDelete });
+      } catch (errForMemDelete) {}
+      await loadMemoryViewForPanelRuntime();
+    }
+
     async function autoGenerateChatTitleForPanelRuntime(chatIdForAutoTitle, userMessageForAutoTitle, apiKeyForAutoTitle, fallbackModelForAutoTitle) {
       const numericChatIdForAutoTitle = Number(chatIdForAutoTitle);
       if (!Number.isFinite(numericChatIdForAutoTitle)) return;
@@ -14051,6 +14389,16 @@
             case 'clear-api-logs':       clearApiLogsForPanelRuntime(); break;
             case 'logs-prev-page':       if (apiLogsPageForPanelRuntime > 0) { apiLogsPageForPanelRuntime--; loadApiLogsViewForPanelRuntime(); } break;
             case 'logs-next-page':       apiLogsPageForPanelRuntime++; loadApiLogsViewForPanelRuntime(); break;
+            case 'skill-new':            openSkillEditorForPanelRuntime(null); break;
+            case 'skill-edit':           openSkillEditorForPanelRuntime(Number(tgtForRuntime.dataset.skillId)); break;
+            case 'skill-delete':         confirmDeleteSkillForPanelRuntime(Number(tgtForRuntime.dataset.skillId)); break;
+            case 'skill-editor-save':    saveSkillFromEditorForPanelRuntime(); break;
+            case 'skill-editor-cancel':  closeSkillEditorForPanelRuntime(); break;
+            case 'memory-new':           openMemoryEditorForPanelRuntime(null); break;
+            case 'memory-edit':          openMemoryEditorForPanelRuntime(Number(tgtForRuntime.dataset.memoryIndex), tgtForRuntime.dataset.memoryText || ''); break;
+            case 'memory-delete':        confirmDeleteMemoryEntryForPanelRuntime(tgtForRuntime.dataset.memoryText || ''); break;
+            case 'memory-editor-save':   saveMemoryFromEditorForPanelRuntime(); break;
+            case 'memory-editor-cancel': closeMemoryEditorForPanelRuntime(); break;
             case 'clear-search': {
               const searchIdForClear = tgtForRuntime.dataset.searchId;
               const inputForClear = searchIdForClear ? root.getElementById(searchIdForClear) : null;

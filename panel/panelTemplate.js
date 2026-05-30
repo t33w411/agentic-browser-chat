@@ -418,7 +418,7 @@
           </div>
 
           <div class="stg-section">
-            <div class="stg-section-title">Agent Rules</div>
+            <div class="stg-section-title">Agent</div>
             <div class="stg-row stg-row-col">
               <div class="stg-label">
                 <strong>Custom instructions</strong>
@@ -429,6 +429,10 @@
                 <span class="stg-agent-rules-saved-msg" id="agent-rules-saved-msg"></span>
                 <button class="btn-primary btn-sm" data-action="save-agent-rules-btn">Save</button>
               </div>
+            </div>
+            <div class="stg-row stg-agent-manage-row">
+              <button class="stg-agent-manage-btn" data-action="set-tab" data-tab="skills">Manage Skills <span class="stg-agent-manage-count" id="settings-skills-count">(0)</span></button>
+              <button class="stg-agent-manage-btn" data-action="set-tab" data-tab="memory">Manage Memory <span class="stg-agent-manage-count" id="settings-memory-count">(0)</span></button>
             </div>
           </div>
 
@@ -511,6 +515,75 @@
           <div class="logs-detail-body" id="logs-detail-body"></div>
         </div>
       </div><!-- /view-logs -->
+
+      <!-- ===================================================
+           SKILLS VIEW
+      =================================================== -->
+      <div class="view hidden" id="view-skills">
+        <div class="logs-topbar">
+          <button class="logs-back-btn" data-action="set-tab" data-tab="settings">&#8592; Settings</button>
+          <span class="logs-topbar-title">Skills</span>
+          <button class="btn-ghost btn-sm agent-add-btn" data-action="skill-new">${icForPanelTemplate.plus12} Add</button>
+        </div>
+        <div class="agent-manage-list" id="skills-list-container">
+          <div class="logs-empty" id="skills-empty-state">No skills yet. Skills are reusable instructions the agent applies on demand.</div>
+        </div>
+        <div class="agent-editor hidden" id="skill-editor-overlay">
+          <div class="logs-topbar">
+            <button class="logs-back-btn" data-action="skill-editor-cancel">&#8592; Back</button>
+            <span class="logs-topbar-title" id="skill-editor-heading">New skill</span>
+            <button class="btn-primary btn-sm" data-action="skill-editor-save">Save</button>
+          </div>
+          <div class="agent-editor-body">
+            <div class="agent-editor-field">
+              <label class="agent-editor-label" for="skill-editor-slug">Command</label>
+              <div class="agent-editor-slug-wrap">
+                <span class="agent-editor-slug-prefix">/</span>
+                <input class="stg-input agent-editor-slug-input" id="skill-editor-slug" type="text" autocomplete="off" spellcheck="false" maxlength="100" placeholder="summarize-page">
+              </div>
+              <span class="agent-editor-hint">Lowercase letters, numbers and hyphens only. Used as a /command.</span>
+            </div>
+            <div class="agent-editor-field">
+              <label class="agent-editor-label" for="skill-editor-title-input">Title</label>
+              <input class="stg-input agent-editor-full" id="skill-editor-title-input" type="text" maxlength="100" placeholder="Short, descriptive name">
+            </div>
+            <div class="agent-editor-field">
+              <label class="agent-editor-label" for="skill-editor-body">Instructions</label>
+              <textarea class="stg-input stg-textarea agent-editor-textarea" id="skill-editor-body" placeholder="What should the agent do when this skill runs?"></textarea>
+            </div>
+            <div class="agent-editor-error" id="skill-editor-error"></div>
+          </div>
+        </div>
+      </div><!-- /view-skills -->
+
+      <!-- ===================================================
+           MEMORY VIEW
+      =================================================== -->
+      <div class="view hidden" id="view-memory">
+        <div class="logs-topbar">
+          <button class="logs-back-btn" data-action="set-tab" data-tab="settings">&#8592; Settings</button>
+          <span class="logs-topbar-title">Memory</span>
+          <button class="btn-ghost btn-sm agent-add-btn" data-action="memory-new">${icForPanelTemplate.plus12} Add</button>
+        </div>
+        <div class="agent-manage-list" id="memory-list-container">
+          <div class="logs-empty" id="memory-empty-state">Nothing remembered yet. Memory entries are facts the agent keeps across chats.</div>
+        </div>
+        <div class="agent-editor hidden" id="memory-editor-overlay">
+          <div class="logs-topbar">
+            <button class="logs-back-btn" data-action="memory-editor-cancel">&#8592; Back</button>
+            <span class="logs-topbar-title" id="memory-editor-heading">New entry</span>
+            <button class="btn-primary btn-sm" data-action="memory-editor-save">Save</button>
+          </div>
+          <div class="agent-editor-body">
+            <div class="agent-editor-field">
+              <label class="agent-editor-label" for="memory-editor-input">Entry</label>
+              <textarea class="stg-input stg-textarea agent-editor-textarea" id="memory-editor-input" maxlength="280" placeholder="e.g. The user prefers concise answers."></textarea>
+              <span class="agent-editor-hint">One fact per entry. Keep it short.</span>
+            </div>
+            <div class="agent-editor-error" id="memory-editor-error"></div>
+          </div>
+        </div>
+      </div><!-- /view-memory -->
 
       <!-- ===================================================
            QUIZ VIEW

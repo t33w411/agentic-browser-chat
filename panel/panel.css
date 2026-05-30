@@ -2286,6 +2286,112 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 }
 
 /* ============================================================
+   AGENT SKILLS & MEMORY MANAGEMENT
+============================================================ */
+.stg-agent-manage-row {
+  display: flex; flex-wrap: wrap; gap: 8px;
+}
+.stg-agent-manage-btn {
+  flex: 1 1 0; min-width: 130px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  border: 1px solid var(--abchat-border-med); border-radius: var(--abchat-r-sm);
+  background: var(--abchat-bg-input); color: var(--abchat-text-primary);
+  font-family: var(--abchat-font); font-size: 13px; font-weight: 500;
+  padding: 8px 12px; cursor: pointer; transition: background 0.1s, border-color 0.1s;
+}
+.stg-agent-manage-btn:hover { background: var(--abchat-bg-hover); border-color: var(--abchat-accent); }
+.stg-agent-manage-count { color: var(--abchat-text-muted); font-weight: 400; }
+/* Keep the manage buttons side by side even in reduced mode, where .stg-row is forced to a column */
+.panel-host.mode-reduced .stg-agent-manage-row { flex-direction: row; align-items: stretch; }
+.panel-host.mode-reduced .stg-agent-manage-row .stg-agent-manage-btn { min-width: 0; }
+
+#view-skills, #view-memory {
+  display: flex; flex-direction: column; height: 100%;
+  position: relative; overflow: hidden;
+}
+#view-skills.hidden, #view-memory.hidden { display: none; }
+
+.agent-add-btn { display: inline-flex; align-items: center; gap: 4px; }
+.agent-add-btn svg { display: block; }
+
+.agent-manage-list {
+  flex: 1; overflow-y: auto; padding: 6px 0; position: relative;
+}
+
+.agent-item {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 9px 13px;
+  border-bottom: 1px solid var(--abchat-border);
+}
+.agent-item:last-child { border-bottom: none; }
+.agent-item-main {
+  flex: 1; min-width: 0; cursor: pointer;
+  display: flex; flex-direction: column; gap: 3px;
+  border-radius: var(--abchat-r-sm);
+}
+.agent-item:hover { background: var(--abchat-bg-hover); }
+.agent-item-head { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
+.agent-item-slug {
+  font-family: "SF Mono","Fira Code",monospace; font-size: 12px; font-weight: 600;
+  color: var(--abchat-accent); white-space: nowrap;
+}
+.agent-item-title {
+  font-size: 13px; font-weight: 500; color: var(--abchat-text-primary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.agent-item-preview {
+  font-size: 12px; color: var(--abchat-text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.agent-item-text {
+  font-size: 13px; color: var(--abchat-text-primary);
+  white-space: pre-wrap; word-break: break-word; line-height: 1.45;
+}
+.agent-item-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.agent-item-del { color: var(--abchat-text-muted); }
+.agent-item-del:hover { color: #dc2626; border-color: #fca5a5; background: #fee2e2; }
+
+.agent-editor {
+  position: absolute; inset: 0; z-index: 10;
+  background: var(--abchat-bg-panel);
+  display: flex; flex-direction: column;
+}
+.agent-editor.hidden { display: none; }
+.agent-editor-body {
+  flex: 1; overflow-y: auto; padding: 13px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.agent-editor-field { display: flex; flex-direction: column; gap: 5px; }
+.agent-editor-label {
+  font-size: 12px; font-weight: 600; color: var(--abchat-text-secondary);
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.agent-editor-hint { font-size: 12px; color: var(--abchat-text-muted); }
+.agent-editor-error { font-size: 13px; color: #dc2626; font-weight: 500; }
+.agent-editor-error:empty { display: none; }
+.agent-editor-full { width: 100%; box-sizing: border-box; min-width: unset; }
+.agent-editor-textarea {
+  width: 100%; box-sizing: border-box; min-width: unset; min-height: 140px; resize: vertical;
+  font-family: var(--abchat-font); line-height: 1.45;
+}
+.agent-editor-slug-wrap {
+  display: flex; align-items: center;
+  border: 1px solid var(--abchat-border); border-radius: var(--abchat-r-sm);
+  background: var(--abchat-bg-input); overflow: hidden;
+}
+.agent-editor-slug-wrap:focus-within { border-color: var(--abchat-accent); }
+.agent-editor-slug-prefix {
+  padding: 5px 2px 5px 9px; color: var(--abchat-text-muted);
+  font-family: "SF Mono","Fira Code",monospace; font-size: 13px;
+}
+.agent-editor-slug-input {
+  flex: 1; min-width: 0; border: none !important; background: transparent !important;
+  border-radius: 0; padding-left: 2px;
+  font-family: "SF Mono","Fira Code",monospace; letter-spacing: 0.02em;
+}
+.agent-editor-slug-input:focus { border: none; }
+
+/* ============================================================
    INLINE CHAT MODAL
 ============================================================ */
 #inline-overlay {
