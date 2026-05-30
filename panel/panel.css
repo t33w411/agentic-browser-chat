@@ -714,6 +714,11 @@
   transition: background 0.1s, color 0.1s;
 }
 .raw-view-btn:hover { background: var(--abchat-bg-hover); color: var(--abchat-text-primary); }
+.raw-view-btn[aria-pressed="true"] {
+  background: var(--abchat-bg-hover);
+  color: var(--abchat-text-primary);
+  border-color: var(--abchat-text-secondary);
+}
 .raw-view-back-btn { background: var(--abchat-bg-input); }
 .raw-view-pre {
   flex: 1;
@@ -732,6 +737,11 @@
   word-break: normal;
   scrollbar-width: thin;
   scrollbar-color: var(--abchat-border) transparent;
+}
+.raw-view-pre.raw-view-wrap {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 #chat-main.raw-view-active .chat-input-area { display: none; }
 

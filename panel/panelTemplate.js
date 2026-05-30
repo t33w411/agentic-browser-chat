@@ -122,6 +122,7 @@
               <div class="raw-view-header">
                 <span class="raw-view-title">Raw messages</span>
                 <div class="raw-view-actions">
+                  <button class="raw-view-btn" data-action="toggle-raw-wrap" aria-pressed="false">Wrap</button>
                   <button class="raw-view-btn" data-action="copy-raw-chat">Copy</button>
                   <button class="raw-view-btn raw-view-back-btn" data-action="close-raw-view">Back</button>
                 </div>

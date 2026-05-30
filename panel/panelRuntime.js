@@ -1093,6 +1093,7 @@
     let apiLogsCacheForPanelRuntime = [];
     let activeLogDetailForPanelRuntime = null;
     let activeLogViewRawForPanelRuntime = false;
+    let rawChatViewWrapForPanelRuntime = false;
 
     const host = root.getElementById('panel-host');
     const overlay = root.getElementById('inline-overlay');
@@ -3567,6 +3568,7 @@
       if (!rawViewForPanelRuntime || !rawContentForPanelRuntime) return;
 
       rawContentForPanelRuntime.textContent = JSON.stringify(messagesForRaw, null, 2);
+      applyRawChatWrapForPanelRuntime();
 
       root.getElementById('chat-empty-state').classList.add('hidden');
       root.getElementById('chat-messages-content').classList.add('hidden');
@@ -3587,6 +3589,22 @@
       if (chatMainForClose) chatMainForClose.classList.remove('raw-view-active');
 
       showChatMessages(S.activeChatId !== null);
+    }
+
+    function applyRawChatWrapForPanelRuntime() {
+      const rawContentForWrap = root.getElementById('chat-raw-view-content');
+      if (rawContentForWrap) {
+        rawContentForWrap.classList.toggle('raw-view-wrap', rawChatViewWrapForPanelRuntime);
+      }
+      const wrapBtnForPanelRuntime = root.querySelector('#chat-raw-view [data-action="toggle-raw-wrap"]');
+      if (wrapBtnForPanelRuntime) {
+        wrapBtnForPanelRuntime.setAttribute('aria-pressed', rawChatViewWrapForPanelRuntime ? 'true' : 'false');
+      }
+    }
+
+    function toggleRawChatWrapForPanelRuntime() {
+      rawChatViewWrapForPanelRuntime = !rawChatViewWrapForPanelRuntime;
+      applyRawChatWrapForPanelRuntime();
     }
 
     function copyRawChatForPanelRuntime(btn) {
@@ -9837,6 +9855,7 @@
           };
           if (args.operation === 'getSelection')    return 'Reading selection';
           if (args.operation === 'getPageContext')  return 'Checking page info';
+          if (args.operation === 'getPageContent')  return 'Reading full page';
           if (args.operation === 'getPageOverview') return 'Scanning page structure';
           if (args.operation === 'findText')        return 'Finding text' + (args.pattern ? ' “' + trunc(args.pattern, 24) + '”' : '') + (args.selector ? selHintForPageQuery : '');
           if (args.operation === 'findPageElements') {
@@ -13927,6 +13946,7 @@
             case 'delete-chat':          deleteChatItemFromDropdownForPanelRuntime(tgtForRuntime); break;
             case 'view-raw-chat':        openRawChatViewForPanelRuntime(tgtForRuntime); break;
             case 'close-raw-view':       closeRawViewForPanelRuntime(); break;
+            case 'toggle-raw-wrap':      toggleRawChatWrapForPanelRuntime(); break;
             case 'copy-raw-chat':        copyRawChatForPanelRuntime(tgtForRuntime); break;
             case 'back-from-chat':       backFromChat(); break;
             case 'use-prompt':           usePrompt(tgtForRuntime); break;

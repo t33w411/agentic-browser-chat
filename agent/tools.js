@@ -126,13 +126,13 @@
       type: 'function',
       function: {
         name: 'page_query',
-        description: 'Your first resort when a question could be about content on the current page. Explore and read web page content through structured category-based discovery. IMPORTANT: getSelection, getPageContext, getPageOverview, findPageElements, and findText are NOT standalone tools; they are values of the `operation` parameter on this single `page_query` tool. Always invoke as `page_query` with the chosen operation, e.g. `page_query({ operation: "findText", pattern: "..." })`, never as a tool literally named `findText` or `findPageElements`. getSelection and getPageContext need no other parameters. getPageOverview returns a structured inventory of all recognizable element categories on the page. findPageElements in discovery mode lists all elements in a category; in detail mode performs operations on a specific element. findText locates elements by text pattern.',
+        description: 'Your first resort when a question could be about content on the current page. Explore and read web page content through structured category-based discovery. IMPORTANT: getSelection, getPageContext, getPageContent, getPageOverview, findPageElements, and findText are NOT standalone tools; they are values of the `operation` parameter on this single `page_query` tool. Always invoke as `page_query` with the chosen operation, e.g. `page_query({ operation: "findText", pattern: "..." })`, never as a tool literally named `findText` or `findPageElements`. getSelection and getPageContext need no other parameters. getPageContent returns the entire current page as a single flattened snapshot (use only for whole-page tasks). getPageOverview returns a structured inventory of all recognizable element categories on the page. findPageElements in discovery mode lists all elements in a category; in detail mode performs operations on a specific element. findText locates elements by text pattern.',
         parameters: {
           type: 'object',
           properties: {
             operation: {
               type: 'string',
-              enum: ['getSelection', 'getPageContext', 'getPageOverview', 'findPageElements', 'findText'],
+              enum: ['getSelection', 'getPageContext', 'getPageContent', 'getPageOverview', 'findPageElements', 'findText'],
               description: [
                 'getSelection: text the user currently has highlighted.',
                 'Result: { selected: boolean, result: string }.',
@@ -141,6 +141,8 @@
                 'getPageContext: page title and URL only.',
                 'Result: { title: string, url: string }.',
                 'Use when you only need to identify the page, not read its content.',
+                '',
+                'getPageContent: the entire current page as a single flattened snapshot, identical to the content the user gets when they attach this browser tab and identical to the "Current page context" flattened-HTML conventions (images become <img_jpg>/<img_png>/<img_svg> etc. placeholders, hidden elements are marked hidden="", scripts/styles/canvas are stripped, redundant div/span wrappers are collapsed, most attributes removed). Result: { truncated: boolean, result: string }. This is a WHOLE-PAGE read and can be large, so use it only when the task genuinely needs holistic understanding of the page (e.g. "summarize this page", "what is this page about", "extract every X across the whole page", or when targeted search has failed to locate scattered content). For a specific value, fact, link, or element, do NOT use getPageContent: prefer findText first, then findPageElements detail mode, which return small targeted snippets far more cheaply. The snapshot is capped at 200,000 characters; truncated is true when the page exceeded the cap and the tail was cut.',
                 '',
                 'getPageOverview: structured inventory of all recognizable element categories present on the current page.',
                 'Result: { <category>: count } (a flat map of category name to element count for every category that has at least one match).',

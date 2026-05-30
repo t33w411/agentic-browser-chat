@@ -1881,6 +1881,38 @@
       return { ok: true, operation: operation, result: { title: document.title, url: window.location.href } };
     }
 
+    if (operation === 'getPageContent') {
+      // Whole-page read: returns the exact flattened snapshot the user gets when
+      // attaching this tab's content. Reuses getFullPageContent so the agent and the
+      // tab-attachment feature stay in lockstep. Falls back to innerText and caps at
+      // 200,000 chars, matching getTabPageContentForServiceWorker in service-worker.js.
+      var flattenedNsForPageContent = (globalThis.ABChatContent || {}).tools;
+      flattenedNsForPageContent = flattenedNsForPageContent && flattenedNsForPageContent.flattenedContent;
+      var extractedForPageContent = '';
+      if (flattenedNsForPageContent && typeof flattenedNsForPageContent.getFullPageContent === 'function') {
+        var fullResultForPageContent = flattenedNsForPageContent.getFullPageContent();
+        if (fullResultForPageContent && fullResultForPageContent.ok && typeof fullResultForPageContent.result === 'string') {
+          extractedForPageContent = fullResultForPageContent.result;
+        }
+      }
+      if (!extractedForPageContent) {
+        var bodyForPageContent = document && document.body ? document.body : null;
+        extractedForPageContent = bodyForPageContent
+          ? String(bodyForPageContent.innerText || bodyForPageContent.textContent || '')
+          : '';
+      }
+      extractedForPageContent = String(extractedForPageContent || '').trim();
+      if (!extractedForPageContent) {
+        return { ok: false, error: 'The current page has no readable content to extract.' };
+      }
+      var truncatedForPageContent = false;
+      if (extractedForPageContent.length > 200000) {
+        extractedForPageContent = extractedForPageContent.slice(0, 200000);
+        truncatedForPageContent = true;
+      }
+      return { ok: true, operation: operation, truncated: truncatedForPageContent, result: extractedForPageContent };
+    }
+
     if (operation === 'getPageOverview') {
       var allCategoriesForOverview = ['links', 'buttons', 'images', 'headers', 'paragraphs', 'blockquotes', 'tables', 'lists', 'iframes', 'videos', 'audio', 'forms', 'form_fields', 'landmarks', 'code', 'custom_elements'];
       var countsForOverview = {};
