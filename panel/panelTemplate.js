@@ -549,7 +549,8 @@
             </div>
             <div class="agent-editor-field">
               <label class="agent-editor-label" for="skill-editor-body">Instructions</label>
-              <textarea class="stg-input stg-textarea agent-editor-textarea" id="skill-editor-body" placeholder="What should the agent do when this skill runs?"></textarea>
+              <textarea class="stg-input stg-textarea agent-editor-textarea" id="skill-editor-body" placeholder="Numbered steps for the agent, e.g.&#10;1. Find the comment box&#10;2. Click it to reveal the editor&#10;3. Fill in the text&#10;4. Stop; let the user click Post"></textarea>
+              <span class="agent-editor-hint">Write self-contained, numbered steps the agent can follow on its own later: be specific about each action and why, and stop before anything that submits, sends, or deletes so it can be confirmed first.</span>
             </div>
             <div class="agent-editor-error" id="skill-editor-error"></div>
           </div>

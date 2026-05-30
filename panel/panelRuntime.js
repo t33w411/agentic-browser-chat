@@ -9923,7 +9923,7 @@
         case 'page_fill_form':
           return 'Filling form fields';
         case 'take_screenshot':
-          return 'Taking screenshot';
+          return 'Reviewing screenshot';
         case 'eval':
           return 'Computing';
         case 'web_fetch': {
@@ -9938,11 +9938,10 @@
         case 'openrouter:web_search':
           return args.query ? 'Web search: “' + trunc(args.query, 24) + '”' : 'Searching the web';
         case 'memory':
-          if (args.operation === 'delete_entry') return 'Removing memory entry';
           return 'Updating memory';
         case 'skill':
           if (args.operation === 'create') return args.title ? 'Saving skill "' + trunc(args.title, 20) + '"' : 'Saving skill';
-          if (args.operation === 'read')   return args.slug ? 'Loading skill /' + trunc(args.slug, 24) : 'Loading skill';
+          if (args.operation === 'read')   return args.slug ? 'Using skill /' + trunc(args.slug, 24) : 'Using skill';
           if (args.operation === 'update') return args.slug ? 'Updating skill /' + trunc(args.slug, 24) : 'Updating skill';
           if (args.operation === 'delete') return args.slug ? 'Deleting skill /' + trunc(args.slug, 24) : 'Deleting skill';
           return 'Managing skill';
