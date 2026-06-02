@@ -9647,15 +9647,36 @@
         || (chatSelectElForCounter && chatSelectElForCounter.value)
         || '';
       let contextFillLabelForDisplay = '';
+      let contextPercentLabelForDisplay = '';
       let contextColorForDisplay = 'var(--text-muted,#888)';
       if (compactorForCounter && typeof compactorForCounter.getTokenBudget === 'function' && modelForCounter) {
-        const budgetForCounter = compactorForCounter.getTokenBudget(modelForCounter);
-        if (budgetForCounter > 0) {
-          const budgetLabelForDisplay = budgetForCounter >= 1000
-            ? Math.round(budgetForCounter / 1000) + 'k'
-            : String(budgetForCounter);
+        const estimatedBudgetForCounter = compactorForCounter.getTokenBudget(modelForCounter);
+        if (estimatedBudgetForCounter > 0) {
+          // Exceeding the estimate proves the real window is larger, so round the
+          // displayed denominator up to the next tier. Display-only; compaction unaffected.
+          const budgetTiersForDisplay = [128000, 200000, 256000, 512000, 1000000, 2000000];
+          let effectiveBudgetForDisplay = estimatedBudgetForCounter;
+          if (totalTokensForDisplay > effectiveBudgetForDisplay) {
+            let tierForDisplay = 0;
+            for (let tierIdxForDisplay = 0; tierIdxForDisplay < budgetTiersForDisplay.length; tierIdxForDisplay++) {
+              if (budgetTiersForDisplay[tierIdxForDisplay] >= totalTokensForDisplay) {
+                tierForDisplay = budgetTiersForDisplay[tierIdxForDisplay];
+                break;
+              }
+            }
+            effectiveBudgetForDisplay = tierForDisplay || totalTokensForDisplay;
+          }
+          const budgetLabelForDisplay = effectiveBudgetForDisplay >= 1000
+            ? Math.round(effectiveBudgetForDisplay / 1000) + 'k'
+            : String(effectiveBudgetForDisplay);
           contextFillLabelForDisplay = ' / ' + budgetLabelForDisplay;
-          const fillFractionForDisplay = totalTokensForDisplay / budgetForCounter;
+          const fillFractionForDisplay = totalTokensForDisplay / effectiveBudgetForDisplay;
+          if (totalTokensForDisplay > 0) {
+            const rawPercentForDisplay = fillFractionForDisplay * 100;
+            contextPercentLabelForDisplay = rawPercentForDisplay < 1
+              ? ' (<1%)'
+              : ' (' + Math.min(100, Math.round(rawPercentForDisplay)) + '%)';
+          }
           if (fillFractionForDisplay >= 0.7) {
             contextColorForDisplay = fillFractionForDisplay >= 0.83 ? 'var(--warning-color,#e67e22)' : 'var(--warning-color-soft,#d4a017)';
           }
@@ -9663,7 +9684,7 @@
       }
       counterElForDisplay.style.color = contextColorForDisplay;
 
-      const tokenPartForDisplay = tokensLabelForDisplay + contextFillLabelForDisplay + ' tok';
+      const tokenPartForDisplay = tokensLabelForDisplay + contextFillLabelForDisplay + ' tok' + contextPercentLabelForDisplay;
       if (numCumulativeCost > 0) {
         const costLabelForDisplay = numCumulativeCost < 0.00001
           ? '<$0.00001'
