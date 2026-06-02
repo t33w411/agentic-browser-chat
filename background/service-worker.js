@@ -2153,6 +2153,68 @@ chrome.contextMenus.onClicked.addListener((infoForServiceWorker, tabForServiceWo
   );
 });
 
+var connectivityProbeCacheForServiceWorker = { reachable: null, ts: 0 };
+var CONNECTIVITY_PROBE_TARGETS_FOR_SERVICE_WORKER = ['https://openrouter.ai', 'https://www.gstatic.com/generate_204'];
+var CONNECTIVITY_PROBE_TIMEOUT_MS_FOR_SERVICE_WORKER = 2500;
+var CONNECTIVITY_PROBE_CACHE_TTL_MS_FOR_SERVICE_WORKER = 5000;
+
+function probeSingleTargetReachableForServiceWorker(targetUrlForProbe, timeoutMsForProbe) {
+  return new Promise(function (resolveForSingleProbe) {
+    var controllerForSingleProbe = new AbortController();
+    var timeoutIdForSingleProbe = setTimeout(function () {
+      try { controllerForSingleProbe.abort(); } catch (abortErrForProbe) {}
+    }, timeoutMsForProbe);
+    fetch(targetUrlForProbe, { method: 'GET', mode: 'no-cors', cache: 'no-store', signal: controllerForSingleProbe.signal })
+      .then(function () {
+        clearTimeout(timeoutIdForSingleProbe);
+        resolveForSingleProbe(true);
+      })
+      .catch(function () {
+        clearTimeout(timeoutIdForSingleProbe);
+        resolveForSingleProbe(false);
+      });
+  });
+}
+
+function probeReachableAnyForServiceWorker(targetsForProbe, timeoutMsForProbe) {
+  return new Promise(function (resolveForAnyProbe) {
+    var remainingForProbe = targetsForProbe.length;
+    if (remainingForProbe === 0) { resolveForAnyProbe(false); return; }
+    var settledForProbe = false;
+    targetsForProbe.forEach(function (targetUrlForAnyProbe) {
+      probeSingleTargetReachableForServiceWorker(targetUrlForAnyProbe, timeoutMsForProbe)
+        .then(function (reachableForAnyProbe) {
+          if (settledForProbe) return;
+          if (reachableForAnyProbe) {
+            settledForProbe = true;
+            resolveForAnyProbe(true);
+            return;
+          }
+          remainingForProbe -= 1;
+          if (remainingForProbe <= 0) {
+            settledForProbe = true;
+            resolveForAnyProbe(false);
+          }
+        });
+    });
+  });
+}
+
+async function handleConnectivityProbeForServiceWorker(messageForProbe, sendResponseForProbe) {
+  var nowForProbe = Date.now();
+  if (connectivityProbeCacheForServiceWorker.reachable !== null &&
+      (nowForProbe - connectivityProbeCacheForServiceWorker.ts) < CONNECTIVITY_PROBE_CACHE_TTL_MS_FOR_SERVICE_WORKER) {
+    sendResponseForProbe({ ok: true, reachable: connectivityProbeCacheForServiceWorker.reachable, cached: true });
+    return;
+  }
+  var reachableForProbe = await probeReachableAnyForServiceWorker(
+    CONNECTIVITY_PROBE_TARGETS_FOR_SERVICE_WORKER,
+    CONNECTIVITY_PROBE_TIMEOUT_MS_FOR_SERVICE_WORKER
+  );
+  connectivityProbeCacheForServiceWorker = { reachable: reachableForProbe, ts: Date.now() };
+  sendResponseForProbe({ ok: true, reachable: reachableForProbe });
+}
+
 if (chrome.commands && chrome.commands.onCommand) {
   chrome.commands.onCommand.addListener((commandForServiceWorker) => {
     const actionForServiceWorker = commandsForServiceWorker.getActionForCommand(commandForServiceWorker);
@@ -2321,6 +2383,11 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
 
   if (messageForServiceWorker.action === (actionsForServiceWorker.agentWebFetch || "agentWebFetch")) {
     handleAgentWebFetchForServiceWorker(messageForServiceWorker, sendResponseForServiceWorker);
+    return true;
+  }
+
+  if (messageForServiceWorker.action === "abchatConnectivityProbe") {
+    handleConnectivityProbeForServiceWorker(messageForServiceWorker, sendResponseForServiceWorker);
     return true;
   }
 

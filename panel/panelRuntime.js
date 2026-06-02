@@ -4345,6 +4345,36 @@
       });
     }
 
+    async function checkConnectivityForPanelRuntime() {
+      try {
+        const responseForConnectivity = await sendRuntimeMessageForPanelRuntime({ action: 'abchatConnectivityProbe' });
+        if (responseForConnectivity && responseForConnectivity.ok && typeof responseForConnectivity.reachable === 'boolean') {
+          return responseForConnectivity.reachable;
+        }
+      } catch (errForConnectivity) {}
+      // Probe infrastructure failed (service worker asleep, context invalidated, etc.).
+      // Treat as reachable and let the real request be the final arbiter.
+      return true;
+    }
+
+    function setOfflineBannerStateForPanelRuntime(stateForBanner) {
+      const offlineBannerElForState = root.getElementById('offline-banner');
+      if (!offlineBannerElForState) return;
+      const offlineBannerTextElForState = root.getElementById('offline-banner-text');
+      if (stateForBanner === 'checking') {
+        if (offlineBannerTextElForState) offlineBannerTextElForState.textContent = 'Checking connection...';
+        offlineBannerElForState.classList.add('checking');
+        offlineBannerElForState.classList.remove('hidden');
+      } else if (stateForBanner === 'offline') {
+        if (offlineBannerTextElForState) offlineBannerTextElForState.textContent = 'No internet connection';
+        offlineBannerElForState.classList.remove('checking');
+        offlineBannerElForState.classList.remove('hidden');
+      } else {
+        offlineBannerElForState.classList.remove('checking');
+        offlineBannerElForState.classList.add('hidden');
+      }
+    }
+
     async function fetchTabPageContentForPanelRuntime(tabIdForPanelRuntime) {
       const numericTabIdForPanelRuntime = Number(tabIdForPanelRuntime);
       if (!Number.isFinite(numericTabIdForPanelRuntime)) {
@@ -10938,8 +10968,14 @@
       }
 
       if (!navigator.onLine) {
-        appendSystemMsgToContainerForPanelRuntime("No internet connection. Please check your network and try again.");
-        return;
+        setOfflineBannerStateForPanelRuntime('checking');
+        const reachableForSend = await checkConnectivityForPanelRuntime();
+        if (!reachableForSend) {
+          setOfflineBannerStateForPanelRuntime('offline');
+          appendSystemMsgToContainerForPanelRuntime("No internet connection. Please check your network and try again.");
+          return;
+        }
+        setOfflineBannerStateForPanelRuntime('hidden');
       }
 
       // Create chat if none is active
@@ -14669,25 +14705,88 @@
       // Bind code-paste detection for the main note textarea
       bindNotePasteDetectionForPanelRuntime(root.getElementById('ne-body'));
 
-      // Offline detection: show banner when the page has no internet access.
-      // Uses the generation guard to self-remove after extension reload.
+      // Offline detection. navigator.onLine is only a fast-path hint; a false value
+      // is verified with an active reachability probe (run in the service worker)
+      // before showing the banner, because navigator.onLine yields false negatives
+      // on some systems even when the network is fully reachable.
       var capturedGenForOfflineBanner = window.abchatListenerGeneration || 0;
-      function updateOfflineBannerForPanelRuntime() {
-        if ((window.abchatListenerGeneration || 0) !== capturedGenForOfflineBanner) {
-          window.removeEventListener('online', updateOfflineBannerForPanelRuntime);
-          window.removeEventListener('offline', updateOfflineBannerForPanelRuntime);
-          return;
+      var offlineBannerProbeIntervalIdForPanelRuntime = null;
+      var offlineBannerProbeInFlightForPanelRuntime = false;
+
+      function isStaleForOfflineBannerForPanelRuntime() {
+        if ((window.abchatListenerGeneration || 0) !== capturedGenForOfflineBanner) return true;
+        try {
+          if (!chrome.runtime || !chrome.runtime.id) return true;
+        } catch (eForOfflineStale) {
+          return true;
         }
-        const offlineBannerEl = root.getElementById('offline-banner');
-        if (!offlineBannerEl) return;
-        if (navigator.onLine) {
-          offlineBannerEl.classList.add('hidden');
-        } else {
-          offlineBannerEl.classList.remove('hidden');
+        return false;
+      }
+
+      function teardownOfflineBannerForPanelRuntime() {
+        window.removeEventListener('online', updateOfflineBannerForPanelRuntime);
+        window.removeEventListener('offline', updateOfflineBannerForPanelRuntime);
+        window.removeEventListener('focus', updateOfflineBannerForPanelRuntime);
+        document.removeEventListener('visibilitychange', updateOfflineBannerForPanelRuntime, true);
+        stopOfflineBannerProbeIntervalForPanelRuntime();
+      }
+
+      function stopOfflineBannerProbeIntervalForPanelRuntime() {
+        if (offlineBannerProbeIntervalIdForPanelRuntime !== null) {
+          clearInterval(offlineBannerProbeIntervalIdForPanelRuntime);
+          offlineBannerProbeIntervalIdForPanelRuntime = null;
         }
       }
+
+      function startOfflineBannerProbeIntervalForPanelRuntime() {
+        if (offlineBannerProbeIntervalIdForPanelRuntime !== null) return;
+        offlineBannerProbeIntervalIdForPanelRuntime = setInterval(function () {
+          if (isStaleForOfflineBannerForPanelRuntime()) {
+            teardownOfflineBannerForPanelRuntime();
+            return;
+          }
+          updateOfflineBannerForPanelRuntime();
+        }, 25000);
+      }
+
+      async function updateOfflineBannerForPanelRuntime() {
+        if (isStaleForOfflineBannerForPanelRuntime()) {
+          teardownOfflineBannerForPanelRuntime();
+          return;
+        }
+        if (navigator.onLine) {
+          setOfflineBannerStateForPanelRuntime('hidden');
+          stopOfflineBannerProbeIntervalForPanelRuntime();
+          return;
+        }
+        if (offlineBannerProbeInFlightForPanelRuntime) return;
+        offlineBannerProbeInFlightForPanelRuntime = true;
+        // Background checks probe silently; the banner only flips to its final
+        // state once the probe resolves, so no "checking" flash on focus/visibility.
+        var reachableForBanner = true;
+        try {
+          reachableForBanner = await checkConnectivityForPanelRuntime();
+        } catch (eForBannerProbe) {
+          reachableForBanner = true;
+        }
+        offlineBannerProbeInFlightForPanelRuntime = false;
+        if (isStaleForOfflineBannerForPanelRuntime()) {
+          teardownOfflineBannerForPanelRuntime();
+          return;
+        }
+        if (reachableForBanner) {
+          setOfflineBannerStateForPanelRuntime('hidden');
+          stopOfflineBannerProbeIntervalForPanelRuntime();
+        } else {
+          setOfflineBannerStateForPanelRuntime('offline');
+          startOfflineBannerProbeIntervalForPanelRuntime();
+        }
+      }
+
       window.addEventListener('online', updateOfflineBannerForPanelRuntime);
       window.addEventListener('offline', updateOfflineBannerForPanelRuntime);
+      window.addEventListener('focus', updateOfflineBannerForPanelRuntime);
+      document.addEventListener('visibilitychange', updateOfflineBannerForPanelRuntime, true);
       updateOfflineBannerForPanelRuntime();
 
       // Load saved API key into settings input when settings tab is visible

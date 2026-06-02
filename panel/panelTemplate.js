@@ -49,7 +49,7 @@
     </div>
     <div id="offline-banner" class="offline-banner hidden">
       ${icForPanelTemplate.offline13}
-      No internet connection
+      <span id="offline-banner-text">No internet connection</span>
     </div>
 
     <!-- CONTENT AREA -->
