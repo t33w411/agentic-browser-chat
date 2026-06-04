@@ -2,6 +2,7 @@
 
 > A privacy-respecting, local-first AI assistant that lives in your browser. Chat with any page, run agent tools, manage notes, tasks, and quizzes, attach files, and keep persistent memory — all from an injected overlay panel that ships with zero servers.
 
+[![Chrome Web Store](https://img.shields.io/chrome-web-store/v/bmkiakodphbdicdfbajbcjemccacihcd?label=Chrome%20Web%20Store&logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/bmkiakodphbdicdfbajbcjemccacihcd)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Manifest V3](https://img.shields.io/badge/Manifest-V3-blue.svg)](https://developer.chrome.com/docs/extensions/mv3/intro/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](./CONTRIBUTING.md)
@@ -214,11 +215,19 @@ The chat surface renders model output with:
 
 ### From the Chrome Web Store
 
-_Coming soon._ A link will be added here once the listing is live.
+Install the published build directly from the store:
+
+**[➜ Agentic Browser Chat on the Chrome Web Store](https://chromewebstore.google.com/detail/bmkiakodphbdicdfbajbcjemccacihcd)**
+
+1. Open the listing and click **Add to Chrome**.
+2. Confirm the permission prompt.
+3. Pin the extension to the toolbar for easy access.
+
+Works in any Chromium-based browser that supports the Chrome Web Store (Chrome, Edge, Brave, Arc, Vivaldi).
 
 ### From source (developer mode)
 
-This is the supported path while the Chrome Web Store listing is in review, and the recommended path if you want to hack on the code.
+This is the recommended path if you want to run the latest unreleased changes or hack on the code.
 
 1. Clone the repo:
    ```bash
