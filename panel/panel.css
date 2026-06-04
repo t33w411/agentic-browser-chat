@@ -970,8 +970,8 @@
 .msg-text a, .abchat-lt-text a, .ne-preview a, .im-msg.asst a { color: var(--abchat-text-accent); text-decoration: underline; text-underline-offset: 2px; }
 .msg-text a:hover, .abchat-lt-text a:hover, .ne-preview a:hover, .im-msg.asst a:hover { color: var(--abchat-accent-hover); }
 .msg-text table, .abchat-lt-text table, .ne-preview table, .im-msg.asst table { width: 100%; border-collapse: collapse; margin-bottom: 8px; font-size: 13.5px; }
-.msg-text table th, .abchat-lt-text table th, .ne-preview table th, .im-msg.asst table th { background: #e8edf5; color: var(--abchat-text-primary); font-weight: 600; text-align: left; padding: 6px 10px; border: 1px solid var(--abchat-border); }
-.msg-text table td, .abchat-lt-text table td, .ne-preview table td, .im-msg.asst table td { padding: 5px 10px; border: 1px solid var(--abchat-border); color: var(--abchat-text-secondary); }
+.msg-text table th, .abchat-lt-text table th, .ne-preview table th, .im-msg.asst table th { background: #e8edf5; color: var(--abchat-text-primary); font-weight: 600; text-align: left; padding: 6px 10px; border: 1px solid var(--abchat-border); min-width: 40px; }
+.msg-text table td, .abchat-lt-text table td, .ne-preview table td, .im-msg.asst table td { padding: 5px 10px; border: 1px solid var(--abchat-border); color: var(--abchat-text-secondary); min-width: 40px; }
 .msg-text table tr:nth-child(even), .abchat-lt-text table tr:nth-child(even), .ne-preview table tr:nth-child(even), .im-msg.asst table tr:nth-child(even) { background: #f4f7fb; }
 .msg-text table tr:nth-child(odd), .abchat-lt-text table tr:nth-child(odd), .ne-preview table tr:nth-child(odd), .im-msg.asst table tr:nth-child(odd) { background: #ffffff; }
 .panel-host[data-theme="dark"] .msg-text table th, .panel-host[data-theme="dark"] .abchat-lt-text table th, .panel-host[data-theme="dark"] .ne-preview table th, .panel-host[data-theme="dark"] .im-msg.asst table th { background: #1a2d44; border-color: var(--abchat-border); }

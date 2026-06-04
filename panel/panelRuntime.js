@@ -11040,6 +11040,19 @@
       const ITER_TOOL_STD_TIMEOUT_MS = 90 * 1000;
       const ITER_TOOL_IMAGE_TIMEOUT_MS = 3 * 60 * 1000;
       let timeoutReasonForSend = null;
+      const buildTimeoutNoticeForSend = function (reasonForNotice, toolTimeoutMsForNotice) {
+        if (reasonForNotice === 'total') {
+          return 'Agent stopped: turn exceeded the 10-minute time limit.';
+        }
+        if (reasonForNotice === 'stream') {
+          return 'Agent stopped: the model stopped responding (no data for 90s).';
+        }
+        const toolSecsForNotice = Math.round((toolTimeoutMsForNotice || ITER_TOOL_STD_TIMEOUT_MS) / 1000);
+        const toolLabelForNotice = toolSecsForNotice % 60 === 0
+          ? (toolSecsForNotice / 60) + '-minute limit'
+          : toolSecsForNotice + '-second limit';
+        return 'Agent stopped: tool execution took too long (' + toolLabelForNotice + ').';
+      };
       const turnTotalTimeoutIdForSend = setTimeout(function () {
         if (!timeoutReasonForSend) timeoutReasonForSend = 'total';
         controllerForSend.abort();
@@ -11464,6 +11477,11 @@
 
             if (resultForLoop && !resultForLoop.cancelled && resultForLoop.incompleteStream && streamRetryCountForLoop < MAX_STREAM_RETRIES_FOR_LOOP) {
               streamRetryCountForLoop++;
+              applyLiveTurnRetryNoticeForPanelRuntime(chatId, streamRetryCountForLoop, MAX_STREAM_RETRIES_FOR_LOOP);
+              broadcastStreamEventForPanelRuntime("stream_retry_notice", chatId, {
+                attempt: streamRetryCountForLoop,
+                maxAttempts: MAX_STREAM_RETRIES_FOR_LOOP
+              });
             } else {
               break;
             }
@@ -11507,12 +11525,7 @@
               }
             }
             if (timeoutReasonForSend && S.activeChatId === chatId) {
-              const timeoutMsgForSend = timeoutReasonForSend === 'total'
-                ? 'Agent stopped: turn exceeded the 10-minute time limit.'
-                : timeoutReasonForSend === 'stream'
-                ? 'Agent stopped: the model stopped responding (no data for 90s).'
-                : 'Agent stopped: tool execution took too long (3-minute limit).';
-              appendSystemMsgToContainerForPanelRuntime(timeoutMsgForSend);
+              appendSystemMsgToContainerForPanelRuntime(buildTimeoutNoticeForSend(timeoutReasonForSend));
             }
             break;
           }
@@ -11669,12 +11682,28 @@
             });
           };
           const toolExecPromisesForLoop = toolCallsForLoop.map(async function (tc) {
-            let toolArgs = {};
-            try { toolArgs = JSON.parse(tc.function.arguments || "{}"); } catch (e) {}
             const tcNameForExec = tc.function ? tc.function.name : '';
-            const logEntry = { name: tcNameForExec, args: toolArgs };
+            const rawToolArgsForExec = (tc.function && typeof tc.function.arguments === 'string') ? tc.function.arguments : '';
+            let toolArgs = {};
+            let toolArgsParseErrorForExec = null;
+            if (rawToolArgsForExec.trim() !== '') {
+              try { toolArgs = JSON.parse(rawToolArgsForExec); }
+              catch (parseErrForExec) { toolArgsParseErrorForExec = parseErrForExec; }
+            }
+            const logEntry = { name: tcNameForExec, args: toolArgsParseErrorForExec ? { _rawArguments: rawToolArgsForExec } : toolArgs };
             logAllToolCallsForSend.push(logEntry);
             toolLogEntriesForLoop.push(logEntry);
+            // Malformed argument JSON: report the parse error back to the model so it
+            // can re-issue the call with valid JSON, instead of silently passing {} to
+            // the tool and producing a misleading downstream error.
+            if (toolArgsParseErrorForExec) {
+              return {
+                ok: false,
+                error: 'Tool call arguments were not valid JSON and could not be parsed: ' +
+                  (toolArgsParseErrorForExec.message || String(toolArgsParseErrorForExec)) +
+                  '. The "arguments" field must be a single valid JSON object with every string value properly escaped (newlines as \\n, quotes as \\", backslashes as \\\\); do not split strings using + concatenation. Re-issue this tool call with corrected JSON.'
+              };
+            }
             // PreToolUse: a hook returning block: { reason } skips execution and
             // surfaces a synthetic error result to the model for this tool call.
             const preToolUseResultForLoop = await dispatchHookForSend('PreToolUse', {
@@ -11716,12 +11745,7 @@
           if (controllerForSend.signal.aborted) {
             logCancelledForSend = true;
             if (timeoutReasonForSend && S.activeChatId === chatId) {
-              const timeoutMsgForToolSend = timeoutReasonForSend === 'total'
-                ? 'Agent stopped: turn exceeded the 10-minute time limit.'
-                : timeoutReasonForSend === 'stream'
-                ? 'Agent stopped: the model stopped responding (no data for 90s).'
-                : 'Agent stopped: tool execution took too long (3-minute limit).';
-              appendSystemMsgToContainerForPanelRuntime(timeoutMsgForToolSend);
+              appendSystemMsgToContainerForPanelRuntime(buildTimeoutNoticeForSend(timeoutReasonForSend, toolExecTimeoutMsForSend));
             }
             break;
           }
