@@ -11816,6 +11816,18 @@
                 size: Number(toolResult.size) || 0,
                 note: 'The generated document has been saved and displayed to the user.'
               };
+            } else if (tcNameForResult === 'eval' && toolResult && toolResult.ok && toolResult._generatedDocument && typeof toolResult._generatedDocument.dataUrl === 'string') {
+              toolResultForModel = {
+                ok: true,
+                result: toolResult.result,
+                document: {
+                  format: toolResult._generatedDocument.format || '',
+                  filename: toolResult._generatedDocument.filename || '',
+                  mimeType: toolResult._generatedDocument.mimeType || '',
+                  size: Number(toolResult._generatedDocument.size) || 0,
+                  note: 'The generated document has been saved and displayed to the user.'
+                }
+              };
             }
             // Strip internal tracking fields before the model sees the result
             if (toolResultForModel && typeof toolResultForModel === 'object' && '_usage' in toolResultForModel) {
@@ -11999,17 +12011,22 @@
             }
             const tcNameForDocument = toolCallsForLoop[gdi].function && toolCallsForLoop[gdi].function.name;
             const toolResultForDocument = toolResultsForLoop[gdi];
-            if (tcNameForDocument !== 'create_document' || !toolResultForDocument || !toolResultForDocument.ok) continue;
-            if (typeof toolResultForDocument.dataUrl !== 'string' || toolResultForDocument.dataUrl.indexOf('data:') !== 0) continue;
+            if (!toolResultForDocument || !toolResultForDocument.ok) continue;
+            // create_document carries the file fields at the top level; eval nests the
+            // generated file under _generatedDocument. Both persist the same way below.
+            const docPayloadForDocument = tcNameForDocument === 'create_document'
+              ? toolResultForDocument
+              : (tcNameForDocument === 'eval' ? toolResultForDocument._generatedDocument : null);
+            if (!docPayloadForDocument || typeof docPayloadForDocument.dataUrl !== 'string' || docPayloadForDocument.dataUrl.indexOf('data:') !== 0) continue;
             if (!panelDataRepoForImageInject || typeof panelDataRepoForImageInject.createAttachmentBlob !== 'function') continue;
             try {
-              const filenameForDocument = String(toolResultForDocument.filename || 'generated-document');
+              const filenameForDocument = String(docPayloadForDocument.filename || 'generated-document');
               const blobRecordForDocument = await panelDataRepoForImageInject.createAttachmentBlob({
                 name: filenameForDocument,
                 kind: 'generated_document',
-                mimeType: String(toolResultForDocument.mimeType || ''),
-                dataUrl: toolResultForDocument.dataUrl,
-                size: Number(toolResultForDocument.size) || toolResultForDocument.dataUrl.length,
+                mimeType: String(docPayloadForDocument.mimeType || ''),
+                dataUrl: docPayloadForDocument.dataUrl,
+                size: Number(docPayloadForDocument.size) || docPayloadForDocument.dataUrl.length,
                 textContent: ''
               });
               if (controllerForSend.signal.aborted) {

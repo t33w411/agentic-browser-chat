@@ -3473,6 +3473,13 @@
   // Checked on the caller side before postMessage to give a clean error path.
   var EVAL_MAX_VARS_BYTES_FOR_TOOL_EXEC = 1048576; // 1 MB
 
+  // Maximum bytes for the resolved blob_ids payload injected as the reserved `blobs`
+  // variable, and (separately) for a returned __document__ spec. Both get their own
+  // budget, independent of the 1 MB vars cap and the 200 KB result cap, matching the
+  // 50 MB file-attachment ceiling (MAX_ATTACHMENT_BYTES_FOR_PANEL_RUNTIME in panelRuntime.js).
+  var EVAL_MAX_BLOB_BYTES_FOR_TOOL_EXEC = 52428800; // 50 MB
+  var EVAL_MAX_DOCUMENT_BYTES_FOR_TOOL_EXEC = 52428800; // 50 MB
+
   var EVAL_WORKER_SRC_FOR_TOOL_EXEC = [
     // importScripts must be nulled FIRST. It is a synchronous external-script loader
     // that executes in the worker global scope; if it runs before our other null
@@ -3502,8 +3509,11 @@
 
     // Output size cap shared with the caller constant EVAL_MAX_OUTPUT_BYTES_FOR_TOOL_EXEC.
     // Defined here so it travels with the worker source and cannot be tampered with
-    // from outside after the worker starts.
+    // from outside after the worker starts. The document cap mirrors the caller
+    // constant EVAL_MAX_DOCUMENT_BYTES_FOR_TOOL_EXEC and bounds the __document__ spec,
+    // which carries the bulk data and rides its own budget instead of the result cap.
     'var EVAL_WORKER_MAX_OUTPUT_BYTES = ' + EVAL_MAX_OUTPUT_BYTES_FOR_TOOL_EXEC + ';',
+    'var EVAL_WORKER_MAX_DOCUMENT_BYTES = ' + EVAL_MAX_DOCUMENT_BYTES_FOR_TOOL_EXEC + ';',
 
     'self.onmessage = function(e) {',
     '  var code = e.data.code;',
@@ -3516,21 +3526,59 @@
     '    self.postMessage({ ok: false, error: "vars JSON parse failed: " + (parseErr.message || String(parseErr)) });',
     '    return;',
     '  }',
+    // blobs arrives as a separate pre-serialized JSON array (resolved from blob_ids on
+    // the caller side). It is injected as a reserved `blobs` variable, never via vars.
+    '  var blobs;',
+    '  try { blobs = JSON.parse(e.data.blobsJson || "[]"); }',
+    '  catch (blobParseErr) {',
+    '    self.postMessage({ ok: false, error: "blobs JSON parse failed: " + (blobParseErr.message || String(blobParseErr)) });',
+    '    return;',
+    '  }',
     '  var keys = Object.keys(vars);',
+    // "blobs" is a reserved injected parameter name; a vars key of the same name would
+    // shadow it, silently hiding the attachments. Reject it with a clear message.
+    '  if (keys.indexOf("blobs") !== -1) {',
+    '    self.postMessage({ ok: false, error: "vars cannot contain a key named \\"blobs\\": that name is reserved for the injected attachment array." });',
+    '    return;',
+    '  }',
     '  var values = keys.map(function(k) { return vars[k]; });',
+    '  keys.push("blobs");',
+    '  values.push(blobs);',
     '  try {',
     '    var fn = new Function(keys, code);',
     '    var result = fn.apply(null, values);',
-    // Serialize the result to check size before sending. This also validates that
-    // the value is JSON-serializable (the original purpose of the JSON.stringify call).
+    // Pull out a __document__ spec (if any) before applying the model-facing output cap.
+    // The spec carries the bulk data and gets its own larger budget; what remains is the
+    // result the model sees and must stay under the 200 KB cap.
+    '    var documentSpecForEval;',
+    '    if (result && typeof result === "object" && !Array.isArray(result) && Object.prototype.hasOwnProperty.call(result, "__document__")) {',
+    '      documentSpecForEval = result.__document__;',
+    '      var strippedResultForEval = {};',
+    '      Object.keys(result).forEach(function(k) { if (k !== "__document__") strippedResultForEval[k] = result[k]; });',
+    '      result = strippedResultForEval;',
+    '    }',
+    '    if (documentSpecForEval !== undefined) {',
+    '      var serializedDocForEval = JSON.stringify(documentSpecForEval);',
+    '      if (serializedDocForEval === undefined) {',
+    '        self.postMessage({ ok: false, error: "__document__ is not JSON-serializable." });',
+    '        return;',
+    '      }',
+    '      if (serializedDocForEval.length > EVAL_WORKER_MAX_DOCUMENT_BYTES) {',
+    '        self.postMessage({ ok: false, error: "__document__ too large: " + serializedDocForEval.length + " bytes (max " + EVAL_WORKER_MAX_DOCUMENT_BYTES + " bytes / 50 MB)." });',
+    '        return;',
+    '      }',
+    '    }',
+    // Serialize the result to check size before sending. This also validates that the
+    // value is JSON-serializable. JSON.stringify(undefined) is undefined; skip the size
+    // check in that case and report the (undefined) result as-is.
     '    var serializedResultForEval = JSON.stringify(result);',
     // Reject results that exceed the output cap. Returning a huge value (e.g.
     // new Array(100000).fill("x")) would bloat every subsequent API call in the
     // agent loop; the model should be told to return a smaller value instead.
-    '    if (serializedResultForEval.length > EVAL_WORKER_MAX_OUTPUT_BYTES) {',
+    '    if (serializedResultForEval !== undefined && serializedResultForEval.length > EVAL_WORKER_MAX_OUTPUT_BYTES) {',
     '      self.postMessage({ ok: false, error: "Output too large: " + serializedResultForEval.length + " bytes (max " + EVAL_WORKER_MAX_OUTPUT_BYTES + " bytes / 200 KB). Return a smaller or summarized value." });',
     '    } else {',
-    '      self.postMessage({ ok: true, result: result });',
+    '      self.postMessage({ ok: true, result: result, document: documentSpecForEval });',
     '    }',
     '  } catch (err) {',
     '    self.postMessage({ ok: false, error: err.message || String(err) });',
@@ -3615,12 +3663,78 @@
     });
   }
 
-  function evalToolForToolExec(args, context) {
+  // Resolve a single blob_ids entry into the plain object injected into the worker.
+  // Unresolved IDs become { id, error } entries so the model sees which ones failed
+  // rather than the whole call erroring out.
+  async function resolveEvalBlobForToolExec(rawId, repo) {
+    var numericId = Number(rawId);
+    if (!Number.isFinite(numericId)) {
+      return { id: rawId, error: 'Invalid blob id' };
+    }
+    var record = null;
+    try {
+      record = await repo.getAttachmentBlob(numericId);
+    } catch (blobErr) {
+      return { id: numericId, error: 'Failed to load blob: ' + ((blobErr && blobErr.message) || String(blobErr)) };
+    }
+    if (!record) {
+      return { id: numericId, error: 'Blob not found' };
+    }
+    return {
+      id: numericId,
+      name: String(record.name || ''),
+      kind: String(record.kind || ''),
+      mimeType: String(record.mimeType || ''),
+      size: Number.isFinite(Number(record.size)) ? Number(record.size) : 0,
+      text: typeof record.textContent === 'string' ? record.textContent : '',
+      dataUrl: typeof record.dataUrl === 'string' ? record.dataUrl : ''
+    };
+  }
+
+  // Build the document binary from a worker-returned __document__ spec, reusing the same
+  // generator that backs the create_document tool. Returns the eval result augmented with
+  // _generatedDocument (carrying the dataUrl for the caller to persist) on success, or with
+  // document_error when generation is unavailable or fails. The computed result is preserved
+  // either way: a failed file should not discard a successful computation.
+  async function finalizeEvalDocumentForToolExec(workerData, signal) {
+    var baseResult = { ok: true, result: workerData.result };
+    var documentGenerationForEval = (globalScopeForToolExec.ABChatAgent || {}).documentGeneration;
+    if (!documentGenerationForEval || typeof documentGenerationForEval.createDocument !== 'function') {
+      baseResult.document_error = 'Document generator is unavailable; returning the computed result without a file.';
+      return baseResult;
+    }
+    var spec = workerData.document;
+    if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
+      baseResult.document_error = '__document__ must be an object with a "format" field and create_document-style content.';
+      return baseResult;
+    }
+    if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
+    try {
+      var built = await documentGenerationForEval.createDocument(spec);
+      if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
+      baseResult._generatedDocument = {
+        dataUrl: built.dataUrl,
+        filename: built.filename,
+        mimeType: built.mimeType,
+        format: built.format,
+        size: built.size
+      };
+      return baseResult;
+    } catch (docErr) {
+      baseResult.document_error = 'Document generation failed: ' + ((docErr && docErr.message) || String(docErr));
+      return baseResult;
+    }
+  }
+
+  async function evalToolForToolExec(args, context) {
     var signal = getAbortSignalForToolExec(context);
     var code = args.code;
-    if (typeof code !== 'string') return Promise.resolve({ ok: false, error: 'code is required' });
+    if (typeof code !== 'string') return { ok: false, error: 'code is required' };
     if (args.vars !== undefined && args.vars !== null && (typeof args.vars !== 'object' || Array.isArray(args.vars))) {
-      return Promise.resolve({ ok: false, error: 'vars must be a plain object (key-value map), not an array or primitive' });
+      return { ok: false, error: 'vars must be a plain object (key-value map), not an array or primitive' };
+    }
+    if (args.blob_ids !== undefined && args.blob_ids !== null && !Array.isArray(args.blob_ids)) {
+      return { ok: false, error: 'blob_ids must be an array of attachment blob IDs (integers).' };
     }
     var vars = (args.vars && typeof args.vars === 'object' && !Array.isArray(args.vars)) ? args.vars : {};
     var timeout = (typeof args.timeout === 'number' && args.timeout > 0)
@@ -3636,12 +3750,35 @@
     try {
       varsJson = JSON.stringify(vars);
     } catch (jsonErr) {
-      return Promise.resolve({ ok: false, error: 'vars could not be serialized to JSON: ' + (jsonErr.message || String(jsonErr)) });
+      return { ok: false, error: 'vars could not be serialized to JSON: ' + (jsonErr.message || String(jsonErr)) };
     }
     if (varsJson.length > EVAL_MAX_VARS_BYTES_FOR_TOOL_EXEC) {
-      return Promise.resolve({ ok: false, error: 'vars too large: ' + varsJson.length + ' bytes (max 1 MB)' });
+      return { ok: false, error: 'vars too large: ' + varsJson.length + ' bytes (max 1 MB)' };
     }
-    if (isAbortedForToolExec(signal)) return Promise.resolve(cancelledResultForToolExec());
+
+    // Resolve blob_ids into the reserved `blobs` array, serialized on its own budget so
+    // attachment data never counts against the 1 MB vars cap.
+    var blobsForEval = [];
+    if (Array.isArray(args.blob_ids) && args.blob_ids.length > 0) {
+      var repoForEval = getPanelDataRepoForToolExec();
+      if (!repoForEval || typeof repoForEval.getAttachmentBlob !== 'function') {
+        return { ok: false, error: 'Attachment storage is unavailable; cannot resolve blob_ids.' };
+      }
+      for (var blobIndexForEval = 0; blobIndexForEval < args.blob_ids.length; blobIndexForEval++) {
+        if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
+        blobsForEval.push(await resolveEvalBlobForToolExec(args.blob_ids[blobIndexForEval], repoForEval));
+      }
+    }
+    var blobsJson;
+    try {
+      blobsJson = JSON.stringify(blobsForEval);
+    } catch (blobsJsonErr) {
+      return { ok: false, error: 'Resolved blobs could not be serialized to JSON: ' + (blobsJsonErr.message || String(blobsJsonErr)) };
+    }
+    if (blobsJson.length > EVAL_MAX_BLOB_BYTES_FOR_TOOL_EXEC) {
+      return { ok: false, error: 'blob_ids payload too large: ' + blobsJson.length + ' bytes (max 50 MB). Pass fewer or smaller attachments.' };
+    }
+    if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
 
     return new Promise(function (resolve) {
       var blob = new Blob([EVAL_WORKER_SRC_FOR_TOOL_EXEC], { type: 'application/javascript' });
@@ -3669,16 +3806,25 @@
       }, timeout);
 
       worker.onmessage = function (e) {
-        settleEvalForToolExec(e.data);
+        var workerDataForEval = e.data || {};
+        // A returned __document__ spec is generated into a real file here (outside the
+        // worker, which has no document libraries) before the result is settled.
+        if (workerDataForEval.ok && workerDataForEval.document !== undefined && workerDataForEval.document !== null) {
+          finalizeEvalDocumentForToolExec(workerDataForEval, signal).then(settleEvalForToolExec, function (finalizeErr) {
+            settleEvalForToolExec({ ok: true, result: workerDataForEval.result, document_error: (finalizeErr && finalizeErr.message) || String(finalizeErr) });
+          });
+          return;
+        }
+        settleEvalForToolExec(workerDataForEval);
       };
 
       worker.onerror = function (e) {
         settleEvalForToolExec({ ok: false, error: (e && e.message) || 'Worker error' });
       };
 
-      // Send vars as a pre-serialized JSON string rather than as a raw object.
-      // See the JSON.stringify block above for the reasons.
-      worker.postMessage({ code: code, varsJson: varsJson });
+      // Send vars and blobs as pre-serialized JSON strings rather than raw objects.
+      // See the JSON.stringify blocks above for the reasons.
+      worker.postMessage({ code: code, varsJson: varsJson, blobsJson: blobsJson });
     });
   }
 
