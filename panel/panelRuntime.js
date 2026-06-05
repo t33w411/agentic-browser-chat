@@ -1665,7 +1665,9 @@
       },
       langPrefix: 'hljs language-',
       gfm: true,
-      breaks: false,
+      breaks: true,
+      headerIds: false,
+      mangle: false,
     });
 
     // Protect math delimiters from markdown parsing via custom marked extensions.
@@ -1732,7 +1734,35 @@
           renderer(token) { return token.text; },
         },
       ],
+      // GFM autolinks bare email addresses (foo@bar.com) into mailto: links.
+      // Suppress that for plain prose by emitting the email as text. Real URLs
+      // still autolink, and explicit [text](mailto:...) and <email> links stay.
+      tokenizer: {
+        url(src) {
+          const capForEmailSuppress = this.rules.inline.url.exec(src);
+          if (capForEmailSuppress && capForEmailSuppress[2] === '@') {
+            return { type: 'text', raw: capForEmailSuppress[0], text: capForEmailSuppress[0] };
+          }
+          return false;
+        },
+      },
     });
+
+    // Open external links from rendered markdown in a new tab so a click never
+    // navigates the host page away. In-page anchors (e.g. #abchat-docblob-*) are
+    // left untouched: they are handled by the panel's own delegated click logic.
+    // DOMPurify persists across re-injection, so guard with a window flag to add
+    // this hook exactly once and avoid stacking duplicates on extension reload.
+    if (!window.abchatDompurifyExternalLinkHookBound) {
+      window.abchatDompurifyExternalLinkHookBound = true;
+      DOMPurify.addHook('afterSanitizeAttributes', function (nodeForLinkHook) {
+        if (nodeForLinkHook.tagName !== 'A' || !nodeForLinkHook.hasAttribute('href')) return;
+        const hrefForLinkHook = nodeForLinkHook.getAttribute('href') || '';
+        if (hrefForLinkHook.charAt(0) === '#') return;
+        nodeForLinkHook.setAttribute('target', '_blank');
+        nodeForLinkHook.setAttribute('rel', 'noopener noreferrer');
+      });
+    }
 
     function mapMermaidCodeBlocksToContainersForPanelRuntime(rawHtmlForPanelRuntime) {
       if (!rawHtmlForPanelRuntime || !rawHtmlForPanelRuntime.trim()) return rawHtmlForPanelRuntime;
@@ -9612,6 +9642,23 @@
       );
     }
 
+    function formatTokenAmountForPanelRuntime(amountForFormat, keepDecimalUnderMillion) {
+      const numForFormat = Number(amountForFormat) || 0;
+      if (numForFormat >= 1000000) {
+        const millionsForFormat = numForFormat / 1000000;
+        const millionsLabelForFormat = Number.isInteger(millionsForFormat)
+          ? String(millionsForFormat)
+          : millionsForFormat.toFixed(1).replace(/\.0$/, '');
+        return millionsLabelForFormat + 'M';
+      }
+      if (numForFormat >= 1000) {
+        return keepDecimalUnderMillion
+          ? (numForFormat / 1000).toFixed(1) + 'k'
+          : Math.round(numForFormat / 1000) + 'k';
+      }
+      return String(numForFormat);
+    }
+
     function updateSessionTokenDisplayForPanelRuntime(usageObj, cumulativeCost) {
       const inputBottomForCounter = root.querySelector('.input-bottom');
       if (!inputBottomForCounter) return;
@@ -9634,9 +9681,7 @@
       const totalTokensForDisplay = Math.max(0, rawTotalTokensForDisplay - reasoningTokensForDisplay);
       const numCumulativeCost = Number(cumulativeCost) || 0;
       if (!totalTokensForDisplay && !numCumulativeCost) { counterElForDisplay.textContent = ''; counterElForDisplay.style.color = 'var(--text-muted,#888)'; return; }
-      const tokensLabelForDisplay = totalTokensForDisplay >= 1000
-        ? (totalTokensForDisplay / 1000).toFixed(1) + 'k'
-        : String(totalTokensForDisplay || 0);
+      const tokensLabelForDisplay = formatTokenAmountForPanelRuntime(totalTokensForDisplay, true);
 
       // Context fill: estimate budget from active model and show fill fraction.
       const agentNsForCounter = globalThis.ABChatAgent || {};
@@ -9666,9 +9711,7 @@
             }
             effectiveBudgetForDisplay = tierForDisplay || totalTokensForDisplay;
           }
-          const budgetLabelForDisplay = effectiveBudgetForDisplay >= 1000
-            ? Math.round(effectiveBudgetForDisplay / 1000) + 'k'
-            : String(effectiveBudgetForDisplay);
+          const budgetLabelForDisplay = formatTokenAmountForPanelRuntime(effectiveBudgetForDisplay, false);
           contextFillLabelForDisplay = ' / ' + budgetLabelForDisplay;
           const fillFractionForDisplay = totalTokensForDisplay / effectiveBudgetForDisplay;
           if (totalTokensForDisplay > 0) {
