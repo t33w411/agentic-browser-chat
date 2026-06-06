@@ -46,21 +46,39 @@
       tools,
       tool_choice,
       onDelta,
-      signal
+      signal,
+      sessionId
     } = paramsForClient || {};
 
     if (!apiKey) throw new Error("No API key provided.");
     if (!model) throw new Error("No model specified.");
     if (!Array.isArray(messages) || messages.length === 0) throw new Error("No messages.");
 
+    // Anthropic and Gemini only cache when cache_control is sent, and that cache lives on the
+    // specific provider endpoint that wrote it. Route these stickily so the cache survives across
+    // turns: send a stable session_id (OpenRouter uses it directly as the sticky key and pins one
+    // provider from the first request) and drop the throughput sort, which re-ranks providers per
+    // request and would scatter the cache. Other providers (OpenAI, DeepSeek) cache automatically
+    // and keep throughput-based routing.
+    const modelIdForClient = String(model).toLowerCase();
+    const useStickyCacheRoutingForClient =
+      modelIdForClient.indexOf("anthropic/") === 0 ||
+      modelIdForClient.indexOf("google/") === 0;
+
     const bodyForClient = {
       model: model,
       messages: messages,
-      stream: true,
-      provider: {
-        sort: "throughput"
-      }
+      stream: true
     };
+
+    if (useStickyCacheRoutingForClient) {
+      bodyForClient.cache_control = { type: "ephemeral" };
+      if (typeof sessionId === "string" && sessionId) {
+        bodyForClient.session_id = sessionId.slice(0, 256);
+      }
+    } else {
+      bodyForClient.provider = { sort: "throughput" };
+    }
 
     if (Array.isArray(tools) && tools.length > 0) {
       bodyForClient.tools = tools;

@@ -4017,7 +4017,7 @@
       if (!chatSelect || !label) return;
       const idx = chatSelect.selectedIndex;
       if (idx >= 0 && chatSelect.options[idx]) {
-        label.textContent = chatSelect.options[idx].textContent.replace(/\s*--\s*\[Expensive\].*$/i, '').trim();
+        label.textContent = chatSelect.options[idx].textContent.replace(/\s*--\s*\[[^\]]+\].*$/i, '').trim();
       }
       const currentModelId = chatSelect.value;
       const dropdown = root.getElementById('model-picker-dropdown');
@@ -8521,6 +8521,7 @@
           model: modelForInline,
           apiKey: apiKeyForInline,
           messages: inlineMessagesForPanelRuntime,
+          sessionId: 'abchat-' + quickChatIdForInline,
           signal: null,
           onDelta: function (deltaForInline) {
             if (!deltaForInline || deltaForInline.type !== 'text' || !deltaForInline.text) return;
@@ -9343,6 +9344,24 @@
       return models[0].id;
     }
 
+    // populateModelSelectsForPanelRuntime forces the global default model as the
+    // selected option on the chat select. When a chat is already active (e.g. on
+    // reload-with-open-panel, where state restore and model population race), that
+    // would clobber the chat's per-chat model with the global default and leave the
+    // picker wrong until the next chat re-render. Re-assert the active chat's model
+    // after populate, mirroring selectChat. The settings default-model select is
+    // intentionally left on the global default.
+    function reapplyActiveChatModelToPickerForPanelRuntime() {
+      if (S.activeChatId == null) return;
+      const chatSelectForReapply = root.getElementById('chat-model-select');
+      const activeChatForReapply = CHAT_STORE_FOR_PANEL_RUNTIME[S.activeChatId];
+      const lastModelForReapply = activeChatForReapply && activeChatForReapply.lastModel;
+      if (!chatSelectForReapply || !lastModelForReapply) return;
+      chatSelectForReapply.value = lastModelForReapply;
+      if (chatSelectForReapply.value !== lastModelForReapply) return;
+      syncModelPickerLabelForPanelRuntime();
+    }
+
     async function initModelSelectsForPanelRuntime() {
       const apiKey = await getApiKeyForPanelRuntime();
       const { chatModels, imageModels } = await getAllModelsForPanelRuntime(apiKey);
@@ -9350,6 +9369,7 @@
       populateModelSelectsForPanelRuntime(chatModels, selectedModel);
       const chatSelectAfterInit = root.getElementById('chat-model-select');
       if (chatSelectAfterInit) loadedGlobalDefaultModelForPanelRuntime = chatSelectAfterInit.value;
+      reapplyActiveChatModelToPickerForPanelRuntime();
       loadedImageModelsForPanelRuntime = imageModels;
       let imageModel = await getImageModelForPanelRuntime();
       if (!imageModel && imageModels.length > 0) {
@@ -11493,6 +11513,7 @@
               model: model,
               apiKey: apiKey,
               messages: apiMessages,
+              sessionId: 'abchat-' + chatId,
               tools: toolDefsForSend.length > 0 ? toolDefsForSend : undefined,
               signal: controllerForSend.signal,
               onDelta: function (deltaForLoop) {
