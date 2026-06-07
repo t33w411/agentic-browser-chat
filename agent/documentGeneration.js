@@ -13,6 +13,29 @@
   var MAX_TABLE_ROWS_FOR_DOCUMENT_GENERATION = 5000;
   var MAX_TABLE_COLS_FOR_DOCUMENT_GENERATION = 100;
   var MAX_CELL_CHARS_FOR_DOCUMENT_GENERATION = 10000;
+  var MAX_DOCX_IMAGES_FOR_DOCUMENT_GENERATION = 50;
+  var EMU_PER_PIXEL_FOR_DOCUMENT_GENERATION = 9525;            // 914400 EMU/in / 96 px/in
+  var MAX_IMAGE_WIDTH_EMU_FOR_DOCUMENT_GENERATION = 5943600;  // 9360 twip content width * 635 EMU/twip
+  var MAX_IMAGE_HEIGHT_EMU_FOR_DOCUMENT_GENERATION = 8229600; // 12960 twip content height * 635 EMU/twip
+  var IMAGE_SENTINEL_RE_FOR_DOCUMENT_GENERATION = /^abchat-img:(\d+):(\d+)$/;
+  var IMAGE_SENTINEL_SCAN_RE_FOR_DOCUMENT_GENERATION = /abchat-img:(\d+):\d+/g;
+  var IMAGE_CONTENT_TYPE_EXT_FOR_DOCUMENT_GENERATION = {
+    'image/png': 'png',
+    'image/jpeg': 'jpeg',
+    'image/gif': 'gif'
+  };
+  var MAX_PDF_IMAGE_RASTER_DIM_FOR_DOCUMENT_GENERATION = 1600;  // longest side, px, before JPEG re-encode
+  var PDF_IMAGE_JPEG_QUALITY_FOR_DOCUMENT_GENERATION = 0.9;
+  var PDF_PX_TO_PT_FOR_DOCUMENT_GENERATION = 0.75;             // 72 pt/in / 96 px/in
+  var PDF_FONT_ASCENT_RATIO_FOR_DOCUMENT_GENERATION = 0.75;    // >= Helvetica cap height (0.718) so glyphs never rise above the line box
+  // Block-level tags that force a line break when nested inside an inline context (the
+  // common case is several <p> inside one table cell, which mammoth emits). Without this
+  // the runs concatenate onto one line (e.g. "Title" + "Subtitle" -> "TitleSubtitle").
+  var INLINE_BLOCK_BOUNDARY_TAGS_FOR_DOCUMENT_GENERATION = {
+    p: true, div: true, section: true, article: true, header: true, footer: true,
+    main: true, figure: true, figcaption: true, blockquote: true, pre: true, address: true,
+    li: true, dd: true, dt: true, h1: true, h2: true, h3: true, h4: true, h5: true, h6: true
+  };
 
   function escapeXmlForDocumentGeneration(valueForDocumentGeneration) {
     return String(valueForDocumentGeneration == null ? '' : valueForDocumentGeneration)
@@ -157,40 +180,853 @@
     };
   }
 
-  function docxParagraphForDocumentGeneration(textForDocumentGeneration, optionsForDocumentGeneration) {
-    var optsForDocumentGeneration = optionsForDocumentGeneration || {};
-    var paragraphPropsForDocumentGeneration = '';
-    if (optsForDocumentGeneration.headingLevel) {
-      var headingSizeForDocumentGeneration = optsForDocumentGeneration.headingLevel === 1 ? '32' : (optsForDocumentGeneration.headingLevel === 2 ? '28' : '24');
-      paragraphPropsForDocumentGeneration = '<w:pPr><w:spacing w:after="160"/><w:rPr><w:b/><w:sz w:val="' + headingSizeForDocumentGeneration + '"/></w:rPr></w:pPr>';
+  function htmlInlineRunsFromNodesForDocumentGeneration(topNodesForDocumentGeneration) {
+    var runsForDocumentGeneration = [];
+    function appendChildRunForDocumentGeneration(childForInline, flagsForDocumentGeneration) {
+      if (childForInline.nodeType === 3) {
+        var textForInline = String(childForInline.nodeValue || '').replace(/\s+/g, ' ');
+        if (textForInline) {
+          runsForDocumentGeneration.push({
+            text: textForInline,
+            bold: flagsForDocumentGeneration.bold,
+            italic: flagsForDocumentGeneration.italic,
+            href: flagsForDocumentGeneration.href
+          });
+        }
+        return;
+      }
+      if (childForInline.nodeType !== 1) return;
+      var tagForInline = String(childForInline.tagName || '').toLowerCase();
+      if (tagForInline === 'br') { runsForDocumentGeneration.push({ text: '\n' }); return; }
+      if (tagForInline === 'ul' || tagForInline === 'ol') return;
+      if (INLINE_BLOCK_BOUNDARY_TAGS_FOR_DOCUMENT_GENERATION[tagForInline] === true) {
+        var lastRunForInline = runsForDocumentGeneration[runsForDocumentGeneration.length - 1];
+        if (lastRunForInline && lastRunForInline.text !== '\n') {
+          runsForDocumentGeneration.push({ text: '\n' });
+        }
+      }
+      var nextFlagsForInline = {
+        bold: flagsForDocumentGeneration.bold,
+        italic: flagsForDocumentGeneration.italic,
+        href: flagsForDocumentGeneration.href
+      };
+      if (tagForInline === 'strong' || tagForInline === 'b') nextFlagsForInline.bold = true;
+      else if (tagForInline === 'em' || tagForInline === 'i') nextFlagsForInline.italic = true;
+      else if (tagForInline === 'a') {
+        var hrefForInline = String(childForInline.getAttribute('href') || '');
+        if (/^(https?:|mailto:)/i.test(hrefForInline)) nextFlagsForInline.href = hrefForInline;
+      }
+      walkInlineForDocumentGeneration(childForInline, nextFlagsForInline);
     }
-    var linesForDocumentGeneration = String(textForDocumentGeneration == null ? '' : textForDocumentGeneration).split(/\r?\n/);
-    var runXmlForDocumentGeneration = linesForDocumentGeneration.map(function (lineForDocumentGeneration, indexForDocumentGeneration) {
-      var breakForDocumentGeneration = indexForDocumentGeneration > 0 ? '<w:br/>' : '';
-      return breakForDocumentGeneration + '<w:t xml:space="preserve">' + escapeXmlForDocumentGeneration(lineForDocumentGeneration) + '</w:t>';
-    }).join('');
-    return '<w:p>' + paragraphPropsForDocumentGeneration + '<w:r>' + runXmlForDocumentGeneration + '</w:r></w:p>';
+    function walkInlineForDocumentGeneration(nodeForDocumentGeneration, flagsForDocumentGeneration) {
+      var childNodesForDocumentGeneration = nodeForDocumentGeneration.childNodes || [];
+      for (var iForInline = 0; iForInline < childNodesForDocumentGeneration.length; iForInline++) {
+        appendChildRunForDocumentGeneration(childNodesForDocumentGeneration[iForInline], flagsForDocumentGeneration);
+      }
+    }
+    for (var iTopForInline = 0; iTopForInline < topNodesForDocumentGeneration.length; iTopForInline++) {
+      appendChildRunForDocumentGeneration(topNodesForDocumentGeneration[iTopForInline], { bold: false, italic: false, href: '' });
+    }
+    return runsForDocumentGeneration.filter(function (runForFilter) {
+      return runForFilter.text && runForFilter.text.length > 0;
+    });
   }
 
-  function docxTableForDocumentGeneration(rowsForDocumentGeneration) {
-    var normalizedRowsForDocumentGeneration = normalizeRowsForDocumentGeneration(rowsForDocumentGeneration);
-    if (normalizedRowsForDocumentGeneration.length === 0) return '';
-    var rowXmlForDocumentGeneration = normalizedRowsForDocumentGeneration.map(function (rowForDocumentGeneration) {
-      var cellsForDocumentGeneration = rowForDocumentGeneration.map(function (cellForDocumentGeneration) {
-        return '<w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr>' +
-          docxParagraphForDocumentGeneration(cellForDocumentGeneration, {}) +
-          '</w:tc>';
-      }).join('');
-      return '<w:tr>' + cellsForDocumentGeneration + '</w:tr>';
+  function htmlInlineRunsForDocumentGeneration(elementForDocumentGeneration) {
+    return htmlInlineRunsFromNodesForDocumentGeneration(elementForDocumentGeneration.childNodes || []);
+  }
+
+  // Split a table cell into one runs array per block-level child (the <p> blocks mammoth
+  // emits become real separate <w:p> paragraphs in the cell). Inline/text content not wrapped
+  // in a block is grouped into its own paragraph. Always returns at least one paragraph so an
+  // empty cell still emits a valid (empty) paragraph.
+  function cellParagraphsFromElementForDocumentGeneration(cellElForDocumentGeneration) {
+    var paragraphsForCell = [];
+    var looseNodesForCell = [];
+    var childNodesForCell = cellElForDocumentGeneration.childNodes || [];
+    function flushLooseForCell() {
+      if (!looseNodesForCell.length) return;
+      var looseRunsForCell = htmlInlineRunsFromNodesForDocumentGeneration(looseNodesForCell);
+      looseNodesForCell = [];
+      var hasContentForCell = looseRunsForCell.some(function (runForCell) {
+        return runForCell.text && runForCell.text !== '\n' && runForCell.text.trim().length > 0;
+      });
+      if (hasContentForCell) paragraphsForCell.push(looseRunsForCell);
+    }
+    for (var iForCell = 0; iForCell < childNodesForCell.length; iForCell++) {
+      var childForCell = childNodesForCell[iForCell];
+      if (childForCell.nodeType === 1
+        && INLINE_BLOCK_BOUNDARY_TAGS_FOR_DOCUMENT_GENERATION[String(childForCell.tagName || '').toLowerCase()] === true) {
+        flushLooseForCell();
+        var blockRunsForCell = htmlInlineRunsForDocumentGeneration(childForCell);
+        if (blockRunsForCell.length) paragraphsForCell.push(blockRunsForCell);
+        continue;
+      }
+      looseNodesForCell.push(childForCell);
+    }
+    flushLooseForCell();
+    if (!paragraphsForCell.length) paragraphsForCell.push([]);
+    return paragraphsForCell;
+  }
+
+  function base64ToUint8ForDocumentGeneration(base64ForDocumentGeneration) {
+    var binaryForDocumentGeneration = atob(String(base64ForDocumentGeneration || ''));
+    var lengthForDocumentGeneration = binaryForDocumentGeneration.length;
+    var bytesForDocumentGeneration = new Uint8Array(lengthForDocumentGeneration);
+    for (var iForDocumentGeneration = 0; iForDocumentGeneration < lengthForDocumentGeneration; iForDocumentGeneration++) {
+      bytesForDocumentGeneration[iForDocumentGeneration] = binaryForDocumentGeneration.charCodeAt(iForDocumentGeneration);
+    }
+    return bytesForDocumentGeneration;
+  }
+
+  function computeDocxImageExtentForDocumentGeneration(widthPxForExtent, heightPxForExtent) {
+    var naturalWidthEmuForExtent = Math.max(1, Math.round(Number(widthPxForExtent) * EMU_PER_PIXEL_FOR_DOCUMENT_GENERATION));
+    var naturalHeightEmuForExtent = Math.max(1, Math.round(Number(heightPxForExtent) * EMU_PER_PIXEL_FOR_DOCUMENT_GENERATION));
+    var scaleForExtent = Math.min(
+      1,
+      MAX_IMAGE_WIDTH_EMU_FOR_DOCUMENT_GENERATION / naturalWidthEmuForExtent,
+      MAX_IMAGE_HEIGHT_EMU_FOR_DOCUMENT_GENERATION / naturalHeightEmuForExtent
+    );
+    return {
+      cx: Math.max(1, Math.round(naturalWidthEmuForExtent * scaleForExtent)),
+      cy: Math.max(1, Math.round(naturalHeightEmuForExtent * scaleForExtent))
+    };
+  }
+
+  function makeImageDropTrackerForDocumentGeneration() {
+    var countsForTracker = {};
+    var totalForTracker = 0;
+    return {
+      add: function (reasonForTracker) {
+        totalForTracker++;
+        countsForTracker[reasonForTracker] = (countsForTracker[reasonForTracker] || 0) + 1;
+      },
+      note: function () {
+        if (totalForTracker === 0) return '';
+        var partsForTracker = Object.keys(countsForTracker).map(function (reasonKeyForTracker) {
+          return countsForTracker[reasonKeyForTracker] + ' ' + reasonKeyForTracker;
+        });
+        var leadForTracker = totalForTracker === 1 ? ' image was not embedded: ' : ' images were not embedded: ';
+        return totalForTracker + leadForTracker + partsForTracker.join('; ') + '.';
+      }
+    };
+  }
+
+  function scanImageBlobIdsForDocumentGeneration(htmlForScan) {
+    var seenForScan = {};
+    var matchForScan;
+    IMAGE_SENTINEL_SCAN_RE_FOR_DOCUMENT_GENERATION.lastIndex = 0;
+    while ((matchForScan = IMAGE_SENTINEL_SCAN_RE_FOR_DOCUMENT_GENERATION.exec(String(htmlForScan || '')))) {
+      seenForScan[matchForScan[1]] = true;
+    }
+    return Object.keys(seenForScan);
+  }
+
+  // Fetch the source images for every distinct blob referenced by the html, one whole-array
+  // round-trip per blob (deps.fetchDocxImages). Resolves to a { blobId: imagesArray|null } map;
+  // index N in each array is the Nth image in mammoth's walk order, matching how the sentinels
+  // were minted on read.
+  function fetchImagesByBlobForDocumentGeneration(htmlForFetch, depsForFetch) {
+    var fetchImagesForFetch = depsForFetch && typeof depsForFetch.fetchDocxImages === 'function'
+      ? depsForFetch.fetchDocxImages
+      : null;
+    var blobIdsForFetch = scanImageBlobIdsForDocumentGeneration(htmlForFetch);
+    return Promise.all(blobIdsForFetch.map(function (blobIdKeyForFetch) {
+      if (!fetchImagesForFetch) return { blobId: blobIdKeyForFetch, images: null };
+      return Promise.resolve()
+        .then(function () { return fetchImagesForFetch(Number(blobIdKeyForFetch)); })
+        .then(function (imagesForFetch) {
+          return { blobId: blobIdKeyForFetch, images: Array.isArray(imagesForFetch) ? imagesForFetch : null };
+        })
+        .catch(function () { return { blobId: blobIdKeyForFetch, images: null }; });
+    })).then(function (fetchedForFetch) {
+      var imagesByBlobForFetch = {};
+      fetchedForFetch.forEach(function (entryForFetch) {
+        imagesByBlobForFetch[entryForFetch.blobId] = entryForFetch.images;
+      });
+      return imagesByBlobForFetch;
+    });
+  }
+
+  // Shared validation: look up the Nth image of a blob and decode it to bytes, or report why it
+  // cannot be embedded. Returns { ok:true, bytes, contentType, ext, wPx, hPx } | { ok:false, reason }.
+  function resolveRawImageForDocumentGeneration(imagesByBlobForRaw, blobIdForRaw, indexForRaw) {
+    var arrayForRaw = imagesByBlobForRaw[String(blobIdForRaw)];
+    if (arrayForRaw == null) return { ok: false, reason: 'source no longer attached' };
+    var rawForRaw = arrayForRaw[indexForRaw];
+    if (!rawForRaw) return { ok: false, reason: 'unknown image reference' };
+    var contentTypeForRaw = String(rawForRaw.contentType || '').toLowerCase();
+    var extForRaw = IMAGE_CONTENT_TYPE_EXT_FOR_DOCUMENT_GENERATION[contentTypeForRaw];
+    if (!extForRaw) {
+      return { ok: false, reason: 'unsupported format (' + (contentTypeForRaw ? contentTypeForRaw.replace('image/', '') : 'unknown') + ')' };
+    }
+    var widthPxForRaw = Number(rawForRaw.width) || 0;
+    var heightPxForRaw = Number(rawForRaw.height) || 0;
+    if (widthPxForRaw <= 0 || heightPxForRaw <= 0) return { ok: false, reason: 'zero-size image' };
+    var bytesForRaw;
+    try {
+      bytesForRaw = base64ToUint8ForDocumentGeneration(rawForRaw.base64);
+    } catch (decodeErrForRaw) {
+      return { ok: false, reason: 'corrupt image data' };
+    }
+    if (!bytesForRaw.length) return { ok: false, reason: 'zero-size image' };
+    return { ok: true, bytes: bytesForRaw, contentType: contentTypeForRaw, ext: extForRaw, wPx: widthPxForRaw, hPx: heightPxForRaw };
+  }
+
+  // docx resolver: maps a sentinel to original bytes + OOXML EMU extent (the docx media is
+  // referenced as-is, container and all). resolve() returns { ok:true, resolved } | { ok:false, reason }.
+  function buildDocxImageResolverForDocumentGeneration(htmlForResolver, depsForResolver) {
+    return fetchImagesByBlobForDocumentGeneration(htmlForResolver, depsForResolver).then(function (imagesByBlobForResolver) {
+      return {
+        resolve: function (blobIdForResolve, indexForResolve) {
+          var rawResForResolve = resolveRawImageForDocumentGeneration(imagesByBlobForResolver, blobIdForResolve, indexForResolve);
+          if (!rawResForResolve.ok) return rawResForResolve;
+          var extentForResolve = computeDocxImageExtentForDocumentGeneration(rawResForResolve.wPx, rawResForResolve.hPx);
+          return {
+            ok: true,
+            resolved: { bytes: rawResForResolve.bytes, ext: rawResForResolve.ext, cx: extentForResolve.cx, cy: extentForResolve.cy }
+          };
+        }
+      };
+    });
+  }
+
+  // pdf resolver: maps a sentinel to original bytes + content type + natural pixel size. The
+  // bytes are rasterized to JPEG later (PDF has no PNG/GIF decoder), so resolve() stays sync and
+  // only carries what the async rasterize pass needs.
+  function buildPdfImageResolverForDocumentGeneration(htmlForResolver, depsForResolver) {
+    return fetchImagesByBlobForDocumentGeneration(htmlForResolver, depsForResolver).then(function (imagesByBlobForResolver) {
+      return {
+        resolve: function (blobIdForResolve, indexForResolve) {
+          var rawResForResolve = resolveRawImageForDocumentGeneration(imagesByBlobForResolver, blobIdForResolve, indexForResolve);
+          if (!rawResForResolve.ok) return rawResForResolve;
+          return {
+            ok: true,
+            resolved: { bytes: rawResForResolve.bytes, contentType: rawResForResolve.contentType, wPx: rawResForResolve.wPx, hPx: rawResForResolve.hPx }
+          };
+        }
+      };
+    });
+  }
+
+  // Turn a resolved PDF image (original bytes) into embeddable JPEG bytes plus the pixel size to
+  // declare in the XObject. Source JPEGs pass through losslessly (DCTDecode embeds them as-is);
+  // PNG/GIF are drawn onto an opaque white OffscreenCanvas and re-encoded to JPEG, which also
+  // flattens transparency. Oversized rasters are scaled down to MAX_PDF_IMAGE_RASTER_DIM.
+  function rasterizePdfImageToJpegForDocumentGeneration(bytesForRaster, contentTypeForRaster, wPxForRaster, hPxForRaster) {
+    if (contentTypeForRaster === 'image/jpeg') {
+      return Promise.resolve({
+        jpegBytes: bytesForRaster,
+        wPx: Math.max(1, Math.round(Number(wPxForRaster) || 1)),
+        hPx: Math.max(1, Math.round(Number(hPxForRaster) || 1))
+      });
+    }
+    if (typeof createImageBitmap !== 'function' || typeof OffscreenCanvas !== 'function') {
+      return Promise.reject(new Error('no raster support'));
+    }
+    var blobForRaster = new Blob([bytesForRaster], { type: contentTypeForRaster });
+    return createImageBitmap(blobForRaster).then(function (bitmapForRaster) {
+      var naturalWForRaster = bitmapForRaster.width || Number(wPxForRaster) || 0;
+      var naturalHForRaster = bitmapForRaster.height || Number(hPxForRaster) || 0;
+      if (naturalWForRaster <= 0 || naturalHForRaster <= 0) {
+        try { if (bitmapForRaster.close) bitmapForRaster.close(); } catch (closeErrForRaster) {}
+        return Promise.reject(new Error('zero-size raster'));
+      }
+      var scaleForRaster = Math.min(
+        1,
+        MAX_PDF_IMAGE_RASTER_DIM_FOR_DOCUMENT_GENERATION / naturalWForRaster,
+        MAX_PDF_IMAGE_RASTER_DIM_FOR_DOCUMENT_GENERATION / naturalHForRaster
+      );
+      var targetWForRaster = Math.max(1, Math.round(naturalWForRaster * scaleForRaster));
+      var targetHForRaster = Math.max(1, Math.round(naturalHForRaster * scaleForRaster));
+      var canvasForRaster = new OffscreenCanvas(targetWForRaster, targetHForRaster);
+      var ctxForRaster = canvasForRaster.getContext('2d');
+      ctxForRaster.fillStyle = '#ffffff';
+      ctxForRaster.fillRect(0, 0, targetWForRaster, targetHForRaster);
+      ctxForRaster.drawImage(bitmapForRaster, 0, 0, targetWForRaster, targetHForRaster);
+      try { if (bitmapForRaster.close) bitmapForRaster.close(); } catch (closeErr2ForRaster) {}
+      return canvasForRaster.convertToBlob({ type: 'image/jpeg', quality: PDF_IMAGE_JPEG_QUALITY_FOR_DOCUMENT_GENERATION })
+        .then(function (jpegBlobForRaster) { return jpegBlobForRaster.arrayBuffer(); })
+        .then(function (bufferForRaster) {
+          return { jpegBytes: new Uint8Array(bufferForRaster), wPx: targetWForRaster, hPx: targetHForRaster };
+        });
+    });
+  }
+
+  // Replace each { type:'image', resolved:{ bytes, contentType, wPx, hPx } } block with one
+  // carrying ready-to-embed JPEG bytes, dropping (and noting) any that cannot be rasterized.
+  // Runs sequentially to bound canvas/memory pressure across many images.
+  function rasterizePdfImageBlocksForDocumentGeneration(blocksForRaster, dropTrackerForRaster) {
+    var chainForRaster = Promise.resolve();
+    var outBlocksForRaster = [];
+    (blocksForRaster || []).forEach(function (blockForRaster) {
+      if (!blockForRaster || blockForRaster.type !== 'image') {
+        chainForRaster = chainForRaster.then(function () { outBlocksForRaster.push(blockForRaster); });
+        return;
+      }
+      chainForRaster = chainForRaster.then(function () {
+        var resolvedForRaster = blockForRaster.resolved || {};
+        return rasterizePdfImageToJpegForDocumentGeneration(resolvedForRaster.bytes, resolvedForRaster.contentType, resolvedForRaster.wPx, resolvedForRaster.hPx)
+          .then(function (jpegForRaster) {
+            if (!jpegForRaster || !jpegForRaster.jpegBytes || !jpegForRaster.jpegBytes.length) {
+              if (dropTrackerForRaster) dropTrackerForRaster.add('could not be decoded');
+              return;
+            }
+            outBlocksForRaster.push({ type: 'image', resolved: { jpegBytes: jpegForRaster.jpegBytes, wPx: jpegForRaster.wPx, hPx: jpegForRaster.hPx } });
+          })
+          .catch(function () {
+            if (dropTrackerForRaster) dropTrackerForRaster.add('could not be decoded');
+          });
+      });
+    });
+    return chainForRaster.then(function () { return outBlocksForRaster; });
+  }
+
+  function bytesToBinaryStringForDocumentGeneration(bytesForBinary) {
+    var chunkSizeForBinary = 0x8000;
+    var stringForBinary = '';
+    for (var iForBinary = 0; iForBinary < bytesForBinary.length; iForBinary += chunkSizeForBinary) {
+      stringForBinary += String.fromCharCode.apply(null, bytesForBinary.subarray(iForBinary, iForBinary + chunkSizeForBinary));
+    }
+    return stringForBinary;
+  }
+
+  function htmlToBlocksForDocumentGeneration(htmlStringForDocumentGeneration, imageResolverForDocumentGeneration, dropTrackerForDocumentGeneration) {
+    if (typeof DOMParser === 'undefined') {
+      throw new Error('HTML input requires a DOM environment and is only supported for docx and pdf.');
+    }
+    var rawHtmlForDocumentGeneration = String(htmlStringForDocumentGeneration || '');
+    if (rawHtmlForDocumentGeneration.length > 200000) {
+      rawHtmlForDocumentGeneration = rawHtmlForDocumentGeneration.slice(0, 200000);
+    }
+    var parsedDocForDocumentGeneration = new DOMParser().parseFromString(rawHtmlForDocumentGeneration, 'text/html');
+    var bodyForDocumentGeneration = parsedDocForDocumentGeneration && parsedDocForDocumentGeneration.body;
+    var blocksForDocumentGeneration = [];
+    if (!bodyForDocumentGeneration) return blocksForDocumentGeneration;
+    var embeddedImageCountForDocumentGeneration = 0;
+
+    function processSentinelImgForDocumentGeneration(imgElForDocumentGeneration) {
+      // No resolver means the PDF path or an API caller with no image support: drop img as
+      // before. Only our own minted sentinel src is honored; a model-supplied http/data src
+      // is never fetched or embedded.
+      if (!imageResolverForDocumentGeneration) return;
+      if (blocksForDocumentGeneration.length >= MAX_DOCX_BLOCKS_FOR_DOCUMENT_GENERATION) return;
+      var srcForImg = String((imgElForDocumentGeneration.getAttribute && imgElForDocumentGeneration.getAttribute('src')) || '');
+      var sentinelMatchForImg = srcForImg.match(IMAGE_SENTINEL_RE_FOR_DOCUMENT_GENERATION);
+      if (!sentinelMatchForImg) return;
+      if (embeddedImageCountForDocumentGeneration >= MAX_DOCX_IMAGES_FOR_DOCUMENT_GENERATION) {
+        if (dropTrackerForDocumentGeneration) dropTrackerForDocumentGeneration.add('image limit reached');
+        return;
+      }
+      var resolutionForImg = imageResolverForDocumentGeneration.resolve(sentinelMatchForImg[1], Number(sentinelMatchForImg[2]));
+      if (!resolutionForImg.ok) {
+        if (dropTrackerForDocumentGeneration) dropTrackerForDocumentGeneration.add(resolutionForImg.reason);
+        return;
+      }
+      embeddedImageCountForDocumentGeneration++;
+      blocksForDocumentGeneration.push({ type: 'image', resolved: resolutionForImg.resolved });
+    }
+
+    function emitImageBlocksFromContainerForDocumentGeneration(containerForImg) {
+      // mammoth emits images as <p><img></p>, so paragraph containers must be scanned for
+      // descendant imgs; getElementsByTagName('img') on an <img> returns [], which is why a
+      // direct-child img is handled by processSentinelImg on the node itself.
+      if (!imageResolverForDocumentGeneration || !containerForImg.getElementsByTagName) return;
+      var imgListForImg = containerForImg.getElementsByTagName('img');
+      for (var iForImg = 0; iForImg < imgListForImg.length; iForImg++) {
+        processSentinelImgForDocumentGeneration(imgListForImg[iForImg]);
+      }
+    }
+
+    function handleListForDocumentGeneration(listElForDocumentGeneration, orderedForDocumentGeneration, levelForDocumentGeneration) {
+      var clampedLevelForDocumentGeneration = levelForDocumentGeneration > 2 ? 2 : levelForDocumentGeneration;
+      var itemsForDocumentGeneration = [];
+      var nestedListsForDocumentGeneration = [];
+      var listChildrenForDocumentGeneration = listElForDocumentGeneration.children || [];
+      for (var liIndexForDocumentGeneration = 0; liIndexForDocumentGeneration < listChildrenForDocumentGeneration.length; liIndexForDocumentGeneration++) {
+        var liForDocumentGeneration = listChildrenForDocumentGeneration[liIndexForDocumentGeneration];
+        if (String(liForDocumentGeneration.tagName || '').toLowerCase() !== 'li') continue;
+        itemsForDocumentGeneration.push(htmlInlineRunsForDocumentGeneration(liForDocumentGeneration));
+        var liChildrenForDocumentGeneration = liForDocumentGeneration.children || [];
+        for (var liChildIndexForDocumentGeneration = 0; liChildIndexForDocumentGeneration < liChildrenForDocumentGeneration.length; liChildIndexForDocumentGeneration++) {
+          var liChildForDocumentGeneration = liChildrenForDocumentGeneration[liChildIndexForDocumentGeneration];
+          var liChildTagForDocumentGeneration = String(liChildForDocumentGeneration.tagName || '').toLowerCase();
+          if (liChildTagForDocumentGeneration === 'ul' || liChildTagForDocumentGeneration === 'ol') {
+            nestedListsForDocumentGeneration.push(liChildForDocumentGeneration);
+          }
+        }
+      }
+      if (itemsForDocumentGeneration.length) {
+        blocksForDocumentGeneration.push({ type: 'list', ordered: orderedForDocumentGeneration, level: clampedLevelForDocumentGeneration, items: itemsForDocumentGeneration });
+      }
+      for (var nestedIndexForDocumentGeneration = 0; nestedIndexForDocumentGeneration < nestedListsForDocumentGeneration.length; nestedIndexForDocumentGeneration++) {
+        var nestedListForDocumentGeneration = nestedListsForDocumentGeneration[nestedIndexForDocumentGeneration];
+        handleListForDocumentGeneration(nestedListForDocumentGeneration, String(nestedListForDocumentGeneration.tagName || '').toLowerCase() === 'ol', clampedLevelForDocumentGeneration + 1);
+      }
+    }
+
+    function handleTableForDocumentGeneration(tableElForDocumentGeneration) {
+      var rowsForDocumentGeneration = [];
+      var hasHeaderForDocumentGeneration = false;
+      // querySelectorAll('tr') also matches rows of a table nested inside a cell, which would
+      // hoist those rows into this table. Keep only rows whose nearest table ancestor is this
+      // one; a nested table is then left in its cell and flattened to text by the cell walker.
+      var allRowsForDocumentGeneration = tableElForDocumentGeneration.querySelectorAll('tr');
+      var trElementsForDocumentGeneration = [];
+      for (var rowScanForDocumentGeneration = 0; rowScanForDocumentGeneration < allRowsForDocumentGeneration.length; rowScanForDocumentGeneration++) {
+        var rowCandidateForDocumentGeneration = allRowsForDocumentGeneration[rowScanForDocumentGeneration];
+        if (!rowCandidateForDocumentGeneration.closest || rowCandidateForDocumentGeneration.closest('table') === tableElForDocumentGeneration) {
+          trElementsForDocumentGeneration.push(rowCandidateForDocumentGeneration);
+        }
+      }
+      for (var trIndexForDocumentGeneration = 0; trIndexForDocumentGeneration < trElementsForDocumentGeneration.length; trIndexForDocumentGeneration++) {
+        var cellsForDocumentGeneration = [];
+        var cellElementsForDocumentGeneration = trElementsForDocumentGeneration[trIndexForDocumentGeneration].children || [];
+        for (var cellIndexForDocumentGeneration = 0; cellIndexForDocumentGeneration < cellElementsForDocumentGeneration.length; cellIndexForDocumentGeneration++) {
+          var cellForDocumentGeneration = cellElementsForDocumentGeneration[cellIndexForDocumentGeneration];
+          var cellTagForDocumentGeneration = String(cellForDocumentGeneration.tagName || '').toLowerCase();
+          if (cellTagForDocumentGeneration !== 'td' && cellTagForDocumentGeneration !== 'th') continue;
+          var isHeaderCellForDocumentGeneration = cellTagForDocumentGeneration === 'th';
+          if (isHeaderCellForDocumentGeneration) hasHeaderForDocumentGeneration = true;
+          var colSpanAttrForDocumentGeneration = parseInt(cellForDocumentGeneration.getAttribute('colspan'), 10);
+          var rowSpanAttrForDocumentGeneration = parseInt(cellForDocumentGeneration.getAttribute('rowspan'), 10);
+          cellsForDocumentGeneration.push({
+            paragraphs: cellParagraphsFromElementForDocumentGeneration(cellForDocumentGeneration),
+            header: isHeaderCellForDocumentGeneration,
+            colSpan: (Number.isFinite(colSpanAttrForDocumentGeneration) && colSpanAttrForDocumentGeneration > 1) ? colSpanAttrForDocumentGeneration : 1,
+            rowSpan: (Number.isFinite(rowSpanAttrForDocumentGeneration) && rowSpanAttrForDocumentGeneration > 1) ? rowSpanAttrForDocumentGeneration : 1
+          });
+        }
+        if (cellsForDocumentGeneration.length) rowsForDocumentGeneration.push(cellsForDocumentGeneration);
+      }
+      if (rowsForDocumentGeneration.length) {
+        // Borders are the model's call: it marks a layout table with border="0" or
+        // role="presentation"/"none", and a bordered data table with border="1".
+        // Left unspecified, tables are bordered by default.
+        var borderedForTableBlock;
+        var roleAttrForTableBlock = String(tableElForDocumentGeneration.getAttribute('role') || '').toLowerCase();
+        var borderAttrForTableBlock = tableElForDocumentGeneration.getAttribute('border');
+        if (roleAttrForTableBlock === 'presentation' || roleAttrForTableBlock === 'none') {
+          borderedForTableBlock = false;
+        } else if (borderAttrForTableBlock !== null) {
+          borderedForTableBlock = String(borderAttrForTableBlock).trim() !== '0';
+        }
+        blocksForDocumentGeneration.push({
+          type: 'table',
+          rows: rowsForDocumentGeneration,
+          header: hasHeaderForDocumentGeneration,
+          bordered: borderedForTableBlock
+        });
+      }
+    }
+
+    function walkBlockForDocumentGeneration(containerForDocumentGeneration) {
+      var childNodesForDocumentGeneration = containerForDocumentGeneration.childNodes || [];
+      for (var nodeIndexForDocumentGeneration = 0; nodeIndexForDocumentGeneration < childNodesForDocumentGeneration.length; nodeIndexForDocumentGeneration++) {
+        if (blocksForDocumentGeneration.length >= MAX_DOCX_BLOCKS_FOR_DOCUMENT_GENERATION) break;
+        var nodeForDocumentGeneration = childNodesForDocumentGeneration[nodeIndexForDocumentGeneration];
+        if (nodeForDocumentGeneration.nodeType === 3) {
+          var looseTextForDocumentGeneration = String(nodeForDocumentGeneration.nodeValue || '').replace(/\s+/g, ' ').trim();
+          if (looseTextForDocumentGeneration) {
+            blocksForDocumentGeneration.push({ type: 'paragraph', runs: [{ text: looseTextForDocumentGeneration }] });
+          }
+          continue;
+        }
+        if (nodeForDocumentGeneration.nodeType !== 1) continue;
+        var tagForDocumentGeneration = String(nodeForDocumentGeneration.tagName || '').toLowerCase();
+        if (/^h[1-6]$/.test(tagForDocumentGeneration)) {
+          blocksForDocumentGeneration.push({ type: 'heading', level: Number(tagForDocumentGeneration.charAt(1)), runs: htmlInlineRunsForDocumentGeneration(nodeForDocumentGeneration) });
+        } else if (tagForDocumentGeneration === 'p' || tagForDocumentGeneration === 'blockquote' || tagForDocumentGeneration === 'pre') {
+          var paragraphRunsForDocumentGeneration = htmlInlineRunsForDocumentGeneration(nodeForDocumentGeneration);
+          if (paragraphRunsForDocumentGeneration.length) {
+            blocksForDocumentGeneration.push({ type: 'paragraph', runs: paragraphRunsForDocumentGeneration });
+          }
+          emitImageBlocksFromContainerForDocumentGeneration(nodeForDocumentGeneration);
+        } else if (tagForDocumentGeneration === 'ul' || tagForDocumentGeneration === 'ol') {
+          handleListForDocumentGeneration(nodeForDocumentGeneration, tagForDocumentGeneration === 'ol', 0);
+        } else if (tagForDocumentGeneration === 'table') {
+          handleTableForDocumentGeneration(nodeForDocumentGeneration);
+        } else if (tagForDocumentGeneration === 'img') {
+          processSentinelImgForDocumentGeneration(nodeForDocumentGeneration);
+        } else if (tagForDocumentGeneration === 'script' || tagForDocumentGeneration === 'style' || tagForDocumentGeneration === 'head' || tagForDocumentGeneration === 'nav') {
+          continue;
+        } else {
+          walkBlockForDocumentGeneration(nodeForDocumentGeneration);
+        }
+      }
+    }
+
+    walkBlockForDocumentGeneration(bodyForDocumentGeneration);
+    return blocksForDocumentGeneration.slice(0, MAX_DOCX_BLOCKS_FOR_DOCUMENT_GENERATION);
+  }
+
+  function makeDocxRelCollectorForDocumentGeneration() {
+    var hyperlinksForDocumentGeneration = [];
+    var numberingForDocumentGeneration = [];
+    var imagesForDocumentGeneration = [];
+    return {
+      hyperlinks: hyperlinksForDocumentGeneration,
+      numbering: numberingForDocumentGeneration,
+      images: imagesForDocumentGeneration,
+      addHyperlink: function (hrefForDocumentGeneration) {
+        var relIdForDocumentGeneration = 'rIdHl' + (hyperlinksForDocumentGeneration.length + 1);
+        hyperlinksForDocumentGeneration.push({ id: relIdForDocumentGeneration, href: hrefForDocumentGeneration });
+        return relIdForDocumentGeneration;
+      },
+      allocNumbering: function (orderedForDocumentGeneration) {
+        var numIdForDocumentGeneration = numberingForDocumentGeneration.length + 1;
+        numberingForDocumentGeneration.push({ numId: numIdForDocumentGeneration, abstractId: orderedForDocumentGeneration ? 1 : 0 });
+        return String(numIdForDocumentGeneration);
+      },
+      addImage: function (bytesForDocumentGeneration, extForDocumentGeneration) {
+        var ordinalForDocumentGeneration = imagesForDocumentGeneration.length + 1;
+        var relIdForDocumentGeneration = 'rIdImg' + ordinalForDocumentGeneration;
+        var partNameForDocumentGeneration = 'media/image' + ordinalForDocumentGeneration + '.' + extForDocumentGeneration;
+        imagesForDocumentGeneration.push({
+          relId: relIdForDocumentGeneration,
+          partName: partNameForDocumentGeneration,
+          ext: extForDocumentGeneration,
+          bytes: bytesForDocumentGeneration
+        });
+        return { relId: relIdForDocumentGeneration, ordinal: ordinalForDocumentGeneration };
+      }
+    };
+  }
+
+  function docxImageDrawingXmlForDocumentGeneration(relIdForImage, drawingIdForImage, cxForImage, cyForImage) {
+    var pictureNameForImage = 'Picture ' + drawingIdForImage;
+    return '<w:p><w:r><w:drawing>' +
+      '<wp:inline distT="0" distB="0" distL="0" distR="0">' +
+        '<wp:extent cx="' + cxForImage + '" cy="' + cyForImage + '"/>' +
+        '<wp:effectExtent l="0" t="0" r="0" b="0"/>' +
+        '<wp:docPr id="' + drawingIdForImage + '" name="' + pictureNameForImage + '"/>' +
+        '<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>' +
+        '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+          '<pic:pic>' +
+            '<pic:nvPicPr>' +
+              '<pic:cNvPr id="' + drawingIdForImage + '" name="' + pictureNameForImage + '"/>' +
+              '<pic:cNvPicPr/>' +
+            '</pic:nvPicPr>' +
+            '<pic:blipFill>' +
+              '<a:blip r:embed="' + relIdForImage + '"/>' +
+              '<a:stretch><a:fillRect/></a:stretch>' +
+            '</pic:blipFill>' +
+            '<pic:spPr>' +
+              '<a:xfrm><a:off x="0" y="0"/><a:ext cx="' + cxForImage + '" cy="' + cyForImage + '"/></a:xfrm>' +
+              '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>' +
+            '</pic:spPr>' +
+          '</pic:pic>' +
+        '</a:graphicData></a:graphic>' +
+      '</wp:inline>' +
+    '</w:drawing></w:r></w:p>';
+  }
+
+  function buildDocxNumberingXmlForDocumentGeneration(numberingEntriesForDocumentGeneration) {
+    var bulletGlyphsForDocumentGeneration = ['•', '◦', '▪'];
+    var orderedFormatsForDocumentGeneration = ['decimal', 'lowerLetter', 'lowerRoman'];
+    var abstractBulletForDocumentGeneration = '<w:abstractNum w:abstractNumId="0">';
+    var abstractOrderedForDocumentGeneration = '<w:abstractNum w:abstractNumId="1">';
+    for (var levelForNumbering = 0; levelForNumbering < 3; levelForNumbering++) {
+      var indentForNumbering = 720 * (levelForNumbering + 1);
+      abstractBulletForDocumentGeneration += '<w:lvl w:ilvl="' + levelForNumbering + '"><w:numFmt w:val="bullet"/><w:lvlText w:val="' + bulletGlyphsForDocumentGeneration[levelForNumbering] + '"/><w:pPr><w:ind w:left="' + indentForNumbering + '" w:hanging="360"/></w:pPr></w:lvl>';
+      abstractOrderedForDocumentGeneration += '<w:lvl w:ilvl="' + levelForNumbering + '"><w:start w:val="1"/><w:numFmt w:val="' + orderedFormatsForDocumentGeneration[levelForNumbering] + '"/><w:lvlText w:val="%' + (levelForNumbering + 1) + '."/><w:pPr><w:ind w:left="' + indentForNumbering + '" w:hanging="360"/></w:pPr></w:lvl>';
+    }
+    abstractBulletForDocumentGeneration += '</w:abstractNum>';
+    abstractOrderedForDocumentGeneration += '</w:abstractNum>';
+    var numsXmlForDocumentGeneration = numberingEntriesForDocumentGeneration.map(function (entryForNumbering) {
+      return '<w:num w:numId="' + entryForNumbering.numId + '"><w:abstractNumId w:val="' + entryForNumbering.abstractId + '"/></w:num>';
     }).join('');
-    return '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders>' +
-      '<w:top w:val="single" w:sz="4" w:space="0" w:color="D9D9D9"/>' +
-      '<w:left w:val="single" w:sz="4" w:space="0" w:color="D9D9D9"/>' +
-      '<w:bottom w:val="single" w:sz="4" w:space="0" w:color="D9D9D9"/>' +
-      '<w:right w:val="single" w:sz="4" w:space="0" w:color="D9D9D9"/>' +
-      '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="D9D9D9"/>' +
-      '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="D9D9D9"/>' +
-      '</w:tblBorders></w:tblPr>' + rowXmlForDocumentGeneration + '</w:tbl>';
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      abstractBulletForDocumentGeneration + abstractOrderedForDocumentGeneration + numsXmlForDocumentGeneration +
+      '</w:numbering>';
+  }
+
+  function buildDocxStylesXmlForDocumentGeneration() {
+    // Heading sizes in half-points: 16/14/12/11/10/10 pt. mammoth's default style map
+    // matches heading paragraphs by styleId (Heading1-6), so those ids must be exact;
+    // the w:name keeps the styles correct for Word's own outline/navigation.
+    var headingSizesForDocumentGeneration = ['32', '28', '24', '22', '20', '20'];
+    var headingStylesForDocumentGeneration = '';
+    for (var headingLevelForStyles = 1; headingLevelForStyles <= 6; headingLevelForStyles++) {
+      headingStylesForDocumentGeneration +=
+        '<w:style w:type="paragraph" w:styleId="Heading' + headingLevelForStyles + '">' +
+        '<w:name w:val="heading ' + headingLevelForStyles + '"/>' +
+        '<w:basedOn w:val="Normal"/>' +
+        '<w:next w:val="Normal"/>' +
+        '<w:pPr><w:keepNext/><w:keepLines/><w:spacing w:before="240" w:after="120"/><w:outlineLvl w:val="' + (headingLevelForStyles - 1) + '"/></w:pPr>' +
+        '<w:rPr><w:b/><w:sz w:val="' + headingSizesForDocumentGeneration[headingLevelForStyles - 1] + '"/></w:rPr>' +
+        '</w:style>';
+    }
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>' +
+      headingStylesForDocumentGeneration +
+      '</w:styles>';
+  }
+
+  function docxRunsXmlForDocumentGeneration(contentForDocumentGeneration, baseRunPropsForDocumentGeneration, relCollectorForDocumentGeneration) {
+    var runsForDocumentGeneration = Array.isArray(contentForDocumentGeneration)
+      ? contentForDocumentGeneration
+      : [{ text: String(contentForDocumentGeneration == null ? '' : contentForDocumentGeneration) }];
+    if (runsForDocumentGeneration.length === 0) runsForDocumentGeneration = [{ text: '' }];
+    return runsForDocumentGeneration.map(function (runForDocumentGeneration) {
+      var safeRunForDocumentGeneration = runForDocumentGeneration || {};
+      var runPropsInnerForDocumentGeneration = baseRunPropsForDocumentGeneration || '';
+      if (safeRunForDocumentGeneration.bold) runPropsInnerForDocumentGeneration += '<w:b/>';
+      if (safeRunForDocumentGeneration.italic) runPropsInnerForDocumentGeneration += '<w:i/>';
+      var hrefForRunForDocumentGeneration = (typeof safeRunForDocumentGeneration.href === 'string' && safeRunForDocumentGeneration.href) ? safeRunForDocumentGeneration.href : '';
+      var isLinkForDocumentGeneration = hrefForRunForDocumentGeneration && relCollectorForDocumentGeneration;
+      if (isLinkForDocumentGeneration) runPropsInnerForDocumentGeneration += '<w:color w:val="0563C1"/><w:u w:val="single"/>';
+      var runPropsXmlForDocumentGeneration = runPropsInnerForDocumentGeneration ? '<w:rPr>' + runPropsInnerForDocumentGeneration + '</w:rPr>' : '';
+      var textLinesForDocumentGeneration = String(safeRunForDocumentGeneration.text == null ? '' : safeRunForDocumentGeneration.text).split(/\r?\n/);
+      var textXmlForDocumentGeneration = textLinesForDocumentGeneration.map(function (lineForRunForDocumentGeneration, lineIndexForRunForDocumentGeneration) {
+        return (lineIndexForRunForDocumentGeneration > 0 ? '<w:br/>' : '') + '<w:t xml:space="preserve">' + escapeXmlForDocumentGeneration(lineForRunForDocumentGeneration) + '</w:t>';
+      }).join('');
+      var runXmlForDocumentGeneration = '<w:r>' + runPropsXmlForDocumentGeneration + textXmlForDocumentGeneration + '</w:r>';
+      if (isLinkForDocumentGeneration) {
+        var relIdForRunForDocumentGeneration = relCollectorForDocumentGeneration.addHyperlink(hrefForRunForDocumentGeneration);
+        return '<w:hyperlink r:id="' + relIdForRunForDocumentGeneration + '">' + runXmlForDocumentGeneration + '</w:hyperlink>';
+      }
+      return runXmlForDocumentGeneration;
+    }).join('');
+  }
+
+  function docxParagraphForDocumentGeneration(contentForDocumentGeneration, optionsForDocumentGeneration, relCollectorForDocumentGeneration) {
+    var optsForDocumentGeneration = optionsForDocumentGeneration || {};
+    var paragraphPropsInnerForDocumentGeneration = '';
+    var baseRunPropsForDocumentGeneration = '';
+    if (optsForDocumentGeneration.headingLevel) {
+      // Use a real Word heading style so the level survives the docx -> HTML -> docx
+      // round-trip (mammoth maps Heading1-6 back to h1-h6). The bold/size/spacing live
+      // in styles.xml; per-run bold/italic still emit normally via the runs below.
+      paragraphPropsInnerForDocumentGeneration += '<w:pStyle w:val="Heading' + optsForDocumentGeneration.headingLevel + '"/>';
+    }
+    if (optsForDocumentGeneration.bold) {
+      baseRunPropsForDocumentGeneration += '<w:b/>';
+    }
+    if (optsForDocumentGeneration.numPr) {
+      paragraphPropsInnerForDocumentGeneration += '<w:numPr><w:ilvl w:val="' + optsForDocumentGeneration.numPr.ilvl + '"/><w:numId w:val="' + optsForDocumentGeneration.numPr.numId + '"/></w:numPr>';
+    }
+    var paragraphPropsXmlForDocumentGeneration = paragraphPropsInnerForDocumentGeneration ? '<w:pPr>' + paragraphPropsInnerForDocumentGeneration + '</w:pPr>' : '';
+    var runsXmlForDocumentGeneration = docxRunsXmlForDocumentGeneration(contentForDocumentGeneration, baseRunPropsForDocumentGeneration, relCollectorForDocumentGeneration);
+    return '<w:p>' + paragraphPropsXmlForDocumentGeneration + runsXmlForDocumentGeneration + '</w:p>';
+  }
+
+  function normalizeRichTableCellForDocumentGeneration(cellForDocumentGeneration) {
+    function clampSpanForDocumentGeneration(valueForCell, maxForCell) {
+      var spanForCell = Math.floor(Number(valueForCell));
+      if (!Number.isFinite(spanForCell) || spanForCell < 1) return 1;
+      return Math.min(spanForCell, maxForCell);
+    }
+    // A rich cell may carry `paragraphs` (array of runs arrays, the html path) or a single
+    // `runs` array (legacy/API), which is treated as one paragraph. Plain scalars become one
+    // single-run paragraph.
+    if (cellForDocumentGeneration && typeof cellForDocumentGeneration === 'object'
+        && (Array.isArray(cellForDocumentGeneration.paragraphs) || Array.isArray(cellForDocumentGeneration.runs))) {
+      var paragraphsForCell = Array.isArray(cellForDocumentGeneration.paragraphs)
+        ? cellForDocumentGeneration.paragraphs.map(function (paragraphForCell) {
+            return Array.isArray(paragraphForCell) ? paragraphForCell : [{ text: String(paragraphForCell == null ? '' : paragraphForCell) }];
+          })
+        : [cellForDocumentGeneration.runs];
+      if (!paragraphsForCell.length) paragraphsForCell = [[]];
+      return {
+        paragraphs: paragraphsForCell,
+        header: !!cellForDocumentGeneration.header,
+        colSpan: clampSpanForDocumentGeneration(cellForDocumentGeneration.colSpan, MAX_TABLE_COLS_FOR_DOCUMENT_GENERATION),
+        rowSpan: clampSpanForDocumentGeneration(cellForDocumentGeneration.rowSpan, MAX_TABLE_ROWS_FOR_DOCUMENT_GENERATION)
+      };
+    }
+    return {
+      paragraphs: [[{ text: String(cellForDocumentGeneration == null ? '' : cellForDocumentGeneration) }]],
+      header: false,
+      colSpan: 1,
+      rowSpan: 1
+    };
+  }
+
+  function plainTextFromTableCellForDocumentGeneration(cellForDocumentGeneration) {
+    var paragraphsForCell = (cellForDocumentGeneration && Array.isArray(cellForDocumentGeneration.paragraphs))
+      ? cellForDocumentGeneration.paragraphs
+      : null;
+    if (paragraphsForCell) {
+      return paragraphsForCell.map(function (runsForParagraphForCell) {
+        return (Array.isArray(runsForParagraphForCell) ? runsForParagraphForCell : []).map(function (runForCell) {
+          return String((runForCell && runForCell.text) || '');
+        }).join('').replace(/\s+/g, ' ').trim();
+      }).filter(function (textForParagraphForCell) {
+        return textForParagraphForCell.length > 0;
+      }).join('\n');
+    }
+    var runsForCell = (cellForDocumentGeneration && Array.isArray(cellForDocumentGeneration.runs))
+      ? cellForDocumentGeneration.runs
+      : null;
+    if (!runsForCell) return String(cellForDocumentGeneration == null ? '' : cellForDocumentGeneration);
+    return runsForCell.map(function (runForCell) {
+      return String((runForCell && runForCell.text) || '');
+    }).join('').replace(/\s+/g, ' ').trim();
+  }
+
+  // Turn rows of cells (rich {paragraphs,colSpan,rowSpan,header} or plain scalars) into a
+  // rectangular grid. Each output row tiles the full width with descriptors: a real
+  // 'cell', a 'vmerge' continuation (covered from above by a rowSpan), or an 'empty'
+  // pad (ragged rows). This is what makes colspan/rowspan emit valid OOXML and keeps
+  // PDF columns aligned. colCount is the grid width.
+  function expandTableGridForDocumentGeneration(rowsForDocumentGeneration) {
+    var inputRowsForGrid = Array.isArray(rowsForDocumentGeneration)
+      ? rowsForDocumentGeneration.slice(0, MAX_TABLE_ROWS_FOR_DOCUMENT_GENERATION)
+      : [];
+    var rowCountForGrid = inputRowsForGrid.length;
+    if (rowCountForGrid === 0) return { colCount: 0, rows: [] };
+
+    var occupiedForGrid = [];
+    var placedForGrid = [];
+    for (var initRowForGrid = 0; initRowForGrid < rowCountForGrid; initRowForGrid++) {
+      occupiedForGrid[initRowForGrid] = [];
+      placedForGrid[initRowForGrid] = [];
+    }
+
+    var colCountForGrid = 0;
+    for (var rowIndexForGrid = 0; rowIndexForGrid < rowCountForGrid; rowIndexForGrid++) {
+      var cellsForGrid = Array.isArray(inputRowsForGrid[rowIndexForGrid])
+        ? inputRowsForGrid[rowIndexForGrid]
+        : [inputRowsForGrid[rowIndexForGrid]];
+      var colCursorForGrid = 0;
+      for (var cellIndexForGrid = 0; cellIndexForGrid < cellsForGrid.length; cellIndexForGrid++) {
+        while (occupiedForGrid[rowIndexForGrid][colCursorForGrid]) colCursorForGrid++;
+        if (colCursorForGrid >= MAX_TABLE_COLS_FOR_DOCUMENT_GENERATION) break;
+        var richCellForGrid = normalizeRichTableCellForDocumentGeneration(cellsForGrid[cellIndexForGrid]);
+        var colSpanForGrid = Math.min(richCellForGrid.colSpan, MAX_TABLE_COLS_FOR_DOCUMENT_GENERATION - colCursorForGrid);
+        var rowSpanForGrid = Math.min(richCellForGrid.rowSpan, rowCountForGrid - rowIndexForGrid);
+        placedForGrid[rowIndexForGrid].push({
+          col: colCursorForGrid,
+          kind: 'cell',
+          paragraphs: richCellForGrid.paragraphs,
+          header: richCellForGrid.header,
+          colSpan: colSpanForGrid,
+          rowSpan: rowSpanForGrid
+        });
+        for (var spanRowForGrid = 0; spanRowForGrid < rowSpanForGrid; spanRowForGrid++) {
+          for (var spanColForGrid = 0; spanColForGrid < colSpanForGrid; spanColForGrid++) {
+            occupiedForGrid[rowIndexForGrid + spanRowForGrid][colCursorForGrid + spanColForGrid] = true;
+          }
+          if (spanRowForGrid > 0) {
+            placedForGrid[rowIndexForGrid + spanRowForGrid].push({
+              col: colCursorForGrid,
+              kind: 'vmerge',
+              colSpan: colSpanForGrid
+            });
+          }
+        }
+        colCursorForGrid += colSpanForGrid;
+      }
+      if (occupiedForGrid[rowIndexForGrid].length > colCountForGrid) {
+        colCountForGrid = occupiedForGrid[rowIndexForGrid].length;
+      }
+    }
+
+    var tiledRowsForGrid = [];
+    for (var tileRowForGrid = 0; tileRowForGrid < rowCountForGrid; tileRowForGrid++) {
+      var descriptorsForRowGrid = placedForGrid[tileRowForGrid].slice().sort(function (aForGrid, bForGrid) {
+        return aForGrid.col - bForGrid.col;
+      });
+      var tiledForGrid = [];
+      var expectedColForGrid = 0;
+      for (var descIndexForGrid = 0; descIndexForGrid < descriptorsForRowGrid.length; descIndexForGrid++) {
+        var descForGrid = descriptorsForRowGrid[descIndexForGrid];
+        while (expectedColForGrid < descForGrid.col) {
+          tiledForGrid.push({ kind: 'empty', colSpan: 1 });
+          expectedColForGrid++;
+        }
+        tiledForGrid.push(descForGrid);
+        expectedColForGrid = descForGrid.col + descForGrid.colSpan;
+      }
+      while (expectedColForGrid < colCountForGrid) {
+        tiledForGrid.push({ kind: 'empty', colSpan: 1 });
+        expectedColForGrid++;
+      }
+      tiledRowsForGrid.push(tiledForGrid);
+    }
+
+    return { colCount: colCountForGrid, rows: tiledRowsForGrid };
+  }
+
+  function tableToPlainRowsForDocumentGeneration(rowsForDocumentGeneration) {
+    var gridForPlain = expandTableGridForDocumentGeneration(rowsForDocumentGeneration);
+    if (gridForPlain.colCount === 0) return [];
+    return gridForPlain.rows.map(function (rowDescriptorsForPlain) {
+      var plainRowForPlain = [];
+      rowDescriptorsForPlain.forEach(function (descriptorForPlain) {
+        var spanForPlain = Math.max(1, Number(descriptorForPlain.colSpan) || 1);
+        plainRowForPlain.push(descriptorForPlain.kind === 'cell'
+          ? plainTextFromTableCellForDocumentGeneration(descriptorForPlain)
+          : '');
+        for (var fillForPlain = 1; fillForPlain < spanForPlain; fillForPlain++) {
+          plainRowForPlain.push('');
+        }
+      });
+      return plainRowForPlain;
+    });
+  }
+
+  // Borders default to on; only an explicit bordered:false (from border="0",
+  // role="presentation", or a blocks-path bordered field) turns them off.
+  function tableShouldShowBordersForDocumentGeneration(blockForDocumentGeneration) {
+    return !blockForDocumentGeneration || blockForDocumentGeneration.bordered !== false;
+  }
+
+  function docxTableForDocumentGeneration(rowsForDocumentGeneration, hasHeaderForDocumentGeneration, relCollectorForDocumentGeneration, showBordersForDocumentGeneration) {
+    var gridForDocumentGeneration = expandTableGridForDocumentGeneration(rowsForDocumentGeneration);
+    if (gridForDocumentGeneration.colCount === 0 || gridForDocumentGeneration.rows.length === 0) return '';
+    var colCountForTable = gridForDocumentGeneration.colCount;
+    var colWidthForTable = Math.max(1, Math.floor(9360 / colCountForTable));
+    var gridColXmlForTable = '';
+    for (var gridColIndexForTable = 0; gridColIndexForTable < colCountForTable; gridColIndexForTable++) {
+      gridColXmlForTable += '<w:gridCol w:w="' + colWidthForTable + '"/>';
+    }
+    var rowXmlForDocumentGeneration = gridForDocumentGeneration.rows.map(function (rowDescriptorsForTable, rowIndexForTable) {
+      var cellsXmlForTable = rowDescriptorsForTable.map(function (descriptorForTable) {
+        var spanForTable = Math.max(1, Number(descriptorForTable.colSpan) || 1);
+        var tcPrInnerForTable = '<w:tcW w:w="' + (colWidthForTable * spanForTable) + '" w:type="dxa"/>';
+        if (spanForTable > 1) tcPrInnerForTable += '<w:gridSpan w:val="' + spanForTable + '"/>';
+        if (descriptorForTable.kind === 'vmerge') {
+          tcPrInnerForTable += '<w:vMerge/>';
+          return '<w:tc><w:tcPr>' + tcPrInnerForTable + '</w:tcPr>' +
+            docxParagraphForDocumentGeneration('', {}, relCollectorForDocumentGeneration) + '</w:tc>';
+        }
+        if (descriptorForTable.kind !== 'cell') {
+          return '<w:tc><w:tcPr>' + tcPrInnerForTable + '</w:tcPr>' +
+            docxParagraphForDocumentGeneration('', {}, relCollectorForDocumentGeneration) + '</w:tc>';
+        }
+        if (Number(descriptorForTable.rowSpan) > 1) tcPrInnerForTable += '<w:vMerge w:val="restart"/>';
+        var isHeaderCellForTable = !!descriptorForTable.header || (!!hasHeaderForDocumentGeneration && rowIndexForTable === 0);
+        // A w:tc must hold at least one paragraph; each cell paragraph becomes its own w:p.
+        var cellParagraphsForTable = (Array.isArray(descriptorForTable.paragraphs) && descriptorForTable.paragraphs.length)
+          ? descriptorForTable.paragraphs
+          : [[]];
+        var cellBodyXmlForTable = cellParagraphsForTable.map(function (runsForParagraphForTable) {
+          return docxParagraphForDocumentGeneration(runsForParagraphForTable, { bold: isHeaderCellForTable }, relCollectorForDocumentGeneration);
+        }).join('');
+        return '<w:tc><w:tcPr>' + tcPrInnerForTable + '</w:tcPr>' + cellBodyXmlForTable + '</w:tc>';
+      }).join('');
+      return '<w:tr>' + cellsXmlForTable + '</w:tr>';
+    }).join('');
+    var tblBordersXmlForTable = showBordersForDocumentGeneration
+      ? '<w:tblBorders>' +
+        '<w:top w:val="single" w:sz="4" w:space="0" w:color="D9D9D9"/>' +
+        '<w:left w:val="single" w:sz="4" w:space="0" w:color="D9D9D9"/>' +
+        '<w:bottom w:val="single" w:sz="4" w:space="0" w:color="D9D9D9"/>' +
+        '<w:right w:val="single" w:sz="4" w:space="0" w:color="D9D9D9"/>' +
+        '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="D9D9D9"/>' +
+        '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="D9D9D9"/>' +
+        '</w:tblBorders>'
+      : '<w:tblBorders>' +
+        '<w:top w:val="nil"/><w:left w:val="nil"/><w:bottom w:val="nil"/>' +
+        '<w:right w:val="nil"/><w:insideH w:val="nil"/><w:insideV w:val="nil"/>' +
+        '</w:tblBorders>';
+    return '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>' + tblBordersXmlForTable +
+      '</w:tblPr><w:tblGrid>' + gridColXmlForTable + '</w:tblGrid>' +
+      rowXmlForDocumentGeneration + '</w:tbl>';
   }
 
   function blocksFromContentForDocumentGeneration(contentForDocumentGeneration) {
@@ -213,41 +1049,74 @@
   }
 
   function buildDocxBodyForDocumentGeneration(inputForDocumentGeneration) {
-    var blocksForDocumentGeneration = Array.isArray(inputForDocumentGeneration.blocks)
-      ? inputForDocumentGeneration.blocks.slice(0, MAX_DOCX_BLOCKS_FOR_DOCUMENT_GENERATION)
-      : [];
-    if (blocksForDocumentGeneration.length === 0 && typeof inputForDocumentGeneration.content === 'string') {
-      blocksForDocumentGeneration = blocksFromContentForDocumentGeneration(inputForDocumentGeneration.content);
-    }
-    if (inputForDocumentGeneration.title && blocksForDocumentGeneration.length > 0) {
-      var firstBlockForDocumentGeneration = blocksForDocumentGeneration[0] || {};
-      if (firstBlockForDocumentGeneration.type !== 'heading' || String(firstBlockForDocumentGeneration.text || '').trim() !== String(inputForDocumentGeneration.title).trim()) {
-        blocksForDocumentGeneration.unshift({ type: 'heading', level: 1, text: inputForDocumentGeneration.title });
-      }
-    }
-    if (blocksForDocumentGeneration.length === 0) {
-      throw new Error('DOCX creation requires blocks or content.');
-    }
+    var blocksForDocumentGeneration = normalizeBlocksForDocumentGeneration(inputForDocumentGeneration, 'DOCX creation requires blocks, html, or content.');
+    var relCollectorForDocumentGeneration = makeDocxRelCollectorForDocumentGeneration();
+    var hasHeadingForDocumentGeneration = false;
 
-    return blocksForDocumentGeneration.map(function (blockForDocumentGeneration) {
+    var bodyXmlForDocumentGeneration = blocksForDocumentGeneration.map(function (blockForDocumentGeneration) {
       if (!blockForDocumentGeneration || typeof blockForDocumentGeneration !== 'object') return '';
+      if (blockForDocumentGeneration.type === 'image') {
+        var resolvedForImageBlock = blockForDocumentGeneration.resolved;
+        if (!resolvedForImageBlock || !resolvedForImageBlock.bytes) return '';
+        var addedForImageBlock = relCollectorForDocumentGeneration.addImage(resolvedForImageBlock.bytes, resolvedForImageBlock.ext);
+        return docxImageDrawingXmlForDocumentGeneration(
+          addedForImageBlock.relId,
+          addedForImageBlock.ordinal,
+          resolvedForImageBlock.cx,
+          resolvedForImageBlock.cy
+        );
+      }
       if (blockForDocumentGeneration.type === 'table') {
-        return docxTableForDocumentGeneration(blockForDocumentGeneration.rows);
+        return docxTableForDocumentGeneration(
+          blockForDocumentGeneration.rows,
+          !!blockForDocumentGeneration.header,
+          relCollectorForDocumentGeneration,
+          tableShouldShowBordersForDocumentGeneration(blockForDocumentGeneration)
+        );
       }
       if (blockForDocumentGeneration.type === 'heading') {
-        var levelForDocumentGeneration = Math.max(1, Math.min(3, Number(blockForDocumentGeneration.level) || 1));
-        return docxParagraphForDocumentGeneration(blockForDocumentGeneration.text || '', { headingLevel: levelForDocumentGeneration });
+        hasHeadingForDocumentGeneration = true;
+        var levelForDocumentGeneration = Math.max(1, Math.min(6, Number(blockForDocumentGeneration.level) || 1));
+        return docxParagraphForDocumentGeneration(
+          Array.isArray(blockForDocumentGeneration.runs) ? blockForDocumentGeneration.runs : (blockForDocumentGeneration.text || ''),
+          { headingLevel: levelForDocumentGeneration },
+          relCollectorForDocumentGeneration
+        );
+      }
+      if (blockForDocumentGeneration.type === 'list') {
+        var numIdForDocumentGeneration = relCollectorForDocumentGeneration.allocNumbering(!!blockForDocumentGeneration.ordered);
+        var ilvlForDocumentGeneration = Math.max(0, Math.min(2, Number(blockForDocumentGeneration.level) || 0));
+        var listItemsForDocumentGeneration = Array.isArray(blockForDocumentGeneration.items) ? blockForDocumentGeneration.items : [];
+        return listItemsForDocumentGeneration.map(function (itemForDocumentGeneration) {
+          return docxParagraphForDocumentGeneration(
+            itemForDocumentGeneration,
+            { numPr: { ilvl: ilvlForDocumentGeneration, numId: numIdForDocumentGeneration } },
+            relCollectorForDocumentGeneration
+          );
+        }).join('');
       }
       if (blockForDocumentGeneration.type === 'bullet') {
         if (Array.isArray(blockForDocumentGeneration.items)) {
           return blockForDocumentGeneration.items.map(function (itemForDocumentGeneration) {
-            return docxParagraphForDocumentGeneration('- ' + String(itemForDocumentGeneration || ''), {});
+            return docxParagraphForDocumentGeneration('- ' + String(itemForDocumentGeneration || ''), {}, relCollectorForDocumentGeneration);
           }).join('');
         }
-        return docxParagraphForDocumentGeneration('- ' + String(blockForDocumentGeneration.text || ''), {});
+        return docxParagraphForDocumentGeneration('- ' + String(blockForDocumentGeneration.text || ''), {}, relCollectorForDocumentGeneration);
       }
-      return docxParagraphForDocumentGeneration(blockForDocumentGeneration.text || '', {});
+      return docxParagraphForDocumentGeneration(
+        Array.isArray(blockForDocumentGeneration.runs) ? blockForDocumentGeneration.runs : (blockForDocumentGeneration.text || ''),
+        {},
+        relCollectorForDocumentGeneration
+      );
     }).join('');
+
+    return {
+      body: bodyXmlForDocumentGeneration,
+      hyperlinks: relCollectorForDocumentGeneration.hyperlinks,
+      numbering: relCollectorForDocumentGeneration.numbering,
+      images: relCollectorForDocumentGeneration.images,
+      hasHeading: hasHeadingForDocumentGeneration
+    };
   }
 
   function buildDocxForDocumentGeneration(inputForDocumentGeneration) {
@@ -255,19 +1124,46 @@
       throw new Error('DOCX generator is unavailable.');
     }
     var zipForDocumentGeneration = new globalScopeForDocumentGeneration.JSZip();
-    var bodyForDocumentGeneration = buildDocxBodyForDocumentGeneration(inputForDocumentGeneration);
+    var builtBodyForDocumentGeneration = buildDocxBodyForDocumentGeneration(inputForDocumentGeneration);
+    var hyperlinksForDocumentGeneration = builtBodyForDocumentGeneration.hyperlinks || [];
+    var numberingForDocumentGeneration = builtBodyForDocumentGeneration.numbering || [];
+    var imagesForDocumentGeneration = builtBodyForDocumentGeneration.images || [];
+    var hasNumberingForDocumentGeneration = numberingForDocumentGeneration.length > 0;
+    var hasHeadingForDocumentGeneration = builtBodyForDocumentGeneration.hasHeading === true;
+    var hasImagesForDocumentGeneration = imagesForDocumentGeneration.length > 0;
+    var imageNamespacesForDocumentGeneration = hasImagesForDocumentGeneration
+      ? ' xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"' +
+        ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"' +
+        ' xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"'
+      : '';
     var documentXmlForDocumentGeneration = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
-      '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
-      '<w:body>' + bodyForDocumentGeneration +
+      '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"' + imageNamespacesForDocumentGeneration + '>' +
+      '<w:body>' + builtBodyForDocumentGeneration.body +
       '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>' +
       '</w:body></w:document>';
+
+    var imageDefaultsXmlForDocumentGeneration = '';
+    if (hasImagesForDocumentGeneration) {
+      var seenImageExtsForDocumentGeneration = {};
+      var extToContentTypeForDocumentGeneration = { png: 'image/png', jpeg: 'image/jpeg', gif: 'image/gif' };
+      imagesForDocumentGeneration.forEach(function (imageEntryForDocumentGeneration) {
+        var extKeyForDocumentGeneration = imageEntryForDocumentGeneration.ext;
+        if (seenImageExtsForDocumentGeneration[extKeyForDocumentGeneration]) return;
+        seenImageExtsForDocumentGeneration[extKeyForDocumentGeneration] = true;
+        var contentTypeForDefaultForDocumentGeneration = extToContentTypeForDocumentGeneration[extKeyForDocumentGeneration] || ('image/' + extKeyForDocumentGeneration);
+        imageDefaultsXmlForDocumentGeneration += '<Default Extension="' + extKeyForDocumentGeneration + '" ContentType="' + contentTypeForDefaultForDocumentGeneration + '"/>';
+      });
+    }
 
     zipForDocumentGeneration.file('[Content_Types].xml',
       '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
       '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
       '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
       '<Default Extension="xml" ContentType="application/xml"/>' +
+      imageDefaultsXmlForDocumentGeneration +
       '<Override PartName="/word/document.xml" ContentType="' + DOCX_MIME_FOR_DOCUMENT_GENERATION + '.main+xml"/>' +
+      (hasNumberingForDocumentGeneration ? '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>' : '') +
+      (hasHeadingForDocumentGeneration ? '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>' : '') +
       '</Types>'
     );
     zipForDocumentGeneration.folder('_rels').file('.rels',
@@ -276,7 +1172,48 @@
       '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
       '</Relationships>'
     );
-    zipForDocumentGeneration.folder('word').file('document.xml', documentXmlForDocumentGeneration);
+
+    var documentRelationshipsForDocumentGeneration = '';
+    for (var hyperlinkIndexForDocumentGeneration = 0; hyperlinkIndexForDocumentGeneration < hyperlinksForDocumentGeneration.length; hyperlinkIndexForDocumentGeneration++) {
+      var hyperlinkForDocumentGeneration = hyperlinksForDocumentGeneration[hyperlinkIndexForDocumentGeneration];
+      documentRelationshipsForDocumentGeneration += '<Relationship Id="' + hyperlinkForDocumentGeneration.id +
+        '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="' +
+        escapeXmlForDocumentGeneration(hyperlinkForDocumentGeneration.href) + '" TargetMode="External"/>';
+    }
+    if (hasNumberingForDocumentGeneration) {
+      documentRelationshipsForDocumentGeneration += '<Relationship Id="rIdNumbering" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>';
+    }
+    if (hasHeadingForDocumentGeneration) {
+      documentRelationshipsForDocumentGeneration += '<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>';
+    }
+    for (var imageRelIndexForDocumentGeneration = 0; imageRelIndexForDocumentGeneration < imagesForDocumentGeneration.length; imageRelIndexForDocumentGeneration++) {
+      var imageRelForDocumentGeneration = imagesForDocumentGeneration[imageRelIndexForDocumentGeneration];
+      documentRelationshipsForDocumentGeneration += '<Relationship Id="' + imageRelForDocumentGeneration.relId +
+        '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="' +
+        imageRelForDocumentGeneration.partName + '"/>';
+    }
+
+    var wordFolderForDocumentGeneration = zipForDocumentGeneration.folder('word');
+    wordFolderForDocumentGeneration.file('document.xml', documentXmlForDocumentGeneration);
+    if (documentRelationshipsForDocumentGeneration) {
+      wordFolderForDocumentGeneration.folder('_rels').file('document.xml.rels',
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        documentRelationshipsForDocumentGeneration +
+        '</Relationships>'
+      );
+    }
+    if (hasNumberingForDocumentGeneration) {
+      wordFolderForDocumentGeneration.file('numbering.xml', buildDocxNumberingXmlForDocumentGeneration(numberingForDocumentGeneration));
+    }
+    if (hasHeadingForDocumentGeneration) {
+      wordFolderForDocumentGeneration.file('styles.xml', buildDocxStylesXmlForDocumentGeneration());
+    }
+    if (hasImagesForDocumentGeneration) {
+      imagesForDocumentGeneration.forEach(function (imageEntryForDocumentGeneration) {
+        wordFolderForDocumentGeneration.file(imageEntryForDocumentGeneration.partName, imageEntryForDocumentGeneration.bytes);
+      });
+    }
 
     return zipForDocumentGeneration.generateAsync({
       type: 'uint8array',
@@ -298,12 +1235,9 @@
     if (blocksForDocumentGeneration.length === 0 && typeof inputForDocumentGeneration.content === 'string') {
       blocksForDocumentGeneration = blocksFromContentForDocumentGeneration(inputForDocumentGeneration.content);
     }
-    if (inputForDocumentGeneration.title && blocksForDocumentGeneration.length > 0) {
-      var firstBlockForDocumentGeneration = blocksForDocumentGeneration[0] || {};
-      if (firstBlockForDocumentGeneration.type !== 'heading' || String(firstBlockForDocumentGeneration.text || '').trim() !== String(inputForDocumentGeneration.title).trim()) {
-        blocksForDocumentGeneration.unshift({ type: 'heading', level: 1, text: inputForDocumentGeneration.title });
-      }
-    }
+    // No title heading is synthesized: whether the document opens with a heading is the
+    // caller's decision (include a heading block, an <h1> in html, or a leading "# " in
+    // content). title is metadata only and drives the filename.
     if (blocksForDocumentGeneration.length === 0) {
       throw new Error(emptyErrorForDocumentGeneration);
     }
@@ -338,36 +1272,71 @@
     return linesForWrap.length ? linesForWrap : [''];
   }
 
+  function pdfRunsFromBlockForDocumentGeneration(blockForDocumentGeneration) {
+    if (Array.isArray(blockForDocumentGeneration.runs) && blockForDocumentGeneration.runs.length) {
+      return blockForDocumentGeneration.runs.slice();
+    }
+    return [{ text: String(blockForDocumentGeneration.text == null ? '' : blockForDocumentGeneration.text) }];
+  }
+
   function pdfLinesFromBlocksForDocumentGeneration(inputForDocumentGeneration) {
-    var blocksForDocumentGeneration = normalizeBlocksForDocumentGeneration(inputForDocumentGeneration, 'PDF creation requires content or blocks.');
+    var blocksForDocumentGeneration = normalizeBlocksForDocumentGeneration(inputForDocumentGeneration, 'PDF creation requires blocks, html, or content.');
     var linesForDocumentGeneration = [];
     blocksForDocumentGeneration.forEach(function (blockForDocumentGeneration) {
       if (!blockForDocumentGeneration || typeof blockForDocumentGeneration !== 'object') return;
+      if (blockForDocumentGeneration.type === 'image') {
+        var resolvedImgForPdf = blockForDocumentGeneration.resolved || {};
+        if (resolvedImgForPdf.jpegBytes && resolvedImgForPdf.jpegBytes.length) {
+          linesForDocumentGeneration.push({
+            type: 'image',
+            jpegBytes: resolvedImgForPdf.jpegBytes,
+            wPx: resolvedImgForPdf.wPx,
+            hPx: resolvedImgForPdf.hPx,
+            gapAfter: 8
+          });
+        }
+        return;
+      }
       if (blockForDocumentGeneration.type === 'table') {
-        var rowsForPdfTable = normalizeRowsForDocumentGeneration(blockForDocumentGeneration.rows).slice(0, 80);
+        // Expand to a rectangular plain-text grid so colspan/rowspan stay column-aligned.
+        // PDF has no read-back path, so cells render as plain text without visual merging.
+        var rowsForPdfTable = tableToPlainRowsForDocumentGeneration(blockForDocumentGeneration.rows).slice(0, 80);
         if (rowsForPdfTable.length > 0) {
-          linesForDocumentGeneration.push({ type: 'table', rows: rowsForPdfTable, gapAfter: 10 });
+          linesForDocumentGeneration.push({
+            type: 'table',
+            rows: rowsForPdfTable,
+            bordered: tableShouldShowBordersForDocumentGeneration(blockForDocumentGeneration),
+            headerRow: !!blockForDocumentGeneration.header,
+            gapAfter: 10
+          });
         }
         return;
       }
       if (blockForDocumentGeneration.type === 'heading') {
         var headingSizeForPdf = Number(blockForDocumentGeneration.level) === 1 ? 18 : (Number(blockForDocumentGeneration.level) === 2 ? 15 : 13);
-        linesForDocumentGeneration.push({ text: String(blockForDocumentGeneration.text || ''), size: headingSizeForPdf, gapAfter: 8 });
+        linesForDocumentGeneration.push({ runs: pdfRunsFromBlockForDocumentGeneration(blockForDocumentGeneration), size: headingSizeForPdf, gapAfter: 8 });
+        return;
+      }
+      if (blockForDocumentGeneration.type === 'list') {
+        var orderedForPdf = !!blockForDocumentGeneration.ordered;
+        var levelForPdf = Math.max(0, Math.min(2, Number(blockForDocumentGeneration.level) || 0));
+        var indentForPdf = 18 + levelForPdf * 18;
+        var listItemsForPdf = Array.isArray(blockForDocumentGeneration.items) ? blockForDocumentGeneration.items : [];
+        listItemsForPdf.forEach(function (itemForPdf, itemIndexForPdf) {
+          var prefixForPdf = orderedForPdf ? ((itemIndexForPdf + 1) + '. ') : '• ';
+          var itemRunsForPdf = Array.isArray(itemForPdf) ? itemForPdf.slice() : [{ text: String(itemForPdf == null ? '' : itemForPdf) }];
+          linesForDocumentGeneration.push({ runs: itemRunsForPdf, size: 11, gapAfter: 4, indent: indentForPdf, prefix: prefixForPdf });
+        });
         return;
       }
       if (blockForDocumentGeneration.type === 'bullet') {
-        if (Array.isArray(blockForDocumentGeneration.items)) {
-          blockForDocumentGeneration.items.forEach(function (itemForPdfBullet) {
-            linesForDocumentGeneration.push({ text: '- ' + String(itemForPdfBullet || ''), size: 11, gapAfter: 4 });
-          });
-          return;
-        }
-        linesForDocumentGeneration.push({ text: '- ' + String(blockForDocumentGeneration.text || ''), size: 11, gapAfter: 4 });
+        var bulletItemsForPdf = Array.isArray(blockForDocumentGeneration.items) ? blockForDocumentGeneration.items : [String(blockForDocumentGeneration.text || '')];
+        bulletItemsForPdf.forEach(function (bulletItemForPdf) {
+          linesForDocumentGeneration.push({ runs: [{ text: String(bulletItemForPdf == null ? '' : bulletItemForPdf) }], size: 11, gapAfter: 4, indent: 18, prefix: '• ' });
+        });
         return;
       }
-      String(blockForDocumentGeneration.text || '').split(/\r?\n/).forEach(function (lineForPdfParagraph) {
-        linesForDocumentGeneration.push({ text: lineForPdfParagraph, size: 11, gapAfter: 4 });
-      });
+      linesForDocumentGeneration.push({ runs: pdfRunsFromBlockForDocumentGeneration(blockForDocumentGeneration), size: 11, gapAfter: 4 });
     });
     return linesForDocumentGeneration.slice(0, MAX_PDF_LINES_FOR_DOCUMENT_GENERATION);
   }
@@ -429,16 +1398,26 @@
   function buildPdfForDocumentGeneration(inputForDocumentGeneration) {
     var logicalLinesForPdf = pdfLinesFromBlocksForDocumentGeneration(inputForDocumentGeneration);
     var pagesForPdf = [];
+    var pageAnnotsForPdf = [];
+    var pageImagesForPdf = [];
     var currentPageForPdf = [];
+    var currentPageAnnotsForPdf = [];
+    var currentPageImagesForPdf = [];
+    var imageObjectsForPdf = [];
     var yForPdf = 742;
     var leftForPdf = 54;
     var bottomForPdf = 54;
     var pageWidthForPdf = 612;
     var tableWidthForPdf = pageWidthForPdf - (leftForPdf * 2);
+    var rightLimitForPdf = leftForPdf + tableWidthForPdf;
 
     function startNewPdfPageForDocumentGeneration() {
       pagesForPdf.push(currentPageForPdf);
+      pageAnnotsForPdf.push(currentPageAnnotsForPdf);
+      pageImagesForPdf.push(currentPageImagesForPdf);
       currentPageForPdf = [];
+      currentPageAnnotsForPdf = [];
+      currentPageImagesForPdf = [];
       yForPdf = 742;
     }
 
@@ -459,6 +1438,17 @@
       });
     }
 
+    function addPdfRawForDocumentGeneration(commandForPdf) {
+      currentPageForPdf.push({ kind: 'path', command: commandForPdf });
+    }
+
+    function fontKeyForRunForPdf(runForPdf) {
+      if (runForPdf.bold && runForPdf.italic) return 'F4';
+      if (runForPdf.bold) return 'F2';
+      if (runForPdf.italic) return 'F3';
+      return 'F1';
+    }
+
     function addPdfRectForDocumentGeneration(xForPdf, yValueForPdf, widthForPdf, heightForPdf) {
       currentPageForPdf.push({
         kind: 'path',
@@ -466,7 +1456,26 @@
       });
     }
 
-    function addPdfTableForDocumentGeneration(rowsForPdfTable) {
+    function addPdfImageForDocumentGeneration(jpegBytesForImg, wPxForImg, hPxForImg) {
+      var naturalWPtForImg = Math.max(1, (Number(wPxForImg) || 1) * PDF_PX_TO_PT_FOR_DOCUMENT_GENERATION);
+      var naturalHPtForImg = Math.max(1, (Number(hPxForImg) || 1) * PDF_PX_TO_PT_FOR_DOCUMENT_GENERATION);
+      var usableHeightForImg = 742 - bottomForPdf;
+      var scaleForImg = Math.min(1, tableWidthForPdf / naturalWPtForImg, usableHeightForImg / naturalHPtForImg);
+      var dispWForImg = naturalWPtForImg * scaleForImg;
+      var dispHForImg = naturalHPtForImg * scaleForImg;
+      ensurePdfSpaceForDocumentGeneration(dispHForImg);
+      var nameForImg = 'Im' + (imageObjectsForPdf.length + 1);
+      imageObjectsForPdf.push({ jpegBytes: jpegBytesForImg, wPx: Math.max(1, Math.round(Number(wPxForImg) || 1)), hPx: Math.max(1, Math.round(Number(hPxForImg) || 1)), name: nameForImg });
+      currentPageImagesForPdf.push(nameForImg);
+      var yBottomForImg = yForPdf - dispHForImg;
+      currentPageForPdf.push({
+        kind: 'path',
+        command: 'q ' + dispWForImg.toFixed(2) + ' 0 0 ' + dispHForImg.toFixed(2) + ' ' + leftForPdf.toFixed(2) + ' ' + yBottomForImg.toFixed(2) + ' cm /' + nameForImg + ' Do Q'
+      });
+      yForPdf = yBottomForImg;
+    }
+
+    function addPdfTableForDocumentGeneration(rowsForPdfTable, borderedForTable, headerRowForTable) {
       var rowsForTable = normalizeRowsForDocumentGeneration(rowsForPdfTable).slice(0, 80);
       if (!rowsForTable.length) return;
       var fontSizeForTable = 8.5;
@@ -477,7 +1486,16 @@
         var rowForTable = rowsForTable[rowIndexForTable] || [];
         var wrappedCellsForTable = colWidthsForTable.map(function (widthForTable, cellIndexForTable) {
           var maxCharsForCell = Math.max(4, Math.floor((widthForTable - paddingForTable * 2) / (fontSizeForTable * 0.48)));
-          return wrapTextForDocumentGeneration(rowForTable[cellIndexForTable], maxCharsForCell);
+          // Cells carry a newline between paragraphs (plainTextFromTableCell); honor it as a
+          // hard line break, wrapping each paragraph independently.
+          var cellTextForTable = String(rowForTable[cellIndexForTable] == null ? '' : rowForTable[cellIndexForTable]);
+          var linesForCellForTable = [];
+          cellTextForTable.split('\n').forEach(function (paragraphPieceForTable) {
+            wrapTextForDocumentGeneration(paragraphPieceForTable, maxCharsForCell).forEach(function (wrappedLineForTable) {
+              linesForCellForTable.push(wrappedLineForTable);
+            });
+          });
+          return linesForCellForTable;
         });
         var maxLinesForRow = wrappedCellsForTable.reduce(function (maxForRow, linesForCell) {
           return Math.max(maxForRow, linesForCell.length);
@@ -489,7 +1507,9 @@
         var xForTable = leftForPdf;
         for (var colIndexForTable = 0; colIndexForTable < colWidthsForTable.length; colIndexForTable++) {
           var colWidthForTable = colWidthsForTable[colIndexForTable];
-          addPdfRectForDocumentGeneration(xForTable, rowBottomForTable, colWidthForTable, rowHeightForTable);
+          if (borderedForTable) {
+            addPdfRectForDocumentGeneration(xForTable, rowBottomForTable, colWidthForTable, rowHeightForTable);
+          }
           var linesForCellForTable = wrappedCellsForTable[colIndexForTable];
           for (var lineIndexForCell = 0; lineIndexForCell < linesForCellForTable.length; lineIndexForCell++) {
             addPdfTextForDocumentGeneration(
@@ -497,7 +1517,7 @@
               fontSizeForTable,
               xForTable + paddingForTable,
               rowTopForTable - paddingForTable - fontSizeForTable - (lineIndexForCell * lineHeightForTable),
-              rowIndexForTable === 0 ? 'F2' : 'F1'
+              (headerRowForTable && rowIndexForTable === 0) ? 'F2' : 'F1'
             );
           }
           xForTable += colWidthForTable;
@@ -506,23 +1526,129 @@
       }
     }
 
+    function renderRunsLineForPdf(runsForPdf, sizeForPdf, indentForPdf, prefixForPdf) {
+      var startXForPdf = leftForPdf + (indentForPdf || 0);
+      var lineHeightForPdf = Math.max(14, sizeForPdf + 4);
+      // yForPdf enters as the top of the line box; the baseline sits one ascent below it, so
+      // glyphs grow down from the cursor rather than up. This keeps text from poking above the
+      // cursor into a preceding image or table (the bottom-edge handoff), while inter-line
+      // spacing is preserved because the entry offset is undone in the final advance.
+      var ascentForPdf = sizeForPdf * PDF_FONT_ASCENT_RATIO_FOR_DOCUMENT_GENERATION;
+      // Tokenize into alternating word / whitespace pieces, tagged with font and link, so
+      // wrapping can break on words while drawing preserves the original spacing.
+      var tokensForPdf = [];
+      if (prefixForPdf) tokensForPdf.push({ text: prefixForPdf, fontKey: 'F1', href: '', space: false });
+      (runsForPdf || []).forEach(function (runForPdf) {
+        var safeRunForPdf = runForPdf || {};
+        var fontKeyForToken = fontKeyForRunForPdf(safeRunForPdf);
+        var hrefForToken = (typeof safeRunForPdf.href === 'string' && safeRunForPdf.href) ? safeRunForPdf.href : '';
+        String(safeRunForPdf.text == null ? '' : safeRunForPdf.text).split(/(\n)/).forEach(function (partForPdf) {
+          if (partForPdf === '\n') { tokensForPdf.push({ newline: true }); return; }
+          if (partForPdf === '') return;
+          partForPdf.split(/(\s+)/).forEach(function (pieceForPdf) {
+            if (pieceForPdf === '') return;
+            tokensForPdf.push({ text: pieceForPdf, fontKey: fontKeyForToken, href: hrefForToken, space: /^\s+$/.test(pieceForPdf) });
+          });
+        });
+      });
+
+      ensurePdfSpaceForDocumentGeneration(lineHeightForPdf);
+      yForPdf -= ascentForPdf;
+      var xCursorForPdf = startXForPdf;
+      var activeLinkForPdf = null;
+
+      // Consecutive tokens sharing a font and link are drawn as one Tj at a single start x,
+      // so the viewer applies the font's real glyph spacing instead of our crude per-word
+      // width estimate. The estimate is then used only to choose wrap points and the start x
+      // of the next segment after a font/link change.
+      var segTextForPdf = '';
+      var segFontKeyForPdf = 'F1';
+      var segHrefForPdf = '';
+      var segStartXForPdf = xCursorForPdf;
+
+      function flushLinkForPdf() {
+        if (activeLinkForPdf) {
+          currentPageAnnotsForPdf.push({
+            href: activeLinkForPdf.href,
+            rect: [activeLinkForPdf.x1, yForPdf - 2, activeLinkForPdf.x2, yForPdf + sizeForPdf + 2]
+          });
+          activeLinkForPdf = null;
+        }
+      }
+      function flushSegForPdf() {
+        if (segTextForPdf === '') return;
+        if (segHrefForPdf) {
+          addPdfRawForDocumentGeneration('0 0 1 rg');
+          addPdfTextForDocumentGeneration(segTextForPdf, sizeForPdf, segStartXForPdf, yForPdf, segFontKeyForPdf);
+          addPdfRawForDocumentGeneration('0 0 0 rg');
+          if (activeLinkForPdf && activeLinkForPdf.href === segHrefForPdf) {
+            activeLinkForPdf.x2 = xCursorForPdf;
+          } else {
+            flushLinkForPdf();
+            activeLinkForPdf = { href: segHrefForPdf, x1: segStartXForPdf, x2: xCursorForPdf };
+          }
+        } else {
+          flushLinkForPdf();
+          addPdfTextForDocumentGeneration(segTextForPdf, sizeForPdf, segStartXForPdf, yForPdf, segFontKeyForPdf);
+        }
+        segTextForPdf = '';
+      }
+      function moveToNextLineForPdf() {
+        flushSegForPdf();
+        flushLinkForPdf();
+        yForPdf -= lineHeightForPdf;
+        xCursorForPdf = startXForPdf;
+        segStartXForPdf = xCursorForPdf;
+        ensurePdfSpaceForDocumentGeneration(lineHeightForPdf);
+      }
+
+      tokensForPdf.forEach(function (tokenForPdf) {
+        if (tokenForPdf.newline) { moveToNextLineForPdf(); return; }
+        var widthForToken = estimatePdfTextWidthForDocumentGeneration(tokenForPdf.text, sizeForPdf);
+        if (!tokenForPdf.space && xCursorForPdf + widthForToken > rightLimitForPdf && xCursorForPdf > startXForPdf) {
+          moveToNextLineForPdf();
+        }
+        // Drop a space that lands at the very start of a line.
+        if (tokenForPdf.space && segTextForPdf === '' && xCursorForPdf === startXForPdf) {
+          return;
+        }
+        if (segTextForPdf !== '' && (tokenForPdf.fontKey !== segFontKeyForPdf || tokenForPdf.href !== segHrefForPdf)) {
+          flushSegForPdf();
+        }
+        if (segTextForPdf === '') {
+          segStartXForPdf = xCursorForPdf;
+          segFontKeyForPdf = tokenForPdf.fontKey;
+          segHrefForPdf = tokenForPdf.href;
+        }
+        segTextForPdf += tokenForPdf.text;
+        xCursorForPdf += widthForToken;
+      });
+      flushSegForPdf();
+      flushLinkForPdf();
+      // Undo the entry ascent offset so the cursor lands on the next line box's top, leaving
+      // net spacing of exactly lineHeight per line.
+      yForPdf -= (lineHeightForPdf - ascentForPdf);
+    }
+
     logicalLinesForPdf.forEach(function (lineForPdf) {
       if (lineForPdf && lineForPdf.type === 'table') {
-        addPdfTableForDocumentGeneration(lineForPdf.rows);
+        addPdfTableForDocumentGeneration(lineForPdf.rows, lineForPdf.bordered, lineForPdf.headerRow);
         yForPdf -= Number(lineForPdf.gapAfter) || 0;
         return;
       }
-      var sizeForPdf = Number(lineForPdf.size) || 11;
-      var maxCharsForPdf = Math.max(28, Math.floor(92 * (11 / sizeForPdf)));
-      var wrappedForPdf = wrapTextForDocumentGeneration(lineForPdf.text, maxCharsForPdf);
-      wrappedForPdf.forEach(function (wrappedLineForPdf) {
-        ensurePdfSpaceForDocumentGeneration(Math.max(14, sizeForPdf + 4));
-        addPdfTextForDocumentGeneration(wrappedLineForPdf, sizeForPdf, leftForPdf, yForPdf, 'F1');
-        yForPdf -= Math.max(14, sizeForPdf + 4);
-      });
+      if (lineForPdf && lineForPdf.type === 'image') {
+        addPdfImageForDocumentGeneration(lineForPdf.jpegBytes, lineForPdf.wPx, lineForPdf.hPx);
+        yForPdf -= Number(lineForPdf.gapAfter) || 0;
+        return;
+      }
+      renderRunsLineForPdf(lineForPdf.runs, Number(lineForPdf.size) || 11, lineForPdf.indent, lineForPdf.prefix);
       yForPdf -= Number(lineForPdf.gapAfter) || 0;
     });
-    if (currentPageForPdf.length || pagesForPdf.length === 0) pagesForPdf.push(currentPageForPdf);
+    if (currentPageForPdf.length || pagesForPdf.length === 0) {
+      pagesForPdf.push(currentPageForPdf);
+      pageAnnotsForPdf.push(currentPageAnnotsForPdf);
+      pageImagesForPdf.push(currentPageImagesForPdf);
+    }
 
     var objectsForPdf = [];
     function addObjectForPdf(contentForPdf) {
@@ -534,15 +1660,43 @@
     var pagesIdForPdf = addObjectForPdf('');
     var fontIdForPdf = addObjectForPdf('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
     var boldFontIdForPdf = addObjectForPdf('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>');
+    var obliqueFontIdForPdf = addObjectForPdf('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Oblique >>');
+    var boldObliqueFontIdForPdf = addObjectForPdf('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-BoldOblique >>');
     var pageIdsForPdf = [];
 
-    pagesForPdf.forEach(function (pageLinesForPdf) {
+    // Each embedded image is one Image XObject (DCTDecode/JPEG, DeviceRGB). The binary stream is
+    // spliced in as a latin1 string, so the whole document is byte-encoded as latin1 at the end.
+    var imageNameToObjIdForPdf = {};
+    imageObjectsForPdf.forEach(function (imgObjForPdf) {
+      var binaryForImgObj = bytesToBinaryStringForDocumentGeneration(imgObjForPdf.jpegBytes);
+      var imgObjIdForPdf = addObjectForPdf('<< /Type /XObject /Subtype /Image /Width ' + imgObjForPdf.wPx + ' /Height ' + imgObjForPdf.hPx + ' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ' + imgObjForPdf.jpegBytes.length + ' >>\nstream\n' + binaryForImgObj + '\nendstream');
+      imageNameToObjIdForPdf[imgObjForPdf.name] = imgObjIdForPdf;
+    });
+
+    pagesForPdf.forEach(function (pageLinesForPdf, pageIndexForPdf) {
       var streamForPdf = pageLinesForPdf.map(function (lineForPdf) {
         if (lineForPdf.kind === 'path') return lineForPdf.command;
         return 'BT /' + (lineForPdf.fontKey || 'F1') + ' ' + lineForPdf.size + ' Tf ' + lineForPdf.x.toFixed(2) + ' ' + lineForPdf.y.toFixed(2) + ' Td (' + pdfSafeTextForDocumentGeneration(lineForPdf.text) + ') Tj ET';
       }).join('\n');
       var contentIdForPdf = addObjectForPdf('<< /Length ' + streamForPdf.length + ' >>\nstream\n' + streamForPdf + '\nendstream');
-      var pageIdForPdf = addObjectForPdf('<< /Type /Page /Parent ' + pagesIdForPdf + ' 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 ' + fontIdForPdf + ' 0 R /F2 ' + boldFontIdForPdf + ' 0 R >> >> /Contents ' + contentIdForPdf + ' 0 R >>');
+      var annotsForPageForPdf = pageAnnotsForPdf[pageIndexForPdf] || [];
+      var annotRefsForPdf = [];
+      annotsForPageForPdf.forEach(function (annotForPdf) {
+        var rectForPdf = annotForPdf.rect;
+        var annotIdForPdf = addObjectForPdf('<< /Type /Annot /Subtype /Link /Rect [' +
+          rectForPdf[0].toFixed(2) + ' ' + rectForPdf[1].toFixed(2) + ' ' + rectForPdf[2].toFixed(2) + ' ' + rectForPdf[3].toFixed(2) +
+          '] /Border [0 0 0] /A << /S /URI /URI (' + pdfSafeTextForDocumentGeneration(annotForPdf.href) + ') >> >>');
+        annotRefsForPdf.push(annotIdForPdf + ' 0 R');
+      });
+      var annotsEntryForPdf = annotRefsForPdf.length ? ' /Annots [' + annotRefsForPdf.join(' ') + ']' : '';
+      var pageImageNamesForPdf = pageImagesForPdf[pageIndexForPdf] || [];
+      var xobjectEntryForPdf = '';
+      if (pageImageNamesForPdf.length) {
+        xobjectEntryForPdf = ' /XObject << ' + pageImageNamesForPdf.map(function (nameForXobj) {
+          return '/' + nameForXobj + ' ' + imageNameToObjIdForPdf[nameForXobj] + ' 0 R';
+        }).join(' ') + ' >>';
+      }
+      var pageIdForPdf = addObjectForPdf('<< /Type /Page /Parent ' + pagesIdForPdf + ' 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 ' + fontIdForPdf + ' 0 R /F2 ' + boldFontIdForPdf + ' 0 R /F3 ' + obliqueFontIdForPdf + ' 0 R /F4 ' + boldObliqueFontIdForPdf + ' 0 R >>' + xobjectEntryForPdf + ' >> /Contents ' + contentIdForPdf + ' 0 R' + annotsEntryForPdf + ' >>');
       pageIdsForPdf.push(pageIdForPdf);
     });
 
@@ -561,7 +1715,13 @@
       outputForPdf += String(offsetsForPdf[xiForPdf]).padStart(10, '0') + ' 00000 n \n';
     }
     outputForPdf += 'trailer\n<< /Size ' + (objectsForPdf.length + 1) + ' /Root ' + catalogIdForPdf + ' 0 R >>\nstartxref\n' + xrefOffsetForPdf + '\n%%EOF';
-    var uint8ForPdf = new TextEncoder().encode(outputForPdf);
+    // latin1 encode: every char is a single byte (ASCII text plus the spliced binary image
+    // streams, which are 0-255). This keeps .length-based xref offsets and /Length values exact
+    // while letting raw JPEG bytes pass through uncorrupted (a UTF-8 TextEncoder would mangle them).
+    var uint8ForPdf = new Uint8Array(outputForPdf.length);
+    for (var byteIndexForPdf = 0; byteIndexForPdf < outputForPdf.length; byteIndexForPdf++) {
+      uint8ForPdf[byteIndexForPdf] = outputForPdf.charCodeAt(byteIndexForPdf) & 0xff;
+    }
     return {
       mimeType: PDF_MIME_FOR_DOCUMENT_GENERATION,
       dataUrl: uint8ToDataUrlForDocumentGeneration(uint8ForPdf, PDF_MIME_FOR_DOCUMENT_GENERATION),
@@ -787,7 +1947,40 @@
     });
   }
 
-  function createDocumentForDocumentGeneration(inputForDocumentGeneration) {
+  function prepareInputWithBlocksForDocumentGeneration(inputForPrepare, formatForPrepare, depsForPrepare) {
+    var hasHtmlForPrepare = !Array.isArray(inputForPrepare.blocks)
+      && typeof inputForPrepare.html === 'string'
+      && inputForPrepare.html.trim();
+    if (!hasHtmlForPrepare || (formatForPrepare !== 'docx' && formatForPrepare !== 'pdf')) {
+      return Promise.resolve({ input: inputForPrepare, note: '' });
+    }
+    // pdf: resolve image sentinels (re-extracted from their source blobs), then rasterize each
+    // to JPEG before the synchronous PDF assembly, tracking any that cannot be embedded.
+    if (formatForPrepare === 'pdf') {
+      var dropTrackerForPdfPrepare = makeImageDropTrackerForDocumentGeneration();
+      return buildPdfImageResolverForDocumentGeneration(inputForPrepare.html, depsForPrepare).then(function (pdfResolverForPrepare) {
+        var pdfBlocksForPrepare = htmlToBlocksForDocumentGeneration(inputForPrepare.html, pdfResolverForPrepare, dropTrackerForPdfPrepare);
+        return rasterizePdfImageBlocksForDocumentGeneration(pdfBlocksForPrepare, dropTrackerForPdfPrepare).then(function (rasterizedBlocksForPrepare) {
+          return {
+            input: Object.assign({}, inputForPrepare, { blocks: rasterizedBlocksForPrepare }),
+            note: dropTrackerForPdfPrepare.note()
+          };
+        });
+      });
+    }
+    // docx: resolve image sentinels (re-extracted from their source blobs) before conversion,
+    // tracking any that cannot be embedded so the result can note them.
+    var dropTrackerForPrepare = makeImageDropTrackerForDocumentGeneration();
+    return buildDocxImageResolverForDocumentGeneration(inputForPrepare.html, depsForPrepare).then(function (resolverForPrepare) {
+      var docxBlocksForPrepare = htmlToBlocksForDocumentGeneration(inputForPrepare.html, resolverForPrepare, dropTrackerForPrepare);
+      return {
+        input: Object.assign({}, inputForPrepare, { blocks: docxBlocksForPrepare }),
+        note: dropTrackerForPrepare.note()
+      };
+    });
+  }
+
+  function createDocumentForDocumentGeneration(inputForDocumentGeneration, depsForDocumentGeneration) {
     var safeInputForDocumentGeneration = inputForDocumentGeneration || {};
     var formatForDocumentGeneration = String(safeInputForDocumentGeneration.format || '').toLowerCase();
     if (['xlsx', 'docx', 'pdf', 'pptx', 'csv'].indexOf(formatForDocumentGeneration) === -1) {
@@ -798,28 +1991,35 @@
       formatForDocumentGeneration,
       safeInputForDocumentGeneration.title
     );
-    var builtForDocumentGeneration;
-    if (formatForDocumentGeneration === 'xlsx') {
-      builtForDocumentGeneration = buildXlsxForDocumentGeneration(safeInputForDocumentGeneration);
-    } else if (formatForDocumentGeneration === 'csv') {
-      builtForDocumentGeneration = buildCsvForDocumentGeneration(safeInputForDocumentGeneration);
-    } else if (formatForDocumentGeneration === 'docx') {
-      builtForDocumentGeneration = buildDocxForDocumentGeneration(safeInputForDocumentGeneration);
-    } else if (formatForDocumentGeneration === 'pdf') {
-      builtForDocumentGeneration = buildPdfForDocumentGeneration(safeInputForDocumentGeneration);
-    } else {
-      builtForDocumentGeneration = buildPptxForDocumentGeneration(safeInputForDocumentGeneration);
-    }
-    return Promise.resolve(builtForDocumentGeneration).then(function (resultForDocumentGeneration) {
-      return {
-        ok: true,
-        format: formatForDocumentGeneration,
-        filename: filenameForDocumentGeneration,
-        mimeType: resultForDocumentGeneration.mimeType,
-        dataUrl: resultForDocumentGeneration.dataUrl,
-        size: resultForDocumentGeneration.size
-      };
-    });
+    return prepareInputWithBlocksForDocumentGeneration(safeInputForDocumentGeneration, formatForDocumentGeneration, depsForDocumentGeneration)
+      .then(function (preparedForDocumentGeneration) {
+        var preparedInputForDocumentGeneration = preparedForDocumentGeneration.input;
+        var noteForDocumentGeneration = preparedForDocumentGeneration.note;
+        var builtForDocumentGeneration;
+        if (formatForDocumentGeneration === 'xlsx') {
+          builtForDocumentGeneration = buildXlsxForDocumentGeneration(preparedInputForDocumentGeneration);
+        } else if (formatForDocumentGeneration === 'csv') {
+          builtForDocumentGeneration = buildCsvForDocumentGeneration(preparedInputForDocumentGeneration);
+        } else if (formatForDocumentGeneration === 'docx') {
+          builtForDocumentGeneration = buildDocxForDocumentGeneration(preparedInputForDocumentGeneration);
+        } else if (formatForDocumentGeneration === 'pdf') {
+          builtForDocumentGeneration = buildPdfForDocumentGeneration(preparedInputForDocumentGeneration);
+        } else {
+          builtForDocumentGeneration = buildPptxForDocumentGeneration(preparedInputForDocumentGeneration);
+        }
+        return Promise.resolve(builtForDocumentGeneration).then(function (resultForDocumentGeneration) {
+          var responseForDocumentGeneration = {
+            ok: true,
+            format: formatForDocumentGeneration,
+            filename: filenameForDocumentGeneration,
+            mimeType: resultForDocumentGeneration.mimeType,
+            dataUrl: resultForDocumentGeneration.dataUrl,
+            size: resultForDocumentGeneration.size
+          };
+          if (noteForDocumentGeneration) responseForDocumentGeneration.note = noteForDocumentGeneration;
+          return responseForDocumentGeneration;
+        });
+      });
   }
 
   agentNamespaceForDocumentGeneration.documentGeneration = {

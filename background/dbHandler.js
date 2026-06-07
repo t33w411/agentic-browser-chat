@@ -23,12 +23,17 @@
     var tasks     = Array.isArray(data && data.tasks)     ? data.tasks     : [];
     var questions = Array.isArray(data && data.questions) ? data.questions : [];
 
+    var hasAttachmentFnForDbHandler = (globalScopeForDbHandler.ABChatShared || {}).messageHasAttachment;
     await db.transaction('rw', [db.chats, db.messages, db.notes, db.tasks, db.questions], async function () {
       for (var i = 0; i < chats.length; i++) {
         var chat = chats[i];
         var msgs = Array.isArray(chat.messages) ? chat.messages : [];
         var chatRecord = Object.assign({}, chat);
         delete chatRecord.messages;
+        // seedIfEmpty bypasses createMessage, so derive the attachment flag here.
+        chatRecord.hasAttachments = typeof hasAttachmentFnForDbHandler === 'function'
+          ? msgs.some(function (mForSeed) { return mForSeed && mForSeed.role !== '_loading' && hasAttachmentFnForDbHandler(mForSeed); })
+          : Boolean(chatRecord.hasAttachments);
         await db.chats.add(chatRecord);
         for (var j = 0; j < msgs.length; j++) {
           if (msgs[j] && msgs[j].role !== '_loading') {

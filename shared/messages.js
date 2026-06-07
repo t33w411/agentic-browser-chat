@@ -36,6 +36,8 @@
     agentWebFetch: "agentWebFetch",
     captureVisibleTabScreenshot: "captureVisibleTabScreenshot",
     parseUploadedFile: "parseUploadedFile",
+    parseAttachmentStructure: "parseAttachmentStructure",
+    extractDocxImages: "extractDocxImages",
     addImageToChat: "addImageToChat",
     addSelectionToChat: "addSelectionToChat",
     // Cross-tab live chat streaming relay.

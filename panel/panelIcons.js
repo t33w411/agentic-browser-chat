@@ -57,6 +57,7 @@
   var codePaths = '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>';
   var stopSquarePath = '<rect x="4" y="4" width="16" height="16" rx="2"/>';
   var bellPaths = '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>';
+  var paperclipPaths = '<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>';
 
   icons.x10 = svgForPanelIcon(10, 2.5, xPaths);
   icons.x12 = svgForPanelIcon(12, 2.5, xPaths);
@@ -123,6 +124,7 @@
   icons.code12 = svgForPanelIcon(12, 2, codePaths);
   icons.stopSquare14 = svgForPanelIcon(14, 0, stopSquarePath, '', 'currentColor', 'none');
   icons.bell11 = svgForPanelIcon(11, 2.2, bellPaths);
+  icons.paperclip12 = svgForPanelIcon(12, 2.2, paperclipPaths);
 
   ns.icons = icons;
   globalScope.ABChatContent = ns;

@@ -32,13 +32,17 @@
     for (var iForToolExec = 0; iForToolExec < attachmentsForToolExec.length; iForToolExec++) {
       var attForToolExec = attachmentsForToolExec[iForToolExec];
       if (!attForToolExec || !attForToolExec.name) continue;
+      var parsedRefIdForToolExec = Number(attForToolExec.refId);
+      var blobIdSuffixForToolExec = Number.isFinite(parsedRefIdForToolExec)
+        ? ' (blob id: ' + parsedRefIdForToolExec + ')'
+        : '';
       var attContentForToolExec = String(attForToolExec.content || '');
       if (attContentForToolExec.indexOf('data:image/') === 0) {
-        partsForToolExec.push('\n[Image attachment: ' + attForToolExec.name + ']');
+        partsForToolExec.push('\n[Image attachment: ' + attForToolExec.name + blobIdSuffixForToolExec + ']');
       } else if (attContentForToolExec.trim()) {
-        partsForToolExec.push('\n[File attachment: ' + attForToolExec.name + ']\n' + attContentForToolExec);
+        partsForToolExec.push('\n[File attachment: ' + attForToolExec.name + blobIdSuffixForToolExec + ']\n' + attContentForToolExec);
       } else {
-        partsForToolExec.push('\n[Attachment: ' + attForToolExec.name + ']');
+        partsForToolExec.push('\n[Attachment: ' + attForToolExec.name + blobIdSuffixForToolExec + ']');
       }
     }
     return partsForToolExec.join('');
@@ -3710,7 +3714,9 @@
     }
     if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
     try {
-      var built = await documentGenerationForEval.createDocument(spec);
+      var built = await documentGenerationForEval.createDocument(spec, {
+        fetchDocxImages: fetchDocxImagesForToolExec
+      });
       if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
       baseResult._generatedDocument = {
         dataUrl: built.dataUrl,
@@ -4567,6 +4573,28 @@
 
   // ---- Document generation ----
 
+  // Re-extract embedded images from a source DOCX blob (in mammoth walk order) so
+  // create_document can re-embed abchat-img:<blobId>:<index> sentinels without the base64
+  // ever entering the model's context. Resolves to the ordered image array, or null when the
+  // blob is gone or not a docx; documentGeneration maps null to a per-image drop-and-note.
+  function fetchDocxImagesForToolExec(blobIdForFetch) {
+    return new Promise(function (resolveForFetch) {
+      var actionsForFetch = (globalScopeForToolExec.ABChatShared || {}).actions || {};
+      var actionNameForFetch = actionsForFetch.extractDocxImages || 'extractDocxImages';
+      try {
+        chrome.runtime.sendMessage({ action: actionNameForFetch, refId: Number(blobIdForFetch) }, function (responseForFetch) {
+          if (chrome.runtime.lastError || !responseForFetch || !responseForFetch.ok) {
+            resolveForFetch(null);
+            return;
+          }
+          resolveForFetch(Array.isArray(responseForFetch.images) ? responseForFetch.images : null);
+        });
+      } catch (errForFetch) {
+        resolveForFetch(null);
+      }
+    });
+  }
+
   async function createDocumentToolForToolExec(args, context) {
     var signal = getAbortSignalForToolExec(context);
     if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
@@ -4583,8 +4611,9 @@
     if (formatForDocumentTool === 'docx' || formatForDocumentTool === 'pdf') {
       var hasDocxContentForDocumentTool = typeof args.content === 'string' && args.content.trim();
       var hasDocxBlocksForDocumentTool = Array.isArray(args.blocks) && args.blocks.length > 0;
-      if (!hasDocxContentForDocumentTool && !hasDocxBlocksForDocumentTool) {
-        return { ok: false, error: formatForDocumentTool.toUpperCase() + ' creation requires content or blocks' };
+      var hasDocxHtmlForDocumentTool = typeof args.html === 'string' && args.html.trim();
+      if (!hasDocxContentForDocumentTool && !hasDocxBlocksForDocumentTool && !hasDocxHtmlForDocumentTool) {
+        return { ok: false, error: formatForDocumentTool.toUpperCase() + ' creation requires html, content, or blocks' };
       }
     }
 
@@ -4615,7 +4644,9 @@
     }
 
     try {
-      var documentResultForToolExec = await documentGenerationForToolExec.createDocument(args);
+      var documentResultForToolExec = await documentGenerationForToolExec.createDocument(args, {
+        fetchDocxImages: fetchDocxImagesForToolExec
+      });
       if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
       return documentResultForToolExec;
     } catch (errForDocumentTool) {
@@ -5026,6 +5057,43 @@
     return { ok: false, error: 'Screenshot captured but vision analysis returned no usable description. Try again, or rely on page_query for text content.' };
   }
 
+  function readDocumentStructureToolForToolExec(args) {
+    var refIdForRead = Number(args.ref_id);
+    if (!Number.isFinite(refIdForRead) || refIdForRead <= 0) {
+      return Promise.resolve({ ok: false, error: 'ref_id is required and must be a positive integer (the blob id from the [Attached file: "name.docx" (blob id: N)] marker).' });
+    }
+    var actionsForRead = (globalScopeForToolExec.ABChatShared || {}).actions || {};
+    var actionNameForRead = actionsForRead.parseAttachmentStructure || 'parseAttachmentStructure';
+    return new Promise(function (resolveForRead) {
+      var settledForRead = false;
+      function settleForRead(valueForRead) {
+        if (settledForRead) return;
+        settledForRead = true;
+        resolveForRead(valueForRead);
+      }
+      try {
+        chrome.runtime.sendMessage({ action: actionNameForRead, refId: refIdForRead }, function (responseForRead) {
+          if (chrome.runtime.lastError) {
+            settleForRead({ ok: false, error: chrome.runtime.lastError.message || 'Could not read document structure.' });
+            return;
+          }
+          if (!responseForRead || !responseForRead.ok) {
+            settleForRead({ ok: false, error: (responseForRead && responseForRead.error) || 'Could not read document structure.' });
+            return;
+          }
+          settleForRead({
+            ok: true,
+            html: String(responseForRead.html || ''),
+            name: String(responseForRead.name || ''),
+            truncated: Boolean(responseForRead.truncated)
+          });
+        });
+      } catch (errForRead) {
+        settleForRead({ ok: false, error: errForRead && errForRead.message ? errForRead.message : 'Could not read document structure.' });
+      }
+    });
+  }
+
   async function executeToolForToolExec(name, args, context) {
     args = args || {};
     switch (name) {
@@ -5043,6 +5111,7 @@
       case 'web_search':            return webSearchToolForToolExec(args, context);
       case 'web_fetch':             return webFetchToolForToolExec(args, context);
       case 'create_document':       return createDocumentToolForToolExec(args, context);
+      case 'read_document_structure': return readDocumentStructureToolForToolExec(args);
       case 'generate_image':        return generateImageToolForToolExec(args, context);
       case 'generate_questions':    return generateQuestionsToolForToolExec(args, context);
       case 'get_environment':       return getEnvironmentToolForToolExec();

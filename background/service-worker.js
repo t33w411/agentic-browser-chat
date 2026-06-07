@@ -29,6 +29,21 @@ const dbHandlerForServiceWorker = backgroundNamespaceForServiceWorker.dbHandler;
 const agentNamespaceForServiceWorker = globalThis.ABChatAgent || {};
 const fileParsingForServiceWorker = agentNamespaceForServiceWorker.fileParsing || {};
 const runtimeRequestResponseCacheForServiceWorker = new Map();
+
+function dataUrlToUint8ForServiceWorker(dataUrlForServiceWorker) {
+  var rawForServiceWorker = String(dataUrlForServiceWorker || '');
+  var commaIndexForServiceWorker = rawForServiceWorker.indexOf(',');
+  var base64ForServiceWorker = commaIndexForServiceWorker >= 0
+    ? rawForServiceWorker.slice(commaIndexForServiceWorker + 1)
+    : rawForServiceWorker;
+  var binaryForServiceWorker = atob(base64ForServiceWorker);
+  var lengthForServiceWorker = binaryForServiceWorker.length;
+  var bytesForServiceWorker = new Uint8Array(lengthForServiceWorker);
+  for (var byteIndexForServiceWorker = 0; byteIndexForServiceWorker < lengthForServiceWorker; byteIndexForServiceWorker++) {
+    bytesForServiceWorker[byteIndexForServiceWorker] = binaryForServiceWorker.charCodeAt(byteIndexForServiceWorker);
+  }
+  return bytesForServiceWorker;
+}
 const runtimeRequestInflightForServiceWorker = new Map();
 const runtimeRequestResponseCacheTtlMsForServiceWorker = 10000;
 const runtimeRequestInflightMaxAgeMsForServiceWorker = 30000;
@@ -2549,6 +2564,108 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
           error: errorForServiceWorker && errorForServiceWorker.message
             ? errorForServiceWorker.message
             : "File parsing failed."
+        });
+      });
+    return true;
+  }
+
+  if (messageForServiceWorker.action === (actionsForServiceWorker.parseAttachmentStructure || "parseAttachmentStructure")) {
+    var refIdForStructure = Number(messageForServiceWorker.refId);
+    if (!Number.isFinite(refIdForStructure)) {
+      sendResponseForServiceWorker({ ok: false, error: "Invalid attachment id." });
+      return false;
+    }
+    var repoForStructure = globalThis.ABChatShared && globalThis.ABChatShared.panelDataRepo;
+    if (!repoForStructure || typeof repoForStructure.getAttachmentBlob !== "function") {
+      sendResponseForServiceWorker({ ok: false, error: "Attachment storage is unavailable." });
+      return false;
+    }
+    if (!fileParsingForServiceWorker || typeof fileParsingForServiceWorker.parseDocxStructure !== "function") {
+      sendResponseForServiceWorker({ ok: false, error: "DOCX structure parser is unavailable." });
+      return false;
+    }
+    Promise.resolve(repoForStructure.getAttachmentBlob(refIdForStructure))
+      .then(function (blobForStructure) {
+        if (!blobForStructure) {
+          throw new Error("Attachment " + refIdForStructure + " was not found.");
+        }
+        var mimeForStructure = String(blobForStructure.mimeType || "").toLowerCase();
+        var nameForStructure = String(blobForStructure.name || "");
+        var isDocxForStructure = mimeForStructure === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+          || /\.docx$/i.test(nameForStructure);
+        if (!isDocxForStructure) {
+          throw new Error("Structural reading is only available for DOCX attachments.");
+        }
+        var dataUrlForStructure = String(blobForStructure.dataUrl || "");
+        if (dataUrlForStructure.indexOf("data:") !== 0) {
+          throw new Error("This document was attached before structural reading was available. Ask the user to re-attach the file.");
+        }
+        var bytesForStructure = dataUrlToUint8ForServiceWorker(dataUrlForStructure);
+        return fileParsingForServiceWorker.parseDocxStructure(bytesForStructure.buffer, refIdForStructure).then(function (structureResultForServiceWorker) {
+          sendResponseForServiceWorker({
+            ok: true,
+            html: structureResultForServiceWorker && structureResultForServiceWorker.html ? structureResultForServiceWorker.html : "",
+            truncated: Boolean(structureResultForServiceWorker && structureResultForServiceWorker.truncated),
+            name: nameForStructure
+          });
+        });
+      })
+      .catch(function (errorForStructure) {
+        sendResponseForServiceWorker({
+          ok: false,
+          error: errorForStructure && errorForStructure.message
+            ? errorForStructure.message
+            : "DOCX structure parsing failed."
+        });
+      });
+    return true;
+  }
+
+  if (messageForServiceWorker.action === (actionsForServiceWorker.extractDocxImages || "extractDocxImages")) {
+    var refIdForImages = Number(messageForServiceWorker.refId);
+    if (!Number.isFinite(refIdForImages)) {
+      sendResponseForServiceWorker({ ok: false, error: "Invalid attachment id." });
+      return false;
+    }
+    var repoForImages = globalThis.ABChatShared && globalThis.ABChatShared.panelDataRepo;
+    if (!repoForImages || typeof repoForImages.getAttachmentBlob !== "function") {
+      sendResponseForServiceWorker({ ok: false, error: "Attachment storage is unavailable." });
+      return false;
+    }
+    if (!fileParsingForServiceWorker || typeof fileParsingForServiceWorker.extractDocxImages !== "function") {
+      sendResponseForServiceWorker({ ok: false, error: "DOCX image extractor is unavailable." });
+      return false;
+    }
+    Promise.resolve(repoForImages.getAttachmentBlob(refIdForImages))
+      .then(function (blobForImages) {
+        if (!blobForImages) {
+          throw new Error("Attachment " + refIdForImages + " was not found.");
+        }
+        var mimeForImages = String(blobForImages.mimeType || "").toLowerCase();
+        var nameForImages = String(blobForImages.name || "");
+        var isDocxForImages = mimeForImages === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+          || /\.docx$/i.test(nameForImages);
+        if (!isDocxForImages) {
+          throw new Error("Image extraction is only available for DOCX attachments.");
+        }
+        var dataUrlForImages = String(blobForImages.dataUrl || "");
+        if (dataUrlForImages.indexOf("data:") !== 0) {
+          throw new Error("This document was attached before structural reading was available. Ask the user to re-attach the file.");
+        }
+        var bytesForImages = dataUrlToUint8ForServiceWorker(dataUrlForImages);
+        return fileParsingForServiceWorker.extractDocxImages(bytesForImages.buffer).then(function (imagesForServiceWorker) {
+          sendResponseForServiceWorker({
+            ok: true,
+            images: Array.isArray(imagesForServiceWorker) ? imagesForServiceWorker : []
+          });
+        });
+      })
+      .catch(function (errorForImages) {
+        sendResponseForServiceWorker({
+          ok: false,
+          error: errorForImages && errorForImages.message
+            ? errorForImages.message
+            : "DOCX image extraction failed."
         });
       });
     return true;

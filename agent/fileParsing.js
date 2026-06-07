@@ -155,6 +155,109 @@
     });
   }
 
+  function parseDocxStructureForFileParsing(arrayBufferForFileParsing, blobIdForFileParsing) {
+    loadLibraryForFileParsing('lib/mammoth.min.js', 'mammoth');
+    if (!globalScopeForFileParsing.mammoth || typeof globalScopeForFileParsing.mammoth.convertToHtml !== 'function') {
+      throw new Error('DOCX structure parser is unavailable.');
+    }
+    var numericBlobIdForFileParsing = Number(blobIdForFileParsing);
+    var canMintSentinelForFileParsing = Number.isFinite(numericBlobIdForFileParsing) && numericBlobIdForFileParsing > 0;
+    var optionsForDocxStructure = {};
+    // Images become small placeholder sentinels (abchat-img:<blobId>:<index>) instead of
+    // base64, keeping the HTML compact while letting create_document re-embed them on a
+    // docx round-trip by re-extracting bytes from this same source blob in the same order.
+    // Without a usable blob id there is nothing to re-extract from, so fall back to drop.
+    if (globalScopeForFileParsing.mammoth.images && typeof globalScopeForFileParsing.mammoth.images.imgElement === 'function') {
+      var sentinelIndexForFileParsing = 0;
+      optionsForDocxStructure.convertImage = globalScopeForFileParsing.mammoth.images.imgElement(function () {
+        if (!canMintSentinelForFileParsing) return {};
+        var srcForFileParsing = 'abchat-img:' + numericBlobIdForFileParsing + ':' + sentinelIndexForFileParsing;
+        sentinelIndexForFileParsing++;
+        return { src: srcForFileParsing };
+      });
+    }
+    return globalScopeForFileParsing.mammoth
+      .convertToHtml({ arrayBuffer: arrayBufferForFileParsing }, optionsForDocxStructure)
+      .then(function (resultForFileParsing) {
+        var htmlForFileParsing = String((resultForFileParsing && resultForFileParsing.value) || '')
+          .replace(/<img\b(?![^>]*\babchat-img:)[^>]*>/gi, '');
+        var truncatedForFileParsing = false;
+        if (htmlForFileParsing.length > MAX_PARSED_TEXT_CHARS_FOR_FILE_PARSING) {
+          htmlForFileParsing = htmlForFileParsing.slice(0, MAX_PARSED_TEXT_CHARS_FOR_FILE_PARSING);
+          truncatedForFileParsing = true;
+        }
+        return { html: htmlForFileParsing, truncated: truncatedForFileParsing };
+      });
+  }
+
+  // Re-extract every embedded image from a DOCX in mammoth's image-walk order, the same
+  // order parseDocxStructure used when minting the abchat-img:<blobId>:<index> sentinels,
+  // so index N here is the image the model saw as :N. Returns base64 + content type +
+  // natural pixel size (via createImageBitmap) for each image, used by create_document to
+  // embed images back into a generated docx without ever putting base64 into the model's
+  // context.
+  function extractDocxImagesForFileParsing(arrayBufferForFileParsing) {
+    loadLibraryForFileParsing('lib/mammoth.min.js', 'mammoth');
+    if (!globalScopeForFileParsing.mammoth || typeof globalScopeForFileParsing.mammoth.convertToHtml !== 'function') {
+      throw new Error('DOCX structure parser is unavailable.');
+    }
+    if (!globalScopeForFileParsing.mammoth.images || typeof globalScopeForFileParsing.mammoth.images.imgElement !== 'function') {
+      return Promise.resolve([]);
+    }
+    var collectedForExtract = [];
+    var optionsForExtract = {
+      convertImage: globalScopeForFileParsing.mammoth.images.imgElement(function (imageForExtract) {
+        return imageForExtract.read('base64').then(function (base64ForExtract) {
+          collectedForExtract.push({
+            base64: String(base64ForExtract || ''),
+            contentType: String((imageForExtract && imageForExtract.contentType) || '')
+          });
+          return {};
+        });
+      })
+    };
+    return globalScopeForFileParsing.mammoth
+      .convertToHtml({ arrayBuffer: arrayBufferForFileParsing }, optionsForExtract)
+      .then(function () {
+        return Promise.all(collectedForExtract.map(function (imageForExtract) {
+          return measureImageDimensionsForFileParsing(imageForExtract.base64, imageForExtract.contentType)
+            .then(function (sizeForExtract) {
+              return {
+                base64: imageForExtract.base64,
+                contentType: imageForExtract.contentType,
+                width: sizeForExtract.width,
+                height: sizeForExtract.height
+              };
+            });
+        }));
+      });
+  }
+
+  function measureImageDimensionsForFileParsing(base64ForMeasure, contentTypeForMeasure) {
+    if (typeof createImageBitmap !== 'function' || typeof Blob === 'undefined' || !base64ForMeasure) {
+      return Promise.resolve({ width: 0, height: 0 });
+    }
+    var bytesForMeasure;
+    try {
+      var binaryForMeasure = atob(base64ForMeasure);
+      bytesForMeasure = new Uint8Array(binaryForMeasure.length);
+      for (var iForMeasure = 0; iForMeasure < binaryForMeasure.length; iForMeasure++) {
+        bytesForMeasure[iForMeasure] = binaryForMeasure.charCodeAt(iForMeasure);
+      }
+    } catch (decodeErrForMeasure) {
+      return Promise.resolve({ width: 0, height: 0 });
+    }
+    return createImageBitmap(new Blob([bytesForMeasure], { type: contentTypeForMeasure || 'application/octet-stream' }))
+      .then(function (bitmapForMeasure) {
+        var sizeForMeasure = { width: bitmapForMeasure.width || 0, height: bitmapForMeasure.height || 0 };
+        if (typeof bitmapForMeasure.close === 'function') bitmapForMeasure.close();
+        return sizeForMeasure;
+      })
+      .catch(function () {
+        return { width: 0, height: 0 };
+      });
+  }
+
   function parseSpreadsheetForFileParsing(arrayBufferForFileParsing) {
     loadLibraryForFileParsing('lib/xlsx.min.js', 'xlsx');
     if (!globalScopeForFileParsing.XLSX || typeof globalScopeForFileParsing.XLSX.read !== 'function') {
@@ -277,7 +380,9 @@
   }
 
   agentNamespaceForFileParsing.fileParsing = {
-    parseFileBuffer: parseFileBufferForFileParsing
+    parseFileBuffer: parseFileBufferForFileParsing,
+    parseDocxStructure: parseDocxStructureForFileParsing,
+    extractDocxImages: extractDocxImagesForFileParsing
   };
 
   globalScopeForFileParsing.ABChatAgent = agentNamespaceForFileParsing;

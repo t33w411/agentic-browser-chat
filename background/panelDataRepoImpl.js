@@ -189,6 +189,16 @@
       .filter(Boolean);
   }
 
+  // Whether a message carries a file-type chip or an embedded generated image/document.
+  // Defined once in shared/db.js (loaded before this file in the service worker) so the
+  // upgrade backfill, seeding, and runtime writes all share one predicate.
+  function messageHasAttachmentForPanelDataRepo(messageForPanelDataRepo) {
+    var sharedNsForPanelDataRepo = globalThis.ABChatShared || {};
+    return typeof sharedNsForPanelDataRepo.messageHasAttachment === 'function'
+      ? sharedNsForPanelDataRepo.messageHasAttachment(messageForPanelDataRepo)
+      : false;
+  }
+
   function normalizeAttachmentBlobRecordForPanelDataRepo(blobInputForPanelDataRepo) {
     var inputForPanelDataRepo = blobInputForPanelDataRepo || {};
     return {
@@ -335,6 +345,7 @@
       summary: String(inputForPanelDataRepo.summary || ''),
       type: normalizeChatTypeForPanelDataRepo(inputForPanelDataRepo.type),
       isPinned: Boolean(inputForPanelDataRepo.isPinned),
+      hasAttachments: Boolean(inputForPanelDataRepo.hasAttachments),
       hasCustomTitle: Boolean(inputForPanelDataRepo.hasCustomTitle),
       lastModel: inputForPanelDataRepo.lastModel ? String(inputForPanelDataRepo.lastModel) : '',
       compactionSummary: String(inputForPanelDataRepo.compactionSummary || ''),
@@ -374,6 +385,9 @@
     }
     if (patchForUpdate.isPinned != null) {
       updateForPanelDataRepo.isPinned = Boolean(patchForUpdate.isPinned);
+    }
+    if (patchForUpdate.hasAttachments != null) {
+      updateForPanelDataRepo.hasAttachments = Boolean(patchForUpdate.hasAttachments);
     }
     if (patchForUpdate.hasCustomTitle != null) {
       updateForPanelDataRepo.hasCustomTitle = Boolean(patchForUpdate.hasCustomTitle);
@@ -532,10 +546,15 @@
       nowForPanelDataRepo
     );
     var messageIdForPanelDataRepo = await dbForPanelDataRepo.messages.add(messageRecordForPanelDataRepo);
+    var chatPatchForPanelDataRepo = {};
     if (optsForPanelDataRepo.touchChat !== false) {
-      await dbForPanelDataRepo.chats.update(numericChatIdForPanelDataRepo, {
-        updatedAt: normalizeChatTimestampForPanelDataRepo(optsForPanelDataRepo.chatUpdatedAt, nowForPanelDataRepo)
-      });
+      chatPatchForPanelDataRepo.updatedAt = normalizeChatTimestampForPanelDataRepo(optsForPanelDataRepo.chatUpdatedAt, nowForPanelDataRepo);
+    }
+    if (!existingChatForPanelDataRepo.hasAttachments && messageHasAttachmentForPanelDataRepo(messageRecordForPanelDataRepo)) {
+      chatPatchForPanelDataRepo.hasAttachments = true;
+    }
+    if (Object.keys(chatPatchForPanelDataRepo).length > 0) {
+      await dbForPanelDataRepo.chats.update(numericChatIdForPanelDataRepo, chatPatchForPanelDataRepo);
     }
     return dbForPanelDataRepo.messages.get(messageIdForPanelDataRepo);
   }
@@ -600,19 +619,27 @@
       if (messageIdsToDeleteForPanelDataRepo.length > 0) {
         await dbForPanelDataRepo.messages.bulkDelete(messageIdsToDeleteForPanelDataRepo);
       }
+      // Replacing from an index can both add and remove attachment-bearing messages,
+      // so recompute the flag over the kept prefix plus the replacements.
+      var hasAttachmentsAfterReplaceForPanelDataRepo = allMessagesForPanelDataRepo
+        .slice(0, startIndexForPanelDataRepo)
+        .some(messageHasAttachmentForPanelDataRepo);
       for (var insertIndexForPanelDataRepo = 0; insertIndexForPanelDataRepo < replacementMessagesForPanelDataRepo.length; insertIndexForPanelDataRepo++) {
         var replacementForPanelDataRepo = replacementMessagesForPanelDataRepo[insertIndexForPanelDataRepo] || {};
         var replacementCreatedAtForPanelDataRepo = replacementForPanelDataRepo.createdAt;
-        await dbForPanelDataRepo.messages.add(
-          normalizeMessageRecordForPanelDataRepo(
-            numericChatIdForPanelDataRepo,
-            replacementForPanelDataRepo,
-            replacementCreatedAtForPanelDataRepo || getIsoNowForPanelDataRepo()
-          )
+        var normalizedReplacementForPanelDataRepo = normalizeMessageRecordForPanelDataRepo(
+          numericChatIdForPanelDataRepo,
+          replacementForPanelDataRepo,
+          replacementCreatedAtForPanelDataRepo || getIsoNowForPanelDataRepo()
         );
+        if (!hasAttachmentsAfterReplaceForPanelDataRepo && messageHasAttachmentForPanelDataRepo(normalizedReplacementForPanelDataRepo)) {
+          hasAttachmentsAfterReplaceForPanelDataRepo = true;
+        }
+        await dbForPanelDataRepo.messages.add(normalizedReplacementForPanelDataRepo);
       }
       await dbForPanelDataRepo.chats.update(numericChatIdForPanelDataRepo, {
-        updatedAt: normalizeChatTimestampForPanelDataRepo(optsForPanelDataRepo.chatUpdatedAt, getIsoNowForPanelDataRepo())
+        updatedAt: normalizeChatTimestampForPanelDataRepo(optsForPanelDataRepo.chatUpdatedAt, getIsoNowForPanelDataRepo()),
+        hasAttachments: hasAttachmentsAfterReplaceForPanelDataRepo
       });
     });
     return listMessagesByChatIdForPanelDataRepo(numericChatIdForPanelDataRepo);

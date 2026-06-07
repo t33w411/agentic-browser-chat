@@ -42,6 +42,41 @@
     return parsedDateForDb.toISOString().slice(0, 10);
   }
 
+  // A message "has an attachment" if it carries a real file/image chip (an uploaded
+  // file, attached image, screenshot, or spreadsheet) or its markdown embeds a
+  // generated image (__blob:N__) or generated document (#abchat-docblob-N). Text/context
+  // chips (page, page-snapshot, selection, paste, note, chat, tab) do not count.
+  const ATTACHMENT_FILE_CHIP_TYPES_FOR_DB = { file: true, image: true, screenshot: true, spreadsheet: true };
+  function messageHasAttachmentForDb(messageForDb) {
+    if (!messageForDb || typeof messageForDb !== 'object') return false;
+    if (Array.isArray(messageForDb.chips)) {
+      for (let chipIndexForDb = 0; chipIndexForDb < messageForDb.chips.length; chipIndexForDb++) {
+        const chipForDb = messageForDb.chips[chipIndexForDb];
+        if (!chipForDb || typeof chipForDb !== 'object') continue;
+        const chipTypeForDb = String(chipForDb.type || '').trim();
+        if (chipTypeForDb && ATTACHMENT_FILE_CHIP_TYPES_FOR_DB[chipTypeForDb]) return true;
+      }
+    }
+    const mdForDb = typeof messageForDb.md === 'string' ? messageForDb.md : '';
+    if (mdForDb && (/__blob:\d+__/.test(mdForDb) || /#abchat-docblob-\d+/.test(mdForDb))) return true;
+    return false;
+  }
+
+  // Recomputes chats.hasAttachments for every chat by scanning the messages table once.
+  // Shared by the schema upgrades so the stored flag tracks whatever messageHasAttachmentForDb
+  // currently considers an attachment.
+  async function backfillChatAttachmentFlagsForDb(txForDbMigration) {
+    const chatIdsWithAttachmentsForDbMigration = new Set();
+    await txForDbMigration.table('messages').toCollection().each(function (messageForDbMigration) {
+      if (messageHasAttachmentForDb(messageForDbMigration)) {
+        chatIdsWithAttachmentsForDbMigration.add(Number(messageForDbMigration.chatId));
+      }
+    });
+    await txForDbMigration.table('chats').toCollection().modify(function (chatForDbMigration) {
+      chatForDbMigration.hasAttachments = chatIdsWithAttachmentsForDbMigration.has(Number(chatForDbMigration.id));
+    });
+  }
+
   db.version(1).stores({
     chats:           '++id, title, createdAt, updatedAt, isPinned',
     messages:        '++id, chatId, role, createdAt, [chatId+createdAt]',
@@ -119,6 +154,35 @@
     webFetchCache:   'url'
   });
 
+  // hasAttachments is read from the in-memory chat row when rendering the sidebar,
+  // never queried, so it does not need an index; the schema strings stay unchanged.
+  // The upgrade backfills the flag for existing chats by scanning their messages once.
+  db.version(4).stores({
+    chats:           '++id, title, createdAt, updatedAt, isPinned',
+    messages:        '++id, chatId, role, createdAt, [chatId+createdAt]',
+    notes:           '++id, title, noteType, sourceChatId, createdAt, updatedAt',
+    noteVersions:    '++id, noteId, savedAt',
+    tasks:           '++id, title, dueAt, isCompleted, createdAt, updatedAt',
+    questions:       '++id, title, intervalStage, dueAt, isPaused, createdAt, updatedAt',
+    attachmentBlobs: '++id, createdAt',
+    webFetchCache:   'url'
+  }).upgrade(backfillChatAttachmentFlagsForDb);
+
+  // Recomputes hasAttachments after narrowing the attachment definition to real
+  // files/images: clears the flag on chats that only ever had text/context chips
+  // (page, selection, paste, note, chat, tab), which the version(4) backfill set true.
+  db.version(5).stores({
+    chats:           '++id, title, createdAt, updatedAt, isPinned',
+    messages:        '++id, chatId, role, createdAt, [chatId+createdAt]',
+    notes:           '++id, title, noteType, sourceChatId, createdAt, updatedAt',
+    noteVersions:    '++id, noteId, savedAt',
+    tasks:           '++id, title, dueAt, isCompleted, createdAt, updatedAt',
+    questions:       '++id, title, intervalStage, dueAt, isPaused, createdAt, updatedAt',
+    attachmentBlobs: '++id, createdAt',
+    webFetchCache:   'url'
+  }).upgrade(backfillChatAttachmentFlagsForDb);
+
   ns.db = db;
+  ns.messageHasAttachment = messageHasAttachmentForDb;
   globalScopeForDb.ABChatShared = ns;
 })();

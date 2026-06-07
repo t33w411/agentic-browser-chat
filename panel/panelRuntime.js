@@ -430,6 +430,7 @@
         summary:   typeof srcForStore.summary   === 'string' ? srcForStore.summary   : '',
         type:      typeof srcForStore.type      === 'string' ? srcForStore.type      : 'chat',
         isPinned:  Boolean(srcForStore.isPinned),
+        hasAttachments: Boolean(srcForStore.hasAttachments),
         lastModel: typeof srcForStore.lastModel === 'string' ? srcForStore.lastModel : '',
         compactionSummary: typeof srcForStore.compactionSummary === 'string' ? srcForStore.compactionSummary : '',
         compactedThroughMessageId: srcForStore.compactedThroughMessageId != null ? srcForStore.compactedThroughMessageId : null,
@@ -518,6 +519,30 @@
       return '';
     }
 
+    // A message "has an attachment" if it carries a real file/image chip (an uploaded
+    // file, attached image, screenshot, or spreadsheet) or its markdown embeds a
+    // generated image (__blob:N__) or generated document (#abchat-docblob-N). Text/context
+    // chips (page, page-snapshot, selection, paste, note, chat, tab) do not count.
+    const ATTACHMENT_FILE_CHIP_TYPES_FOR_PANEL_RUNTIME = { file: true, image: true, screenshot: true, spreadsheet: true };
+    function messageHasAttachmentForPanelRuntime(messageForPanelRuntime) {
+      if (!messageForPanelRuntime || typeof messageForPanelRuntime !== 'object') return false;
+      if (Array.isArray(messageForPanelRuntime.chips)) {
+        for (let chipIndexForAttach = 0; chipIndexForAttach < messageForPanelRuntime.chips.length; chipIndexForAttach++) {
+          const chipForAttach = messageForPanelRuntime.chips[chipIndexForAttach];
+          if (!chipForAttach || typeof chipForAttach !== 'object') continue;
+          const chipTypeForAttach = String(chipForAttach.type || '').trim();
+          if (chipTypeForAttach && ATTACHMENT_FILE_CHIP_TYPES_FOR_PANEL_RUNTIME[chipTypeForAttach]) return true;
+        }
+      }
+      const mdForAttach = typeof messageForPanelRuntime.md === 'string' ? messageForPanelRuntime.md : '';
+      if (mdForAttach && (/__blob:\d+__/.test(mdForAttach) || /#abchat-docblob-\d+/.test(mdForAttach))) return true;
+      return false;
+    }
+
+    function chatMessagesHaveAttachmentForPanelRuntime(messagesForPanelRuntime) {
+      return Array.isArray(messagesForPanelRuntime) && messagesForPanelRuntime.some(messageHasAttachmentForPanelRuntime);
+    }
+
     function cloneChatRecordForPanelRuntime(chatForPanelRuntime) {
       const safeChatForPanelRuntime = chatForPanelRuntime || {};
       const messagesForPanelRuntime = Array.isArray(safeChatForPanelRuntime.messages)
@@ -537,6 +562,7 @@
         summary: summaryForPanelRuntime,
         type: safeChatForPanelRuntime.type === 'quickq' ? 'quickq' : 'chat',
         isPinned: Boolean(safeChatForPanelRuntime.isPinned),
+        hasAttachments: Boolean(safeChatForPanelRuntime.hasAttachments),
         hasCustomTitle: Boolean(safeChatForPanelRuntime.hasCustomTitle),
         messages: messagesForPanelRuntime,
         createdAt: createdAtForPanelRuntime,
@@ -566,6 +592,10 @@
         CHAT_STORE_FOR_PANEL_RUNTIME[numericChatIdForPanelRuntime].summary = getChatSummaryFromMessagesForPanelRuntime(
           CHAT_STORE_FOR_PANEL_RUNTIME[numericChatIdForPanelRuntime].messages
         );
+        if (!CHAT_STORE_FOR_PANEL_RUNTIME[numericChatIdForPanelRuntime].hasAttachments
+            && chatMessagesHaveAttachmentForPanelRuntime(pendingMsgsForApply)) {
+          CHAT_STORE_FOR_PANEL_RUNTIME[numericChatIdForPanelRuntime].hasAttachments = true;
+        }
       }
       const existingIndexForPanelRuntime = CHAT_ORDER_FOR_PANEL_RUNTIME.indexOf(numericChatIdForPanelRuntime);
       if (existingIndexForPanelRuntime >= 0) {
@@ -2413,6 +2443,13 @@
         linkForHydrate.removeAttribute('target');
         linkForHydrate.rel = 'noopener noreferrer';
         linkForHydrate.classList.add('generated-document-link');
+        if (!linkForHydrate.querySelector('.gen-doc-icon')) {
+          const iconForHydrate = document.createElement('span');
+          iconForHydrate.className = 'gen-doc-icon';
+          iconForHydrate.setAttribute('aria-hidden', 'true');
+          iconForHydrate.innerHTML = ic.paperclip12 || '';
+          linkForHydrate.insertBefore(iconForHydrate, linkForHydrate.firstChild);
+        }
       });
     }
 
@@ -2843,6 +2880,9 @@
               CHAT_STORE_FOR_PANEL_RUNTIME[S.activeChatId].messages
             );
             CHAT_STORE_FOR_PANEL_RUNTIME[S.activeChatId].updatedAt = new Date().toISOString();
+            CHAT_STORE_FOR_PANEL_RUNTIME[S.activeChatId].hasAttachments = chatMessagesHaveAttachmentForPanelRuntime(
+              CHAT_STORE_FOR_PANEL_RUNTIME[S.activeChatId].messages
+            );
           }
           upsertChatUiForPanelRuntime(S.activeChatId, true);
         } catch (errorForPanelRuntime) {
@@ -6191,6 +6231,20 @@
           titleElementForSync.appendChild(streamingDotForSync);
         } else if (!isStreamingForSync && streamingDotForSync) {
           streamingDotForSync.remove();
+        }
+      }
+      if (titleElementForSync) {
+        const hasAttachmentsForSync = Boolean(chatDataForSync.hasAttachments);
+        let attachIndicatorForSync = titleElementForSync.querySelector('.ci-attach-indicator');
+        if (hasAttachmentsForSync && !attachIndicatorForSync) {
+          attachIndicatorForSync = document.createElement('span');
+          attachIndicatorForSync.className = 'ci-attach-indicator';
+          attachIndicatorForSync.setAttribute('aria-label', 'Has attachments');
+          attachIndicatorForSync.setAttribute('title', 'Has attachments');
+          attachIndicatorForSync.innerHTML = ic.paperclip12 || '';
+          titleElementForSync.insertBefore(attachIndicatorForSync, titleElementForSync.firstChild);
+        } else if (!hasAttachmentsForSync && attachIndicatorForSync) {
+          attachIndicatorForSync.remove();
         }
       }
       if (excerptElementForSync && excerptElementForSync.dataset.renderedSummary !== nextSummaryForSync) {
@@ -9550,6 +9604,7 @@
         summary: summaryForPanelRuntime,
         type: chatTypeForPanelRuntime === 'quickq' ? 'quickq' : 'chat',
         isPinned: Boolean(isPinnedForPanelRuntime),
+        hasAttachments: false,
         lastModel: typeof lastModelForPanelRuntime === 'string' ? lastModelForPanelRuntime : '',
         messages: [],
         createdAt: nowForPanelRuntime,
@@ -10217,6 +10272,7 @@
       const panelDataRepoForPanelRuntime = getPanelDataRepoForPanelRuntime();
       const nowForPanelRuntime = new Date().toISOString();
       const shouldPersistToDbForPanelRuntime = optsForPanelRuntime.persistToDb !== false;
+      const msgAddsAttachmentForPanelRuntime = messageHasAttachmentForPanelRuntime(msgObjForPanelRuntime);
 
       if (shouldPersistToDbForPanelRuntime && panelDataRepoForPanelRuntime && typeof panelDataRepoForPanelRuntime.createMessage === 'function') {
         try {
@@ -10234,6 +10290,7 @@
           chatForPanelRuntime.summary = getChatSummaryFromMessagesForPanelRuntime(chatForPanelRuntime.messages);
           chatForPanelRuntime.updatedAt = nowForPanelRuntime;
           if (!chatForPanelRuntime.createdAt) chatForPanelRuntime.createdAt = nowForPanelRuntime;
+          if (msgAddsAttachmentForPanelRuntime) chatForPanelRuntime.hasAttachments = true;
           if (!optsForPanelRuntime.skipChatUpdate) {
             try {
               const persistedChatForPanelRuntime = await panelDataRepoForPanelRuntime.updateChat(chatIdForPanelRuntime, {
@@ -10264,6 +10321,7 @@
       chatForPanelRuntime.summary = getChatSummaryFromMessagesForPanelRuntime(chatForPanelRuntime.messages);
       chatForPanelRuntime.updatedAt = nowForPanelRuntime;
       if (!chatForPanelRuntime.createdAt) chatForPanelRuntime.createdAt = nowForPanelRuntime;
+      if (msgAddsAttachmentForPanelRuntime) chatForPanelRuntime.hasAttachments = true;
       upsertChatUiForPanelRuntime(chatIdForPanelRuntime, true);
       return localMsgForPanelRuntime;
     }
@@ -13159,13 +13217,22 @@
       }
       const extractedTextForPanelRuntime = String(parseResponseForPanelRuntime.text || '');
       const resolvedMimeTypeForPanelRuntime = String(parseResponseForPanelRuntime.mimeType || fileForPanelRuntime.type || 'application/octet-stream');
-      const persistedBlobForPanelRuntime = await createAttachmentBlobForPanelRuntime({
+      // Retain raw bytes for DOCX only, so the model can later re-read the file as
+      // structured HTML (read_document_structure) when a task needs its layout.
+      // Other formats keep just the extracted text to avoid storing large blobs.
+      const isDocxAttachmentForPanelRuntime = resolvedMimeTypeForPanelRuntime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        || getFileExtensionForPanelRuntime(fileForPanelRuntime.name || '') === 'docx';
+      const fileBlobInputForPanelRuntime = {
         name: String(fileForPanelRuntime.name || 'File'),
         kind: 'file',
         mimeType: resolvedMimeTypeForPanelRuntime,
         size: Number(fileForPanelRuntime.size || 0),
         textContent: extractedTextForPanelRuntime
-      });
+      };
+      if (isDocxAttachmentForPanelRuntime) {
+        fileBlobInputForPanelRuntime.dataUrl = arrayBufferToDataUrlForPanelRuntime(arrayBufferForPanelRuntime, resolvedMimeTypeForPanelRuntime);
+      }
+      const persistedBlobForPanelRuntime = await createAttachmentBlobForPanelRuntime(fileBlobInputForPanelRuntime);
       const targetChipForPanelRuntime = chipNodeForPanelRuntime || addInputChipForPanelRuntime({
         type: 'file',
         label: String(fileForPanelRuntime.name || 'File')
@@ -13266,13 +13333,22 @@
             return;
           }
           const extractedTextForNoteAttach = String(parseResponseForNoteAttach.text || '');
-          const persistedBlobForNoteFile = await createAttachmentBlobForPanelRuntime({
+          const noteFileMimeTypeForNoteAttach = String(fileForPanelRuntime.type || '');
+          // Retain raw bytes for DOCX only, matching the chat attachment path, so the
+          // model can later re-read a note's DOCX as structured HTML when needed.
+          const isDocxNoteAttachForPanelRuntime = noteFileMimeTypeForNoteAttach === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+            || getFileExtensionForPanelRuntime(fileForPanelRuntime.name || '') === 'docx';
+          const noteFileBlobInputForPanelRuntime = {
             name: String(fileForPanelRuntime.name || 'file'),
             kind: 'file',
-            mimeType: String(fileForPanelRuntime.type || ''),
+            mimeType: noteFileMimeTypeForNoteAttach,
             size: Number(fileForPanelRuntime.size || 0),
             textContent: extractedTextForNoteAttach
-          });
+          };
+          if (isDocxNoteAttachForPanelRuntime) {
+            noteFileBlobInputForPanelRuntime.dataUrl = arrayBufferToDataUrlForPanelRuntime(arrayBufferForNoteAttach, noteFileMimeTypeForNoteAttach);
+          }
+          const persistedBlobForNoteFile = await createAttachmentBlobForPanelRuntime(noteFileBlobInputForPanelRuntime);
           pendingChipForNoteAttach.remove();
           if (isPopoutForPanelRuntime && popoutForPanelRuntime) {
             renderAttachmentChipForPopoutForPanelRuntime(popoutForPanelRuntime, attachmentsWrapForPanelRuntime, { name: String(fileForPanelRuntime.name || 'file'), refId: Number(persistedBlobForNoteFile.id) }, 'file');

@@ -556,6 +556,16 @@
 .ci-dd-item.danger:hover { background: #fee2e2; color: #dc2626; }
 .chat-item.ci-dropdown-open .chat-item-meta { opacity: 1; max-width: 60px; overflow: visible; pointer-events: auto; }
 
+.ci-attach-indicator {
+  display: inline-block;
+  margin-right: 4px;
+  color: var(--abchat-text-muted);
+  vertical-align: middle;
+  flex-shrink: 0;
+  line-height: 0;
+}
+.ci-attach-indicator svg { display: block; }
+
 .ci-streaming-dot {
   display: inline-block;
   width: 6px; height: 6px;
@@ -984,6 +994,13 @@
 .gen-img-download-btn { position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.62); color: #fff; border: none; border-radius: 20px; padding: 5px 13px; font-size: 12.5px; font-family: inherit; cursor: pointer; opacity: 0; transition: opacity 0.15s ease; pointer-events: none; display: flex; align-items: center; gap: 5px; white-space: nowrap; }
 .gen-img-wrap:hover .gen-img-download-btn { opacity: 1; pointer-events: auto; }
 .gen-img-download-btn:hover { background: rgba(0,0,0,0.82); }
+.generated-document-link .gen-doc-icon {
+  display: inline-block;
+  margin-right: 4px;
+  vertical-align: middle;
+  line-height: 0;
+}
+.generated-document-link .gen-doc-icon svg { display: block; }
 .msg-edit-textarea {
   width: 100%;
   border: 1px solid var(--abchat-border-med);
