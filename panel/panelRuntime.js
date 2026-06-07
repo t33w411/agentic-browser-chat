@@ -1104,6 +1104,14 @@
     }
     let isKeyboardIsolationBoundForPanelRuntime = false;
     let isEditableFocusIsolationBoundForPanelRuntime = false;
+    // Focus-steal defense against page-side modal focus traps (react-focus-lock et al).
+    const FOCUS_RECLAIM_WINDOW_MS_FOR_PANEL_RUNTIME = 1500;
+    const FOCUS_RECLAIM_MAX_ATTEMPTS_FOR_PANEL_RUNTIME = 3;
+    const FOCUS_RECLAIM_RESET_MS_FOR_PANEL_RUNTIME = 1000;
+    let lastPanelEditableFocusForPanelRuntime = null;
+    let lastPointerWithinPanelForPanelRuntime = false;
+    let focusReclaimAttemptsForPanelRuntime = 0;
+    let focusReclaimResetTimerForPanelRuntime = null;
     // Snapshot of a toggle dropdown's open state, captured on mousedown before the
     // capture-phase close handler runs. Toggle functions read this to know whether
     // to re-open the dropdown after the capture handler has already closed everything.
@@ -1542,13 +1550,26 @@
       return isEditableKeyboardTargetForPanelRuntime(eventTargetForPanelRuntime) ? eventTargetForPanelRuntime : null;
     }
 
+    // True if the node is our shadow host element, or any element living inside our
+    // shadow root (panel-host or any of the overlays). Focus events retarget to the
+    // host once they cross out of the open shadow tree, so the host itself counts.
+    function isNodeWithinPanelForPanelRuntime(nodeForPanelRuntime) {
+      if (!nodeForPanelRuntime || nodeForPanelRuntime.nodeType !== 1) return false;
+      if (root && root.host && nodeForPanelRuntime === root.host) return true;
+      if (typeof nodeForPanelRuntime.getRootNode === 'function' && nodeForPanelRuntime.getRootNode() === root) return true;
+      return false;
+    }
+
+    function nowMsForPanelRuntime() {
+      return (typeof performance !== 'undefined' && performance && typeof performance.now === 'function')
+        ? performance.now()
+        : Date.now();
+    }
+
     function shouldIsolateKeyboardEventForPanelRuntime(eventForPanelRuntime) {
       const editableTargetForPanelRuntime = getEditableKeyboardTargetForPanelRuntime(eventForPanelRuntime);
       if (!editableTargetForPanelRuntime) return false;
-      if (host && typeof host.contains === 'function' && host.contains(editableTargetForPanelRuntime)) return true;
-      if (pickerOverlay && typeof pickerOverlay.contains === 'function' && pickerOverlay.contains(editableTargetForPanelRuntime)) return true;
-      if (featureTourOverlayForPanelRuntime && typeof featureTourOverlayForPanelRuntime.contains === 'function' && featureTourOverlayForPanelRuntime.contains(editableTargetForPanelRuntime)) return true;
-      return false;
+      return isNodeWithinPanelForPanelRuntime(editableTargetForPanelRuntime);
     }
 
     function isolateKeyboardEventForPanelRuntime(eventForPanelRuntime) {
@@ -1571,15 +1592,85 @@
       rootNodeForPanelRuntime.addEventListener('keyup', isolateKeyboardEventForPanelRuntime);
     }
 
-    function isolateEditableFocusEventForPanelRuntime(eventForPanelRuntime) {
-      if (!shouldIsolateKeyboardEventForPanelRuntime(eventForPanelRuntime)) return;
+    const capturedGenerationForPanelFocusGuard = window.abchatListenerGeneration || 0;
+    function isStaleFocusGuardForPanelRuntime() {
+      if ((window.abchatListenerGeneration || 0) !== capturedGenerationForPanelFocusGuard) return true;
+      try {
+        if (!chrome.runtime || !chrome.runtime.id) return true;
+      } catch (errorForPanelRuntime) {
+        return true;
+      }
+      return false;
+    }
+
+    // A page-side focus trap (react-focus-lock and similar) refocuses its modal the
+    // moment it observes focus leave the locked container. It learns this from two
+    // events: the focusin/focus landing on a panel element, and the focusout/blur of
+    // the page element whose focus is heading into the panel (relatedTarget = panel).
+    // We deny it exactly those two cross-boundary transitions, leaving panel-internal
+    // focus handling and ordinary page focus handling untouched.
+    function isFocusEnteringPanelForPanelRuntime(eventForPanelRuntime) {
+      if (!eventForPanelRuntime) return false;
+      const typeForPanelRuntime = eventForPanelRuntime.type;
+      if (typeForPanelRuntime === 'focusin' || typeForPanelRuntime === 'focus') {
+        return isNodeWithinPanelForPanelRuntime(eventForPanelRuntime.target);
+      }
+      if (typeForPanelRuntime === 'focusout' || typeForPanelRuntime === 'blur') {
+        return !isNodeWithinPanelForPanelRuntime(eventForPanelRuntime.target)
+          && isNodeWithinPanelForPanelRuntime(eventForPanelRuntime.relatedTarget);
+      }
+      return false;
+    }
+
+    function suppressPanelFocusEventForPanelRuntime(eventForPanelRuntime) {
+      if (!isFocusEnteringPanelForPanelRuntime(eventForPanelRuntime)) return;
+      const typeForPanelRuntime = eventForPanelRuntime.type;
+      if (typeForPanelRuntime === 'focusin' || typeForPanelRuntime === 'focus') {
+        const shadowActiveForPanelRuntime = root && root.activeElement ? root.activeElement : null;
+        if (isEditableKeyboardTargetForPanelRuntime(shadowActiveForPanelRuntime)) {
+          lastPanelEditableFocusForPanelRuntime = { el: shadowActiveForPanelRuntime, ts: nowMsForPanelRuntime() };
+        }
+      }
       if (typeof eventForPanelRuntime.stopImmediatePropagation === 'function') {
         eventForPanelRuntime.stopImmediatePropagation();
-        return;
-      }
-      if (typeof eventForPanelRuntime.stopPropagation === 'function') {
+      } else if (typeof eventForPanelRuntime.stopPropagation === 'function') {
         eventForPanelRuntime.stopPropagation();
       }
+    }
+
+    function scheduleFocusReclaimResetForPanelRuntime() {
+      if (focusReclaimResetTimerForPanelRuntime) clearTimeout(focusReclaimResetTimerForPanelRuntime);
+      focusReclaimResetTimerForPanelRuntime = setTimeout(function () {
+        focusReclaimAttemptsForPanelRuntime = 0;
+        focusReclaimResetTimerForPanelRuntime = null;
+      }, FOCUS_RECLAIM_RESET_MS_FOR_PANEL_RUNTIME);
+    }
+
+    // Backstop for traps the suppression layer cannot beat (one whose listener sits
+    // above ours, or one that polls document.activeElement): if focus is yanked out of
+    // the panel to a page element right after the user focused a panel input, and the
+    // user's last click was inside the panel, grab it back once. Capped and debounced
+    // so it can never devolve into a focus tug-of-war.
+    function handlePanelFocusWatchdogForPanelRuntime(eventForPanelRuntime) {
+      const typeForPanelRuntime = eventForPanelRuntime.type;
+      if (typeForPanelRuntime !== 'focusout' && typeForPanelRuntime !== 'blur') return;
+      if (!isNodeWithinPanelForPanelRuntime(eventForPanelRuntime.target)) return;
+      if (isNodeWithinPanelForPanelRuntime(eventForPanelRuntime.relatedTarget)) return;
+      if (!lastPointerWithinPanelForPanelRuntime) return;
+      const lastFocusForPanelRuntime = lastPanelEditableFocusForPanelRuntime;
+      if (!lastFocusForPanelRuntime || !lastFocusForPanelRuntime.el) return;
+      if ((nowMsForPanelRuntime() - lastFocusForPanelRuntime.ts) > FOCUS_RECLAIM_WINDOW_MS_FOR_PANEL_RUNTIME) return;
+      if (focusReclaimAttemptsForPanelRuntime >= FOCUS_RECLAIM_MAX_ATTEMPTS_FOR_PANEL_RUNTIME) return;
+      const editableElForPanelRuntime = lastFocusForPanelRuntime.el;
+      if (!editableElForPanelRuntime || !editableElForPanelRuntime.isConnected) return;
+      focusReclaimAttemptsForPanelRuntime++;
+      scheduleFocusReclaimResetForPanelRuntime();
+      setTimeout(function () {
+        if (isStaleFocusGuardForPanelRuntime()) return;
+        if (!editableElForPanelRuntime.isConnected) return;
+        if (isNodeWithinPanelForPanelRuntime(document.activeElement)) return;
+        try { editableElForPanelRuntime.focus({ preventScroll: true }); } catch (errorForPanelRuntime) {}
+      }, 0);
     }
 
     function bindEditableFocusIsolationForPanelRuntime(rootNodeForPanelRuntime) {
@@ -1587,27 +1678,43 @@
       if (isEditableFocusIsolationBoundForPanelRuntime) return;
       isEditableFocusIsolationBoundForPanelRuntime = true;
 
-      rootNodeForPanelRuntime.addEventListener('focusin', isolateEditableFocusEventForPanelRuntime);
-
-      var capturedGenerationForPanelFocusIsolation = window.abchatListenerGeneration || 0;
-      function isolateDocumentFocusEventForPanelRuntime(eventForPanelRuntime) {
-        if ((window.abchatListenerGeneration || 0) !== capturedGenerationForPanelFocusIsolation) {
-          document.removeEventListener('focusin', isolateDocumentFocusEventForPanelRuntime, true);
+      function onWindowFocusEventForPanelRuntime(eventForPanelRuntime) {
+        if (isStaleFocusGuardForPanelRuntime()) {
+          window.removeEventListener('focusin', onWindowFocusEventForPanelRuntime, true);
+          window.removeEventListener('focus', onWindowFocusEventForPanelRuntime, true);
+          window.removeEventListener('focusout', onWindowFocusEventForPanelRuntime, true);
+          window.removeEventListener('blur', onWindowFocusEventForPanelRuntime, true);
           return;
         }
-        try {
-          if (!chrome.runtime || !chrome.runtime.id) {
-            document.removeEventListener('focusin', isolateDocumentFocusEventForPanelRuntime, true);
-            return;
-          }
-        } catch (errorForPanelRuntime) {
-          document.removeEventListener('focusin', isolateDocumentFocusEventForPanelRuntime, true);
-          return;
-        }
-        isolateEditableFocusEventForPanelRuntime(eventForPanelRuntime);
+        // Watchdog reads state before suppression may stop the event; suppression
+        // then denies the trap the trigger for the next steal.
+        handlePanelFocusWatchdogForPanelRuntime(eventForPanelRuntime);
+        suppressPanelFocusEventForPanelRuntime(eventForPanelRuntime);
       }
 
-      document.addEventListener('focusin', isolateDocumentFocusEventForPanelRuntime, true);
+      function onWindowPointerDownForPanelRuntime(eventForPanelRuntime) {
+        if (isStaleFocusGuardForPanelRuntime()) {
+          window.removeEventListener('pointerdown', onWindowPointerDownForPanelRuntime, true);
+          return;
+        }
+        let pointerTargetForPanelRuntime = eventForPanelRuntime.target;
+        if (typeof eventForPanelRuntime.composedPath === 'function') {
+          const pathForPanelRuntime = eventForPanelRuntime.composedPath();
+          if (pathForPanelRuntime && pathForPanelRuntime.length) pointerTargetForPanelRuntime = pathForPanelRuntime[0];
+        }
+        lastPointerWithinPanelForPanelRuntime = isNodeWithinPanelForPanelRuntime(pointerTargetForPanelRuntime);
+        if (lastPointerWithinPanelForPanelRuntime) {
+          focusReclaimAttemptsForPanelRuntime = 0;
+        }
+      }
+
+      // Bound at window capture so we sit above the page's document/element-level
+      // focus-trap listeners in the capture order.
+      window.addEventListener('focusin', onWindowFocusEventForPanelRuntime, true);
+      window.addEventListener('focus', onWindowFocusEventForPanelRuntime, true);
+      window.addEventListener('focusout', onWindowFocusEventForPanelRuntime, true);
+      window.addEventListener('blur', onWindowFocusEventForPanelRuntime, true);
+      window.addEventListener('pointerdown', onWindowPointerDownForPanelRuntime, true);
     }
 
     function bindSelectorTabHoverTooltipForPanelRuntime(rootNodeForSelectorTabTooltip) {
