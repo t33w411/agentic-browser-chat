@@ -2275,6 +2275,8 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
   color: var(--abchat-text-secondary); white-space: pre-wrap; word-break: break-all;
   margin: 0;
 }
+.log-code.log-json-pre { white-space: pre; word-break: normal; overflow-x: auto; max-width: 100%; }
+.log-code.log-json-pre.log-json-wrap { white-space: pre-wrap; word-break: break-all; }
 .log-error-text { color: #dc2626; }
 
 #log-view-toggle-btn.log-view-raw {

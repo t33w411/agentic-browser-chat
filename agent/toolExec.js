@@ -1693,6 +1693,26 @@
           if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
           add(el);
         });
+        // Custom ARIA checkbox/radio (a div/span with role, not a native input).
+        // They are operated by clicking (page_fill_form redirects them to the click
+        // sub_operation), but they live in form_fields so a form-fill discovery pass
+        // surfaces them where the agent looks. Native <input type="checkbox|radio">
+        // are already added by the input query above; exclude native form tags here.
+        document.querySelectorAll('[role="checkbox"], [role="radio"]').forEach(function (el) {
+          var tag = el.tagName;
+          if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+          add(el);
+        });
+        // Other ARIA value/text widgets on non-native elements. role="textbox"/
+        // "searchbox" is usually a contenteditable (already added above; the Set
+        // dedupes); this also catches the rarer non-contenteditable case. spinbutton
+        // and slider are value widgets the agent operates via their own controls or
+        // arrow keys, not by page_fill_form value writes.
+        document.querySelectorAll('[role="textbox"], [role="searchbox"], [role="spinbutton"], [role="slider"]').forEach(function (el) {
+          var tag = el.tagName;
+          if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+          add(el);
+        });
         break;
       case 'landmarks':
         document.querySelectorAll('header, nav, main, aside, footer, article, section').forEach(add);
@@ -1889,6 +1909,17 @@
     // Custom combobox trigger (the div that opens a listbox). Native <select>,
     // <input>, and <textarea> are handled by their own branches above/below.
     if (role === 'combobox' && tag !== 'SELECT' && tag !== 'INPUT' && tag !== 'TEXTAREA') return 'form_fields';
+    // Other ARIA form-control widgets on non-native elements. textbox/searchbox are
+    // text entry (usually contenteditable); spinbutton/slider are value widgets;
+    // checkbox/radio are click-toggled (unlike switch, which lives in buttons, these
+    // sit in form_fields so a form-fill discovery pass surfaces them — page_fill_form
+    // still redirects them to the click sub_operation). Native <input type="checkbox|
+    // radio"> already returned 'form_fields' from the INPUT branch above; guarding the
+    // remaining native form tags keeps these branches to custom widgets and in sync
+    // with the form_fields case in getCategoryElementsForPageQuery.
+    if ((role === 'textbox' || role === 'searchbox' || role === 'spinbutton' || role === 'slider' ||
+        role === 'checkbox' || role === 'radio') &&
+        tag !== 'SELECT' && tag !== 'INPUT' && tag !== 'TEXTAREA') return 'form_fields';
 
     if (tag === 'IMG' || tag === 'PICTURE') return 'images';
     if (tag === 'SVG') {
@@ -2738,6 +2769,10 @@
               if (buttonControlsForFPE) rowForFPE.aria_controls = buttonControlsForFPE;
               var buttonSelectedForFPE = elForFPE.getAttribute('aria-selected');
               if (buttonSelectedForFPE) rowForFPE.aria_selected = buttonSelectedForFPE;
+              // Toggle state for switch / checkbox / radio / menuitemcheckbox /
+              // menuitemradio so the agent knows the current state before clicking.
+              var buttonCheckedForFPE = elForFPE.getAttribute('aria-checked');
+              if (buttonCheckedForFPE) rowForFPE.aria_checked = buttonCheckedForFPE;
               // Heuristic match (class-name + interactive indicator, no ARIA role): flag
               // so the agent knows this is an inferred widget and verifies via label
               // before clicking. Confirmed buttons (native tag or explicit role) do not
@@ -2784,6 +2819,21 @@
               if (fieldExpandedForFPE) rowForFPE.aria_expanded = fieldExpandedForFPE;
               var fieldControlsForFPE = elForFPE.getAttribute('aria-controls');
               if (fieldControlsForFPE) rowForFPE.aria_controls = fieldControlsForFPE;
+              // Toggle state for custom role="checkbox"/"radio" so the agent knows the
+              // current state before clicking to change it.
+              var fieldCheckedForFPE = elForFPE.getAttribute('aria-checked');
+              if (fieldCheckedForFPE) rowForFPE.aria_checked = fieldCheckedForFPE;
+              // Value-widget state for role="spinbutton"/"slider" (and any field that
+              // exposes the ARIA value range). page_fill_form cannot write these custom
+              // widgets, so the current value is what the agent reasons from.
+              var fieldValueNowForFPE = elForFPE.getAttribute('aria-valuenow');
+              if (fieldValueNowForFPE !== null) rowForFPE.aria_valuenow = fieldValueNowForFPE;
+              var fieldValueMinForFPE = elForFPE.getAttribute('aria-valuemin');
+              if (fieldValueMinForFPE !== null) rowForFPE.aria_valuemin = fieldValueMinForFPE;
+              var fieldValueMaxForFPE = elForFPE.getAttribute('aria-valuemax');
+              if (fieldValueMaxForFPE !== null) rowForFPE.aria_valuemax = fieldValueMaxForFPE;
+              var fieldValueTextForFPE = elForFPE.getAttribute('aria-valuetext');
+              if (fieldValueTextForFPE) rowForFPE.aria_valuetext = fieldValueTextForFPE;
             }
             break;
           case 'landmarks':
@@ -3178,17 +3228,35 @@
     if (tagForPageFillForm === 'input' && (elForPageFillForm.getAttribute('type') || 'text').toLowerCase() === 'hidden') {
       return buildFailedResultForPageFillForm(baseForPageFillForm, 'blocked', 'Hidden fields are blocked.');
     }
+    // Custom ARIA widgets (an interactive role on a non-native element) cannot be
+    // value-written: they expose no native value/checked the page reads, so a write
+    // would either set a JS property nobody reads (a false "changed") or fail with a
+    // confusing setter error. They all categorize as form_fields, so detect them by
+    // role and redirect to the operation that actually works before any write is
+    // attempted. A contenteditable textbox/searchbox is the one fillable case and
+    // falls through to the contenteditable path.
+    var fieldRoleForWidget = (elForPageFillForm.getAttribute && elForPageFillForm.getAttribute('role')) || '';
+    if (fieldRoleForWidget && tagForPageFillForm !== 'input' && tagForPageFillForm !== 'select' && tagForPageFillForm !== 'textarea') {
+      if (fieldRoleForWidget === 'combobox') {
+        return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'This is a custom combobox (role="combobox" on a <' + tagForPageFillForm + '>), not a native <select> or <input>. page_fill_form cannot set its value directly. Use page_query findPageElements with this combobox\'s selector, sub_operation="select_option", and option set to the target value\'s visible label; it opens the dropdown, finds the matching option (handling portal-rendered lists, type-to-filter, and virtualized lists), clicks it, and reports whether the selection committed. Manual fallback: click the combobox to open it, re-run findPageElements category="buttons" to discover the now-visible role="option" elements, then click the matching option.');
+      }
+      if (fieldRoleForWidget === 'checkbox' || fieldRoleForWidget === 'radio') {
+        return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'This is a custom ARIA ' + fieldRoleForWidget + ' (role="' + fieldRoleForWidget + '" on a <' + tagForPageFillForm + '>), not a native checkbox/radio input, so it has no .checked state to write. Toggle it with page_query findPageElements using this element\'s selector and sub_operation="click", then read its aria-checked attribute (surfaced in discovery) to confirm the new state.');
+      }
+      if (fieldRoleForWidget === 'spinbutton' || fieldRoleForWidget === 'slider') {
+        return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'This is a custom ARIA ' + fieldRoleForWidget + ' (role="' + fieldRoleForWidget + '" on a <' + tagForPageFillForm + '>), not a native number/range input, so it has no value to write. Adjust it via its own increment/decrement controls or drag handle (find them with findPageElements category="buttons"), or focus it with sub_operation="click" and send arrow keys; read aria-valuenow to confirm the result.');
+      }
+      if (fieldRoleForWidget === 'textbox' || fieldRoleForWidget === 'searchbox') {
+        var ceForWidget = elForPageFillForm.getAttribute('contenteditable');
+        if (ceForWidget !== 'true' && ceForWidget !== '') {
+          return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'This is a custom ARIA ' + fieldRoleForWidget + ' (role="' + fieldRoleForWidget + '" on a <' + tagForPageFillForm + '>) that is not contenteditable, so it has no writable value. The page captures keystrokes directly and page_fill_form cannot fill it. Focus it with findPageElements sub_operation="click" and rely on the page\'s own input handling, or look for an associated native <input> to fill instead.');
+        }
+        // A contenteditable textbox/searchbox is fillable: fall through to the
+        // contenteditable path below.
+      }
+    }
     if (resolveCategoryForPageQuery(elForPageFillForm) !== 'form_fields') {
       return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'Target is not a supported form field. Use page_query with category form_fields.');
-    }
-    // Custom comboboxes (role="combobox" on a non-input/select/textarea) cannot be
-    // written via .value — they're a clickable trigger that opens a listbox of
-    // <div role="option"> entries, and the page's own JavaScript updates the
-    // underlying hidden input when an option is clicked. Redirect the agent to
-    // the click-based flow rather than failing with a confusing setter error.
-    var fieldRoleForCombobox = elForPageFillForm.getAttribute && elForPageFillForm.getAttribute('role');
-    if (fieldRoleForCombobox === 'combobox' && tagForPageFillForm !== 'input' && tagForPageFillForm !== 'select' && tagForPageFillForm !== 'textarea') {
-      return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'This is a custom combobox (role="combobox" on a <' + tagForPageFillForm + '>), not a native <select> or <input>. page_fill_form cannot set its value directly. Use page_query findPageElements with this combobox\'s selector, sub_operation="select_option", and option set to the target value\'s visible label; it opens the dropdown, finds the matching option (handling portal-rendered lists, type-to-filter, and virtualized lists), clicks it, and reports whether the selection committed. Manual fallback: click the combobox to open it, re-run findPageElements category="buttons" to discover the now-visible role="option" elements, then click the matching option.');
     }
     if (elForPageFillForm.disabled) {
       return buildFailedResultForPageFillForm(baseForPageFillForm, 'blocked', 'Disabled fields are blocked.');

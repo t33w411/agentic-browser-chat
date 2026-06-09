@@ -793,26 +793,39 @@
       return;
     }
 
-    var parentForContentSelector = currentElementForContentSelector.parentElement;
-    if (
-      !parentForContentSelector ||
-      parentForContentSelector === document.body ||
-      parentForContentSelector === document.documentElement
+    // Climb the ancestor chain, skipping pass-through wrappers that add no words,
+    // and stop at the first ancestor whose word count actually increases. If no
+    // ancestor adds words before the document boundary, leave the selection as-is.
+    var baseWordCountForContentSelector = getWordCountForContentSelector(currentElementForContentSelector);
+    var targetForContentSelector = null;
+    var candidateForContentSelector = currentElementForContentSelector.parentElement;
+    while (
+      candidateForContentSelector &&
+      candidateForContentSelector !== document.body &&
+      candidateForContentSelector !== document.documentElement
     ) {
+      if (getWordCountForContentSelector(candidateForContentSelector) > baseWordCountForContentSelector) {
+        targetForContentSelector = candidateForContentSelector;
+        break;
+      }
+      candidateForContentSelector = candidateForContentSelector.parentElement;
+    }
+
+    if (!targetForContentSelector) {
       return;
     }
 
     if (currentElementForContentSelector.classList) {
       currentElementForContentSelector.classList.remove(highlightClassForContentSelector);
     }
-    if (parentForContentSelector.classList) {
-      parentForContentSelector.classList.add(highlightClassForContentSelector);
+    if (targetForContentSelector.classList) {
+      targetForContentSelector.classList.add(highlightClassForContentSelector);
     }
 
-    contentNamespaceForContentSelector.state.contentSelectorHoveredElement = parentForContentSelector;
+    contentNamespaceForContentSelector.state.contentSelectorHoveredElement = targetForContentSelector;
     contentNamespaceForContentSelector.state.contentSelectorExpansionLocked = true;
 
-    var selectorTextForContentSelector = generateSelectorForContentSelector(parentForContentSelector);
+    var selectorTextForContentSelector = generateSelectorForContentSelector(targetForContentSelector);
     contentNamespaceForContentSelector.state.contentSelectorTooltipText = selectorTextForContentSelector;
     updateTooltipForContentSelector(
       selectorTextForContentSelector,

@@ -1126,12 +1126,17 @@
       "Apologies, I couldn't finish my response. Let me know if you want me to give it another go.",
       "I hit a snag and couldn't send a reply. Let me know if you'd like me to try again."
     ];
+    // Shown when a turn produced no assistant text but at least one tool call succeeded
+    // (e.g. the model performed page actions then ended on an empty completion without
+    // summarizing). Neutral and non-apologetic, since the underlying task did succeed.
+    const AGENT_NEUTRAL_COMPLETION_FOR_PANEL_RUNTIME = "Done. Let me know if you'd like anything else.";
     // Map<chatId, { wrap, shownAt, hasText, toolsDoneAt, removeTimer, bufferText, renderedLength, renderRafId }> — per-chat live bubble state
     const liveTurnBubblesForPanelRuntime = new Map();
     let apiLogsPageForPanelRuntime = 0;
     let apiLogsCacheForPanelRuntime = [];
     let activeLogDetailForPanelRuntime = null;
     let activeLogViewRawForPanelRuntime = false;
+    let activeLogViewWrapForPanelRuntime = false;
     let rawChatViewWrapForPanelRuntime = false;
 
     const host = root.getElementById('panel-host');
@@ -10711,8 +10716,11 @@
       if (overlay) overlay.classList.add('hidden');
       activeLogDetailForPanelRuntime = null;
       activeLogViewRawForPanelRuntime = false;
+      activeLogViewWrapForPanelRuntime = false;
       const btnForClose = root.getElementById('log-view-toggle-btn');
       if (btnForClose) { btnForClose.textContent = 'JSON'; btnForClose.classList.remove('log-view-raw'); }
+      const wrapBtnForClose = root.getElementById('log-wrap-toggle-btn');
+      if (wrapBtnForClose) { wrapBtnForClose.classList.add('hidden'); wrapBtnForClose.setAttribute('aria-pressed', 'false'); }
     }
 
     function copyLogDetailForPanelRuntime(btn) {
@@ -10733,6 +10741,7 @@
       const body = root.getElementById('logs-detail-body');
       const btn = root.getElementById('log-view-toggle-btn');
       if (!body || !btn) return;
+      const wrapBtnForToggle = root.getElementById('log-wrap-toggle-btn');
       if (activeLogViewRawForPanelRuntime) {
         const sanitized = Object.assign({}, activeLogDetailForPanelRuntime);
         if (sanitized.requestMessages) {
@@ -10745,13 +10754,32 @@
             return tc;
           });
         }
-        body.innerHTML = '<pre class="log-code">' + escapeHtmlForPanelRuntime(JSON.stringify(sanitized, null, 2)) + '</pre>';
+        const wrapClassForJson = activeLogViewWrapForPanelRuntime ? ' log-json-wrap' : '';
+        body.innerHTML = '<pre class="log-code log-json-pre' + wrapClassForJson + '">' + escapeHtmlForPanelRuntime(JSON.stringify(sanitized, null, 2)) + '</pre>';
         btn.textContent = 'Formatted';
         btn.classList.add('log-view-raw');
+        if (wrapBtnForToggle) {
+          wrapBtnForToggle.classList.remove('hidden');
+          wrapBtnForToggle.setAttribute('aria-pressed', activeLogViewWrapForPanelRuntime ? 'true' : 'false');
+        }
       } else {
         body.innerHTML = renderLogDetailForPanelRuntime(activeLogDetailForPanelRuntime);
         btn.textContent = 'JSON';
         btn.classList.remove('log-view-raw');
+        if (wrapBtnForToggle) wrapBtnForToggle.classList.add('hidden');
+      }
+    }
+
+    function toggleLogWrapForPanelRuntime() {
+      if (!activeLogViewRawForPanelRuntime) return;
+      activeLogViewWrapForPanelRuntime = !activeLogViewWrapForPanelRuntime;
+      const preForWrap = root.querySelector('#logs-detail-body .log-json-pre');
+      if (preForWrap) {
+        preForWrap.classList.toggle('log-json-wrap', activeLogViewWrapForPanelRuntime);
+      }
+      const wrapBtnForToggle = root.getElementById('log-wrap-toggle-btn');
+      if (wrapBtnForToggle) {
+        wrapBtnForToggle.setAttribute('aria-pressed', activeLogViewWrapForPanelRuntime ? 'true' : 'false');
       }
     }
 
@@ -11343,6 +11371,12 @@
       // whether to append the apologetic fallback: if the user can already see something from
       // the assistant, the fallback is suppressed regardless of what failed afterwards.
       let hasAppendedRenderableAssistantMessageForSend = false;
+      // Set true once at least one tool call this turn returned a non-error result. Drives the
+      // empty-final-turn recovery: if the model ends on an empty completion after real tool work,
+      // that is a missing summary rather than a failure, so we retry once for a confirmation and
+      // otherwise show a neutral completion instead of the apologetic fallback.
+      let hadSuccessfulToolCallForSend = false;
+      let didRetryEmptyFinalTurnForSend = false;
       // Baseline cost from messages persisted before this send; used in live counter updates to avoid
       // double-counting costs that accumulate in turnMainCostAccumForSend during the current send.
       const preSendCostForSend = sumPersistedChatCostForPanelRuntime(chatId);
@@ -11776,7 +11810,20 @@
           const hasToolCalls = toolCallsForLoop && toolCallsForLoop.length > 0;
 
           if (!hasContent && !hasToolCalls) {
-            appendSystemMsgToContainerForPanelRuntime('The model returned an empty response.');
+            // Some models (notably streamed Gemini) occasionally end a turn that followed
+            // successful tool work with an empty completion: no text, no tool calls. The work
+            // succeeded but the model emitted no closing summary. Re-invoke once with a corrective
+            // note asking it to confirm, before giving up.
+            if (hadSuccessfulToolCallForSend && !didRetryEmptyFinalTurnForSend) {
+              didRetryEmptyFinalTurnForSend = true;
+              pendingSystemNotesForSend.push('Your previous response was empty. You have already completed the requested actions. Briefly confirm to the user, in plain language, what you did.');
+              continue;
+            }
+            // Only surface the alarming "empty response" note when nothing useful happened; when
+            // tool work succeeded the finally block shows a neutral completion instead.
+            if (!hadSuccessfulToolCallForSend) {
+              appendSystemMsgToContainerForPanelRuntime('The model returned an empty response.');
+            }
             break;
           }
 
@@ -12253,6 +12300,7 @@
             consecutiveEmptyItersForSend++;
           } else {
             consecutiveEmptyItersForSend = 0;
+            hadSuccessfulToolCallForSend = true;
           }
           if (consecutiveEmptyItersForSend >= 4) {
             if (S.activeChatId === chatId) {
@@ -12358,7 +12406,12 @@
           // (text, generated image, generated document, etc.) and without user cancellation.
           // If anything renderable was already shown, the user has visible output and the
           // apologetic fallback would only confuse them, so we suppress it in that case.
-          const fallbackTextForSend = AGENT_FALLBACK_RESPONSES_FOR_PANEL_RUNTIME[Math.floor(Math.random() * AGENT_FALLBACK_RESPONSES_FOR_PANEL_RUNTIME.length)];
+          // When successful tool work happened but the model never summarized (an empty final
+          // turn after real work), a neutral completion is correct; the apologetic fallback is
+          // reserved for turns where nothing useful happened at all.
+          const fallbackTextForSend = hadSuccessfulToolCallForSend
+            ? AGENT_NEUTRAL_COMPLETION_FOR_PANEL_RUNTIME
+            : AGENT_FALLBACK_RESPONSES_FOR_PANEL_RUNTIME[Math.floor(Math.random() * AGENT_FALLBACK_RESPONSES_FOR_PANEL_RUNTIME.length)];
           try {
             await persistPendingUserMessagesForChatForPanelRuntime(chatId, { touchChat: false });
             await appendMessageToChatForPanelRuntime(chatId, {
@@ -14816,6 +14869,7 @@
             case 'view-log-detail':      showLogDetailForPanelRuntime(tgtForRuntime.dataset.logId); break;
             case 'close-log-detail':     closeLogDetailForPanelRuntime(); break;
             case 'toggle-log-view':      toggleLogViewForPanelRuntime(); break;
+            case 'toggle-log-wrap':      toggleLogWrapForPanelRuntime(); break;
             case 'copy-log-detail':      copyLogDetailForPanelRuntime(tgtForRuntime); break;
             case 'clear-api-logs':       clearApiLogsForPanelRuntime(); break;
             case 'logs-prev-page':       if (apiLogsPageForPanelRuntime > 0) { apiLogsPageForPanelRuntime--; loadApiLogsViewForPanelRuntime(); } break;
@@ -15237,15 +15291,64 @@
       }));
     })();
 
+    function deriveImageFilenameFromSrcForPanelRuntime(srcUrlForFilename) {
+      if (!srcUrlForFilename || typeof srcUrlForFilename !== 'string') return '';
+      if (srcUrlForFilename.indexOf('data:') === 0 || srcUrlForFilename.indexOf('blob:') === 0) return '';
+      var pathPartForFilename = srcUrlForFilename.split('#')[0].split('?')[0];
+      var lastSegmentForFilename = pathPartForFilename.split('/').pop() || '';
+      try { lastSegmentForFilename = decodeURIComponent(lastSegmentForFilename); } catch (eDecodeForFilename) {}
+      return lastSegmentForFilename.trim();
+    }
+
+    function classifyImageSrcFormatForPanelRuntime(srcUrlForClassify) {
+      if (!srcUrlForClassify || typeof srcUrlForClassify !== 'string') return '';
+      if (srcUrlForClassify.indexOf('data:') === 0) {
+        var dataMimeMatchForClassify = /^data:([^;,]+)/i.exec(srcUrlForClassify);
+        return dataMimeMatchForClassify ? String(dataMimeMatchForClassify[1] || '').toLowerCase() : '';
+      }
+      var pathForClassify = srcUrlForClassify.split('#')[0].split('?')[0];
+      var lastSegForClassify = pathForClassify.split('/').pop() || '';
+      var dotIdxForClassify = lastSegForClassify.lastIndexOf('.');
+      var extForClassify = dotIdxForClassify >= 0 ? lastSegForClassify.slice(dotIdxForClassify + 1).toLowerCase() : '';
+      var extToMimeForClassify = {
+        png: 'image/png',
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        jfif: 'image/jpeg',
+        webp: 'image/webp',
+        gif: 'image/gif',
+        svg: 'image/svg+xml',
+        bmp: 'image/bmp',
+        avif: 'image/avif',
+        tif: 'image/tiff',
+        tiff: 'image/tiff',
+        ico: 'image/x-icon',
+        heic: 'image/heic',
+        heif: 'image/heif'
+      };
+      return extToMimeForClassify[extForClassify] || '';
+    }
+
     async function addImageChipFromContextMenuForPanelRuntime(srcUrlForCtxMenu) {
       if (!srcUrlForCtxMenu || typeof srcUrlForCtxMenu !== 'string') return;
 
+      var ACCEPTED_IMAGE_TYPES_FOR_CTX_MENU = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+      var classifiedMimeForCtxMenu = classifyImageSrcFormatForPanelRuntime(srcUrlForCtxMenu);
+      if (classifiedMimeForCtxMenu && ACCEPTED_IMAGE_TYPES_FOR_CTX_MENU.indexOf(classifiedMimeForCtxMenu) === -1) {
+        var toastForCtxMenuFormat = ABChatContent && ABChatContent.ui && ABChatContent.ui.toast;
+        if (toastForCtxMenuFormat && typeof toastForCtxMenuFormat.show === 'function') {
+          toastForCtxMenuFormat.show('Unsupported image format. Only PNG, JPEG, WEBP and GIF can be added.', { durationMs: 4000 });
+        }
+        return;
+      }
+
       var pageUrlForCtxMenu = String(window.location.href || '');
       var pageTitleForCtxMenu = String(document.title || '');
+      var displayNameForCtxMenu = deriveImageFilenameFromSrcForPanelRuntime(srcUrlForCtxMenu) || 'Image from page';
 
       var pendingChipForCtxMenu = addInputChipForPanelRuntime({
         type: 'image',
-        label: 'Image from page',
+        label: displayNameForCtxMenu,
         status: 'loading',
         statusText: 'Loading image...',
         pageUrl: pageUrlForCtxMenu,
@@ -15317,7 +15420,7 @@
       try {
         var approxSizeForCtxMenu = Math.floor(dataUrlForCtxMenu.length * 0.75);
         var persistedBlobForCtxMenu = await createAttachmentBlobForPanelRuntime({
-          name: 'Image from page',
+          name: displayNameForCtxMenu,
           kind: 'image',
           mimeType: mimeTypeForCtxMenu,
           size: approxSizeForCtxMenu,
@@ -15325,7 +15428,7 @@
         });
         if (!pendingChipForCtxMenu) return;
         pendingChipForCtxMenu.dataset.attachType = 'image';
-        pendingChipForCtxMenu.dataset.attachName = 'Image from page';
+        pendingChipForCtxMenu.dataset.attachName = displayNameForCtxMenu;
         pendingChipForCtxMenu.dataset.attachRefId = String(Number(persistedBlobForCtxMenu && persistedBlobForCtxMenu.id) || '');
         pendingChipForCtxMenu.dataset.attachMimeType = mimeTypeForCtxMenu;
         pendingChipForCtxMenu.dataset.attachSize = String(approxSizeForCtxMenu);

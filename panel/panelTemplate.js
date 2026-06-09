@@ -510,6 +510,7 @@
             <button class="logs-back-btn" data-action="close-log-detail">&#8592; Back</button>
             <span class="logs-topbar-title">Log Detail</span>
             <button class="btn-ghost btn-sm" data-action="toggle-log-view" id="log-view-toggle-btn">JSON</button>
+            <button class="btn-ghost btn-sm hidden" data-action="toggle-log-wrap" id="log-wrap-toggle-btn" aria-pressed="false">Wrap</button>
             <button class="btn-ghost btn-sm" data-action="copy-log-detail">Copy</button>
           </div>
           <div class="logs-detail-body" id="logs-detail-body"></div>
