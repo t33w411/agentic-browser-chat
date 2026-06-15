@@ -1127,11 +1127,14 @@
       "I hit a snag and couldn't send a reply. Let me know if you'd like me to try again."
     ];
     // Shown when a turn produced no assistant text but at least one tool call succeeded
-    // (e.g. the model performed page actions then ended on an empty completion without
-    // summarizing). Neutral and non-apologetic, since the underlying task did succeed.
-    const AGENT_NEUTRAL_COMPLETION_FOR_PANEL_RUNTIME = "Done. Let me know if you'd like anything else.";
+    // (e.g. the model ran actions then ended on an empty completion, or was cut off by an
+    // error or the iteration cap after doing real work). Neutral and non-apologetic since
+    // work was done, but it deliberately does not claim completion: the outcome is unknown
+    // because the model never summarized, so it invites the user to verify or continue.
+    const AGENT_NEUTRAL_COMPLETION_FOR_PANEL_RUNTIME = "I took some actions. Let me know if it looks right or needs more.";
     // Map<chatId, { wrap, shownAt, hasText, toolsDoneAt, removeTimer, bufferText, renderedLength, renderRafId }> — per-chat live bubble state
     const liveTurnBubblesForPanelRuntime = new Map();
+
     let apiLogsPageForPanelRuntime = 0;
     let apiLogsCacheForPanelRuntime = [];
     let activeLogDetailForPanelRuntime = null;
@@ -10203,8 +10206,55 @@
         }
         case 'page_fill_form':
           return 'Filling form fields';
+        case 'page_act': {
+          var pointerTargetLabelForPageAct = function (selKey, nodeKey) {
+            if (typeof args[selKey] === 'string' && args[selKey].trim()) return args[selKey].trim();
+            if (typeof args[nodeKey] === 'number') return 'node ' + args[nodeKey];
+            return '';
+          };
+          var aimTargetForPageActLabel = pointerTargetLabelForPageAct('selector', 'backend_node_id');
+          var aimHintForPageActLabel = aimTargetForPageActLabel ? ' “' + trunc(aimTargetForPageActLabel, 24) + '”' : '';
+          switch (args.action) {
+            case 'click':        return 'Clicking' + aimHintForPageActLabel;
+            case 'double_click': return 'Double-clicking' + aimHintForPageActLabel;
+            case 'right_click':  return 'Right-clicking' + aimHintForPageActLabel;
+            case 'move':         return aimTargetForPageActLabel
+              ? 'Moving pointer to “' + trunc(aimTargetForPageActLabel, 24) + '”'
+              : 'Moving pointer';
+            case 'drag': {
+              var fromTargetForPageActLabel = pointerTargetLabelForPageAct('from_selector', 'from_backend_node_id');
+              var toTargetForPageActLabel = pointerTargetLabelForPageAct('to_selector', 'to_backend_node_id');
+              var fromHintForPageActLabel = fromTargetForPageActLabel ? ' “' + trunc(fromTargetForPageActLabel, 20) + '”' : '';
+              var toHintForPageActLabel = toTargetForPageActLabel ? ' to “' + trunc(toTargetForPageActLabel, 20) + '”' : '';
+              return 'Dragging' + fromHintForPageActLabel + toHintForPageActLabel;
+            }
+            case 'scroll': {
+              var dxForScrollLabel = typeof args.dx === 'number' ? args.dx : 0;
+              var dyForScrollLabel = typeof args.dy === 'number' ? args.dy : 0;
+              var dirForScrollLabel = Math.abs(dyForScrollLabel) >= Math.abs(dxForScrollLabel)
+                ? (dyForScrollLabel >= 0 ? 'down' : 'up')
+                : (dxForScrollLabel >= 0 ? 'right' : 'left');
+              return 'Scrolling ' + dirForScrollLabel;
+            }
+            case 'type':
+              return args.text != null && String(args.text).trim()
+                ? 'Typing “' + trunc(args.text, 20) + '”'
+                : 'Typing';
+            case 'key':
+              return args.keys ? 'Pressing ' + trunc(args.keys, 24) : 'Pressing key';
+            case 'type_sequence': {
+              var lineCountForPageActLabel = Array.isArray(args.lines) ? args.lines.length : 0;
+              if (!lineCountForPageActLabel) return 'Entering values';
+              return 'Entering ' + lineCountForPageActLabel + ' value' + (lineCountForPageActLabel === 1 ? '' : 's');
+            }
+            default:
+              return 'Driving the page';
+          }
+        }
+        case 'page_accessibility_tree':
+          return 'Reading accessibility tree';
         case 'take_screenshot':
-          return 'Reviewing screenshot';
+          return 'Taking a visual look';
         case 'eval':
           return 'Computing';
         case 'web_fetch': {
@@ -11321,6 +11371,7 @@
       syncMainChatListItemForPanelRuntime(chatId);
 
       const MAX_TOOL_ITERS = 20;
+      const MAX_CONSECUTIVE_ALL_FAILURE_ITERS_FOR_SEND = 8;
       let iterCount = 0;
       let consecutiveEmptyItersForSend = 0;
       let sideCallCostForSend = 0;
@@ -11388,6 +11439,12 @@
       // because JS let/const are scoped to their block, so catch and finally cannot see them if they
       // are declared inside try.
       const model = (modelSelectForSend && modelSelectForSend.value) ? modelSelectForSend.value : DEFAULT_MODEL_FOR_PANEL_RUNTIME;
+      // The run-scoped CDP lease is released in the finally block, so its state must
+      // also live outside the try.
+      const agentNs = globalThis.ABChatAgent || {};
+      const cdpClientForSend = agentNs.cdpClient;
+      let cdpRunLeaseHeldForSend = false;
+      const visualPreflightSessionIdForSend = 'vp_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2);
       try {
       const imageModelForSend = await getImageModelForPanelRuntime();
       const cachedForCostForSend = await getCachedModelsForPanelRuntime();
@@ -11478,11 +11535,26 @@
         }
       }
 
-      const agentNs = globalThis.ABChatAgent || {};
       const clientForSend = agentNs.client || {};
       const contextBuilderForSend = agentNs.contextBuilder || {};
       const compactorForSend = agentNs.compactor || null;
-      const toolDefsForSend = agentNs.toolDefs || [];
+      let automationEnabledForSend = false;
+      try {
+        automationEnabledForSend = await new Promise(function (resolveAutomationEnabled) {
+          chrome.storage.local.get('abchatAutomationEnabled', function (itemsForAutomationEnabled) {
+            resolveAutomationEnabled(!!(itemsForAutomationEnabled && itemsForAutomationEnabled.abchatAutomationEnabled));
+          });
+        });
+      } catch (eAutomationEnabledForSend) { automationEnabledForSend = false; }
+      // Advertise the trusted-input automation tools only when the user has enabled the feature,
+      // so the model never tries to drive the page (or attach the debugger) while it is off.
+      const toolDefsForSend = (agentNs.toolDefs || []).filter(function (toolDefForSend) {
+        const toolNameForSend = toolDefForSend && toolDefForSend.function ? toolDefForSend.function.name : '';
+        if ((toolNameForSend === 'page_act' || toolNameForSend === 'page_accessibility_tree') && !automationEnabledForSend) {
+          return false;
+        }
+        return true;
+      });
       const executeToolForSend = agentNs.executeTool;
 
       const chatRecordForCompactionForSend = CHAT_STORE_FOR_PANEL_RUNTIME[chatId] || null;
@@ -11613,7 +11685,8 @@
                 agentMemoryId: memCtxForBuild.agentMemoryId,
                 agentSkills: memCtxForBuild.agentSkills,
                 compactionSummary: compactionSummaryForSend,
-                compactedThroughMessageId: compactedThroughMessageIdForSend
+                compactedThroughMessageId: compactedThroughMessageIdForSend,
+                automationEnabled: automationEnabledForSend
               })
             : (function () {
                 const msgsForFallback = chatMsgs.map(function (messageForPanelRuntime) {
@@ -11929,6 +12002,24 @@
           // (PostModelResponse handler), and per-send image-generation cap enforced
           // by agent/hooks/builtin/imageGenerationCap.js (PreToolUse handler).
 
+          // Acquire the run-scoped CDP lease BEFORE executing page_act. Attaching shows
+          // Chrome's "debugging" infobar, which shrinks the viewport; resolving pointer
+          // targets against a stable viewport means attaching first (with a brief settle)
+          // so coordinates are computed after the resize, not shifted mid-run.
+          if (!cdpRunLeaseHeldForSend && automationEnabledForSend && cdpClientForSend && typeof cdpClientForSend.acquire === 'function'
+              && toolCallsForLoop.some(function (tcForLease) {
+                const tcNameForLease = tcForLease.function && tcForLease.function.name;
+                return tcNameForLease === 'page_act' || tcNameForLease === 'page_accessibility_tree';
+              })) {
+            try {
+              const runLeaseResForSend = await cdpClientForSend.acquire();
+              if (runLeaseResForSend && runLeaseResForSend.ok) {
+                cdpRunLeaseHeldForSend = true;
+                await new Promise(function (resolveForLeaseSettle) { setTimeout(resolveForLeaseSettle, 400); });
+              }
+            } catch (eRunLeaseForSend) {}
+          }
+
           // Execute all tool calls in parallel, then append results in order
           const toolLogEntriesForLoop = [];
           const wrapToolPromiseWithAbortForSend = function (toolPromiseForSend) {
@@ -12000,6 +12091,7 @@
                   messages: apiMessages,
                   model: model,
                   chatId: chatId,
+                  visualPreflightSessionId: visualPreflightSessionIdForSend,
                   signal: controllerForSend.signal,
                   captureScreenshot: captureScreenshotWithoutPanelUiForPanelRuntime
                 })
@@ -12292,7 +12384,7 @@
             updateSessionTokenDisplayForPanelRuntime(logUsageForSend, preSendCostForSend + turnMainCostAccumForSend + sideCallCostForSend);
           }
 
-          // Consecutive all-error guard: stop the loop if every tool in four back-to-back rounds failed
+          // Consecutive all-error guard: stop after MAX_CONSECUTIVE_ALL_FAILURE_ITERS_FOR_SEND rounds where every tool failed
           const allToolsFailedForIter = toolResultsForLoop.every(function (r) {
             return !r || r.ok === false || (typeof r === 'object' && typeof r.error === 'string');
           });
@@ -12302,9 +12394,11 @@
             consecutiveEmptyItersForSend = 0;
             hadSuccessfulToolCallForSend = true;
           }
-          if (consecutiveEmptyItersForSend >= 4) {
+          if (consecutiveEmptyItersForSend >= MAX_CONSECUTIVE_ALL_FAILURE_ITERS_FOR_SEND) {
             if (S.activeChatId === chatId) {
-              appendSystemMsgToContainerForPanelRuntime('Agent stopped: four consecutive rounds of tool calls all returned errors. Review the results above and try a different approach.');
+              appendSystemMsgToContainerForPanelRuntime(
+                'Agent stopped: ' + MAX_CONSECUTIVE_ALL_FAILURE_ITERS_FOR_SEND + ' consecutive rounds of tool calls all returned errors. Review the results above and try a different approach.'
+              );
             }
             break;
           }
@@ -12368,6 +12462,12 @@
           if (S.activeChatId === chatId) appendSystemMsgToContainerForPanelRuntime("Error: " + friendlyErrMsgForSend);
         }
       } finally {
+        // Release the run-scoped CDP lease with an immediate detach: the run is over,
+        // so the debugger infobar drops right away instead of waiting out the idle grace.
+        if (cdpRunLeaseHeldForSend && cdpClientForSend && typeof cdpClientForSend.release === 'function') {
+          try { cdpClientForSend.release(undefined, true); } catch (eRunLeaseReleaseForSend) {}
+          cdpRunLeaseHeldForSend = false;
+        }
         if (logCancelledForSend && logStatusForSend !== 'error') { logStatusForSend = 'cancelled'; }
         const apiLoggerForSend = (globalThis.ABChatContent || {}).apiLogger;
         if (apiLoggerForSend && typeof apiLoggerForSend.writeLog === 'function') {
@@ -12533,6 +12633,68 @@
       if (alertToggleForBehaviour) alertToggleForBehaviour.checked = settingsForBehaviour.alertSound !== false;
       const leadTimeInputForBehaviour = root.getElementById('settings-reminder-lead-time');
       if (leadTimeInputForBehaviour) leadTimeInputForBehaviour.value = currentReminderLeadTimeForPanelRuntime;
+      try {
+        chrome.storage.local.get('abchatAutomationEnabled', function (itemsForAutomationToggle) {
+          const automationToggleForBehaviour = root.getElementById('settings-automation-toggle');
+          if (automationToggleForBehaviour) {
+            automationToggleForBehaviour.checked = !!(itemsForAutomationToggle && itemsForAutomationToggle.abchatAutomationEnabled);
+          }
+        });
+      } catch (eAutomationLoadForBehaviour) {}
+    }
+
+    function handleAutomationToggleForPanelRuntime(wantEnabledForAutomation) {
+      const actionsForAutomationToggle = ((globalThis.ABChatShared || {}).actions) || {};
+      try {
+        if (wantEnabledForAutomation) {
+          // Enabling needs consent (and explains the debugger banner), so do not assume the feature is
+          // on yet: revert the checkbox to its real state. storage.onChanged flips it true once the
+          // user confirms in the consent window; if they cancel, it correctly stays off.
+          const elForAutomationRevert = root.getElementById('settings-automation-toggle');
+          if (elForAutomationRevert) elForAutomationRevert.checked = false;
+          chrome.runtime.sendMessage({ action: actionsForAutomationToggle.cdpAutomationEnable || 'cdpAutomationEnable' });
+        } else {
+          chrome.runtime.sendMessage({ action: actionsForAutomationToggle.cdpAutomationDisable || 'cdpAutomationDisable' });
+        }
+      } catch (eAutomationToggleSend) {}
+    }
+
+    function maybeShowAutomationIntroForPanelRuntime() {
+      try {
+        chrome.storage.local.get(['abchatAutomationIntroPending', 'abchatAutomationIntroSeen'], function (introItemsForPanelRuntime) {
+          if (!introItemsForPanelRuntime || !introItemsForPanelRuntime.abchatAutomationIntroPending || introItemsForPanelRuntime.abchatAutomationIntroSeen) {
+            return;
+          }
+          // Consume immediately so it shows exactly once across tabs and reloads.
+          chrome.storage.local.set({ abchatAutomationIntroPending: false, abchatAutomationIntroSeen: true });
+          const toastForAutomationIntro = ABChatContent && ABChatContent.ui && ABChatContent.ui.toast;
+          if (toastForAutomationIntro && typeof toastForAutomationIntro.show === 'function') {
+            toastForAutomationIntro.show('New: the assistant can now act on pages that the normal tools cannot reach, like spreadsheet grids. It stays off until you enable Advanced automation in Settings.');
+          }
+        });
+      } catch (eAutomationIntroForPanelRuntime) {}
+    }
+
+    var automationStorageSyncListenerForPanelRuntime = null;
+    function bindAutomationStorageSyncForPanelRuntime() {
+      try {
+        if (automationStorageSyncListenerForPanelRuntime) {
+          chrome.storage.onChanged.removeListener(automationStorageSyncListenerForPanelRuntime);
+          automationStorageSyncListenerForPanelRuntime = null;
+        }
+        var capturedGenForAutomationSync = window.abchatListenerGeneration || 0;
+        automationStorageSyncListenerForPanelRuntime = function automationStorageSyncHandlerForPanelRuntime(changes, area) {
+          if ((window.abchatListenerGeneration || 0) !== capturedGenForAutomationSync) {
+            chrome.storage.onChanged.removeListener(automationStorageSyncListenerForPanelRuntime);
+            automationStorageSyncListenerForPanelRuntime = null;
+            return;
+          }
+          if (area !== 'local' || !changes.abchatAutomationEnabled) return;
+          const elForAutomationSync = root.getElementById('settings-automation-toggle');
+          if (elForAutomationSync) elForAutomationSync.checked = !!changes.abchatAutomationEnabled.newValue;
+        };
+        chrome.storage.onChanged.addListener(automationStorageSyncListenerForPanelRuntime);
+      } catch (eAutomationSyncBind) {}
     }
 
     async function saveAlertSoundForPanelRuntime(checked) {
@@ -14914,6 +15076,7 @@
             case 'save-delete-chats-older-than':   saveDeleteChatsOlderThanForPanelRuntime(tgtForRuntime.value); break;
             case 'prune-orphaned-blobs':           pruneOrphanedBlobsFromSettingsForPanelRuntime(); break;
             case 'save-alert-sound':               saveAlertSoundForPanelRuntime(tgtForRuntime.checked); break;
+            case 'toggle-automation':              handleAutomationToggleForPanelRuntime(tgtForRuntime.checked); break;
             case 'save-reminder-lead-time':        saveReminderLeadTimeForPanelRuntime(tgtForRuntime.value); break;
             case 'tep-due-change': {
               if (!tgtForRuntime.value) break;
@@ -15158,6 +15321,8 @@
       loadBehaviourSettingsForPanelRuntime();
       loadThemeIntoSettingsForPanelRuntime();
       bindThemeStorageSyncForPanelRuntime();
+      bindAutomationStorageSyncForPanelRuntime();
+      maybeShowAutomationIntroForPanelRuntime();
       bindAgentRulesStorageSyncForPanelRuntime();
       initModelSelectsForPanelRuntime();
       autoDeleteOldChatsForPanelRuntime();

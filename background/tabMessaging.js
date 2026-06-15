@@ -48,6 +48,7 @@
     "agent/apiLogger.js",
     "agent/tools.js",
     "agent/documentGeneration.js",
+    "agent/cdpClient.js",
     "agent/toolExec.js",
     "agent/contextBuilder.js",
     "agent/client.js",

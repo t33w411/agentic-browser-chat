@@ -7,6 +7,15 @@
 ============================================================ */
 :host { all: initial; display: block; }
 
+/* Click-through during trusted-input automation: a CDP page_act click whose coordinates fall over
+   the panel must reach the page beneath, not the panel. Host pointer-events:none alone is defeated
+   by descendants that set pointer-events:auto (active chat-item meta, search-clear, etc.), so force
+   the whole panel subtree non-interactive while the host carries this class. No visual change. */
+:host(.abchat-clickthrough),
+:host(.abchat-clickthrough) * {
+  pointer-events: none !important;
+}
+
 /* ============================================================
    PANEL — CSS CUSTOM PROPERTIES (light theme defaults)
    Declared on the mount wrapper so they are fully isolated from

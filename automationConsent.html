@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Enable Advanced Automation</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #ffffff;
+      --fg: #18181b;
+      --muted: #71717a;
+      --border: #e4e4e7;
+      --accent: #2563eb;
+      --accent-fg: #ffffff;
+      --warn-bg: #fef9c3;
+      --warn-fg: #854d0e;
+      --warn-border: #fde68a;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0b0b0d;
+        --fg: #f4f4f5;
+        --muted: #a1a1aa;
+        --border: #27272a;
+        --accent: #3b82f6;
+        --accent-fg: #ffffff;
+        --warn-bg: #3a2f0b;
+        --warn-fg: #fde68a;
+        --warn-border: #4b3f12;
+      }
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .card {
+      width: 100%;
+      max-width: 400px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 22px;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 17px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+    p { margin: 0 0 14px; color: var(--muted); }
+    .warn {
+      background: var(--warn-bg);
+      color: var(--warn-fg);
+      border: 1px solid var(--warn-border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin: 0 0 16px;
+      font-size: 13px;
+    }
+    .actions {
+      display: flex;
+      gap: 10px;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+    }
+    button {
+      font: inherit;
+      font-weight: 600;
+      padding: 9px 16px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      cursor: pointer;
+      background: transparent;
+      color: var(--fg);
+      transition: background 0.12s ease, opacity 0.12s ease;
+    }
+    button:hover { background: rgba(127, 127, 127, 0.1); }
+    button.primary {
+      background: var(--accent);
+      color: var(--accent-fg);
+      border-color: var(--accent);
+    }
+    button.primary:hover { opacity: 0.92; background: var(--accent); }
+    .status {
+      margin: 14px 0 0;
+      font-size: 13px;
+      color: var(--muted);
+      min-height: 18px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Enable advanced page automation</h1>
+    <p>This lets the assistant click, type, and act on pages that are not reachable through the normal page tools, such as spreadsheet grids and other canvas-based apps.</p>
+    <div class="warn">While automation is running, Chrome shows a banner that says it is debugging the browser. This is expected. Automation stays off until you run it, and you can turn the feature off any time in settings.</div>
+    <div class="actions">
+      <button type="button" id="cdp-cancel-btn">Cancel</button>
+      <button type="button" id="cdp-enable-btn" class="primary">Enable automation</button>
+    </div>
+    <p class="status" id="cdp-status"></p>
+  </div>
+  <script src="automationConsent.js"></script>
+</body>
+</html>

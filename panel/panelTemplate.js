@@ -455,6 +455,17 @@
           </div>
 
           <div class="stg-section">
+            <div class="stg-section-title">Advanced automation</div>
+            <div class="stg-row">
+              <div class="stg-label">
+                <strong>Let the assistant control pages</strong>
+                <span>Click, type, and act on pages the normal tools cannot reach, such as spreadsheet grids and other canvas apps. Chrome shows a "debugging this browser" banner while it runs.</span>
+              </div>
+              <label class="ts"><input type="checkbox" id="settings-automation-toggle" data-action="toggle-automation"><span class="ts-slider"></span></label>
+            </div>
+          </div>
+
+          <div class="stg-section">
             <div class="stg-section-title">Data</div>
             <div class="stg-row">
               <div class="stg-label">

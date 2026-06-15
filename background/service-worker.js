@@ -11,7 +11,8 @@ importScripts(
   "./tabMessaging.js",
   "./contextMenus.js",
   "./commands.js",
-  "./dbHandler.js"
+  "./dbHandler.js",
+  "./cdpAutomation.js"
 );
 
 const sharedNamespaceForServiceWorker = globalThis.ABChatShared || {};
@@ -26,6 +27,7 @@ const tabMessagingForServiceWorker = backgroundNamespaceForServiceWorker.tabMess
 const contextMenusForServiceWorker = backgroundNamespaceForServiceWorker.contextMenus;
 const commandsForServiceWorker = backgroundNamespaceForServiceWorker.commands;
 const dbHandlerForServiceWorker = backgroundNamespaceForServiceWorker.dbHandler;
+const cdpAutomationForServiceWorker = backgroundNamespaceForServiceWorker.cdpAutomation || {};
 const agentNamespaceForServiceWorker = globalThis.ABChatAgent || {};
 const fileParsingForServiceWorker = agentNamespaceForServiceWorker.fileParsing || {};
 const runtimeRequestResponseCacheForServiceWorker = new Map();
@@ -2032,7 +2034,7 @@ if (chrome.alarms && chrome.alarms.onAlarm) {
   });
 }
 
-chrome.runtime.onInstalled.addListener(async () => {
+chrome.runtime.onInstalled.addListener(async (detailsForServiceWorker) => {
   // Rebuild context menus for the new/updated manifest.
   contextMenusForServiceWorker.rebuildContextMenus();
   // Recover all currently open tabs immediately after reload/update so users do not
@@ -2040,6 +2042,18 @@ chrome.runtime.onInstalled.addListener(async () => {
   await runReloadRecoveryWithRetriesForServiceWorker();
   cleanExpiredWebFetchCacheForServiceWorker();
   ensureReminderAlarmForServiceWorker();
+  // One-time notice for existing users after the update that introduced the required debugger
+  // permission and advanced automation, so the re-consent they just went through is explained and
+  // the (off-by-default) feature is discoverable. Only on update, only once ever.
+  if (detailsForServiceWorker && detailsForServiceWorker.reason === "update") {
+    try {
+      chrome.storage.local.get("abchatAutomationIntroSeen", function (introItemsForServiceWorker) {
+        if (!(introItemsForServiceWorker && introItemsForServiceWorker.abchatAutomationIntroSeen)) {
+          chrome.storage.local.set({ abchatAutomationIntroPending: true });
+        }
+      });
+    } catch (introErrForServiceWorker) {}
+  }
 });
 
 chrome.runtime.onStartup.addListener(async () => {
@@ -2519,6 +2533,99 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
         });
       });
     return true;
+  }
+
+  if (messageForServiceWorker.action === (actionsForServiceWorker.cdpAutomationStatus || "cdpAutomationStatus")) {
+    if (typeof cdpAutomationForServiceWorker.isAutomationEnabled !== "function") {
+      sendResponseForServiceWorker({ ok: false, enabled: false, error: "Automation module unavailable." });
+      return false;
+    }
+    cdpAutomationForServiceWorker.isAutomationEnabled().then(function (enabledForCdpStatus) {
+      sendResponseForServiceWorker({ ok: true, enabled: !!enabledForCdpStatus });
+    });
+    return true;
+  }
+
+  if (messageForServiceWorker.action === (actionsForServiceWorker.cdpAutomationEnable || "cdpAutomationEnable")) {
+    if (typeof cdpAutomationForServiceWorker.openConsentWindow !== "function") {
+      sendResponseForServiceWorker({ ok: false, error: "Automation module unavailable." });
+      return false;
+    }
+    cdpAutomationForServiceWorker.openConsentWindow().then(function (openedForCdpEnable) {
+      sendResponseForServiceWorker({ ok: !!openedForCdpEnable });
+    });
+    return true;
+  }
+
+  if (messageForServiceWorker.action === (actionsForServiceWorker.cdpAutomationDisable || "cdpAutomationDisable")) {
+    if (typeof cdpAutomationForServiceWorker.setAutomationEnabled !== "function") {
+      sendResponseForServiceWorker({ ok: false, error: "Automation module unavailable." });
+      return false;
+    }
+    cdpAutomationForServiceWorker.setAutomationEnabled(false).then(function () {
+      sendResponseForServiceWorker({ ok: true, enabled: false });
+    });
+    return true;
+  }
+
+  if (messageForServiceWorker.action === (actionsForServiceWorker.cdpAutomation || "cdpAutomation")) {
+    var cdpOpForServiceWorker = messageForServiceWorker.op;
+    var cdpTabIdForServiceWorker = typeof messageForServiceWorker.tabId === "number"
+      ? messageForServiceWorker.tabId
+      : (senderForServiceWorker && senderForServiceWorker.tab && typeof senderForServiceWorker.tab.id === "number"
+        ? senderForServiceWorker.tab.id
+        : null);
+    var cdpParamsForServiceWorker = messageForServiceWorker.params || {};
+    if (typeof cdpAutomationForServiceWorker.acquireLease !== "function") {
+      sendResponseForServiceWorker({ ok: false, error: { code: "module-unavailable", message: "Automation module unavailable." } });
+      return false;
+    }
+    if (cdpTabIdForServiceWorker === null) {
+      sendResponseForServiceWorker({ ok: false, error: { code: "no-tab", message: "No target tab id." } });
+      return false;
+    }
+    switch (cdpOpForServiceWorker) {
+      case "acquire":
+        cdpAutomationForServiceWorker.acquireLease(cdpTabIdForServiceWorker).then(function (resForCdpAcquire) {
+          sendResponseForServiceWorker(resForCdpAcquire);
+        });
+        return true;
+      case "release":
+        cdpAutomationForServiceWorker.releaseLease(cdpTabIdForServiceWorker, cdpParamsForServiceWorker.immediate === true);
+        sendResponseForServiceWorker({ ok: true });
+        return false;
+      case "detach":
+        cdpAutomationForServiceWorker.forceDetach(cdpTabIdForServiceWorker).then(function () {
+          sendResponseForServiceWorker({ ok: true });
+        });
+        return true;
+      case "state":
+        sendResponseForServiceWorker({ ok: true, session: cdpAutomationForServiceWorker.getSessionState(cdpTabIdForServiceWorker) });
+        return false;
+      case "act":
+        cdpAutomationForServiceWorker.performAction(cdpTabIdForServiceWorker, cdpParamsForServiceWorker).then(function (resForCdpAct) {
+          sendResponseForServiceWorker(resForCdpAct);
+        });
+        return true;
+      case "command":
+        cdpAutomationForServiceWorker.sendCommand(cdpTabIdForServiceWorker, cdpParamsForServiceWorker.method, cdpParamsForServiceWorker.params)
+          .then(function (resForCdpCommand) {
+            sendResponseForServiceWorker({ ok: true, result: resForCdpCommand });
+          })
+          .catch(function (errForCdpCommand) {
+            sendResponseForServiceWorker({
+              ok: false,
+              error: {
+                code: (errForCdpCommand && errForCdpCommand.code) || "command-failed",
+                message: (errForCdpCommand && errForCdpCommand.message) || "Command failed."
+              }
+            });
+          });
+        return true;
+      default:
+        sendResponseForServiceWorker({ ok: false, error: { code: "unknown-op", message: "Unknown cdp op: " + String(cdpOpForServiceWorker) } });
+        return false;
+    }
   }
 
   if (messageForServiceWorker.action === (actionsForServiceWorker.parseUploadedFile || "parseUploadedFile")) {

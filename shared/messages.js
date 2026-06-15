@@ -59,7 +59,20 @@
     // instead of document.hasFocus() so the panel stays visible in the last
     // known tab when the browser loses OS-level focus.
     activeTabChanged: "activeTabChanged",
-    getActiveTabStatus: "getActiveTabStatus"
+    getActiveTabStatus: "getActiveTabStatus",
+    // Advanced automation (chrome.debugger / CDP) behavioral toggle. The
+    // debugger permission is required at install (Chrome forbids it as
+    // optional), so these gate use, not the permission. The enabled flag lives
+    // in storage and syncs across tabs via storage.onChanged.
+    //   cdpAutomationStatus:  content → SW, returns { enabled }.
+    //   cdpAutomationEnable:  content → SW, opens the consent window.
+    //   cdpAutomationDisable: content → SW, turns the feature off and detaches.
+    cdpAutomationStatus: "cdpAutomationStatus",
+    cdpAutomationEnable: "cdpAutomationEnable",
+    cdpAutomationDisable: "cdpAutomationDisable",
+    // Umbrella action for agent-driven CDP session ops, dispatched by op in the
+    // service worker: acquire | release | detach | state | command.
+    cdpAutomation: "cdpAutomation"
   };
 
   const messageTypesForMessages = {
