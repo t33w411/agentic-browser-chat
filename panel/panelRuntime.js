@@ -3567,6 +3567,8 @@
         d.classList.remove('open');
         d.closest('.note-item')?.classList.remove('ni-dropdown-open');
       });
+      const newMenuDropdownForClose = root.getElementById('new-menu-dropdown');
+      if (newMenuDropdownForClose) newMenuDropdownForClose.classList.remove('open');
     }
 
     function measureMessageDropdownHeightForPanelRuntime(dropdownForPanelRuntime) {
@@ -13213,6 +13215,38 @@
       }
     }
 
+    function toggleNewMenu(btn) {
+      const wasOpenForNewMenu = preclickOpenStateForPanelRuntime;
+      preclickOpenStateForPanelRuntime = null;
+      // closeAllDropdownsForPanelRuntime already ran via the root capture handler
+      if (!wasOpenForNewMenu && btn) {
+        const dropdownForNewMenu = btn.nextElementSibling;
+        if (dropdownForNewMenu) {
+          // Fixed positioning escapes the .panel-tabs overflow clip; anchor under the button.
+          dropdownForNewMenu.classList.add('open');
+          const btnRectForNewMenu = btn.getBoundingClientRect();
+          const dropdownWidthForNewMenu = dropdownForNewMenu.offsetWidth || 130;
+          const edgeGapForNewMenu = 8;
+          const viewportWidthForNewMenu = window.innerWidth || document.documentElement.clientWidth || 0;
+          let leftForNewMenu = btnRectForNewMenu.left;
+          const maxLeftForNewMenu = viewportWidthForNewMenu - dropdownWidthForNewMenu - edgeGapForNewMenu;
+          if (leftForNewMenu > maxLeftForNewMenu) leftForNewMenu = Math.max(edgeGapForNewMenu, maxLeftForNewMenu);
+          dropdownForNewMenu.style.top = (btnRectForNewMenu.bottom + 4) + 'px';
+          dropdownForNewMenu.style.left = leftForNewMenu + 'px';
+        }
+      }
+    }
+
+    function createNewFromMenuForPanelRuntime(kindForNewMenu) {
+      switch (kindForNewMenu) {
+        case 'chat': setTab('chats'); newChat(); break;
+        case 'note': setTab('notes'); newNote(); break;
+        case 'task': setTab('tasks'); newTask(); break;
+        case 'quiz': setTab('quiz');  openQuizEditor(); break;
+        default: break;
+      }
+    }
+
     /* ============================================================
       TAB PICKER
     ============================================================ */
@@ -14960,6 +14994,8 @@
             case 'select-note':          selectNote(Number(tgtForRuntime.dataset.noteId)); break;
             case 'toggle-note-star':     toggleNoteStar(tgtForRuntime); break;
             case 'toggle-note-dropdown': toggleNoteDropdown(tgtForRuntime); evtForRuntime.stopPropagation(); break;
+            case 'toggle-new-menu':      toggleNewMenu(tgtForRuntime); evtForRuntime.stopPropagation(); break;
+            case 'new-menu-create':      createNewFromMenuForPanelRuntime(tgtForRuntime.dataset.newKind); break;
             case 'open-note-popout':     openCurrentNoteInPopoutForPanelRuntime(); break;
             case 'focus-note-popout':    focusNotePopoutForHandoffForPanelRuntime(); break;
             case 'close-note-popout-handoff': closeNotePopoutFromHandoffForPanelRuntime(); break;
@@ -15188,6 +15224,11 @@
           case 'toggle-note-dropdown': {
             const ddForNote = tgtForMousedown.nextElementSibling;
             preclickOpenStateForPanelRuntime = ddForNote ? ddForNote.classList.contains('open') : false;
+            break;
+          }
+          case 'toggle-new-menu': {
+            const ddForNewMenu = tgtForMousedown.nextElementSibling;
+            preclickOpenStateForPanelRuntime = ddForNewMenu ? ddForNewMenu.classList.contains('open') : false;
             break;
           }
           default:

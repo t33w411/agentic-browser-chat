@@ -27,6 +27,16 @@
         <button class="tab-icon-btn" id="selector-tab" data-action="toggle-selector">
           ${icForPanelTemplate.cursor14}
         </button>
+        <!-- New menu (reduced view only) -->
+        <div class="new-menu-wrap">
+          <button class="new-menu-btn" id="new-menu-btn" title="Create new" data-action="toggle-new-menu">+ New</button>
+          <div class="new-menu-dropdown" id="new-menu-dropdown">
+            <button class="new-menu-item" data-action="new-menu-create" data-new-kind="chat">New Chat</button>
+            <button class="new-menu-item" data-action="new-menu-create" data-new-kind="note">New Note</button>
+            <button class="new-menu-item" data-action="new-menu-create" data-new-kind="task">New Task</button>
+            <button class="new-menu-item" data-action="new-menu-create" data-new-kind="quiz">New Quiz</button>
+          </div>
+        </div>
       </div>
       <div class="panel-controls">
         <button class="ctrl-btn ctrl-sync" id="sync-all-btn" title="Sync chats, notes, tasks, and quiz questions across tabs" data-action="sync-all">
