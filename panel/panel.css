@@ -147,6 +147,19 @@
   cursor: pointer;
 }
 
+/* Transparency mode (reduced view only): fade the floating panel when the
+   mouse is not over it so the page underneath is visible. Restored to full
+   opacity on hover, or while a field inside has focus (so it does not fade
+   mid-typing). Visual-only: the panel still receives pointer events. */
+.panel-host.mode-reduced.transparency-on .panel {
+  opacity: 0.3;
+  transition: opacity 0.2s ease;
+}
+.panel-host.mode-reduced.transparency-on .panel:hover,
+.panel-host.mode-reduced.transparency-on .panel:focus-within {
+  opacity: 1;
+}
+
 .panel {
   background: var(--abchat-bg-panel);
   border: 1px solid var(--abchat-border);

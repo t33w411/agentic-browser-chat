@@ -3342,6 +3342,47 @@
       } catch (e) {}
     }
 
+    function applyPanelTransparencyForPanelRuntime(enabled, skipSave) {
+      const onForTransparency = Boolean(enabled);
+      host.classList.toggle('transparency-on', onForTransparency);
+      if (!skipSave) {
+        chrome.storage.local.set({ [TRANSPARENCY_KEY_FOR_PANEL_RUNTIME]: onForTransparency });
+      }
+    }
+
+    function loadPanelTransparencyIntoSettingsForPanelRuntime() {
+      chrome.storage.local.get([TRANSPARENCY_KEY_FOR_PANEL_RUNTIME], function (res) {
+        const savedForTransparency = !!(res && res[TRANSPARENCY_KEY_FOR_PANEL_RUNTIME]);
+        applyPanelTransparencyForPanelRuntime(savedForTransparency, true);
+        const toggleForTransparency = root.getElementById('settings-transparency-toggle');
+        if (toggleForTransparency) toggleForTransparency.checked = savedForTransparency;
+      });
+    }
+
+    var transparencyStorageSyncListenerForPanelRuntime = null;
+    function bindPanelTransparencyStorageSyncForPanelRuntime() {
+      try {
+        if (transparencyStorageSyncListenerForPanelRuntime) {
+          chrome.storage.onChanged.removeListener(transparencyStorageSyncListenerForPanelRuntime);
+          transparencyStorageSyncListenerForPanelRuntime = null;
+        }
+        var capturedGenForTransparencySync = window.abchatListenerGeneration || 0;
+        transparencyStorageSyncListenerForPanelRuntime = function transparencyStorageSyncHandlerForPanelRuntime(changes, area) {
+          if ((window.abchatListenerGeneration || 0) !== capturedGenForTransparencySync) {
+            chrome.storage.onChanged.removeListener(transparencyStorageSyncListenerForPanelRuntime);
+            transparencyStorageSyncListenerForPanelRuntime = null;
+            return;
+          }
+          if (area !== 'local' || !changes[TRANSPARENCY_KEY_FOR_PANEL_RUNTIME]) return;
+          const incomingTransparencyForPanelRuntime = !!changes[TRANSPARENCY_KEY_FOR_PANEL_RUNTIME].newValue;
+          applyPanelTransparencyForPanelRuntime(incomingTransparencyForPanelRuntime, true);
+          const toggleForTransparencySync = root.getElementById('settings-transparency-toggle');
+          if (toggleForTransparencySync) toggleForTransparencySync.checked = incomingTransparencyForPanelRuntime;
+        };
+        chrome.storage.onChanged.addListener(transparencyStorageSyncListenerForPanelRuntime);
+      } catch (e) {}
+    }
+
     /* ============================================================
       TABS
     ============================================================ */
@@ -9315,6 +9356,7 @@
     const MODEL_CACHE_KEY_FOR_PANEL_RUNTIME = 'abchat_model_cache_v8';
     const ROUTER_EXCEPTION_MODEL_IDS_FOR_PANEL_RUNTIME = ['openrouter/auto', 'openrouter/free'];
     const THEME_KEY_FOR_PANEL_RUNTIME = 'abchat_theme';
+    const TRANSPARENCY_KEY_FOR_PANEL_RUNTIME = 'abchat_panel_transparency';
     const INPUT_DRAFT_KEY_FOR_PANEL_RUNTIME = 'abchat_input_draft';
     const NOTE_DRAFT_SYNC_KEY_PREFIX_FOR_PANEL_RUNTIME = 'abchat_note_draft_sync:';
     var currentAgentRulesForPanelRuntime = '';
@@ -15564,6 +15606,7 @@
           const action = tgtForRuntime.dataset.action;
           switch (action) {
             case 'apply-theme-settings':           applyThemeFromSettings(tgtForRuntime.value); break;
+            case 'toggle-panel-transparency':      applyPanelTransparencyForPanelRuntime(tgtForRuntime.checked); break;
             case 'update-correct-option':          updateCorrectOption(tgtForRuntime); break;
             case 'save-api-key':                   saveApiKeyFromSettingsForPanelRuntime(); break;
             case 'save-default-model':             saveDefaultModelForPanelRuntime(tgtForRuntime.value); break;
@@ -15828,6 +15871,8 @@
       loadBehaviourSettingsForPanelRuntime();
       loadThemeIntoSettingsForPanelRuntime();
       bindThemeStorageSyncForPanelRuntime();
+      loadPanelTransparencyIntoSettingsForPanelRuntime();
+      bindPanelTransparencyStorageSyncForPanelRuntime();
       bindAutomationStorageSyncForPanelRuntime();
       maybeShowAutomationIntroForPanelRuntime();
       bindAgentRulesStorageSyncForPanelRuntime();
@@ -16609,6 +16654,10 @@
       if (themeStorageSyncListenerForPanelRuntime) {
         try { chrome.storage.onChanged.removeListener(themeStorageSyncListenerForPanelRuntime); } catch (e) {}
         themeStorageSyncListenerForPanelRuntime = null;
+      }
+      if (transparencyStorageSyncListenerForPanelRuntime) {
+        try { chrome.storage.onChanged.removeListener(transparencyStorageSyncListenerForPanelRuntime); } catch (e) {}
+        transparencyStorageSyncListenerForPanelRuntime = null;
       }
       if (agentRulesStorageSyncListenerForPanelRuntime) {
         try { chrome.storage.onChanged.removeListener(agentRulesStorageSyncListenerForPanelRuntime); } catch (e) {}

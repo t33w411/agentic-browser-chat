@@ -397,6 +397,13 @@
                 <option value="system">System</option>
               </select>
             </div>
+            <div class="stg-row">
+              <div class="stg-label">
+                <strong>Transparent when inactive</strong>
+                <span>Fade the floating panel when your mouse isn't over it, so you can see the page underneath. Reduced view only.</span>
+              </div>
+              <label class="ts"><input type="checkbox" id="settings-transparency-toggle" data-action="toggle-panel-transparency"><span class="ts-slider"></span></label>
+            </div>
           </div>
 
           <div class="stg-section">
