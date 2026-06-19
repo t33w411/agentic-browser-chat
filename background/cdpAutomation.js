@@ -8,6 +8,12 @@
   var CDP_IDLE_DETACH_MS_FOR_CDP = 8000;
   var sessionsForCdp = new Map();
   var debuggerListenersBoundForCdp = false;
+  // Optional predicate(tabId) -> bool. When it returns true, a navigation on that tab does
+  // NOT force-detach the debugger. The offscreen-hosted run loop survives page navigation
+  // and manages the lease itself (releasing it at run end), so detaching on navigation would
+  // wrongly drop a session the loop is still using to drive the new page. The service worker
+  // sets this to "is this tab the target of an active offscreen run?".
+  var navigationSurvivalPredicateForCdp = null;
 
   // ---- Behavioral enable/disable ----
   // The debugger permission is required at install (Chrome forbids listing it
@@ -423,6 +429,29 @@
     sessionsForCdp.delete(tabIdForRemoved);
   }
 
+  // A top-level document load (navigation or reload) tears down the page's content
+  // script, which is what holds the run lease and sends the release on completion.
+  // That release never arrives once the script is gone, so the refCount stays pinned
+  // above zero, the idle-detach timer is never armed, and the native "is being
+  // debugged" infobar lingers indefinitely. Detaching here drops it as soon as the
+  // tab starts loading. The fragment/SPA case does not flip the tab to "loading", so
+  // those in-page transitions (which keep the content script alive) are not affected.
+  function handleTabNavigatedForCdp(tabIdForNavigated) {
+    var sessionForNavigated = sessionsForCdp.get(tabIdForNavigated);
+    if (!sessionForNavigated || sessionForNavigated.state === "DETACHED") {
+      return;
+    }
+    // An active offscreen-hosted run owns this tab's lease across the navigation and will
+    // release it when the run ends, so leave the session attached to avoid detach/re-attach
+    // churn (and infobar flicker) mid-run.
+    try {
+      if (typeof navigationSurvivalPredicateForCdp === "function" && navigationSurvivalPredicateForCdp(tabIdForNavigated)) {
+        return;
+      }
+    } catch (errForSurvivalPredicate) { /* fall through to detach */ }
+    forceDetachForCdp(tabIdForNavigated);
+  }
+
   // ---- High-level input actions ----
 
   // The text field is what makes the renderer run full key processing (keypress, editor
@@ -817,6 +846,18 @@
   }
 
   try {
+    if (chrome.tabs && chrome.tabs.onUpdated && typeof chrome.tabs.onUpdated.addListener === "function") {
+      chrome.tabs.onUpdated.addListener(function (tabIdForUpdated, changeInfoForUpdated) {
+        if (changeInfoForUpdated && changeInfoForUpdated.status === "loading") {
+          handleTabNavigatedForCdp(tabIdForUpdated);
+        }
+      });
+    }
+  } catch (errForTabUpdatedReg) {
+    /* ignore */
+  }
+
+  try {
     if (chrome.storage && chrome.storage.onChanged && typeof chrome.storage.onChanged.addListener === "function") {
       chrome.storage.onChanged.addListener(function (changesForStorage, areaForStorage) {
         if (areaForStorage !== "local" || !changesForStorage) {
@@ -844,7 +885,10 @@
     forceDetachAll: forceDetachAllForCdp,
     getSessionState: getSessionStateForCdp,
     sendCommand: sendCommandForCdp,
-    performAction: performActionForCdp
+    performAction: performActionForCdp,
+    setNavigationSurvivalPredicate: function (predicateForSet) {
+      navigationSurvivalPredicateForCdp = (typeof predicateForSet === "function") ? predicateForSet : null;
+    }
   };
 
   globalScopeForCdp.ABChatBackground = nsForCdp;

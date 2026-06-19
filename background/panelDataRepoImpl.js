@@ -240,6 +240,7 @@
           }).filter(function(s) { return Boolean(s.url); })
         : [],
       incomplete: Boolean(inputForPanelDataRepo.incomplete),
+      systemNotice: Boolean(inputForPanelDataRepo.systemNotice),
       createdAt: normalizeChatTimestampForPanelDataRepo(inputForPanelDataRepo.createdAt, fallbackTimestampForPanelDataRepo || getIsoNowForPanelDataRepo())
     };
   }

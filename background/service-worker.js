@@ -370,6 +370,29 @@ let isReloadRecoveryRunningForServiceWorker = false;
 // ---------------------------------------------------------------------------
 const streamSnapshotsForServiceWorker = new Map();
 
+// chatId -> targetTabId for runs hosted in the offscreen document. The offscreen doc
+// has no sender.tab, so the SW records which tab each run targets (from the initiator's
+// agentRunStart) and uses it to: stamp the snapshot's originatorTabId, relay page-DOM
+// tool calls (delegatePageTool) to the right tab, and (deliberately) NOT kill the run
+// when that tab navigates/reloads. Cleared on stream_end.
+const offscreenRunTargetTabsForServiceWorker = new Map();
+
+// Tell the CDP layer to keep the debugger attached across a navigation on any tab that is
+// the target of an active offscreen run. Without this, the navigation force-detach (added to
+// drop a stranded infobar when the LEGACY content-script loop dies on navigation) would also
+// fire mid-run for the offscreen loop, which survives the navigation and still needs the
+// session to drive the new page. The offscreen loop releases the lease itself at run end.
+if (cdpAutomationForServiceWorker && typeof cdpAutomationForServiceWorker.setNavigationSurvivalPredicate === "function") {
+  cdpAutomationForServiceWorker.setNavigationSurvivalPredicate(function (tabIdForSurvival) {
+    if (typeof tabIdForSurvival !== "number") return false;
+    let survivesForPredicate = false;
+    offscreenRunTargetTabsForServiceWorker.forEach(function (targetTabIdForPredicate) {
+      if (targetTabIdForPredicate === tabIdForSurvival) survivesForPredicate = true;
+    });
+    return survivesForPredicate;
+  });
+}
+
 function updateStreamSnapshotForServiceWorker(eventForSnapshot, chatIdForSnapshot, payloadForSnapshot, senderTabIdForSnapshot) {
   const numericChatIdForSnapshot = Number(chatIdForSnapshot);
   if (!Number.isFinite(numericChatIdForSnapshot)) return;
@@ -1401,6 +1424,27 @@ function validateQuestionForServiceWorker(q) {
   return issues;
 }
 
+function writeSecondaryLlmLogForServiceWorker(entry) {
+  try {
+    var apiLoggerForSecondary = (globalThis.ABChatContent || {}).apiLogger;
+    if (apiLoggerForSecondary && typeof apiLoggerForSecondary.writeLog === 'function') {
+      apiLoggerForSecondary.writeLog({
+        requestType: entry.requestType,
+        timestamp: new Date(entry.startTime).toISOString(),
+        model: entry.model || null,
+        iterationCount: 1,
+        totalLatencyMs: Date.now() - entry.startTime,
+        status: entry.status,
+        errorMessage: entry.errorMessage || '',
+        requestMessages: entry.requestMessages || null,
+        apiParams: entry.apiParams || null,
+        responseContent: entry.responseContent || null,
+        usage: entry.usage || null
+      }).catch(function () {});
+    }
+  } catch (e) { /* silent */ }
+}
+
 async function fixQuestionForServiceWorker(question, issues, apiKey, model) {
   var systemPromptForFix = [
     'You are a quiz question fixer. A generated quiz question failed validation. Regenerate the question from scratch, fixing all reported issues while preserving its topic and intent.',
@@ -1416,6 +1460,12 @@ async function fixQuestionForServiceWorker(question, issues, apiKey, model) {
     '- Do not include any text outside the JSON object.'
   ].join('\n');
   var userMsgForFix = 'Original question:\n' + JSON.stringify(question, null, 2) + '\n\nIssues to fix:\n' + issues.map(function (i) { return '- ' + i; }).join('\n');
+  var fixLogStartForServiceWorker = Date.now();
+  var fixRequestMessagesForLog = [
+    { role: 'system', content: systemPromptForFix },
+    { role: 'user', content: userMsgForFix }
+  ];
+  var fixApiParamsForLog = { stream: false, response_format: { type: 'json_object' }, model: model };
   try {
     var MAX_RETRIES_FOR_FIX = 2;
     var RETRY_DELAYS_FOR_FIX = [1500, 3000];
@@ -1456,10 +1506,32 @@ async function fixQuestionForServiceWorker(question, issues, apiKey, model) {
         if (retryForFix >= MAX_RETRIES_FOR_FIX) break;
       }
     }
-    if (lastErrForFix || !respForFix || !respForFix.ok) return null;
+    if (lastErrForFix || !respForFix || !respForFix.ok) {
+      writeSecondaryLlmLogForServiceWorker({
+        requestType: 'quiz-fix',
+        startTime: fixLogStartForServiceWorker,
+        model: model,
+        status: 'error',
+        errorMessage: (lastErrForFix && lastErrForFix.message) || (respForFix ? ('HTTP ' + respForFix.status) : 'Question fix request failed.'),
+        requestMessages: fixRequestMessagesForLog,
+        apiParams: fixApiParamsForLog,
+        responseContent: ''
+      });
+      return null;
+    }
     var jsonForFix = await respForFix.json();
     var rawForFix = jsonForFix.choices && jsonForFix.choices[0] && jsonForFix.choices[0].message
       ? (jsonForFix.choices[0].message.content || '') : '';
+    writeSecondaryLlmLogForServiceWorker({
+      requestType: 'quiz-fix',
+      startTime: fixLogStartForServiceWorker,
+      model: (jsonForFix && jsonForFix.model) || model,
+      status: 'success',
+      requestMessages: fixRequestMessagesForLog,
+      apiParams: fixApiParamsForLog,
+      responseContent: rawForFix,
+      usage: (jsonForFix && jsonForFix.usage) || null
+    });
     var parsedForFix = null;
     try { parsedForFix = JSON.parse(rawForFix); } catch (e) {}
     if (!parsedForFix) {
@@ -1468,6 +1540,16 @@ async function fixQuestionForServiceWorker(question, issues, apiKey, model) {
     }
     return (parsedForFix && typeof parsedForFix === 'object') ? parsedForFix : null;
   } catch (e) {
+    writeSecondaryLlmLogForServiceWorker({
+      requestType: 'quiz-fix',
+      startTime: fixLogStartForServiceWorker,
+      model: model,
+      status: 'error',
+      errorMessage: (e && e.message) || 'Question fix failed.',
+      requestMessages: fixRequestMessagesForLog,
+      apiParams: fixApiParamsForLog,
+      responseContent: ''
+    });
     return null;
   }
 }
@@ -1510,6 +1592,29 @@ async function handleAgentGenerateQuestionsForServiceWorker(msgForGenQ, sendResp
     '- Do not include any text outside the JSON object.'
   ].filter(function (l) { return l !== null; }).join('\n');
 
+  var genQLogStartForServiceWorker = Date.now();
+  var genQLoggedForServiceWorker = false;
+  var genQRequestMessagesForLog = [
+    { role: 'system', content: systemPromptForGenQ },
+    { role: 'user', content: contentForGenQ }
+  ];
+  var genQApiParamsForLog = { stream: false, response_format: { type: 'json_object' }, model: modelForGenQ };
+  function logGenQOnceForServiceWorker(fieldsForGenQLog) {
+    if (genQLoggedForServiceWorker) return;
+    genQLoggedForServiceWorker = true;
+    var baseForGenQLog = {
+      requestType: 'quiz-generate',
+      startTime: genQLogStartForServiceWorker,
+      model: modelForGenQ,
+      requestMessages: genQRequestMessagesForLog,
+      apiParams: genQApiParamsForLog
+    };
+    for (var kForGenQLog in fieldsForGenQLog) {
+      if (Object.prototype.hasOwnProperty.call(fieldsForGenQLog, kForGenQLog)) baseForGenQLog[kForGenQLog] = fieldsForGenQLog[kForGenQLog];
+    }
+    writeSecondaryLlmLogForServiceWorker(baseForGenQLog);
+  }
+
   try {
     var MAX_RETRIES_FOR_GEN_Q = 2;
     var RETRY_DELAYS_FOR_GEN_Q = [1500, 3000];
@@ -1520,6 +1625,7 @@ async function handleAgentGenerateQuestionsForServiceWorker(msgForGenQ, sendResp
       if (retryForGenQ > 0) {
         await delayForServiceWorker(RETRY_DELAYS_FOR_GEN_Q[retryForGenQ - 1], requestRecordForGenQ ? requestRecordForGenQ.signal : null);
         if (requestRecordForGenQ && requestRecordForGenQ.signal.aborted) {
+          logGenQOnceForServiceWorker({ status: 'cancelled' });
           sendResponseForGenQ({ ok: false, cancelled: true, error: 'Cancelled' });
           return;
         }
@@ -1552,6 +1658,7 @@ async function handleAgentGenerateQuestionsForServiceWorker(msgForGenQ, sendResp
         break;
       } catch (fetchErrForGenQ) {
         if (requestRecordForGenQ && requestRecordForGenQ.signal.aborted) {
+          logGenQOnceForServiceWorker({ status: 'cancelled' });
           sendResponseForGenQ({ ok: false, cancelled: true, error: 'Cancelled' });
           return;
         }
@@ -1564,10 +1671,12 @@ async function handleAgentGenerateQuestionsForServiceWorker(msgForGenQ, sendResp
     if (!responseForGenQ.ok) {
       var errTextForGenQ = '';
       try { errTextForGenQ = await responseForGenQ.text(); } catch (e) {}
+      logGenQOnceForServiceWorker({ status: 'error', errorMessage: 'API error ' + responseForGenQ.status + ': ' + errTextForGenQ.slice(0, 200), responseContent: '' });
       sendResponseForGenQ({ ok: false, error: 'Question generation API error ' + responseForGenQ.status + ': ' + errTextForGenQ.slice(0, 200) });
       return;
     }
     if (requestRecordForGenQ && requestRecordForGenQ.signal.aborted) {
+      logGenQOnceForServiceWorker({ status: 'cancelled' });
       sendResponseForGenQ({ ok: false, cancelled: true, error: 'Cancelled' });
       return;
     }
@@ -1576,6 +1685,12 @@ async function handleAgentGenerateQuestionsForServiceWorker(msgForGenQ, sendResp
     var rawContentForGenQ = jsonForGenQ.choices && jsonForGenQ.choices[0] && jsonForGenQ.choices[0].message
       ? (jsonForGenQ.choices[0].message.content || '')
       : '';
+    logGenQOnceForServiceWorker({
+      status: 'success',
+      model: (jsonForGenQ && jsonForGenQ.model) || modelForGenQ,
+      responseContent: rawContentForGenQ,
+      usage: (jsonForGenQ && jsonForGenQ.usage) || null
+    });
 
     var parsedForGenQ = null;
     try { parsedForGenQ = JSON.parse(rawContentForGenQ); } catch (e) {}
@@ -1628,9 +1743,11 @@ async function handleAgentGenerateQuestionsForServiceWorker(msgForGenQ, sendResp
     sendResponseForGenQ(responsePayloadForGenQ);
   } catch (errForGenQ) {
     if (requestRecordForGenQ && requestRecordForGenQ.signal.aborted) {
+      logGenQOnceForServiceWorker({ status: 'cancelled' });
       sendResponseForGenQ({ ok: false, cancelled: true, error: 'Cancelled' });
       return;
     }
+    logGenQOnceForServiceWorker({ status: 'error', errorMessage: (errForGenQ && errForGenQ.message) || 'Question generation failed', responseContent: '' });
     sendResponseForGenQ({ ok: false, error: (errForGenQ && errForGenQ.message) || 'Question generation failed' });
   }
 }
@@ -1897,29 +2014,119 @@ async function handleAgentWebFetchForServiceWorker(msgForFetch, sendResponseForF
   }
 }
 
-// --- Offscreen document for audio playback ---
+// --- Offscreen document (shared host: audio playback + agent run loop) ---
 
+// Only one offscreen document may exist per extension, so audio playback and the
+// agent orchestration loop share it. All capability reasons are declared up front
+// at creation time because an existing document's reasons cannot be changed without
+// closing it: WORKERS (the eval tool's sandbox Worker), DOM_PARSER (create_document's
+// DOMParser), BLOBS (generated file/blob URLs), AUDIO_PLAYBACK (reminder beep).
 const OFFSCREEN_URL_FOR_SERVICE_WORKER = 'offscreen/offscreen.html';
+const OFFSCREEN_REASONS_FOR_SERVICE_WORKER = ['AUDIO_PLAYBACK', 'WORKERS', 'DOM_PARSER', 'BLOBS'];
 
-async function playReminderBeepViaOffscreenForServiceWorker() {
-  if (!chrome.offscreen) return;
+// Concurrent callers must not both call createDocument (Chrome throws "Only a single
+// offscreen document may be created"). Serialize creation behind one in-flight promise.
+let offscreenCreateInFlightForServiceWorker = null;
+// Keepalive refcount: while > 0 an agent run (or other long-lived consumer) needs the
+// document kept open. Audio playback is fire-and-forget and does not take a ref. The
+// document is currently never proactively closed; the refcount exists so future cleanup
+// can avoid closing the doc out from under an active run.
+let offscreenKeepAliveRefCountForServiceWorker = 0;
+
+async function offscreenDocumentExistsForServiceWorker() {
+  if (!chrome.offscreen) return false;
   var offscreenUrl = chrome.runtime.getURL(OFFSCREEN_URL_FOR_SERVICE_WORKER);
-  var existingContexts = [];
   try {
-    existingContexts = await chrome.runtime.getContexts({
+    var existingContexts = await chrome.runtime.getContexts({
       contextTypes: ['OFFSCREEN_DOCUMENT'],
       documentUrls: [offscreenUrl]
     });
-  } catch (e) { /* getContexts not available in older Chrome */ }
-  if (existingContexts.length === 0) {
-    try {
-      await chrome.offscreen.createDocument({
-        url: OFFSCREEN_URL_FOR_SERVICE_WORKER,
-        reasons: ['AUDIO_PLAYBACK'],
-        justification: 'Play reminder alert beep'
-      });
-    } catch (e) { return; }
+    return existingContexts.length > 0;
+  } catch (e) {
+    // getContexts not available in older Chrome; fall back to attempting creation.
+    return false;
   }
+}
+
+async function ensureOffscreenDocumentForServiceWorker() {
+  if (!chrome.offscreen) return false;
+  if (await offscreenDocumentExistsForServiceWorker()) return true;
+  if (offscreenCreateInFlightForServiceWorker) {
+    try { await offscreenCreateInFlightForServiceWorker; } catch (e) { /* fall through */ }
+    return offscreenDocumentExistsForServiceWorker();
+  }
+  offscreenCreateInFlightForServiceWorker = chrome.offscreen.createDocument({
+    url: OFFSCREEN_URL_FOR_SERVICE_WORKER,
+    reasons: OFFSCREEN_REASONS_FOR_SERVICE_WORKER,
+    justification: 'Play reminder alerts and host the agent run loop so it survives page reloads.'
+  });
+  try {
+    await offscreenCreateInFlightForServiceWorker;
+    return true;
+  } catch (e) {
+    // A concurrent create may have already won the race; treat an existing doc as success.
+    return offscreenDocumentExistsForServiceWorker();
+  } finally {
+    offscreenCreateInFlightForServiceWorker = null;
+  }
+}
+
+function acquireOffscreenKeepAliveForServiceWorker() {
+  offscreenKeepAliveRefCountForServiceWorker += 1;
+}
+
+function releaseOffscreenKeepAliveForServiceWorker() {
+  offscreenKeepAliveRefCountForServiceWorker = Math.max(0, offscreenKeepAliveRefCountForServiceWorker - 1);
+}
+
+// Deliver agentRunStart to the offscreen document, retrying until it acks. Right after the
+// offscreen document is created its scripts are still loading, so the first send can land
+// before agentRun.js has registered its listener and would be silently dropped. The offscreen
+// listener responds { ok: true }; we retry on a missing/failed ack a few times, then give up
+// and reset the initiator's UI by synthesizing a stream_end for that chat.
+const AGENT_RUN_START_MAX_RETRIES_FOR_SERVICE_WORKER = 8;
+const AGENT_RUN_START_RETRY_DELAY_MS_FOR_SERVICE_WORKER = 250;
+
+function deliverAgentRunStartForServiceWorker(paramsForDeliver, attemptForDeliver) {
+  chrome.runtime.sendMessage({ action: "agentRunStart", params: paramsForDeliver }, function (respForDeliver) {
+    const ackedForDeliver = !chrome.runtime.lastError && respForDeliver && respForDeliver.ok === true;
+    if (ackedForDeliver) return;
+    if (attemptForDeliver < AGENT_RUN_START_MAX_RETRIES_FOR_SERVICE_WORKER) {
+      setTimeout(function () {
+        deliverAgentRunStartForServiceWorker(paramsForDeliver, attemptForDeliver + 1);
+      }, AGENT_RUN_START_RETRY_DELAY_MS_FOR_SERVICE_WORKER);
+      return;
+    }
+    // Gave up. Release the keepalive ref taken at agentRunStart and clear the run mapping,
+    // then tell every tab the run ended so the initiator stops showing "working".
+    releaseOffscreenKeepAliveForServiceWorker();
+    const chatIdForGiveUp = Number(paramsForDeliver && paramsForDeliver.chatId);
+    if (!Number.isFinite(chatIdForGiveUp)) return;
+    offscreenRunTargetTabsForServiceWorker.delete(chatIdForGiveUp);
+    streamSnapshotsForServiceWorker.delete(chatIdForGiveUp);
+    const deliverActionForGiveUp = actionsForServiceWorker.streamReceiverDeliver || "streamReceiverDeliver";
+    chrome.tabs.query({}, function (tabsForGiveUp) {
+      if (!Array.isArray(tabsForGiveUp)) return;
+      for (var iForGiveUp = 0; iForGiveUp < tabsForGiveUp.length; iForGiveUp++) {
+        var tabForGiveUp = tabsForGiveUp[iForGiveUp];
+        if (!tabForGiveUp || typeof tabForGiveUp.id !== "number") continue;
+        try {
+          chrome.tabs.sendMessage(tabForGiveUp.id, {
+            action: deliverActionForGiveUp,
+            event: "stream_end",
+            chatId: chatIdForGiveUp,
+            originatorTabId: null,
+            payload: { orphaned: true }
+          }, function () { void chrome.runtime.lastError; });
+        } catch (errForGiveUp) {}
+      }
+    });
+  });
+}
+
+async function playReminderBeepViaOffscreenForServiceWorker() {
+  var ensured = await ensureOffscreenDocumentForServiceWorker();
+  if (!ensured) return;
   chrome.runtime.sendMessage({ action: 'playReminderBeep' }, function () {
     if (chrome.runtime.lastError) { /* offscreen not ready yet */ }
   });
@@ -2128,6 +2335,10 @@ function handleStreamOriginatorGoneForServiceWorker(tabIdForCleanup) {
   if (!streamSnapshotsForServiceWorker || streamSnapshotsForServiceWorker.size === 0) return;
   const orphanedChatIdsForCleanup = [];
   streamSnapshotsForServiceWorker.forEach(function (snapshotForCleanup, chatIdForCleanup) {
+    // Offscreen-hosted runs survive a page reload by design: the loop lives in the
+    // offscreen document, not this tab, so do NOT synthesize stream_end for them. The
+    // reloaded panel re-subscribes via the snapshot request and the run continues.
+    if (snapshotForCleanup && snapshotForCleanup.hostedOffscreen) return;
     if (snapshotForCleanup && snapshotForCleanup.originatorTabId === tabIdForCleanup) {
       orphanedChatIdsForCleanup.push(chatIdForCleanup);
     }
@@ -2269,19 +2480,48 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
     return false;
   }
 
-  if (messageForServiceWorker.action === (actionsForServiceWorker.getActiveTabStatus || "getActiveTabStatus")) {
-    var senderTabIdForActiveTabStatus = senderForServiceWorker && senderForServiceWorker.tab && typeof senderForServiceWorker.tab.id === "number"
-      ? senderForServiceWorker.tab.id
+  if (messageForServiceWorker.action === (actionsForServiceWorker.resolvePanelStateForTab || "resolvePanelStateForTab")) {
+    // Authoritative single source of truth for "should THIS tab show the panel
+    // right now?" = global isOpen AND this tab is the active tab. Content scripts
+    // pull this on every signal that can change the answer (activation, focus,
+    // an isOpen change from another tab, re-injection), instead of relying on
+    // the SW's best-effort push commands which can be dropped to a busy tab.
+    var senderTabForResolve = senderForServiceWorker && senderForServiceWorker.tab ? senderForServiceWorker.tab : null;
+    var senderTabIdForResolve = senderTabForResolve && typeof senderTabForResolve.id === "number"
+      ? senderTabForResolve.id
       : null;
-    if (currentActiveTabIdForServiceWorker === null) {
-      // Lazy-init in case the SW was just spun up by this very message and
-      // hasn't yet resolved the focused window.
-      initActiveTabTrackingForServiceWorker();
+    if (senderTabIdForResolve === null) {
+      sendResponseForServiceWorker({ ok: true, shouldBeOpen: false });
+      return false;
     }
-    var isActiveForActiveTabStatus = typeof senderTabIdForActiveTabStatus === "number" &&
-      senderTabIdForActiveTabStatus === currentActiveTabIdForServiceWorker;
-    sendResponseForServiceWorker({ ok: true, isActive: isActiveForActiveTabStatus });
-    return false;
+    readDesiredPanelOpenForServiceWorker(function (desiredOpenForResolve) {
+      if (!desiredOpenForResolve) {
+        sendResponseForServiceWorker({ ok: true, shouldBeOpen: false });
+        return;
+      }
+      getActiveFocusedTabForPanelVisibilityForServiceWorker(function (activeTabForResolve) {
+        var shouldBeOpenForResolve = false;
+        if (activeTabForResolve) {
+          // Browser is focused: only the active tab of the focused window shows
+          // the panel, and only when that tab is a supported page.
+          shouldBeOpenForResolve =
+            isSupportedPanelTabForServiceWorker(activeTabForResolve) &&
+            activeTabForResolve.id === senderTabIdForResolve;
+        } else {
+          // No focused window (browser lost OS focus to another app). Fall back
+          // to the tracked active tab so the panel does NOT close when focus
+          // merely moves to another app.
+          if (currentActiveTabIdForServiceWorker === null) {
+            initActiveTabTrackingForServiceWorker();
+          }
+          shouldBeOpenForResolve =
+            isSupportedPanelTabForServiceWorker(senderTabForResolve) &&
+            senderTabIdForResolve === currentActiveTabIdForServiceWorker;
+        }
+        sendResponseForServiceWorker({ ok: true, shouldBeOpen: Boolean(shouldBeOpenForResolve) });
+      });
+    });
+    return true;
   }
 
   if (messageForServiceWorker.action === (actionsForServiceWorker.panelVisibilityChanged || "panelVisibilityChanged")) {
@@ -2316,6 +2556,10 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
   if (messageForServiceWorker.action === (actionsForServiceWorker.streamCancelRequest || "streamCancelRequest")) {
     const cancelDeliverActionForServiceWorker = actionsForServiceWorker.streamCancelDeliver || "streamCancelDeliver";
     const requestedChatIdForCancel = messageForServiceWorker.chatId;
+    // Also reach the offscreen-hosted loop (not a tab, so tabs.sendMessage misses it).
+    try {
+      chrome.runtime.sendMessage({ action: "offscreenCancelRequest", chatId: requestedChatIdForCancel }, function () { void chrome.runtime.lastError; });
+    } catch (errForOffscreenCancel) {}
     chrome.tabs.query({}, function (tabsForCancelBroadcast) {
       if (!Array.isArray(tabsForCancelBroadcast)) return;
       for (var iForCancelBroadcast = 0; iForCancelBroadcast < tabsForCancelBroadcast.length; iForCancelBroadcast++) {
@@ -2380,6 +2624,197 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
     return false;
   }
 
+  // Offscreen-hosted agent run start. The initiator content script does its send-init
+  // DOM work (render the user message, persist it), then hands the run to the offscreen
+  // document via the SW. The SW records which tab the run targets (for page-DOM tool
+  // delegation and snapshot ownership), keeps the offscreen doc alive, and forwards the
+  // run params to it. sender.tab.id is authoritative for the target tab.
+  if (messageForServiceWorker.action === "agentRunStart") {
+    const senderTabIdForRunStart = senderForServiceWorker && senderForServiceWorker.tab && typeof senderForServiceWorker.tab.id === "number"
+      ? senderForServiceWorker.tab.id
+      : null;
+    const paramsForRunStart = messageForServiceWorker.params || {};
+    const chatIdForRunStart = Number(paramsForRunStart.chatId);
+    if (Number.isFinite(chatIdForRunStart) && senderTabIdForRunStart != null) {
+      offscreenRunTargetTabsForServiceWorker.set(chatIdForRunStart, senderTabIdForRunStart);
+    }
+    const forwardedParamsForRunStart = Object.assign({}, paramsForRunStart, { targetTabId: senderTabIdForRunStart });
+    acquireOffscreenKeepAliveForServiceWorker();
+    ensureOffscreenDocumentForServiceWorker().then(function (ensuredForRunStart) {
+      if (!ensuredForRunStart) {
+        releaseOffscreenKeepAliveForServiceWorker();
+        return;
+      }
+      deliverAgentRunStartForServiceWorker(forwardedParamsForRunStart, 0);
+    });
+    sendResponseForServiceWorker({ ok: true });
+    return false;
+  }
+
+  // Stream events emitted by the offscreen-hosted loop. Mirrors streamOriginatorBroadcast,
+  // but the source is the offscreen document (no sender.tab), so the target tab is resolved
+  // from the run map and used as the snapshot's originatorTabId, and the event is fanned out
+  // to ALL tabs (there is no originating tab to exclude). On stream_end the run mapping is
+  // cleared and the offscreen keepalive ref is released.
+  if (messageForServiceWorker.action === "offscreenStreamBroadcast") {
+    const chatIdForOsb = Number(messageForServiceWorker.chatId);
+    const targetTabIdForOsb = offscreenRunTargetTabsForServiceWorker.has(chatIdForOsb)
+      ? offscreenRunTargetTabsForServiceWorker.get(chatIdForOsb)
+      : null;
+    updateStreamSnapshotForServiceWorker(
+      messageForServiceWorker.event,
+      messageForServiceWorker.chatId,
+      messageForServiceWorker.payload,
+      targetTabIdForOsb
+    );
+    const snapForOsb = streamSnapshotsForServiceWorker.get(chatIdForOsb);
+    if (snapForOsb) {
+      snapForOsb.hostedOffscreen = true;
+      snapForOsb.targetTabId = targetTabIdForOsb;
+    }
+    const deliverActionForOsb = actionsForServiceWorker.streamReceiverDeliver || "streamReceiverDeliver";
+    chrome.tabs.query({}, function (tabsForOsb) {
+      if (!Array.isArray(tabsForOsb)) return;
+      for (var iForOsb = 0; iForOsb < tabsForOsb.length; iForOsb++) {
+        var tabForOsb = tabsForOsb[iForOsb];
+        if (!tabForOsb || typeof tabForOsb.id !== "number") continue;
+        try {
+          chrome.tabs.sendMessage(
+            tabForOsb.id,
+            {
+              action: deliverActionForOsb,
+              event: messageForServiceWorker.event,
+              chatId: messageForServiceWorker.chatId,
+              originatorTabId: targetTabIdForOsb,
+              payload: messageForServiceWorker.payload || null
+            },
+            function () { void chrome.runtime.lastError; }
+          );
+        } catch (errorForOsb) {}
+      }
+    });
+    if (messageForServiceWorker.event === "stream_end") {
+      offscreenRunTargetTabsForServiceWorker.delete(chatIdForOsb);
+      releaseOffscreenKeepAliveForServiceWorker();
+    }
+    return false;
+  }
+
+  // Page-DOM-bound tool delegation: the offscreen loop cannot touch the page, so it asks
+  // the SW to run page_query / page_fill_form / screenshot capture on the run's target tab.
+  // sendActionToTab is ack-only (it does not surface the content response), so this uses a
+  // direct request/response chrome.tabs.sendMessage after ensuring the content script is
+  // injected (which also covers the just-reloaded-tab case via re-injection).
+  if (messageForServiceWorker.action === "delegatePageTool") {
+    const chatIdForDelegate = Number(messageForServiceWorker.chatId);
+    const targetTabIdForDelegate = offscreenRunTargetTabsForServiceWorker.has(chatIdForDelegate)
+      ? offscreenRunTargetTabsForServiceWorker.get(chatIdForDelegate)
+      : null;
+    if (targetTabIdForDelegate == null) {
+      sendResponseForServiceWorker({ ok: false, error: "No target tab is associated with this run." });
+      return false;
+    }
+    // A click can navigate the page (a link or form submit), which tears down the target tab's
+    // content script mid-observation: the in-flight runDelegatedPageTool response is then lost
+    // (the message port closes). Rather than report that as an unreachable-tab error, watch the
+    // tab for a document load during the call and resolve with an honest "navigated" result so
+    // the model re-reads the new page instead of assuming the click failed. A same-document
+    // (pushState) soft-nav does not load a document, so the content script survives and returns
+    // its own result normally; only status==="loading" triggers this. Applies to page_act and to
+    // a page_query findPageElements click sub_operation (both of which an offscreen run is allowed
+    // to let navigate; an in-panel run refuses page-leaving clicks before they reach here).
+    const argsForNavWatch = messageForServiceWorker.args || {};
+    const isPageActForDelegate = messageForServiceWorker.tool === "page_act";
+    const isPageQueryClickForDelegate = messageForServiceWorker.tool === "page_query"
+      && argsForNavWatch.operation === "findPageElements"
+      && argsForNavWatch.sub_operation === "click";
+    const watchNavigationForDelegate = isPageActForDelegate || isPageQueryClickForDelegate;
+    (async function () {
+      try {
+        if (tabMessagingForServiceWorker && typeof tabMessagingForServiceWorker.ensureContentInjected === "function") {
+          await tabMessagingForServiceWorker.ensureContentInjected(targetTabIdForDelegate);
+        }
+        let settledForDelegate = false;
+        let navWatcherForDelegate = null;
+        const beforeTabForDelegate = await getTabByIdForServiceWorker(targetTabIdForDelegate);
+        const beforeUrlForDelegate = (beforeTabForDelegate && beforeTabForDelegate.url) || "";
+        const cleanupForDelegate = function () {
+          if (navWatcherForDelegate) {
+            try { chrome.tabs.onUpdated.removeListener(navWatcherForDelegate); } catch (eRemoveNavForDelegate) { /* ignore */ }
+            navWatcherForDelegate = null;
+          }
+        };
+        const finishOkForDelegate = function (resultForDelegate) {
+          if (settledForDelegate) return;
+          settledForDelegate = true;
+          cleanupForDelegate();
+          sendResponseForServiceWorker({ ok: true, result: resultForDelegate });
+        };
+        const finishErrForDelegate = function (errorMsgForDelegate) {
+          if (settledForDelegate) return;
+          settledForDelegate = true;
+          cleanupForDelegate();
+          sendResponseForServiceWorker({ ok: false, error: errorMsgForDelegate });
+        };
+        const resolveNavigatedForDelegate = function (newUrlForDelegate) {
+          const actionForDelegate = isPageQueryClickForDelegate
+            ? "click"
+            : String((messageForServiceWorker.args && messageForServiceWorker.args.action) || "action");
+          finishOkForDelegate({
+            ok: true,
+            result: {
+              action: actionForDelegate,
+              navigated: true,
+              url: newUrlForDelegate || "",
+              navigated_note: "The " + actionForDelegate + " triggered a page navigation, so the post-action page read could not complete. The page is now loading " + (newUrlForDelegate ? '"' + newUrlForDelegate + '"' : "a new URL") + ". This is NOT a failure; re-read the page (page_accessibility_tree or page_query) before the next action."
+            }
+          });
+        };
+        if (watchNavigationForDelegate) {
+          navWatcherForDelegate = function (updatedTabIdForDelegate, changeInfoForDelegate) {
+            if (updatedTabIdForDelegate !== targetTabIdForDelegate) return;
+            if (changeInfoForDelegate && changeInfoForDelegate.status === "loading") {
+              resolveNavigatedForDelegate(changeInfoForDelegate.url || "");
+            }
+          };
+          chrome.tabs.onUpdated.addListener(navWatcherForDelegate);
+        }
+        chrome.tabs.sendMessage(
+          targetTabIdForDelegate,
+          { action: "runDelegatedPageTool", tool: messageForServiceWorker.tool, args: messageForServiceWorker.args || {}, chatId: chatIdForDelegate },
+          function (respForDelegate) {
+            if (chrome.runtime.lastError) {
+              const portErrMsgForDelegate = chrome.runtime.lastError.message || "no response";
+              if (!watchNavigationForDelegate) {
+                finishErrForDelegate("The target tab could not be reached: " + portErrMsgForDelegate);
+                return;
+              }
+              // The port may have closed because the click navigated the page. Re-check the
+              // tab: if it is loading or its URL changed, report a navigation; otherwise the
+              // tab is genuinely unreachable.
+              chrome.tabs.get(targetTabIdForDelegate, function (tabAfterForDelegate) {
+                if (chrome.runtime.lastError || !tabAfterForDelegate) {
+                  finishErrForDelegate("The target tab could not be reached: " + portErrMsgForDelegate);
+                  return;
+                }
+                if (tabAfterForDelegate.status === "loading" || (tabAfterForDelegate.url && tabAfterForDelegate.url !== beforeUrlForDelegate)) {
+                  resolveNavigatedForDelegate(tabAfterForDelegate.url || "");
+                } else {
+                  finishErrForDelegate("The target tab could not be reached: " + portErrMsgForDelegate);
+                }
+              });
+              return;
+            }
+            finishOkForDelegate(respForDelegate);
+          }
+        );
+      } catch (errForDelegate) {
+        sendResponseForServiceWorker({ ok: false, error: (errForDelegate && errForDelegate.message) || "Delegated page tool failed." });
+      }
+    })();
+    return true;
+  }
+
   // Piggyback periodic cleanup on each incoming message. setInterval is not used because
   // the service worker can be suspended between events, making interval-based timers
   // unreliable. The timestamp guards ensure cleanup runs at most once per interval even
@@ -2439,7 +2874,8 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
               url: String(tabForServiceWorker.url || ""),
               favIconUrl: String(tabForServiceWorker.favIconUrl || ""),
               active: Boolean(tabForServiceWorker.active),
-              discarded: Boolean(tabForServiceWorker.discarded)
+              discarded: Boolean(tabForServiceWorker.discarded),
+              accessible: tabMessagingForServiceWorker.isSupportedUrl(tabForServiceWorker.url || "")
             };
           });
         sendResponseForServiceWorker({ ok: true, tabs: serializedTabsForServiceWorker });

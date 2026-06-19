@@ -393,7 +393,8 @@
     return true;
   }
 
-  function setPanelVisibleForPanelBoot(isVisibleForPanelBoot) {
+  function setPanelVisibleForPanelBoot(isVisibleForPanelBoot, optionsForPanelBoot) {
+    const skipSyncForPanelBoot = Boolean(optionsForPanelBoot && optionsForPanelBoot.skipSync);
     const shadowHostForPanelBoot = document.getElementById('abchat-panel-shadow-host');
     if (!shadowHostForPanelBoot) {
       return;
@@ -421,10 +422,18 @@
     // Broadcast visibility to other tabs via panelStateSync (debounced/merged
     // into the shared abchat_panel_ui_state key). Guarded internally so
     // applying a remote isOpen change does not echo back.
-    const syncNsForBootVisibility =
-      contentNamespaceForPanelBoot.ui && contentNamespaceForPanelBoot.ui.panelStateSync;
-    if (syncNsForBootVisibility && typeof syncNsForBootVisibility.writeState === 'function') {
-      syncNsForBootVisibility.writeState({ isOpen: Boolean(isVisibleForPanelBoot) });
+    //
+    // skipSync suppresses the broadcast for transient LOCAL hides that must not
+    // touch the shared cross-tab open state — e.g. the pre-screenshot hide,
+    // which briefly drops the panel to capture the page and restores it. Without
+    // this, that hide/restore would flip the global isOpen and flicker panels in
+    // other tabs.
+    if (!skipSyncForPanelBoot) {
+      const syncNsForBootVisibility =
+        contentNamespaceForPanelBoot.ui && contentNamespaceForPanelBoot.ui.panelStateSync;
+      if (syncNsForBootVisibility && typeof syncNsForBootVisibility.writeState === 'function') {
+        syncNsForBootVisibility.writeState({ isOpen: Boolean(isVisibleForPanelBoot) });
+      }
     }
     if (isVisibleForPanelBoot) {
       if (pendingVisibleCallbacksForPanelBoot.length > 0) {

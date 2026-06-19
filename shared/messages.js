@@ -55,11 +55,15 @@
     streamSnapshotRequest: "streamSnapshotRequest",
     // Background-mediated active-tab tracking. The SW maintains a single
     // "currently active tab" id that survives focus moving to another app
-    // (window focus → WINDOW_ID_NONE is ignored). Content scripts use this
-    // instead of document.hasFocus() so the panel stays visible in the last
-    // known tab when the browser loses OS-level focus.
+    // (window focus → WINDOW_ID_NONE is ignored).
+    //   activeTabChanged:        SW → content. A trigger telling the tab to
+    //                            re-pull its panel visibility decision.
+    //   resolvePanelStateForTab: content → SW. Authoritative answer to "should
+    //                            THIS tab show the panel?" = global isOpen AND
+    //                            this tab is the active tab. The single source of
+    //                            truth for panel visibility; content applies it.
     activeTabChanged: "activeTabChanged",
-    getActiveTabStatus: "getActiveTabStatus",
+    resolvePanelStateForTab: "resolvePanelStateForTab",
     // Advanced automation (chrome.debugger / CDP) behavioral toggle. The
     // debugger permission is required at install (Chrome forbids it as
     // optional), so these gate use, not the permission. The enabled flag lives
@@ -72,7 +76,25 @@
     cdpAutomationDisable: "cdpAutomationDisable",
     // Umbrella action for agent-driven CDP session ops, dispatched by op in the
     // service worker: acquire | release | detach | state | command.
-    cdpAutomation: "cdpAutomation"
+    cdpAutomation: "cdpAutomation",
+    // Offscreen-hosted agent run. The orchestration loop runs in the offscreen
+    // document so an in-flight run survives a page reload (the content script
+    // dies on navigation, the offscreen document does not).
+    //   agentRunStart:           content → SW. SW ensures the offscreen doc and
+    //                            forwards the run params; SW maps chatId → targetTabId.
+    //   offscreenStreamBroadcast: offscreen → SW. Like streamOriginatorBroadcast but
+    //                            sourced from the offscreen doc (which has no sender.tab);
+    //                            SW fans out streamReceiverDeliver to ALL tabs.
+    //   offscreenCancelRequest:  SW → offscreen. Aborts the run's controller.
+    //   delegatePageTool:        offscreen → SW. SW relays a page-DOM-bound tool call
+    //                            to the target tab's content script.
+    //   runDelegatedPageTool:    SW → content. The content script runs the page-DOM
+    //                            tool body against its live document and returns the result.
+    agentRunStart: "agentRunStart",
+    offscreenStreamBroadcast: "offscreenStreamBroadcast",
+    offscreenCancelRequest: "offscreenCancelRequest",
+    delegatePageTool: "delegatePageTool",
+    runDelegatedPageTool: "runDelegatedPageTool"
   };
 
   const messageTypesForMessages = {

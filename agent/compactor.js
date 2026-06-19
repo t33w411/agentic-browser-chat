@@ -32,9 +32,6 @@
     { prefix: "google/gemini", budget: 128000 },
     { prefix: "x-ai/grok-2", budget: 131072 },
     { prefix: "x-ai/grok", budget: 256000 },
-    { prefix: "meta-llama/llama-3.1", budget: 128000 },
-    { prefix: "meta-llama/llama-3.3", budget: 128000 },
-    { prefix: "meta-llama/llama-4", budget: 1000000 },
     { prefix: "mistralai/", budget: 128000 },
     { prefix: "deepseek/", budget: 128000 },
     { prefix: "qwen/", budget: 128000 }

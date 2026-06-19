@@ -405,6 +405,51 @@
   // has run and this instance is stale — listeners return/skip without processing.
   var capturedGenerationForContentMain = window.abchatListenerGeneration || 0;
 
+  // Panel-independent screenshot capture, used when the offscreen loop delegates
+  // __capture_screenshot__ to a tab whose panel runtime is not initialized (the panel was
+  // never opened here — common right after a navigation). When the panel is mounted/visible
+  // its host is hidden (via the panel controller if available) for the capture and restored
+  // after; when it is not visible there is nothing to hide and the page is captured as-is.
+  function captureScreenshotForDelegationForContentMain() {
+    return new Promise(function (resolveForCapture) {
+      var panelControllerForCapture = contentNamespaceForContentMain.ui && contentNamespaceForContentMain.ui.panel;
+      var shadowHostForCapture = document.getElementById('abchat-panel-shadow-host');
+      var canToggleForCapture = panelControllerForCapture && typeof panelControllerForCapture.setVisible === 'function';
+      var isVisibleForCapture = canToggleForCapture && typeof panelControllerForCapture.isVisible === 'function'
+        ? Boolean(panelControllerForCapture.isVisible())
+        : Boolean(shadowHostForCapture && shadowHostForCapture.style.display !== 'none' && shadowHostForCapture.offsetParent !== null);
+
+      function restorePanelForCapture() {
+        if (!isVisibleForCapture) return;
+        if (canToggleForCapture) { try { panelControllerForCapture.setVisible(true); } catch (eRestoreForCapture) {} }
+        else if (shadowHostForCapture) { shadowHostForCapture.style.display = 'block'; }
+      }
+      function doCaptureForCapture() {
+        var actionForCapture = (actionsForContentMain.captureVisibleTabScreenshot || 'captureVisibleTabScreenshot');
+        try {
+          chrome.runtime.sendMessage({ action: actionForCapture }, function (respForCapture) {
+            void chrome.runtime.lastError;
+            restorePanelForCapture();
+            if (respForCapture && respForCapture.ok && respForCapture.dataUrl) resolveForCapture(respForCapture);
+            else resolveForCapture(respForCapture || { ok: false, error: 'Screenshot capture failed.' });
+          });
+        } catch (errForCapture) {
+          restorePanelForCapture();
+          resolveForCapture({ ok: false, error: (errForCapture && errForCapture.message) || 'Screenshot capture failed.' });
+        }
+      }
+
+      if (isVisibleForCapture) {
+        if (canToggleForCapture) { try { panelControllerForCapture.setVisible(false); } catch (eHideForCapture) {} }
+        else if (shadowHostForCapture) { shadowHostForCapture.style.display = 'none'; }
+        // Let the hide paint before capturing.
+        requestAnimationFrame(function () { requestAnimationFrame(function () { setTimeout(doCaptureForCapture, 80); }); });
+      } else {
+        doCaptureForCapture();
+      }
+    });
+  }
+
   chrome.runtime.onMessage.addListener((messageForContentMain, senderForContentMain, sendResponseForContentMain) => {
     // Stale-generation guard. Without this, every re-injection stacks a new onMessage
     // listener. Since cachedResponsesForContentMain is IIFE-local (not shared across
@@ -475,6 +520,75 @@
         );
       }
       return false;
+    }
+
+    // Page-DOM-bound tool delegated by the offscreen-hosted agent loop (which cannot
+    // touch the page). Runs against this tab's live document and responds with the tool
+    // result. page_query / page_fill_form go straight to the tool executor, which is
+    // available as soon as the content scripts load — they do NOT require the panel to be
+    // mounted (after a navigation the panel may not be open yet). Only screenshot capture
+    // needs the panel (to hide it during capture). Async: keep the channel open (return true).
+    if (messageForContentMain.action === (actionsForContentMain.runDelegatedPageTool || "runDelegatedPageTool")) {
+      var delegatedToolForContentMain = messageForContentMain.tool;
+      var delegatedArgsForContentMain = messageForContentMain.args || {};
+      if (delegatedToolForContentMain === 'page_query' || delegatedToolForContentMain === 'page_fill_form' || delegatedToolForContentMain === 'page_act') {
+        var agentNsForDelegate = (typeof globalThis !== 'undefined' ? globalThis : self).ABChatAgent || {};
+        if (typeof agentNsForDelegate.executeTool !== 'function') {
+          sendResponseForContentMain({ ok: false, error: 'The page tool executor is not available in this tab yet. The page may still be loading.' });
+          return true;
+        }
+        // page_act runs here (not in the offscreen doc) so its document references are the live
+        // page. It needs the chat id so its visual-preflight check shares a session key with the
+        // screenshot capture marked below; no tabId is passed, so the unbound CDP client lets the
+        // service worker resolve the target tab from sender.tab (this tab). Every delegated call
+        // carries offscreenRun:true, since delegation only happens for the offscreen-hosted run
+        // loop, which survives page navigation: the navigation gate in the page_query click and
+        // page_act click paths reads this to allow page-leaving clicks (page_fill_form ignores it).
+        var delegateCtxForContentMain = (delegatedToolForContentMain === 'page_act')
+          ? { chatId: messageForContentMain.chatId, offscreenRun: true }
+          : { offscreenRun: true };
+        Promise.resolve(agentNsForDelegate.executeTool(delegatedToolForContentMain, delegatedArgsForContentMain, delegateCtxForContentMain))
+          .then(function (resultForDelegate) { sendResponseForContentMain(resultForDelegate); })
+          .catch(function (errForDelegate) {
+            sendResponseForContentMain({ ok: false, error: (errForDelegate && errForDelegate.message) || 'Delegated page tool failed.' });
+          });
+        return true;
+      }
+      // __capture_screenshot__: prefer the panel runtime's capture (it has proper
+      // hide-and-confirm logic) when the panel is mounted/initialized. If the panel was
+      // never opened in this tab (common right after a navigation), the runtime isn't
+      // initialized, so fall back to a direct capture. The panel is not visible in that
+      // case, so there is nothing to hide and no DOM is touched.
+      //
+      // A successful capture marks the visual preflight on this content side, keyed by chat
+      // id and stamped with the live page URL, so a subsequently delegated page_act passes
+      // its preflight check (the offscreen take_screenshot marks a different document's map).
+      // This records the preflight at capture time, slightly ahead of the screenshot's vision
+      // analysis completing in the offscreen loop.
+      var markCapturePreflightForContentMain = function (captureResultForMark) {
+        if (delegatedToolForContentMain !== '__capture_screenshot__') return;
+        if (!captureResultForMark || captureResultForMark.ok !== true) return;
+        var agentNsForMark = (typeof globalThis !== 'undefined' ? globalThis : self).ABChatAgent || {};
+        if (typeof agentNsForMark.markVisualPreflight === 'function') {
+          try { agentNsForMark.markVisualPreflight({ chatId: messageForContentMain.chatId }); } catch (eMarkPreflightForContentMain) {}
+        }
+      };
+      var panelRuntimeNsForDelegate = contentNamespaceForContentMain.ui && contentNamespaceForContentMain.ui.panelRuntime;
+      if (panelRuntimeNsForDelegate && typeof panelRuntimeNsForDelegate.runDelegatedPageTool === 'function' &&
+          typeof panelRuntimeNsForDelegate.isRuntimeReady === 'function' && panelRuntimeNsForDelegate.isRuntimeReady()) {
+        Promise.resolve(panelRuntimeNsForDelegate.runDelegatedPageTool(delegatedToolForContentMain, delegatedArgsForContentMain))
+          .then(function (resultForDelegate) { markCapturePreflightForContentMain(resultForDelegate); sendResponseForContentMain(resultForDelegate); })
+          .catch(function (errForDelegate) {
+            sendResponseForContentMain({ ok: false, error: (errForDelegate && errForDelegate.message) || 'Delegated page tool failed.' });
+          });
+        return true;
+      }
+      captureScreenshotForDelegationForContentMain()
+        .then(function (resultForCaptureDelegate) { markCapturePreflightForContentMain(resultForCaptureDelegate); sendResponseForContentMain(resultForCaptureDelegate); })
+        .catch(function (errForCaptureDelegate) {
+          sendResponseForContentMain({ ok: false, error: (errForCaptureDelegate && errForCaptureDelegate.message) || 'Screenshot capture failed.' });
+        });
+      return true;
     }
 
     if (messageForContentMain.action === (actionsForContentMain.panelVisibilityCommand || "panelVisibilityCommand")) {

@@ -3,5 +3,31 @@
 <body>
   <audio id="reminder-audio" src="../sounds/reminder.wav"></audio>
   <script src="offscreen.js"></script>
+
+  <!-- Agent run loop host. The orchestration loop runs here (not in the page content
+       script) so an in-flight run survives a page reload. Scripts are loaded in the
+       same dependency order the manifest uses for the content script. Page-DOM-bound
+       tools (page_query, page_fill_form, take_screenshot capture) are delegated back to
+       the target tab's content script; everything else runs here. -->
+  <script src="../shared/messages.js"></script>
+  <script src="../shared/agentRunStop.js"></script>
+  <script src="../shared/toolRegistry.js"></script>
+  <script src="../shared/storage.js"></script>
+  <script src="../shared/panelDataRepo.js"></script>
+  <script src="../lib/jszip.min.js"></script>
+  <script src="../lib/xlsx.min.js"></script>
+  <script src="../agent/apiLogger.js"></script>
+  <script src="../agent/tools.js"></script>
+  <script src="../agent/documentGeneration.js"></script>
+  <script src="../agent/cdpClient.js"></script>
+  <script src="../agent/toolExec.js"></script>
+  <script src="../agent/contextBuilder.js"></script>
+  <script src="../agent/client.js"></script>
+  <script src="../agent/compactor.js"></script>
+  <script src="../agent/hooks/registry.js"></script>
+  <script src="../agent/hooks/builtin/memoryClaimGuard.js"></script>
+  <script src="../agent/hooks/builtin/imageGenerationCap.js"></script>
+  <script src="../agent/hooks/builtin/toolCallCap.js"></script>
+  <script src="agentRun.js"></script>
 </body>
 </html>

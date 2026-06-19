@@ -24,6 +24,7 @@
   const injectableJsFilesForTabMessaging = [
     "content/preInit.js",
     "shared/messages.js",
+    "shared/agentRunStop.js",
     "shared/toolRegistry.js",
     "shared/domainConfig.js",
     "shared/storage.js",

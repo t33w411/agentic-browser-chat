@@ -918,6 +918,17 @@
   background: transparent;
   box-shadow: none;
 }
+/* Stop/timeout/cancel notices persisted into the timeline: a muted system line,
+   visually separate from the model's own assistant bubbles. */
+.msg-bubble.asst.msg-system-notice {
+  background: var(--abchat-bg-hover);
+  border-color: var(--abchat-border);
+  box-shadow: none;
+  border-radius: var(--abchat-r-sm);
+  font-size: 13px;
+  color: var(--abchat-text-muted);
+}
+.msg-bubble.asst.msg-system-notice .msg-text { color: var(--abchat-text-muted); }
 
 .msg-options-wrap {
   position: absolute;
@@ -1369,10 +1380,22 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
   display: none; position: absolute; bottom: calc(100% + 6px); left: 0;
   background: var(--abchat-bg-panel); border: 1px solid var(--abchat-border);
   border-radius: var(--abchat-r-md); box-shadow: 0 4px 16px rgba(0,0,0,0.12);
-  min-width: 200px; max-height: 280px; overflow-y: auto;
+  min-width: 220px; max-height: 320px;
   z-index: 200; padding: 4px;
 }
-.model-picker-dropdown.open { display: block; }
+.model-picker-dropdown.open { display: flex; flex-direction: column; }
+.mp-search-row { position: relative; flex-shrink: 0; margin-bottom: 4px; }
+.mp-search {
+  width: 100%; box-sizing: border-box;
+  border: 1px solid var(--abchat-border); border-radius: var(--abchat-r-sm);
+  padding: 6px 26px 6px 8px; background: var(--abchat-bg-input);
+  color: var(--abchat-text-primary); font-family: var(--abchat-font);
+  font-size: 13px; outline: none;
+}
+.mp-search::placeholder { color: var(--abchat-text-secondary); }
+.mp-search:focus { border-color: var(--abchat-accent); }
+.mp-list { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+.mp-empty { padding: 10px 8px; text-align: center; font-size: 13px; color: var(--abchat-text-secondary); }
 .mp-group { margin-bottom: 2px; }
 .mp-group:last-child { margin-bottom: 0; }
 .mp-group-label {
@@ -1390,7 +1413,7 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 }
 .mp-item:hover { background: var(--abchat-bg-hover); }
 .mp-item.active { color: var(--abchat-accent); font-weight: 600; }
-.mp-tier-cheap, .mp-tier-mid, .mp-tier-expensive {
+.mp-tier-cheap, .mp-tier-mid, .mp-tier-expensive, .mp-tier-extreme {
   display: inline-block; padding: 1px 5px; border-radius: 3px;
   font-size: 10px; font-weight: 600; letter-spacing: 0.03em; vertical-align: middle;
   margin-left: 4px; pointer-events: none;
@@ -1398,6 +1421,7 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 .mp-tier-cheap    { background: rgba(34, 197, 94, 0.15); color: #16a34a; }
 .mp-tier-mid      { background: rgba(234, 179, 8, 0.15); color: #b45309; }
 .mp-tier-expensive { background: rgba(239, 68, 68, 0.15); color: #dc2626; }
+.mp-tier-extreme  { background: rgba(147, 51, 234, 0.15); color: #9333ea; }
 
 .send-btn {
   border: none; border-radius: 50%;
@@ -2233,6 +2257,8 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 .log-status-dot.log-status-success { background: #22c55e; }
 .log-status-dot.log-status-error   { background: #ef4444; }
 .log-status-dot.log-status-cancelled { background: var(--abchat-text-muted); }
+.log-status-dot.log-status-cancelled-user { background: #94a3b8; }
+.log-status-dot.log-status-timeout { background: #f59e0b; }
 
 .log-ts {
   font-size: 12px; color: var(--abchat-text-muted); white-space: nowrap;
@@ -2303,6 +2329,8 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 .log-status-badge.log-status-success { background: #dcfce7; color: #16a34a; }
 .log-status-badge.log-status-error   { background: #fee2e2; color: #dc2626; }
 .log-status-badge.log-status-cancelled { background: var(--abchat-bg-hover); color: var(--abchat-text-muted); }
+.log-status-badge.log-status-cancelled-user { background: #e2e8f0; color: #475569; }
+.log-status-badge.log-status-timeout { background: #fef3c7; color: #b45309; }
 .log-mono { font-family: "SF Mono","Fira Code",monospace; font-size: 12px; }
 
 .log-detail-tools { display: flex; flex-direction: column; gap: 6px; }

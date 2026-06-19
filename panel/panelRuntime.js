@@ -32,6 +32,7 @@
   var _exposedReclampPanelPositionForPanelRuntime = null;
   var _exposedHandleRemoteStreamEventForPanelRuntime = null;
   var _exposedHandleRemoteCancelDeliverForPanelRuntime = null;
+  var _exposedRunDelegatedPageToolForPanelRuntime = null;
   var _exposedSetReducedPaneForPanelRuntime = null;
   var _exposedSetChatSubTabForPanelRuntime = null;
   var _exposedSetTaskFilterForPanelRuntime = null;
@@ -418,7 +419,9 @@
     // search query. They are removed from the DOM and these sets when the query is cleared.
     // REGRESSION RISK: always clear these sets and remove the extra DOM nodes when the
     // search query is emptied; failing to do so leaves phantom DOM items in the sidebar.
-    var searchForcedChatIdsForPanelRuntime = new Set();
+    // filterForcedChatIdsForPanelRuntime covers all three chat-list filters (sub-tab, favs,
+    // search) since they share a single window-aware apply path.
+    var filterForcedChatIdsForPanelRuntime = new Set();
     var searchForcedNoteIdsForPanelRuntime = new Set();
     var searchForcedTaskIdsForPanelRuntime = new Set();
     var searchForcedQuizIdsForPanelRuntime = new Set();
@@ -494,6 +497,7 @@
             }).filter(function(s) { return Boolean(s.url); })
           : [],
         incomplete: Boolean(safeMessageForPanelRuntime.incomplete),
+        systemNotice: Boolean(safeMessageForPanelRuntime.systemNotice),
         createdAt: typeof safeMessageForPanelRuntime.createdAt === 'string' ? safeMessageForPanelRuntime.createdAt : '',
         _persistedToDb: safeMessageForPanelRuntime._persistedToDb === false ? false : true
       };
@@ -772,6 +776,11 @@
     // stream_end so the last token batch isn't lost.
     // -------------------------------------------------------------------
     const remoteStreamingChatsForPanelRuntime = new Set();
+    // Chats this tab handed off to the offscreen-hosted loop. Tracked locally so we can
+    // guard against a duplicate send before stream_start arrives, route a cancel during
+    // that window, and re-focus the chat input when the run ends (the offscreen path
+    // makes this tab a pure stream receiver, so the legacy finally-block focus is gone).
+    const offscreenInitiatedChatsForPanelRuntime = new Set();
     const textDebounceTimersForStreamBroadcast = new Map();
     const textPendingAccForStreamBroadcast = new Map();
     const STREAM_TEXT_DEBOUNCE_MS_FOR_PANEL_RUNTIME = 120;
@@ -832,10 +841,14 @@
       ) {
         createLiveTurnBubbleForPanelRuntime(numericChatIdForEnsure);
       }
-      // Flip the send button to a cancel button on first entering the
-      // remote-stream state for the active chat.
-      if (!wasRemoteStreamingForEnsure && S.activeChatId === numericChatIdForEnsure) {
-        setSendingUIStateForPanelRuntime();
+      // On first entering the remote-stream state, show the chat-list streaming dot for
+      // this chat (independent of which chat is active) and, when it is the active chat,
+      // flip the send button to a cancel button.
+      if (!wasRemoteStreamingForEnsure) {
+        syncMainChatListItemForPanelRuntime(numericChatIdForEnsure);
+        if (S.activeChatId === numericChatIdForEnsure) {
+          setSendingUIStateForPanelRuntime();
+        }
       }
     }
 
@@ -908,20 +921,35 @@
       if (sendingChatsForPanelRuntime.has(numericChatIdForRemote)) return;
 
       if (eventForRemote === "stream_start") {
-        // Force an immediate chat-store refresh so the user message the
-        // originator just persisted lands on screen BEFORE the live bubble
-        // appears below it. We can't rely on the dbDataChanged 250ms debounce
-        // — the first text delta may arrive sooner than that.
+        // Show the user message the originator just persisted, above the live streaming bubble.
+        // We refresh immediately rather than waiting for the dbDataChanged 250ms debounce, since
+        // the first text delta may arrive sooner than that.
         //
-        // We deliberately do NOT mark the chat as remoteStreaming yet: if we
-        // did, the render guard in executeStoreRefresh would skip the render
-        // and the user message would never appear until stream_end. The flag
-        // is set in the .then() below (and also lazily by ensureRemoteBubble
-        // when a content-bearing event races ahead of the refresh).
+        // The originator persists that user message with touchChat:false, so the chat's
+        // updatedAt is unchanged. A receiver already viewing this chat (its messages already
+        // loaded) would otherwise fail the refresh's change-gate, skip the message refetch, and
+        // not show the new user message until stream_end. Evict it from the loaded set so the
+        // refresh refetches and renders it now, mirroring what the stream_end handler does.
+        if (S.activeChatId === numericChatIdForRemote) {
+          chatMessagesLoadedSetForPanelRuntime.delete(numericChatIdForRemote);
+        }
+        // Create the live bubble and mark the chat remoteStreaming up front. This intentionally
+        // gates the refresh's own active-chat render (so we do not render twice); we then render
+        // once in the .then() below. Doing it in this order also closes the race where a fast
+        // stream_text would otherwise set remoteStreaming mid-refresh and gate the render,
+        // leaving the user message hidden until stream_end.
+        ensureRemoteBubbleForPanelRuntime(numericChatIdForRemote);
         Promise.resolve(executeStoreRefreshForPanelRuntime("chats")).catch(function () {
           // Refresh errors are non-fatal; the bubble still appears below.
         }).then(function () {
-          ensureRemoteBubbleForPanelRuntime(numericChatIdForRemote);
+          // The refresh refetched the messages (loaded-set evicted above) but skipped its
+          // active-chat render (remoteStreaming gate). Render once here so the just-persisted
+          // user message shows; renderChatMessages rebuilds the container, so reattach the live
+          // bubble (preserved by reference) below it.
+          if (S.activeChatId !== numericChatIdForRemote) return;
+          renderChatMessages();
+          reattachLiveTurnBubbleForPanelRuntime(numericChatIdForRemote);
+          scrollChatToBottomForPanelRuntime();
         });
         return;
       }
@@ -990,19 +1018,125 @@
         return;
       }
 
+      // Emitted by the offscreen-hosted loop where the legacy in-panel loop appended a
+      // transient system message (timeout/error/empty-response/cap notices). Shown only on
+      // the active chat, mirroring the legacy S.activeChatId gate.
+      if (eventForRemote === "stream_system_notice") {
+        if (S.activeChatId !== numericChatIdForRemote) return;
+        const noticeTextForRemote = payloadForRemote && typeof payloadForRemote.text === 'string' ? payloadForRemote.text : '';
+        if (noticeTextForRemote) appendSystemMsgToContainerForPanelRuntime(noticeTextForRemote);
+        return;
+      }
+
+      // Emitted by the offscreen-hosted loop around history compaction, replacing the
+      // legacy showCompactingBubble/removeCompactingBubble calls.
+      if (eventForRemote === "stream_compacting") {
+        if (S.activeChatId !== numericChatIdForRemote) return;
+        if (payloadForRemote && payloadForRemote.active) showCompactingBubbleForPanelRuntime();
+        else removeCompactingBubbleForPanelRuntime();
+        return;
+      }
+
+      // Live session token/cost counter, emitted per turn by the offscreen-hosted loop in
+      // place of the legacy in-panel loop's direct updateSessionTokenDisplay calls. Only the
+      // tab viewing this chat updates its counter.
+      if (eventForRemote === "stream_usage") {
+        if (S.activeChatId !== numericChatIdForRemote) return;
+        if (!payloadForRemote) return;
+        updateSessionTokenDisplayForPanelRuntime(payloadForRemote.usage || null, Number(payloadForRemote.cumulativeCost) || 0);
+        return;
+      }
+
+      // Emitted by the offscreen-hosted loop after a tool round that created or edited
+      // notes/tasks/questions. The legacy in-panel loop called scheduleStoreRefresh
+      // directly for the mutated stores; the offscreen loop cannot, so it signals here.
+      // A full refresh (no ops) is used deliberately rather than relying on the cross-tab
+      // incremental DB-change broadcast, which renders new notes but was observed to leave
+      // new tasks/questions unrendered until a later full refresh.
+      if (eventForRemote === "stream_stores_mutated") {
+        const storesForMutated = payloadForRemote && Array.isArray(payloadForRemote.stores) ? payloadForRemote.stores : [];
+        for (var iForMutated = 0; iForMutated < storesForMutated.length; iForMutated++) {
+          var storeForMutated = storesForMutated[iForMutated];
+          if (storeForMutated === 'notes' || storeForMutated === 'tasks' || storeForMutated === 'questions') {
+            scheduleStoreRefreshForPanelRuntime(storeForMutated);
+          }
+        }
+        return;
+      }
+
       if (eventForRemote === "stream_end") {
-        if (!remoteStreamingChatsForPanelRuntime.has(numericChatIdForRemote)) return;
+        // If this tab initiated an offscreen-hosted run for this chat, the legacy
+        // finally-block input re-focus no longer runs here (the loop is in the offscreen
+        // doc), so restore focus now.
+        const wasInitiatorForEnd = offscreenInitiatedChatsForPanelRuntime.has(numericChatIdForRemote);
+        if (wasInitiatorForEnd) {
+          offscreenInitiatedChatsForPanelRuntime.delete(numericChatIdForRemote);
+          // Offscreen runs survive page navigation/reload, so they never arm the
+          // leave-warning beforeunload; agentIsWorking tracks only legacy in-panel runs.
+          if (S.activeChatId === numericChatIdForRemote) {
+            const chatTaForOffscreenFocus = root.querySelector('.chat-textarea');
+            if (chatTaForOffscreenFocus) chatTaForOffscreenFocus.focus();
+          }
+        }
+        const wasTrackingForEnd = remoteStreamingChatsForPanelRuntime.has(numericChatIdForRemote);
         remoteStreamingChatsForPanelRuntime.delete(numericChatIdForRemote);
+        // Skip work only on tabs that neither tracked this stream, initiated it, nor are
+        // viewing the chat. Critically, do NOT skip when this tab is VIEWING the chat: an
+        // offscreen-hosted loop persists the final messages to the DB, but this tab may
+        // have missed the live stream events (the panel mounted late, or the page reloaded
+        // mid-run), so a DB refresh is required to actually render the final response.
+        if (!wasTrackingForEnd && !wasInitiatorForEnd && S.activeChatId !== numericChatIdForRemote) return;
         // Flip the cancel button back to a send button on the active chat.
         if (S.activeChatId === numericChatIdForRemote) {
           setSendingUIStateForPanelRuntime();
         }
+        // Remove the chat-list streaming dot now that the run has ended (the
+        // remoteStreaming/offscreenInitiated sets were cleared above).
+        syncMainChatListItemForPanelRuntime(numericChatIdForRemote);
         removeLiveTurnBubbleForPanelRuntime(numericChatIdForRemote, true);
-        // Refresh from the DB so the persisted final assistant message
-        // replaces the transient bubble. The guard is now off, so the active
-        // chat will re-render.
+        // Force the active-chat message refetch in the refresh below. executeStoreRefresh
+        // gates that refetch on the chat's updatedAt changing, but the offscreen loop
+        // persists messages with touchChat:false, so updatedAt may be unchanged (cancel,
+        // fallback, error, or a race around the loop's final updateChat) — which would skip
+        // the refetch and leave the persisted final message unrendered. Evicting the chat
+        // from the loaded-set makes the gate's second condition fire and reload messages.
+        chatMessagesLoadedSetForPanelRuntime.delete(numericChatIdForRemote);
+        // Refresh from the DB so the persisted final assistant message replaces the
+        // transient bubble. remoteStreaming is now cleared, so the active chat re-renders.
         scheduleStoreRefreshForPanelRuntime("chats");
+        // Also refresh the notes/tasks/questions sidebars in case the run created or edited
+        // any of them. The legacy in-panel loop did this per tool round via scheduleStoreRefresh;
+        // the offscreen loop can't, so the viewing/initiator tab reconciles here at run end.
+        // Done in the receiver (always-fresh page context) and via a full refresh, so it does
+        // not depend on the offscreen loop emitting an extra signal.
+        scheduleStoreRefreshForPanelRuntime("notes");
+        scheduleStoreRefreshForPanelRuntime("tasks");
+        scheduleStoreRefreshForPanelRuntime("questions");
         return;
+      }
+    }
+
+    // Runs a page-DOM-bound tool on behalf of the offscreen-hosted loop, which cannot
+    // touch the page. The offscreen loop delegates page_query / page_fill_form (which run
+    // against this tab's live document via the local tool executor) and screenshot capture
+    // (which must hide the panel first, so it can only happen here). Returns the tool result
+    // object, forwarded back to the offscreen loop by the service worker.
+    async function runDelegatedPageToolForPanelRuntime(toolForDelegate, argsForDelegate) {
+      if (toolForDelegate === '__capture_screenshot__') {
+        try {
+          return await captureScreenshotWithoutPanelUiForPanelRuntime();
+        } catch (errForCaptureDelegate) {
+          return { ok: false, error: (errForCaptureDelegate && errForCaptureDelegate.message) || 'Screenshot capture failed.' };
+        }
+      }
+      const agentNsForDelegate = globalThis.ABChatAgent || {};
+      if (typeof agentNsForDelegate.executeTool !== 'function') {
+        return { ok: false, error: 'Page tool executor is unavailable in this tab.' };
+      }
+      try {
+        return await agentNsForDelegate.executeTool(toolForDelegate, argsForDelegate || {}, {});
+      } catch (errForDelegateExec) {
+        return { ok: false, error: (errForDelegateExec && errForDelegateExec.message) || 'Page tool failed.' };
       }
     }
 
@@ -1118,6 +1252,7 @@
     let preclickOpenStateForPanelRuntime = null;
     // Map<chatId, AbortController> — one entry per chat that is actively streaming
     const sendingChatsForPanelRuntime = new Map();
+    const userStopRequestedChatsForPanelRuntime = new Set();
     const AGENT_FALLBACK_RESPONSES_FOR_PANEL_RUNTIME = [
       "Sorry, something went wrong. Please let me know if I should try again.",
       "I wasn't able to complete that. Feel free to ask me to try again.",
@@ -1300,7 +1435,7 @@
         desc: 'Agentic Browser Chat uses OpenRouter to access AI models. You\'ll need a free API key to get started.',
         bullets: [
           'Get your key at openrouter.ai (free to sign up)',
-          'Supports GPT-4, Gemini, Claude, Llama, and more',
+          'Supports GPT-4+, Gemini, Claude, and more',
           'Your key is stored only on your device, never synced'
         ]
       },
@@ -2868,6 +3003,17 @@
         // Assistant messages with text are buffered and merged into one bubble.
         if (!isUser) {
           const mdText = String(msg.md || msg.content || '').trim();
+          if (msg.systemNotice && mdText) {
+            flushAsstBuffer();
+            html +=
+              '<div class="msg-wrap">' +
+                '<div class="msg-bubble asst msg-system-notice">' +
+                  '<div class="msg-text"><em>' + escHtml(mdText) + '</em></div>' +
+                '</div>' +
+              '</div>';
+            i++;
+            continue;
+          }
           if (mdText) {
             asstMergeBuffer.push({
               md: mdText,
@@ -3469,23 +3615,9 @@
 
     function toggleFavs(btn) {
       btn.classList.toggle('active');
-      const on = btn.classList.contains('active');
-      btn.innerHTML = on ? (ic.starFilled12 + ' Favs') : (ic.starEmpty12 + ' Favs');
-      const isQuickQTabForFavs = (S.chatType || 'chats') === 'quickq';
-      root.querySelectorAll('.chat-item').forEach(item => {
-        const itemIsQQForFavs = item.dataset.chatType === 'quickq';
-        // Only touch items that belong to the currently active sub-tab
-        if (itemIsQQForFavs !== isQuickQTabForFavs) return;
-        const chatIdForPanelRuntime = Number(item.dataset.chatId);
-        const chatDataForPanelRuntime = CHAT_STORE_FOR_PANEL_RUNTIME[chatIdForPanelRuntime];
-        const isPinnedForPanelRuntime = Boolean(chatDataForPanelRuntime && chatDataForPanelRuntime.isPinned);
-        if (on) {
-          item.style.display = isPinnedForPanelRuntime ? '' : 'none';
-        } else {
-          item.style.display = '';
-        }
-      });
-      refreshChatGroupLabelsVisibilityForPanelRuntime();
+      const onForFavs = btn.classList.contains('active');
+      btn.innerHTML = onForFavs ? (ic.starFilled12 + ' Favs') : (ic.starEmpty12 + ' Favs');
+      applyChatListFilterForPanelRuntime();
     }
 
     async function toggleChatStar(btn) {
@@ -3513,15 +3645,7 @@
       }
       const favsBtnForPanelRuntime = root.getElementById('favs-btn');
       if (favsBtnForPanelRuntime && favsBtnForPanelRuntime.classList.contains('active')) {
-        const isQuickQTabForStar = (S.chatType || 'chats') === 'quickq';
-        root.querySelectorAll('.chat-item').forEach(function (itemForPanelRuntime) {
-          const itemIsQQForStar = itemForPanelRuntime.dataset.chatType === 'quickq';
-          if (itemIsQQForStar !== isQuickQTabForStar) return;
-          const itemChatIdForPanelRuntime = Number(itemForPanelRuntime.dataset.chatId);
-          const itemChatForPanelRuntime = CHAT_STORE_FOR_PANEL_RUNTIME[itemChatIdForPanelRuntime];
-          itemForPanelRuntime.style.display = itemChatForPanelRuntime && itemChatForPanelRuntime.isPinned ? '' : 'none';
-        });
-        refreshChatGroupLabelsVisibilityForPanelRuntime();
+        applyChatListFilterForPanelRuntime();
       }
     }
 
@@ -3552,7 +3676,7 @@
       });
     }
 
-    function closeAllDropdownsForPanelRuntime() {
+    function closeAllDropdownsForPanelRuntime(evtForCloseDropdowns) {
       root.querySelectorAll('.ci-dropdown.open').forEach(function(d) {
         d.classList.remove('open');
         d.closest('.chat-item')?.classList.remove('ci-dropdown-open');
@@ -3561,8 +3685,13 @@
       closeAttachPicker();
       const modelDropdown = root.getElementById('model-picker-dropdown');
       const modelBtn = root.getElementById('model-picker-btn');
-      if (modelDropdown) modelDropdown.classList.remove('open');
-      if (modelBtn) modelBtn.classList.remove('open');
+      const pathForCloseDropdowns = (evtForCloseDropdowns && typeof evtForCloseDropdowns.composedPath === 'function')
+        ? evtForCloseDropdowns.composedPath() : [];
+      const clickWithinModelPickerForClose = pathForCloseDropdowns.some(function (nodeForPath) {
+        return nodeForPath && nodeForPath.id === 'model-picker-dropdown';
+      });
+      if (modelDropdown && !clickWithinModelPickerForClose) modelDropdown.classList.remove('open');
+      if (modelBtn && !clickWithinModelPickerForClose) modelBtn.classList.remove('open');
       root.querySelectorAll('.ni-dropdown.open').forEach(function(d) {
         d.classList.remove('open');
         d.closest('.note-item')?.classList.remove('ni-dropdown-open');
@@ -3964,18 +4093,13 @@
       root.querySelectorAll('.ctab-btn').forEach(b => {
         b.classList.toggle('active', b.dataset.ctype === normalizedTypeForChatType);
       });
-      const isQuickQ = normalizedTypeForChatType === 'quickq';
-      root.querySelectorAll('.chat-item').forEach(item => {
-        const itemIsQQ = item.dataset.chatType === 'quickq';
-        item.style.display = (isQuickQ ? itemIsQQ : !itemIsQQ) ? '' : 'none';
-      });
-      refreshChatGroupLabelsVisibilityForPanelRuntime();
       // Reset favs filter when switching types
       const favsBtn = root.getElementById('favs-btn');
       if (favsBtn) {
         favsBtn.classList.remove('active');
         favsBtn.innerHTML = ic.starEmpty12 + ' Favs';
       }
+      applyChatListFilterForPanelRuntime();
       if (!optsForChatTypeForPanelRuntime.skipStateSync) {
         writePanelStateSyncForPanelRuntime({ chatSubTab: normalizedTypeForChatType, chatSearchQuery: '' });
       }
@@ -4025,6 +4149,11 @@
       S.activeChatId = null;
       writePanelStateSyncForPanelRuntime({ activeChatId: null });
       clearSessionTokenCounterForPanelRuntime();
+      // Re-sync the composer for the now-empty (null) active chat. Without this, switching
+      // here while another chat is still responding leaves the textarea disabled and the
+      // send button stuck in cancel mode (stale from the previously active chat), making it
+      // impossible to start a concurrent chat even though the run layer allows up to three.
+      setSendingUIStateForPanelRuntime();
       showChatMessages(false);
       updateChatBackTitleForPanelRuntime();
       S.inChatView = true;
@@ -4165,6 +4294,14 @@
         if (!dropdown || !btn) return;
         dropdown.classList.add('open');
         btn.classList.add('open');
+        const searchForOpen = root.getElementById('model-picker-search');
+        if (searchForOpen) {
+          searchForOpen.value = '';
+          const searchRowForOpen = searchForOpen.closest('.mp-search-row');
+          if (searchRowForOpen) searchRowForOpen.classList.remove('has-value');
+          filterModelPickerForPanelRuntime('');
+          setTimeout(function () { try { searchForOpen.focus(); } catch (e) {} }, 0);
+        }
       }
     }
 
@@ -4185,10 +4322,17 @@
       }
     }
 
-    function buildModelPickerDropdownForPanelRuntime(pickedByProvider, providerKeys, effectiveSelected, getProviderLabel, isExpensive, getDisplayName, getProviderKey) {
-      const dropdown = root.getElementById('model-picker-dropdown');
-      if (!dropdown) return;
-      dropdown.innerHTML = '';
+    function formatModelCostTooltipForPanelRuntime(modelForCostTooltip) {
+      const costForCostTooltip = Number(modelForCostTooltip && modelForCostTooltip.completionCostPerMillion);
+      if (!Number.isFinite(costForCostTooltip) || costForCostTooltip <= 0) return '';
+      const decimalsForCostTooltip = costForCostTooltip < 1 ? 3 : 2;
+      return '$' + costForCostTooltip.toFixed(decimalsForCostTooltip) + ' / 1M output tokens';
+    }
+
+    function buildModelPickerDropdownForPanelRuntime(pickedByProvider, providerKeys, effectiveSelected, getProviderLabel, getDisplayName, getProviderKey) {
+      const listForDropdown = root.getElementById('model-picker-list');
+      if (!listForDropdown) return;
+      listForDropdown.innerHTML = '';
       providerKeys.forEach(function (providerKey) {
         const models = pickedByProvider[providerKey];
         if (!models || models.length === 0) return;
@@ -4204,15 +4348,41 @@
           if (m.id === effectiveSelected) btn.classList.add('active');
           btn.dataset.action = 'select-model';
           btn.dataset.modelId = m.id;
-          const namePart = escHtml(getDisplayName(m, providerKey));
+          const displayNameForItem = getDisplayName(m, providerKey);
+          const namePart = escHtml(displayNameForItem);
           const tierForBtn = getModelTierForPanelRuntime(m);
+          btn.dataset.searchText = (String(displayNameForItem) + ' ' + String(m.id) + ' ' + (tierForBtn ? tierForBtn.label : '')).toLowerCase();
+          const costTooltipForItem = formatModelCostTooltipForPanelRuntime(m);
+          if (costTooltipForItem) btn.title = costTooltipForItem;
           btn.innerHTML = tierForBtn
             ? namePart + ' <span class="' + tierForBtn.cls + '">' + tierForBtn.label + '</span>'
             : namePart;
           group.appendChild(btn);
         });
-        dropdown.appendChild(group);
+        listForDropdown.appendChild(group);
       });
+      const searchInputForRebuild = root.getElementById('model-picker-search');
+      filterModelPickerForPanelRuntime(searchInputForRebuild ? searchInputForRebuild.value : '');
+    }
+
+    function filterModelPickerForPanelRuntime(rawQueryForFilter) {
+      const listForFilter = root.getElementById('model-picker-list');
+      if (!listForFilter) return;
+      const queryForFilter = String(rawQueryForFilter || '').trim().toLowerCase();
+      let totalVisibleForFilter = 0;
+      listForFilter.querySelectorAll('.mp-group').forEach(function (groupForFilter) {
+        let visibleInGroupForFilter = 0;
+        groupForFilter.querySelectorAll('.mp-item').forEach(function (itemForFilter) {
+          const haystackForFilter = itemForFilter.dataset.searchText || itemForFilter.textContent.toLowerCase();
+          const matchesForFilter = !queryForFilter || haystackForFilter.indexOf(queryForFilter) !== -1;
+          itemForFilter.style.display = matchesForFilter ? '' : 'none';
+          if (matchesForFilter) visibleInGroupForFilter++;
+        });
+        groupForFilter.style.display = visibleInGroupForFilter > 0 ? '' : 'none';
+        totalVisibleForFilter += visibleInGroupForFilter;
+      });
+      const emptyForFilter = root.getElementById('model-picker-empty');
+      if (emptyForFilter) emptyForFilter.hidden = totalVisibleForFilter > 0;
     }
 
     function selectModelForPanelRuntime(modelId) {
@@ -4656,7 +4826,9 @@
 
       if (isPanelVisibleForPanelRuntime) {
         if (canTogglePanelForPanelRuntime) {
-          panelControllerForPanelRuntime.setVisible(false);
+          // skipSync: this is a transient local hide for the capture, not a
+          // user-intended close — it must not flip the shared cross-tab state.
+          panelControllerForPanelRuntime.setVisible(false, { skipSync: true });
         } else if (panelShadowHostForPanelRuntime) {
           panelShadowHostForPanelRuntime.style.display = 'none';
         }
@@ -4690,7 +4862,7 @@
       } finally {
         if (isPanelVisibleForPanelRuntime) {
           if (canTogglePanelForPanelRuntime) {
-            panelControllerForPanelRuntime.setVisible(true);
+            panelControllerForPanelRuntime.setVisible(true, { skipSync: true });
           } else if (panelShadowHostForPanelRuntime) {
             panelShadowHostForPanelRuntime.style.display = 'block';
           }
@@ -5713,7 +5885,12 @@
         var wasInOrderForApply = NOTE_ORDER_FOR_PANEL_RUNTIME.indexOf(idForApply) >= 0;
         NOTE_STORE_FOR_PANEL_RUNTIME[idForApply] = cloneNoteRecordForPanelRuntime(fetchedForApply);
         if (fetchedForApply.noteType !== 'agent' && !wasInOrderForApply) {
-          NOTE_ORDER_FOR_PANEL_RUNTIME.push(idForApply);
+          // Insert at the front, not the end: syncMainNoteListItem's window
+          // guard rejects positions >= renderedNoteCount, so a freshly created
+          // note appended at the end never gets a DOM node when there are more
+          // notes than the rendered window. refreshNoteOrder re-sorts it into
+          // its real position afterward. Mirrors the chats incremental path.
+          NOTE_ORDER_FOR_PANEL_RUNTIME.unshift(idForApply);
           renderedNoteCountForPanelRuntime = Math.min(
             renderedNoteCountForPanelRuntime + 1,
             NOTE_ORDER_FOR_PANEL_RUNTIME.length
@@ -5820,7 +5997,9 @@
         var wasInOrderForApply = TASK_ORDER_FOR_PANEL_RUNTIME.indexOf(idForApply) >= 0;
         TASK_STORE_FOR_PANEL_RUNTIME[idForApply] = cloneTaskRecordForPanelRuntime(fetchedForApply);
         if (!wasInOrderForApply) {
-          TASK_ORDER_FOR_PANEL_RUNTIME.push(idForApply);
+          // Front-insert so syncMainTaskListItem's window guard renders the new
+          // node; refreshTaskOrder re-sorts it afterward. See the notes branch.
+          TASK_ORDER_FOR_PANEL_RUNTIME.unshift(idForApply);
           renderedTaskCountForPanelRuntime = Math.min(
             renderedTaskCountForPanelRuntime + 1,
             TASK_ORDER_FOR_PANEL_RUNTIME.length
@@ -5890,7 +6069,9 @@
         var wasInOrderForApply = QUIZ_ORDER_FOR_PANEL_RUNTIME.indexOf(idForApply) >= 0;
         QUIZ_STORE_FOR_PANEL_RUNTIME[idForApply] = cloneQuestionRecordForPanelRuntime(fetchedForApply);
         if (!wasInOrderForApply) {
-          QUIZ_ORDER_FOR_PANEL_RUNTIME.push(idForApply);
+          // Front-insert so syncMainQuizListItem's window guard renders the new
+          // node; refreshQuizOrder re-sorts it afterward. See the notes branch.
+          QUIZ_ORDER_FOR_PANEL_RUNTIME.unshift(idForApply);
           renderedQuizCountForPanelRuntime = Math.min(
             renderedQuizCountForPanelRuntime + 1,
             QUIZ_ORDER_FOR_PANEL_RUNTIME.length
@@ -6295,7 +6476,9 @@
       const starClassForSync = wasStarredForSync ? ' starred' : '';
       const starTitleForSync = wasStarredForSync ? 'Unfavorite' : 'Favorite';
       const starGlyphForSync = wasStarredForSync ? '&#9733;' : '&#9734;';
-      const isStreamingForSync = sendingChatsForPanelRuntime.has(chatIdForSync);
+      const isStreamingForSync = sendingChatsForPanelRuntime.has(chatIdForSync) ||
+        remoteStreamingChatsForPanelRuntime.has(chatIdForSync) ||
+        offscreenInitiatedChatsForPanelRuntime.has(chatIdForSync);
       const needsChatItemShellForSync = !chatItemForSync.querySelector('.chat-item-body') ||
         !chatItemForSync.querySelector('.chat-item-title') ||
         !chatItemForSync.querySelector('.chat-item-excerpt') ||
@@ -7206,7 +7389,13 @@
       const savedNoteForPanelRuntime = cloneNoteRecordForPanelRuntime(persistedNoteForPanelRuntime || noteDraftForPanelRuntime);
       NOTE_STORE_FOR_PANEL_RUNTIME[noteIdForPanelRuntime] = savedNoteForPanelRuntime;
       if (NOTE_ORDER_FOR_PANEL_RUNTIME.indexOf(noteIdForPanelRuntime) === -1) {
-        NOTE_ORDER_FOR_PANEL_RUNTIME.push(noteIdForPanelRuntime);
+        // Front-insert and grow the render window by one so syncMainNoteListItem's window
+        // guard creates the new node; refreshNoteOrder re-sorts it into place. See saveTask.
+        NOTE_ORDER_FOR_PANEL_RUNTIME.unshift(noteIdForPanelRuntime);
+        renderedNoteCountForPanelRuntime = Math.min(
+          renderedNoteCountForPanelRuntime + 1,
+          NOTE_ORDER_FOR_PANEL_RUNTIME.length
+        );
       }
       syncSearchIndexForPanelRuntime('notes', isNewNoteForPanelRuntime ? 'add' : 'update', noteIdForPanelRuntime, savedNoteForPanelRuntime);
       S.activeNoteId = noteIdForPanelRuntime;
@@ -8271,7 +8460,15 @@
       );
       TASK_STORE_FOR_PANEL_RUNTIME[taskIdForPanelRuntime] = savedTaskForPanelRuntime;
       if (TASK_ORDER_FOR_PANEL_RUNTIME.indexOf(taskIdForPanelRuntime) === -1) {
-        TASK_ORDER_FOR_PANEL_RUNTIME.push(taskIdForPanelRuntime);
+        // Front-insert and grow the render window by one so syncMainTaskListItem's window
+        // guard (pos >= renderedTaskCount) creates the new node; refreshTaskOrder re-sorts it
+        // into place. Appending to the end left it at a position outside the window, so a new
+        // task went unrendered until a later full refresh.
+        TASK_ORDER_FOR_PANEL_RUNTIME.unshift(taskIdForPanelRuntime);
+        renderedTaskCountForPanelRuntime = Math.min(
+          renderedTaskCountForPanelRuntime + 1,
+          TASK_ORDER_FOR_PANEL_RUNTIME.length
+        );
       }
       syncSearchIndexForPanelRuntime('tasks', isNewTaskForPanelRuntime ? 'add' : 'update', taskIdForPanelRuntime, savedTaskForPanelRuntime);
       syncMainTaskListItemForPanelRuntime(taskIdForPanelRuntime);
@@ -8778,7 +8975,7 @@
               totalLatencyMs: Date.now() - inlineLogStartTimeForPanelRuntime,
               status: inlineLogStatusForPanelRuntime,
               errorMessage: inlineLogErrorForPanelRuntime,
-              requestMessages: inlineLogRequestMsgsForPanelRuntime,
+              requestMessages: sanitizeMessagesForLogDisplay(inlineLogRequestMsgsForPanelRuntime || []),
               apiParams: { stream: true },
               responseContent: inlineLogResponseForPanelRuntime,
               toolCalls: [],
@@ -8811,83 +9008,121 @@
       SEARCH / FILTER
     ============================================================ */
 
-    function filterChatListForPanelRuntime(query) {
-      const chatListForFilter = root.querySelector('.chat-list');
-      if (!chatListForFilter) return;
+    function getActiveChatFilterStateForPanelRuntime() {
+      var favsBtnForState = root.getElementById('favs-btn');
+      var searchInputForState = root.getElementById('chat-search-input');
+      return {
+        type: (S.chatType || 'chats') === 'quickq' ? 'quickq' : 'chats',
+        favsOn: Boolean(favsBtnForState && favsBtnForState.classList.contains('active')),
+        query: searchInputForState ? (searchInputForState.value || '').trim() : ''
+      };
+    }
 
-      const activeTypeForFilter = S.chatType || 'chats';
-      const isQuickQForFilter = activeTypeForFilter === 'quickq';
-      const trimmedQueryForFilter = (query || '').trim();
+    // Scans the WHOLE store (not just the render window) for chats matching the
+    // current sub-tab + favs + search constraints. Returns a Set of chat IDs.
+    function computeVisibleChatIdsForPanelRuntime(filterStateForCompute) {
+      var matchedIdsForCompute = new Set();
 
-      // Remove any chat items that were force-rendered for a previous search query but fall
-      // outside the normal render window. Must run before applying the new filter so stale
-      // forced items do not remain visible when the query changes.
-      searchForcedChatIdsForPanelRuntime.forEach(function (idForClear) {
+      // null search set => no query active => match by type/favs only.
+      var searchMatchSetForCompute = null;
+      if (filterStateForCompute.query) {
+        searchMatchSetForCompute = new Set();
+        var searchNsForCompute = (globalThis.ABChatShared || {}).search;
+        if (searchNsForCompute && typeof searchNsForCompute.search === 'function') {
+          searchNsForCompute.search('chats', filterStateForCompute.query, 200).forEach(function (idForCompute) {
+            searchMatchSetForCompute.add(Number(idForCompute));
+          });
+        } else {
+          var lowerForCompute = filterStateForCompute.query.toLowerCase();
+          Object.keys(CHAT_STORE_FOR_PANEL_RUNTIME).forEach(function (idForFallback) {
+            var chatForFallback = CHAT_STORE_FOR_PANEL_RUNTIME[idForFallback];
+            if (!chatForFallback) return;
+            var contentForFallback = Array.isArray(chatForFallback.messages)
+              ? chatForFallback.messages.map(function (mForFallback) {
+                  return String((mForFallback && (mForFallback.content || mForFallback.md)) || '');
+                }).join('\n').toLowerCase()
+              : '';
+            if (
+              (chatForFallback.title || '').toLowerCase().includes(lowerForCompute) ||
+              (chatForFallback.summary || '').toLowerCase().includes(lowerForCompute) ||
+              contentForFallback.includes(lowerForCompute)
+            ) {
+              searchMatchSetForCompute.add(Number(idForFallback));
+            }
+          });
+        }
+      }
+
+      var wantQuickQForCompute = filterStateForCompute.type === 'quickq';
+      CHAT_ORDER_FOR_PANEL_RUNTIME.forEach(function (idForCompute) {
+        var chatForCompute = CHAT_STORE_FOR_PANEL_RUNTIME[idForCompute];
+        if (!chatForCompute) return;
+        if ((chatForCompute.type === 'quickq') !== wantQuickQForCompute) return;
+        if (filterStateForCompute.favsOn && !chatForCompute.isPinned) return;
+        if (searchMatchSetForCompute && !searchMatchSetForCompute.has(Number(idForCompute))) return;
+        matchedIdsForCompute.add(Number(idForCompute));
+      });
+      return matchedIdsForCompute;
+    }
+
+    function applyChatListFilterForPanelRuntime() {
+      var chatListForApply = root.querySelector('.chat-list');
+      if (!chatListForApply) return;
+
+      var filterStateForApply = getActiveChatFilterStateForPanelRuntime();
+      var visibleIdsForApply = computeVisibleChatIdsForPanelRuntime(filterStateForApply);
+
+      // Favs, the quickq sub-tab, and search are narrowing filters: their matches
+      // may sit beyond the render window and must be pulled into the DOM. The
+      // default chats view (no favs, no query) must NOT force-render or it would
+      // defeat the windowing and paint every chat at once.
+      var isNarrowingForApply =
+        filterStateForApply.favsOn ||
+        filterStateForApply.type === 'quickq' ||
+        Boolean(filterStateForApply.query);
+
+      // Drop any previously force-rendered, out-of-window node so stale items
+      // do not accumulate in the sidebar.
+      filterForcedChatIdsForPanelRuntime.forEach(function (idForClear) {
         var posForClear = CHAT_ORDER_FOR_PANEL_RUNTIME.indexOf(Number(idForClear));
         if (posForClear >= renderedChatCountForPanelRuntime) {
-          var elForClear = chatListForFilter.querySelector('.chat-item[data-chat-id="' + idForClear + '"]');
+          var elForClear = chatListForApply.querySelector('.chat-item[data-chat-id="' + idForClear + '"]');
           if (elForClear) elForClear.remove();
         }
       });
-      searchForcedChatIdsForPanelRuntime.clear();
+      filterForcedChatIdsForPanelRuntime.clear();
 
-      if (!trimmedQueryForFilter) {
-        chatListForFilter.querySelectorAll('.chat-item').forEach(function (itemForFilter) {
-          const itemIsQQForFilter = itemForFilter.dataset.chatType === 'quickq';
-          if (itemIsQQForFilter !== isQuickQForFilter) return;
-          itemForFilter.style.display = '';
-        });
-        refreshChatGroupLabelsVisibilityForPanelRuntime();
-        return;
-      }
-
-      const searchNsForFilter = (globalThis.ABChatShared || {}).search;
-      const matchedIdsForFilter = new Set();
-
-      if (searchNsForFilter && typeof searchNsForFilter.search === 'function') {
-        searchNsForFilter.search('chats', trimmedQueryForFilter, 200).forEach(function (id) {
-          matchedIdsForFilter.add(Number(id));
-        });
-      } else {
-        const lowerForFilter = trimmedQueryForFilter.toLowerCase();
-        Object.keys(CHAT_STORE_FOR_PANEL_RUNTIME).forEach(function (id) {
-          const chatForFallback = CHAT_STORE_FOR_PANEL_RUNTIME[id];
-          const chatContentForFallback = Array.isArray(chatForFallback.messages)
-            ? chatForFallback.messages
-                .map(function (messageForPanelRuntime) {
-                  return String((messageForPanelRuntime && (messageForPanelRuntime.content || messageForPanelRuntime.md)) || '');
-                })
-                .join('\n')
-                .toLowerCase()
-            : '';
-          if (
-            (chatForFallback.title || '').toLowerCase().includes(lowerForFilter) ||
-            (chatForFallback.summary || '').toLowerCase().includes(lowerForFilter) ||
-            chatContentForFallback.includes(lowerForFilter)
-          ) {
-            matchedIdsForFilter.add(Number(id));
+      if (isNarrowingForApply) {
+        visibleIdsForApply.forEach(function (idForForce) {
+          var posForForce = CHAT_ORDER_FOR_PANEL_RUNTIME.indexOf(Number(idForForce));
+          if (posForForce >= renderedChatCountForPanelRuntime) {
+            syncMainChatListItemForPanelRuntime(idForForce, false, true);
+            filterForcedChatIdsForPanelRuntime.add(Number(idForForce));
           }
         });
       }
 
-      // Force-render any matching item that sits beyond the current render window so it
-      // appears in search results. Track the ID so it can be cleaned up when query clears.
-      matchedIdsForFilter.forEach(function (id) {
-        var posForSearch = CHAT_ORDER_FOR_PANEL_RUNTIME.indexOf(id);
-        if (posForSearch >= renderedChatCountForPanelRuntime) {
-          syncMainChatListItemForPanelRuntime(id, false, true);
-          searchForcedChatIdsForPanelRuntime.add(id);
-        }
+      chatListForApply.querySelectorAll('.chat-item').forEach(function (itemForApply) {
+        itemForApply.style.display =
+          visibleIdsForApply.has(Number(itemForApply.dataset.chatId)) ? '' : 'none';
       });
 
-      chatListForFilter.querySelectorAll('.chat-item').forEach(function (itemForFilter) {
-        const itemIsQQForFilter = itemForFilter.dataset.chatType === 'quickq';
-        if (itemIsQQForFilter !== isQuickQForFilter) return;
-        const chatIdForFilter = Number(itemForFilter.dataset.chatId);
-        itemForFilter.style.display = matchedIdsForFilter.has(chatIdForFilter) ? '' : 'none';
-      });
+      // Only re-grid when out-of-window nodes were injected (they append at the
+      // end and need re-sorting into date order). Otherwise just refresh labels,
+      // keeping search keystrokes cheap.
+      if (filterForcedChatIdsForPanelRuntime.size > 0) {
+        rebuildChatListGroupingForPanelRuntime();
+      } else {
+        refreshChatGroupLabelsVisibilityForPanelRuntime();
+      }
+    }
 
-      refreshChatGroupLabelsVisibilityForPanelRuntime();
+    function filterChatListForPanelRuntime(query) {
+      const chatSearchInputForFilter = root.getElementById('chat-search-input');
+      if (chatSearchInputForFilter && typeof query === 'string' && chatSearchInputForFilter.value !== query) {
+        chatSearchInputForFilter.value = query; // keep input in sync for mirror/reapply callers
+      }
+      applyChatListFilterForPanelRuntime();
     }
 
     function filterTasksListForPanelRuntime(query) {
@@ -9053,7 +9288,7 @@
     const SELECTED_IMAGE_MODEL_KEY_FOR_PANEL_RUNTIME = 'abchat_selected_image_model';
 
     const FALLBACK_IMAGE_MODELS_FOR_PANEL_RUNTIME = [
-      { id: 'google/gemini-3.1-flash-lite-preview',  name: 'Gemini 3.1 Flash Lite Preview',  created: 0 },
+      { id: 'google/gemini-3.1-flash-lite',  name: 'Gemini 3.1 Flash Lite',  created: 0 },
       { id: 'openai/gpt-image-1',                    name: 'GPT Image 1',                    created: 0 },
       { id: 'google/imagen-4.0-generate-001',        name: 'Imagen 4',                       created: 0 },
       { id: 'google/imagen-4.0-ultra-generate-001',  name: 'Imagen 4 Ultra',                 created: 0 },
@@ -9063,7 +9298,7 @@
 
     const FALLBACK_MODELS_FOR_PANEL_RUNTIME = {
       google: [
-        { id: 'google/gemini-3.1-flash-lite-preview', name: 'Gemini 3.1 Flash Lite Preview' },
+        { id: 'google/gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite' },
       ],
       openai: [
         // { id: 'openai/gpt-4.1-nano', name: 'GPT-4.1 Nano' },
@@ -9073,11 +9308,8 @@
         { id: 'anthropic/claude-haiku-4.5', name: 'Claude Haiku 4.5' },
         { id: 'anthropic/claude-sonnet-4.6', name: 'Claude Sonnet 4.6' },
       ],
-      'meta-llama': [
-        { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B Instruct' },
-      ],
     };
-    const DEFAULT_MODEL_FOR_PANEL_RUNTIME = 'google/gemini-3.1-flash-lite-preview';
+    const DEFAULT_MODEL_FOR_PANEL_RUNTIME = 'google/gemini-3.1-flash-lite';
     var loadedGlobalDefaultModelForPanelRuntime = '';
     var loadedImageModelsForPanelRuntime = [];
     const MODEL_CACHE_KEY_FOR_PANEL_RUNTIME = 'abchat_model_cache_v8';
@@ -9094,7 +9326,6 @@
     var noteDraftSyncTimersForPanelRuntime = {};
     const SELECTED_MODEL_KEY_FOR_PANEL_RUNTIME = 'abchat_selected_model';
     const MODEL_CACHE_TTL_MS_FOR_PANEL_RUNTIME = 6 * 60 * 60 * 1000;
-    const COMPLETION_COST_WARNING_THRESHOLD_PER_MILLION_FOR_PANEL_RUNTIME = 3;
 
     function getDefaultModelForPanelRuntime() {
       return new Promise(function (resolve) {
@@ -9254,7 +9485,14 @@
         'meta-llama': 'Meta',
         mistralai: 'Mistral',
         xai: 'xAI',
-        'x-ai': 'xAI'
+        'x-ai': 'xAI',
+        deepseek: 'DeepSeek',
+        moonshotai: 'Moonshot AI',
+        minimax: 'MiniMax',
+        microsoft: 'Microsoft',
+        amazon: 'Amazon',
+        nvidia: 'NVIDIA',
+        perplexity: 'Perplexity'
       };
       if (providerLabelsForPanelRuntime[providerKey]) return providerLabelsForPanelRuntime[providerKey];
       const labelWords = String(providerKey || 'other')
@@ -9266,17 +9504,13 @@
       return labelWords.length > 0 ? labelWords.join(' ') : 'Other';
     }
 
-    function isExpensiveModelForPanelRuntime(modelForPricing) {
-      const completionCostPerMillionForModel = Number(modelForPricing && modelForPricing.completionCostPerMillion);
-      return Number.isFinite(completionCostPerMillionForModel) && completionCostPerMillionForModel > COMPLETION_COST_WARNING_THRESHOLD_PER_MILLION_FOR_PANEL_RUNTIME;
-    }
-
     function getModelTierForPanelRuntime(m) {
       const cost = Number(m && m.completionCostPerMillion);
       if (!Number.isFinite(cost) || cost <= 0) return null;
       if (cost <= 1.5) return { label: 'Cheap', cls: 'mp-tier-cheap' };
       if (cost <= 3) return { label: 'Standard', cls: 'mp-tier-mid' };
-      return { label: 'Expensive', cls: 'mp-tier-expensive' };
+      if (cost <= 15) return { label: 'Expensive', cls: 'mp-tier-expensive' };
+      return { label: 'Extreme', cls: 'mp-tier-extreme' };
     }
 
     function getImageModelTierForPanelRuntime(m) {
@@ -9298,44 +9532,6 @@
       return rawModelNameForDisplay;
     }
 
-    function pickRepresentativeModelsForProvider(modelsForProvider) {
-      const alwaysIncluded = modelsForProvider.filter(function (m) {
-        return m.id === 'openrouter/auto' || m.id === 'openrouter/free';
-      });
-      const rest = modelsForProvider.filter(function (m) {
-        return m.id !== 'openrouter/auto' && m.id !== 'openrouter/free';
-      });
-      const cheapModels = rest.filter(function (m) { return !isExpensiveModelForPanelRuntime(m); });
-      const expensiveModels = rest.filter(function (m) { return isExpensiveModelForPanelRuntime(m); });
-
-      const picked = [];
-
-      if (cheapModels.length > 0) {
-        const cheapByRecency = cheapModels.slice().sort(function (a, b) {
-          return Number(b.created) - Number(a.created);
-        });
-        const recentCheapPool = cheapByRecency.slice(0, 3);
-        recentCheapPool.sort(function (a, b) {
-          return Number(b.completionCostPerMillion) - Number(a.completionCostPerMillion);
-        });
-        picked.push(recentCheapPool[0]);
-      }
-
-      if (expensiveModels.length > 0) {
-        const expensiveByRecency = expensiveModels.slice().sort(function (a, b) {
-          return Number(b.created) - Number(a.created);
-        });
-        const recentExpensivePool = expensiveByRecency.slice(0, 5);
-        recentExpensivePool.sort(function (a, b) {
-          return Number(a.completionCostPerMillion) - Number(b.completionCostPerMillion);
-        });
-        const midIndexForExpensive = Math.floor((recentExpensivePool.length - 1) / 2);
-        picked.push(recentExpensivePool[midIndexForExpensive]);
-      }
-
-      return alwaysIncluded.concat(picked);
-    }
-
     function populateModelSelectsForPanelRuntime(models, selectedId) {
       const chatSelect = root.getElementById('chat-model-select');
       const settingsSelect = root.getElementById('settings-default-model-select');
@@ -9346,7 +9542,7 @@
         if (!Array.isArray(modelsByProvider[providerKeyForModel])) modelsByProvider[providerKeyForModel] = [];
         modelsByProvider[providerKeyForModel].push(modelForGrouping);
       });
-      const allowedProviderOrderForPanelRuntime = ['google', 'openai', 'openrouter', 'meta-llama', 'meta', 'anthropic', 'qwen', 'xai', 'x-ai', 'z-ai'];
+      const allowedProviderOrderForPanelRuntime = ['google', 'openai', 'openrouter', 'meta-llama', 'meta', 'anthropic', 'qwen', 'xai', 'x-ai', 'z-ai', 'deepseek', 'mistralai', 'moonshotai', 'minimax', 'microsoft', 'amazon', 'nvidia', 'perplexity'];
       const providerKeys = Object.keys(modelsByProvider)
         .filter(function (k) { return allowedProviderOrderForPanelRuntime.includes(k); })
         .sort(function (a, b) {
@@ -9356,29 +9552,12 @@
       const allPickedIds = new Set();
       const pickedByProvider = {};
       providerKeys.forEach(function (providerKeyForGroup) {
-        const picked = pickRepresentativeModelsForProvider(modelsByProvider[providerKeyForGroup]);
+        const picked = (modelsByProvider[providerKeyForGroup] || []).slice();
+        picked.sort(function (a, b) {
+          return Number(a.completionCostPerMillion) - Number(b.completionCostPerMillion);
+        });
         pickedByProvider[providerKeyForGroup] = picked;
         picked.forEach(function (m) { allPickedIds.add(m.id); });
-      });
-
-      const priorityIdsByProvider = {};
-      providerKeys.forEach(function (providerKeyForGroup) {
-        const priorityEntries = FALLBACK_MODELS_FOR_PANEL_RUNTIME[providerKeyForGroup] || [];
-        const priorityIds = priorityEntries.map(function (e) { return e.id; });
-        priorityIdsByProvider[providerKeyForGroup] = priorityIds;
-        const apiModelsForProvider = modelsByProvider[providerKeyForGroup] || [];
-        const apiModelById = {};
-        apiModelsForProvider.forEach(function (m) { apiModelById[m.id] = m; });
-        const toPrepend = [];
-        priorityIds.forEach(function (priorityId) {
-          if (apiModelById[priorityId] && !allPickedIds.has(priorityId)) {
-            toPrepend.push(apiModelById[priorityId]);
-            allPickedIds.add(priorityId);
-          }
-        });
-        if (toPrepend.length > 0) {
-          pickedByProvider[providerKeyForGroup] = toPrepend.concat(pickedByProvider[providerKeyForGroup]);
-        }
       });
 
       const resolvedSelectedId = allPickedIds.has(selectedId) ? selectedId : DEFAULT_MODEL_FOR_PANEL_RUNTIME;
@@ -9392,14 +9571,7 @@
           if (!pickedForGroup || pickedForGroup.length === 0) return;
           const optgroupForModels = document.createElement('optgroup');
           optgroupForModels.label = getModelProviderLabelForPanelRuntime(providerKeyForGroup);
-          const priorityIdsForGroup = priorityIdsByProvider[providerKeyForGroup] || [];
-          const pinnedModelsForGroup = pickedForGroup.filter(function (m) { return priorityIdsForGroup.includes(m.id); });
-          const nonPinnedModelsForGroup = pickedForGroup.filter(function (m) { return !priorityIdsForGroup.includes(m.id); });
-          nonPinnedModelsForGroup.sort(function (a, b) {
-            return Number(a.completionCostPerMillion) - Number(b.completionCostPerMillion);
-          });
-          const sortedPickedForGroup = pinnedModelsForGroup.concat(nonPinnedModelsForGroup);
-          sortedPickedForGroup.forEach(function (m) {
+          pickedForGroup.forEach(function (m) {
             const opt = document.createElement('option');
             opt.value = m.id;
             const tierForOption = getModelTierForPanelRuntime(m);
@@ -9418,7 +9590,6 @@
         providerKeys,
         effectiveSelected,
         getModelProviderLabelForPanelRuntime,
-        isExpensiveModelForPanelRuntime,
         getModelDisplayNameForPanelRuntime,
         getModelProviderKeyForPanelRuntime
       );
@@ -9764,10 +9935,12 @@
     }
 
     function setSendingUIStateForPanelRuntime() {
-      // Either a local send OR a remote-mirrored stream for the active chat
+      // A local send, a remote-mirrored stream, OR an offscreen-hosted run this tab
+      // just initiated (before its first stream event arrives) for the active chat
       // turns the send button into a cancel button and disables the input.
       const sending = sendingChatsForPanelRuntime.has(S.activeChatId) ||
-                      remoteStreamingChatsForPanelRuntime.has(S.activeChatId);
+                      remoteStreamingChatsForPanelRuntime.has(S.activeChatId) ||
+                      offscreenInitiatedChatsForPanelRuntime.has(S.activeChatId);
       const sendBtnForUI = root.querySelector('.send-btn');
       const chatTaForUI = root.querySelector('.chat-textarea');
       if (sendBtnForUI) {
@@ -10383,9 +10556,26 @@
       if (!container) return;
       const el = document.createElement('div');
       el.className = 'msg-wrap';
-      el.innerHTML = '<div class="msg-bubble asst"><div class="msg-text"><em>' + escHtml(text) + '</em></div></div>';
+      el.innerHTML = '<div class="msg-bubble asst msg-system-notice"><div class="msg-text"><em>' + escHtml(text) + '</em></div></div>';
       container.appendChild(el);
       scrollChatToBottomForPanelRuntime();
+    }
+
+    async function persistAgentStopNoticeForPanelRuntime(chatIdForStopNotice, stopReasonForStopNotice, toolTimeoutMsForStopNotice) {
+      const agentRunStopForStopNotice = (globalThis.ABChatShared || {}).agentRunStop;
+      if (!agentRunStopForStopNotice || !stopReasonForStopNotice) return;
+      const noticeTextForStopNotice = agentRunStopForStopNotice.buildNotice(stopReasonForStopNotice, toolTimeoutMsForStopNotice);
+      if (!noticeTextForStopNotice) return;
+      await appendMessageToChatForPanelRuntime(chatIdForStopNotice, {
+        role: 'assistant',
+        content: noticeTextForStopNotice,
+        md: noticeTextForStopNotice,
+        systemNotice: true
+      }, { skipChatUpdate: true });
+      if (S.activeChatId === chatIdForStopNotice) {
+        renderChatMessages();
+        scrollChatToBottomForPanelRuntime();
+      }
     }
 
     function collectInputChipsForPanelRuntime() {
@@ -10561,21 +10751,44 @@
       } catch (e) { return isoStr; }
     }
 
+    function getLogStatusMetaForPanelRuntime(logForStatusMeta) {
+      const agentRunStopForLogMeta = (globalThis.ABChatShared || {}).agentRunStop;
+      const statusForLogMeta = logForStatusMeta ? logForStatusMeta.status : '';
+      if (agentRunStopForLogMeta) {
+        return {
+          label: agentRunStopForLogMeta.getStatusLabel(statusForLogMeta),
+          cssClass: agentRunStopForLogMeta.getStatusCssClass(statusForLogMeta),
+          preview: agentRunStopForLogMeta.getLogPreviewText(logForStatusMeta)
+        };
+      }
+      const legacyLabelForLogMeta = statusForLogMeta === 'success' ? 'Success'
+        : statusForLogMeta === 'error' ? 'Error'
+        : statusForLogMeta === 'cancelled' ? 'Cancelled'
+        : (statusForLogMeta || '');
+      const legacyClassForLogMeta = statusForLogMeta === 'success' ? 'log-status-success'
+        : statusForLogMeta === 'error' ? 'log-status-error'
+        : 'log-status-cancelled';
+      const legacyPreviewForLogMeta = statusForLogMeta === 'error'
+        ? ((logForStatusMeta && logForStatusMeta.errorMessage) || 'Error')
+        : statusForLogMeta === 'cancelled'
+          ? 'Cancelled'
+          : ((logForStatusMeta && logForStatusMeta.responseContent) || '');
+      return { label: legacyLabelForLogMeta, cssClass: legacyClassForLogMeta, preview: legacyPreviewForLogMeta };
+    }
+
     function renderLogRowForPanelRuntime(log) {
-      const statusClass = log.status === 'success' ? 'log-status-success' :
-        log.status === 'error' ? 'log-status-error' : 'log-status-cancelled';
+      const statusMetaForLogRow = getLogStatusMetaForPanelRuntime(log);
       const ts = formatLogTimestampForPanelRuntime(log.timestamp);
       const modelShort = escapeHtmlForPanelRuntime((log.model || '').split('/').pop());
       const latency = log.totalLatencyMs ? (log.totalLatencyMs / 1000).toFixed(2) + 's' : '';
-      const preview = log.status === 'error' ? (log.errorMessage || 'Error') :
-        log.status === 'cancelled' ? 'Cancelled' : (log.responseContent || '');
+      const preview = statusMetaForLogRow.preview;
       const reqType = log.requestType || log.type || '';
-      const reqTypeLabels = { chat: 'Chat', 'inline-chat': 'Inline', title: 'Title', compaction: 'Compact', web_search: 'Search', generate_image: 'Image' };
+      const reqTypeLabels = { chat: 'Chat', 'inline-chat': 'Inline', title: 'Title', compaction: 'Compact', web_search: 'Search', generate_image: 'Image', 'web-fetch-vision': 'Vision', 'web-fetch-summary': 'Summarize', 'tab-read': 'Tab', 'screenshot-vision': 'Vision', 'quiz-generate': 'Quiz', 'quiz-fix': 'Quiz Fix' };
       const reqTypeLabel = reqTypeLabels[reqType] || escapeHtmlForPanelRuntime(reqType);
       const reqTypeBadge = reqType ? `<span class="log-request-type-badge">${reqTypeLabel}</span>` : '';
       return `<div class="log-row" data-action="view-log-detail" data-log-id="${log.id}">` +
         `<div class="log-row-header">` +
-        `<span class="log-status-dot ${statusClass}"></span>` +
+        `<span class="log-status-dot ${statusMetaForLogRow.cssClass}"></span>` +
         `<span class="log-ts">${escapeHtmlForPanelRuntime(ts)}</span>` +
         reqTypeBadge +
         `<span class="log-model">${modelShort}</span>` +
@@ -10603,15 +10816,14 @@
     function renderLogDetailForPanelRuntime(log) {
       const ts = formatLogTimestampForPanelRuntime(log.timestamp);
       const latency = log.totalLatencyMs ? (log.totalLatencyMs / 1000).toFixed(2) + 's' : 'N/A';
-      const statusLabel = { success: 'Success', error: 'Error', cancelled: 'Cancelled' }[log.status] || (log.status || '');
-      const statusClass = log.status === 'success' ? 'log-status-success' :
-        log.status === 'error' ? 'log-status-error' : 'log-status-cancelled';
+      const statusMetaForLogDetail = getLogStatusMetaForPanelRuntime(log);
 
       const reqTypeRaw = log.requestType || log.type || '';
-      const reqTypeDisplayMap = { chat: 'Chat', 'inline-chat': 'Inline Chat', title: 'Title Generation', compaction: 'Compaction', web_search: 'Web Search', generate_image: 'Image Generation' };
+      const reqTypeDisplayMap = { chat: 'Chat', 'inline-chat': 'Inline Chat', title: 'Title Generation', compaction: 'Compaction', web_search: 'Web Search', generate_image: 'Image Generation', 'web-fetch-vision': 'Web Fetch Vision', 'web-fetch-summary': 'Web Fetch Summary', 'tab-read': 'Tab Read', 'screenshot-vision': 'Screenshot Vision', 'quiz-generate': 'Quiz Generation', 'quiz-fix': 'Quiz Question Fix' };
       const reqTypeDisplay = reqTypeDisplayMap[reqTypeRaw] || reqTypeRaw;
       let html = `<div class="log-detail-meta">` +
-        `<div class="log-detail-row"><span class="log-detail-label">Status</span><span class="log-status-badge ${statusClass}">${escapeHtmlForPanelRuntime(statusLabel)}</span></div>` +
+        `<div class="log-detail-row"><span class="log-detail-label">Status</span><span class="log-status-badge ${statusMetaForLogDetail.cssClass}">${escapeHtmlForPanelRuntime(statusMetaForLogDetail.label)}</span></div>` +
+        (log.stopReason ? `<div class="log-detail-row"><span class="log-detail-label">Stop reason</span><span>${escapeHtmlForPanelRuntime(log.stopReason)}</span></div>` : '') +
         `<div class="log-detail-row"><span class="log-detail-label">Time</span><span>${escapeHtmlForPanelRuntime(ts)}</span></div>` +
         (reqTypeDisplay ? `<div class="log-detail-row"><span class="log-detail-label">Type</span><span>${escapeHtmlForPanelRuntime(reqTypeDisplay)}</span></div>` : '') +
         `<div class="log-detail-row"><span class="log-detail-label">Model</span><span class="log-mono">${escapeHtmlForPanelRuntime(log.model || '')}</span></div>` +
@@ -11274,6 +11486,31 @@
       return '';
     }
 
+    // Feature flag: when enabled, the orchestration loop runs in the offscreen document
+    // (so it survives a page reload) instead of in this content script. Controlled by the
+    // "Keep runs alive across page reloads" toggle in Settings. The default below applies
+    // only when the user has never toggled it. It is on by default; set it to false to make
+    // the legacy in-panel loop the default again. The toggle init and storage-sync read the
+    // same default.
+    const OFFSCREEN_LOOP_DEFAULT_ENABLED_FOR_PANEL_RUNTIME = true;
+    function resolveOffscreenLoopEnabledForPanelRuntime(itemsForFlag) {
+      if (!itemsForFlag || itemsForFlag.abchatOffscreenLoopEnabled === undefined) {
+        return OFFSCREEN_LOOP_DEFAULT_ENABLED_FOR_PANEL_RUNTIME;
+      }
+      return !!itemsForFlag.abchatOffscreenLoopEnabled;
+    }
+    function isOffscreenLoopEnabledForPanelRuntime() {
+      return new Promise(function (resolveForFlag) {
+        try {
+          chrome.storage.local.get('abchatOffscreenLoopEnabled', function (itemsForFlag) {
+            resolveForFlag(resolveOffscreenLoopEnabledForPanelRuntime(itemsForFlag));
+          });
+        } catch (errForFlag) {
+          resolveForFlag(OFFSCREEN_LOOP_DEFAULT_ENABLED_FOR_PANEL_RUNTIME);
+        }
+      });
+    }
+
     async function sendChatForPanelRuntime(optionsForPanelRuntime) {
       const optsForPanelRuntime = optionsForPanelRuntime || {};
 
@@ -11327,7 +11564,17 @@
         appendSystemMsgToContainerForPanelRuntime('This chat is currently streaming on another tab. Wait for it to finish or cancel it before sending again.');
         return;
       }
-      if (sendingChatsForPanelRuntime.size >= 3) {
+      // Concurrent-session cap. Count distinct chats with an active run this tab knows about:
+      // local (legacy) sends, offscreen runs this tab initiated, and offscreen runs from other
+      // tabs whose stream this tab is mirroring. The sets overlap (an initiator is also a
+      // receiver of its own run), so de-duplicate by chat id, and exclude this chat since it is
+      // the one being started. The offscreen document enforces the same cap authoritatively.
+      const activeRunChatIdsForCapForSend = new Set();
+      sendingChatsForPanelRuntime.forEach(function (controllerForCap, chatIdForCapKey) { activeRunChatIdsForCapForSend.add(Number(chatIdForCapKey)); });
+      offscreenInitiatedChatsForPanelRuntime.forEach(function (chatIdForCapKey) { activeRunChatIdsForCapForSend.add(Number(chatIdForCapKey)); });
+      remoteStreamingChatsForPanelRuntime.forEach(function (chatIdForCapKey) { activeRunChatIdsForCapForSend.add(Number(chatIdForCapKey)); });
+      activeRunChatIdsForCapForSend.delete(chatId);
+      if (activeRunChatIdsForCapForSend.size >= 3) {
         appendSystemMsgToContainerForPanelRuntime('Too many active agent sessions (max 3). Wait for another chat to finish before starting this one.');
         return;
       }
@@ -11341,6 +11588,140 @@
           return;
         }
       }
+
+      // Offscreen-hosted run path. Do the send-initiation DOM work (append + render the
+      // user message, clear the input, kick off title generation), persist the user message
+      // to the DB, then hand the run to the offscreen document and become a pure stream
+      // receiver. The entire legacy in-panel loop below is skipped. Reuses all the entry
+      // guards above; the legacy path is untouched so flag-off behavior is unchanged.
+      const offscreenLoopEnabledForSend = await isOffscreenLoopEnabledForPanelRuntime();
+      if (offscreenLoopEnabledForSend) {
+        if (offscreenInitiatedChatsForPanelRuntime.has(chatId)) return;
+        const modelForOffscreen = (modelSelectForSend && modelSelectForSend.value) ? modelSelectForSend.value : DEFAULT_MODEL_FOR_PANEL_RUNTIME;
+        if (CHAT_STORE_FOR_PANEL_RUNTIME[chatId]) CHAT_STORE_FOR_PANEL_RUNTIME[chatId].lastModel = modelForOffscreen;
+        // Persist lastModel to the DB now, at handoff. Every tab (this initiator included)
+        // reconciles from the DB on stream_end, overwriting the in-memory lastModel. The
+        // offscreen loop's end-of-run lastModel write is skipped when a run errors or is
+        // refused, and a new chat is created with no model, so without this early write the
+        // stream_end refresh would wipe the model the user actually used.
+        const panelDataRepoForOffscreenModel = getPanelDataRepoForPanelRuntime();
+        if (panelDataRepoForOffscreenModel && typeof panelDataRepoForOffscreenModel.updateChat === 'function' && CHAT_STORE_FOR_PANEL_RUNTIME[chatId]) {
+          try { await panelDataRepoForOffscreenModel.updateChat(chatId, { lastModel: modelForOffscreen }); } catch (eOffscreenModelPersist) {}
+        }
+
+        if (!isResendForPanelRuntime) {
+          const msgsForAutoChipScanOffscreen = (CHAT_STORE_FOR_PANEL_RUNTIME[chatId] || {}).messages || [];
+          const blobIdPatternForAutoChipOffscreen = /__blob:(\d+)__/;
+          let lastUserIndexForAutoChipOffscreen = -1;
+          for (var aciOffscreen = msgsForAutoChipScanOffscreen.length - 1; aciOffscreen >= 0; aciOffscreen--) {
+            const msgForAutoChipOffscreen = msgsForAutoChipScanOffscreen[aciOffscreen];
+            if (msgForAutoChipOffscreen && msgForAutoChipOffscreen.role === 'user') { lastUserIndexForAutoChipOffscreen = aciOffscreen; break; }
+          }
+          for (var acjOffscreen = lastUserIndexForAutoChipOffscreen + 1; acjOffscreen < msgsForAutoChipScanOffscreen.length; acjOffscreen++) {
+            const msgForAutoChipAssistantOffscreen = msgsForAutoChipScanOffscreen[acjOffscreen];
+            if (!msgForAutoChipAssistantOffscreen || msgForAutoChipAssistantOffscreen.role !== 'assistant') continue;
+            const autoChipMatchOffscreen = blobIdPatternForAutoChipOffscreen.exec(String(msgForAutoChipAssistantOffscreen.md || ''));
+            if (!autoChipMatchOffscreen) continue;
+            const autoChipBlobIdOffscreen = Number(autoChipMatchOffscreen[1]);
+            if (!Number.isFinite(autoChipBlobIdOffscreen)) continue;
+            addInputChipForPanelRuntime({ type: 'image', label: 'Generated image', mimeType: 'image/png', refId: autoChipBlobIdOffscreen, size: 0, kind: 'generated_image' });
+          }
+          const chipsForOffscreen = collectInputChipsForPanelRuntime();
+          await appendMessageToChatForPanelRuntime(chatId, { role: "user", content: text, md: text, chips: chipsForOffscreen, _addedByThisTab: true }, { persistToDb: false });
+          chatTaForSend.value = "";
+          clearInputChipsForPanelRuntime();
+          clearDraftForPanelRuntime();
+          updateAutoExpandForTextareaForPanelRuntime(chatTaForSend);
+          renderChatMessages();
+          scrollChatToBottomForPanelRuntime();
+          const chatForFirstMsgCheckOffscreen = CHAT_STORE_FOR_PANEL_RUNTIME[chatId];
+          if (chatForFirstMsgCheckOffscreen && chatForFirstMsgCheckOffscreen.messages.length === 1) {
+            const firstMessageSummaryOffscreen = getChatSummaryFromMessagesForPanelRuntime(chatForFirstMsgCheckOffscreen.messages);
+            if (firstMessageSummaryOffscreen && chatForFirstMsgCheckOffscreen.summary !== firstMessageSummaryOffscreen) {
+              chatForFirstMsgCheckOffscreen.summary = firstMessageSummaryOffscreen;
+              upsertChatUiForPanelRuntime(chatId, true);
+            }
+            // Persist the first-message summary now, mirroring the in-panel path. Without this
+            // the DB summary stays empty until the offscreen loop's end-of-run updateChat, so
+            // other tabs and fresh panel loads would show no summary for the whole run.
+            const panelDataRepoForFirstSummaryOffscreen = getPanelDataRepoForPanelRuntime();
+            if (firstMessageSummaryOffscreen && panelDataRepoForFirstSummaryOffscreen && typeof panelDataRepoForFirstSummaryOffscreen.updateChat === 'function') {
+              try {
+                await panelDataRepoForFirstSummaryOffscreen.updateChat(chatId, {
+                  summary: firstMessageSummaryOffscreen,
+                  updatedAt: chatForFirstMsgCheckOffscreen.updatedAt || new Date().toISOString()
+                });
+              } catch (eFirstSummaryOffscreen) {}
+            }
+          }
+          if (chatForFirstMsgCheckOffscreen && chatForFirstMsgCheckOffscreen.messages.length === 1 && !chatForFirstMsgCheckOffscreen.hasCustomTitle) {
+            let titleContextOffscreen = text;
+            if (chipsForOffscreen.length > 0) {
+              const chipContextPartsOffscreen = chipsForOffscreen.map(function (chipForTitleOffscreen) {
+                const snippetForTitleOffscreen = chipForTitleOffscreen.content ? chipForTitleOffscreen.content.slice(0, 200) : '';
+                return chipForTitleOffscreen.label + (snippetForTitleOffscreen ? ': ' + snippetForTitleOffscreen : '');
+              });
+              titleContextOffscreen = (text ? text + '\n' : '') + chipContextPartsOffscreen.join('\n');
+            }
+            autoGenerateChatTitleForPanelRuntime(chatId, titleContextOffscreen, apiKey, modelForOffscreen);
+          }
+        }
+
+        // Persist the user message to the DB so the offscreen loop's getChat sees it.
+        try { await persistPendingUserMessagesForChatForPanelRuntime(chatId, { touchChat: false }); } catch (ePersistOffscreen) {}
+
+        // Pricing for the offscreen loop's cost accounting.
+        const imageModelForOffscreen = await getImageModelForPanelRuntime();
+        const cachedForCostOffscreen = await getCachedModelsForPanelRuntime();
+        const cachedModelsForCostOffscreen = (cachedForCostOffscreen && cachedForCostOffscreen.chatModels) || [];
+        const modelObjForCostOffscreen = cachedModelsForCostOffscreen.find(function (m) { return m.id === modelForOffscreen; }) || null;
+        const completionCostPerMillionOffscreen = modelObjForCostOffscreen ? (Number(modelObjForCostOffscreen.completionCostPerMillion) || 0) : 0;
+        const imageModelObjForCostOffscreen = loadedImageModelsForPanelRuntime.find(function (m) { return m.id === imageModelForOffscreen; }) || null;
+        const imageGenCostOffscreen = imageModelObjForCostOffscreen ? (Number(imageModelObjForCostOffscreen.imageCost) || 0) : 0;
+        const compactorModelObjOffscreen = cachedModelsForCostOffscreen.find(function (m) { return m.id === 'openai/gpt-4.1-nano'; }) || null;
+        const compactorCostPerMillionOffscreen = compactorModelObjOffscreen ? (Number(compactorModelObjOffscreen.completionCostPerMillion) || 0) : 0;
+
+        let automationEnabledOffscreen = false;
+        try {
+          automationEnabledOffscreen = await new Promise(function (resAutoOffscreen) {
+            chrome.storage.local.get('abchatAutomationEnabled', function (itAutoOffscreen) { resAutoOffscreen(!!(itAutoOffscreen && itAutoOffscreen.abchatAutomationEnabled)); });
+          });
+        } catch (eAutoOffscreen) { automationEnabledOffscreen = false; }
+
+        offscreenInitiatedChatsForPanelRuntime.add(chatId);
+        // No leave-warning flag here: an offscreen-hosted run survives page reload, so
+        // navigating away does not lose it (the reloaded panel re-subscribes).
+        setSendingUIStateForPanelRuntime();
+        syncMainChatListItemForPanelRuntime(chatId);
+
+        try {
+          chrome.runtime.sendMessage({
+            action: 'agentRunStart',
+            params: {
+              chatId: chatId,
+              model: modelForOffscreen,
+              apiKey: apiKey,
+              imageModel: imageModelForOffscreen,
+              automationEnabled: automationEnabledOffscreen,
+              agentRules: currentAgentRulesForPanelRuntime || '',
+              userText: getOriginatingUserTextForMemoryGuardForPanelRuntime(chatId, text),
+              visualPreflightSessionId: 'vp_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2),
+              isResend: isResendForPanelRuntime,
+              pricing: {
+                completionCostPerMillion: completionCostPerMillionOffscreen,
+                imageGenCost: imageGenCostOffscreen,
+                compactorCostPerMillion: compactorCostPerMillionOffscreen
+              }
+            }
+          }, function () { void chrome.runtime.lastError; });
+        } catch (eAgentRunStart) {
+          offscreenInitiatedChatsForPanelRuntime.delete(chatId);
+          setSendingUIStateForPanelRuntime();
+          appendSystemMsgToContainerForPanelRuntime('Could not start the agent run. Please try again.');
+        }
+        return;
+      }
+
       // Guard must be set before the first await so the UI and shared state immediately know this chat is active.
       const controllerForSend = new AbortController();
       const TURN_TOTAL_TIMEOUT_MS = 10 * 60 * 1000;
@@ -11417,7 +11798,8 @@
       let logResolvedModelForSend = null;
       let logStatusForSend = 'success';
       let logErrorMsgForSend = '';
-      let logCancelledForSend = false;
+      let logStopReasonForSend = null;
+      let lastToolTimeoutMsForSend = ITER_TOOL_STD_TIMEOUT_MS;
       let hasPersistedNonUserMessagesForSend = false;
       // Set to true once any renderable assistant message (text, generated image, generated
       // document, etc.) has been persisted this turn. The finally block uses it to decide
@@ -11447,6 +11829,17 @@
       const cdpClientForSend = agentNs.cdpClient;
       let cdpRunLeaseHeldForSend = false;
       const visualPreflightSessionIdForSend = 'vp_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2);
+      function markRunStoppedForSend() {
+        if (logStopReasonForSend) return;
+        const agentRunStopForMarkStopped = (globalThis.ABChatShared || {}).agentRunStop;
+        logStopReasonForSend = agentRunStopForMarkStopped && typeof agentRunStopForMarkStopped.resolveStopReason === 'function'
+          ? agentRunStopForMarkStopped.resolveStopReason({
+              timeoutReason: timeoutReasonForSend,
+              userStopRequested: userStopRequestedChatsForPanelRuntime.has(chatId),
+              wasAborted: controllerForSend.signal.aborted
+            })
+          : (timeoutReasonForSend || 'cancelled');
+      }
       try {
       const imageModelForSend = await getImageModelForPanelRuntime();
       const cachedForCostForSend = await getCachedModelsForPanelRuntime();
@@ -11688,7 +12081,8 @@
                 agentSkills: memCtxForBuild.agentSkills,
                 compactionSummary: compactionSummaryForSend,
                 compactedThroughMessageId: compactedThroughMessageIdForSend,
-                automationEnabled: automationEnabledForSend
+                automationEnabled: automationEnabledForSend,
+                pageNavigationAllowed: false
               })
             : (function () {
                 const msgsForFallback = chatMsgs.map(function (messageForPanelRuntime) {
@@ -11723,7 +12117,7 @@
           }
 
           if (iterCount === 1) {
-            logFirstMessagesForSend = apiMessages;
+            logFirstMessagesForSend = sanitizeMessagesForLogDisplay(apiMessages);
             logApiParamsForSend = {
               stream: true,
               tool_choice: toolDefsForSend.length > 0 ? "auto" : undefined,
@@ -11836,7 +12230,7 @@
           });
 
           if (!resultForLoop || resultForLoop.cancelled) {
-            logCancelledForSend = true;
+            markRunStoppedForSend();
             // Salvage whatever text streamed in before the cancel/timeout so a
             // stopped response stays visible and persisted instead of vanishing.
             // Prefer the client's accumulated content, falling back to the local
@@ -11861,9 +12255,6 @@
                 renderChatMessages();
                 scrollChatToBottomForPanelRuntime();
               }
-            }
-            if (timeoutReasonForSend && S.activeChatId === chatId) {
-              appendSystemMsgToContainerForPanelRuntime(buildTimeoutNoticeForSend(timeoutReasonForSend));
             }
             break;
           }
@@ -12106,6 +12497,7 @@
             return tcForTimeout.function && tcForTimeout.function.name === 'generate_image';
           });
           const toolExecTimeoutMsForSend = hasImageGenInBatchForTimeout ? ITER_TOOL_IMAGE_TIMEOUT_MS : ITER_TOOL_STD_TIMEOUT_MS;
+          lastToolTimeoutMsForSend = toolExecTimeoutMsForSend;
           const iterToolTimeoutIdForSend = setTimeout(function () {
             if (!timeoutReasonForSend) timeoutReasonForSend = 'tool';
             controllerForSend.abort();
@@ -12113,10 +12505,7 @@
           const toolResultsForLoop = await Promise.all(toolExecPromisesForLoop);
           clearTimeout(iterToolTimeoutIdForSend);
           if (controllerForSend.signal.aborted) {
-            logCancelledForSend = true;
-            if (timeoutReasonForSend && S.activeChatId === chatId) {
-              appendSystemMsgToContainerForPanelRuntime(buildTimeoutNoticeForSend(timeoutReasonForSend, toolExecTimeoutMsForSend));
-            }
+            markRunStoppedForSend();
             break;
           }
 
@@ -12125,7 +12514,7 @@
           // Persist all tool results. Strip dataUrl from generators so base64 never reaches the model.
           for (var ti = 0; ti < toolCallsForLoop.length; ti++) {
             if (controllerForSend.signal.aborted) {
-              logCancelledForSend = true;
+              markRunStoppedForSend();
               break;
             }
             const tc = toolCallsForLoop[ti];
@@ -12206,6 +12595,17 @@
                 }
               }
             }
+            if (tcNameForResult === 'read_tab' && toolResult && toolResult._usage) {
+              const actualReadTabCostForSend = Number(toolResult._usage.cost);
+              if (Number.isFinite(actualReadTabCostForSend) && actualReadTabCostForSend > 0) {
+                sideCallCostForSend += actualReadTabCostForSend;
+              } else {
+                const readTabTotalTokensForCost = Number(toolResult._usage.total_tokens) || 0;
+                if (readTabTotalTokensForCost > 0 && completionCostPerMillionForSend > 0) {
+                  sideCallCostForSend += (readTabTotalTokensForCost * completionCostPerMillionForSend) / 1000000;
+                }
+              }
+            }
             const toolResultStr = typeof toolResultForModel === 'string' ? toolResultForModel : JSON.stringify(toolResultForModel);
             const toolResultStrForLog = typeof toolResultForModel === 'string' ? toolResultForModel : JSON.stringify(toolResultForModel);
             toolLogEntriesForLoop[ti].result = toolResultStrForLog.length > TOOL_RESULT_LOG_MAX_CHARS
@@ -12256,7 +12656,7 @@
             });
           }
           if (controllerForSend.signal.aborted) {
-            logCancelledForSend = true;
+            markRunStoppedForSend();
             break;
           }
 
@@ -12288,7 +12688,7 @@
           const panelDataRepoForImageInject = (globalThis.ABChatShared || {}).panelDataRepo;
           for (var gi = 0; gi < toolCallsForLoop.length; gi++) {
             if (controllerForSend.signal.aborted) {
-              logCancelledForSend = true;
+              markRunStoppedForSend();
               break;
             }
             const tcNameForImage = toolCallsForLoop[gi].function && toolCallsForLoop[gi].function.name;
@@ -12305,7 +12705,7 @@
                 size: toolResultForImage.dataUrl.length
               });
               if (controllerForSend.signal.aborted) {
-                logCancelledForSend = true;
+                markRunStoppedForSend();
                 if (blobRecordForImage && blobRecordForImage.id != null && typeof panelDataRepoForImageInject.deleteAttachmentBlob === 'function') {
                   try { await panelDataRepoForImageInject.deleteAttachmentBlob(Number(blobRecordForImage.id)); } catch (e) {}
                 }
@@ -12328,12 +12728,12 @@
             } catch (e) {}
           }
           if (controllerForSend.signal.aborted) {
-            logCancelledForSend = true;
+            markRunStoppedForSend();
             break;
           }
           for (var gdi = 0; gdi < toolCallsForLoop.length; gdi++) {
             if (controllerForSend.signal.aborted) {
-              logCancelledForSend = true;
+              markRunStoppedForSend();
               break;
             }
             const tcNameForDocument = toolCallsForLoop[gdi].function && toolCallsForLoop[gdi].function.name;
@@ -12357,7 +12757,7 @@
                 textContent: ''
               });
               if (controllerForSend.signal.aborted) {
-                logCancelledForSend = true;
+                markRunStoppedForSend();
                 if (blobRecordForDocument && blobRecordForDocument.id != null && typeof panelDataRepoForImageInject.deleteAttachmentBlob === 'function') {
                   try { await panelDataRepoForImageInject.deleteAttachmentBlob(Number(blobRecordForDocument.id)); } catch (e) {}
                 }
@@ -12376,7 +12776,7 @@
             } catch (e) {}
           }
           if (controllerForSend.signal.aborted) {
-            logCancelledForSend = true;
+            markRunStoppedForSend();
             break;
           }
           if (S.activeChatId === chatId) {
@@ -12443,7 +12843,7 @@
       } catch (sendErrForPanelRuntime) {
         removeLiveTurnBubbleForPanelRuntime(chatId, true);
         if (sendErrForPanelRuntime && sendErrForPanelRuntime.name === "AbortError") {
-          logCancelledForSend = true;
+          markRunStoppedForSend();
         } else {
           logStatusForSend = 'error';
           logErrorMsgForSend = sendErrForPanelRuntime ? (sendErrForPanelRuntime.message || 'Unknown error') : 'Unknown error';
@@ -12470,7 +12870,21 @@
           try { cdpClientForSend.release(undefined, true); } catch (eRunLeaseReleaseForSend) {}
           cdpRunLeaseHeldForSend = false;
         }
-        if (logCancelledForSend && logStatusForSend !== 'error') { logStatusForSend = 'cancelled'; }
+        if (controllerForSend.signal.aborted && !logStopReasonForSend) {
+          markRunStoppedForSend();
+        }
+        userStopRequestedChatsForPanelRuntime.delete(chatId);
+        const agentRunStopFinallyForSend = (globalThis.ABChatShared || {}).agentRunStop;
+        if (logStopReasonForSend && logStatusForSend !== 'error') {
+          logStatusForSend = agentRunStopFinallyForSend && typeof agentRunStopFinallyForSend.logStatusFromStopReason === 'function'
+            ? agentRunStopFinallyForSend.logStatusFromStopReason(logStopReasonForSend, logStatusForSend)
+            : 'cancelled';
+        }
+        if (logStopReasonForSend) {
+          try {
+            await persistAgentStopNoticeForPanelRuntime(chatId, logStopReasonForSend, lastToolTimeoutMsForSend);
+          } catch (eStopNoticeForSend) {}
+        }
         const apiLoggerForSend = (globalThis.ABChatContent || {}).apiLogger;
         if (apiLoggerForSend && typeof apiLoggerForSend.writeLog === 'function') {
           apiLoggerForSend.writeLog({
@@ -12481,6 +12895,8 @@
             iterationCount: iterCount,
             totalLatencyMs: Date.now() - logStartTimeForSend,
             status: logStatusForSend,
+            stopReason: logStopReasonForSend || undefined,
+            toolTimeoutMs: logStopReasonForSend === 'tool' ? lastToolTimeoutMsForSend : undefined,
             errorMessage: logErrorMsgForSend,
             requestMessages: logFirstMessagesForSend,
             apiParams: logApiParamsForSend,
@@ -12491,7 +12907,7 @@
             usage: logUsageForSend
           }).catch(function () {});
         }
-        if (logCancelledForSend && !hasPersistedNonUserMessagesForSend) {
+        if (logStopReasonForSend && !hasPersistedNonUserMessagesForSend) {
           // Roll back any unpersisted user messages so the chat is clean for the next send.
           const chatForRollback = CHAT_STORE_FOR_PANEL_RUNTIME[chatId];
           if (chatForRollback && Array.isArray(chatForRollback.messages)) {
@@ -12503,7 +12919,7 @@
               scrollChatToBottomForPanelRuntime();
             }
           }
-        } else if (!hasAppendedRenderableAssistantMessageForSend && !logCancelledForSend) {
+        } else if (!hasAppendedRenderableAssistantMessageForSend && !logStopReasonForSend) {
           // Turn ended (error or loop cap) without persisting any renderable assistant message
           // (text, generated image, generated document, etc.) and without user cancellation.
           // If anything renderable was already shown, the user has visible output and the
@@ -12554,13 +12970,26 @@
     }
 
     function cancelSendForPanelRuntime() {
-      // Local stream: abort the AbortController directly.
+      // Local stream: abort the AbortController directly. Only flag user-stop for a local
+      // run, whose finally consumes and clears the flag. Offscreen/remote runs track
+      // user-stop in the offscreen loop, so flagging here would leave a stale entry the
+      // local finally never runs to clear.
       const ctrl = sendingChatsForPanelRuntime.get(S.activeChatId);
-      if (ctrl) { ctrl.abort(); return; }
-      // Remote stream: ask the originator (whichever tab it is) to abort.
-      // The SW fans the request out to every tab; only the originator with
-      // a matching AbortController actually aborts.
-      if (remoteStreamingChatsForPanelRuntime.has(S.activeChatId)) {
+      if (ctrl) {
+        const chatIdForCancelSend = Number(S.activeChatId);
+        if (Number.isFinite(chatIdForCancelSend)) {
+          userStopRequestedChatsForPanelRuntime.add(chatIdForCancelSend);
+        }
+        ctrl.abort();
+        return;
+      }
+      // Remote stream, or an offscreen-hosted run this tab just initiated (the run lives
+      // in the offscreen document, not here): ask the SW to abort. The SW fans the request
+      // out to every tab and also signals the offscreen loop; only the holder of the matching
+      // AbortController actually aborts. The offscreenInitiated check covers the window
+      // between handoff and the first stream event, before remoteStreaming is set.
+      if (remoteStreamingChatsForPanelRuntime.has(S.activeChatId) ||
+          offscreenInitiatedChatsForPanelRuntime.has(S.activeChatId)) {
         try {
           chrome.runtime.sendMessage({
             action: "streamCancelRequest",
@@ -12576,7 +13005,10 @@
       const numericChatIdForCancel = Number(chatIdForCancel);
       if (!Number.isFinite(numericChatIdForCancel)) return;
       const ctrlForCancel = sendingChatsForPanelRuntime.get(numericChatIdForCancel);
-      if (ctrlForCancel) ctrlForCancel.abort();
+      if (ctrlForCancel) {
+        userStopRequestedChatsForPanelRuntime.add(numericChatIdForCancel);
+        ctrlForCancel.abort();
+      }
     }
 
     async function saveApiKeyFromSettingsForPanelRuntime() {
@@ -12643,6 +13075,20 @@
           }
         });
       } catch (eAutomationLoadForBehaviour) {}
+      try {
+        chrome.storage.local.get('abchatOffscreenLoopEnabled', function (itemsForOffscreenToggle) {
+          const offscreenToggleForBehaviour = root.getElementById('settings-offscreen-loop-toggle');
+          if (offscreenToggleForBehaviour) {
+            offscreenToggleForBehaviour.checked = resolveOffscreenLoopEnabledForPanelRuntime(itemsForOffscreenToggle);
+          }
+        });
+      } catch (eOffscreenLoadForBehaviour) {}
+    }
+
+    function handleOffscreenLoopToggleForPanelRuntime(wantEnabledForOffscreen) {
+      try {
+        chrome.storage.local.set({ abchatOffscreenLoopEnabled: !!wantEnabledForOffscreen });
+      } catch (eOffscreenToggleSet) {}
     }
 
     function handleAutomationToggleForPanelRuntime(wantEnabledForAutomation) {
@@ -12691,9 +13137,15 @@
             automationStorageSyncListenerForPanelRuntime = null;
             return;
           }
-          if (area !== 'local' || !changes.abchatAutomationEnabled) return;
-          const elForAutomationSync = root.getElementById('settings-automation-toggle');
-          if (elForAutomationSync) elForAutomationSync.checked = !!changes.abchatAutomationEnabled.newValue;
+          if (area !== 'local') return;
+          if (changes.abchatAutomationEnabled) {
+            const elForAutomationSync = root.getElementById('settings-automation-toggle');
+            if (elForAutomationSync) elForAutomationSync.checked = !!changes.abchatAutomationEnabled.newValue;
+          }
+          if (changes.abchatOffscreenLoopEnabled) {
+            const elForOffscreenSync = root.getElementById('settings-offscreen-loop-toggle');
+            if (elForOffscreenSync) elForOffscreenSync.checked = resolveOffscreenLoopEnabledForPanelRuntime({ abchatOffscreenLoopEnabled: changes.abchatOffscreenLoopEnabled.newValue });
+          }
         };
         chrome.storage.onChanged.addListener(automationStorageSyncListenerForPanelRuntime);
       } catch (eAutomationSyncBind) {}
@@ -14195,7 +14647,13 @@
       const savedQuestionForPanelRuntime = cloneQuestionRecordForPanelRuntime(persistedQuestionForPanelRuntime || questionDraftForPanelRuntime);
       QUIZ_STORE_FOR_PANEL_RUNTIME[questionIdForPanelRuntime] = savedQuestionForPanelRuntime;
       if (QUIZ_ORDER_FOR_PANEL_RUNTIME.indexOf(questionIdForPanelRuntime) === -1) {
-        QUIZ_ORDER_FOR_PANEL_RUNTIME.push(questionIdForPanelRuntime);
+        // Front-insert and grow the render window by one so syncMainQuizListItem's window
+        // guard creates the new node; refreshQuizOrder re-sorts it into place. See saveTask.
+        QUIZ_ORDER_FOR_PANEL_RUNTIME.unshift(questionIdForPanelRuntime);
+        renderedQuizCountForPanelRuntime = Math.min(
+          renderedQuizCountForPanelRuntime + 1,
+          QUIZ_ORDER_FOR_PANEL_RUNTIME.length
+        );
       }
       syncSearchIndexForPanelRuntime('questions', isNewQuestionForPanelRuntime ? 'add' : 'update', questionIdForPanelRuntime, savedQuestionForPanelRuntime);
       syncMainQuizListItemForPanelRuntime(questionIdForPanelRuntime);
@@ -15087,11 +15545,12 @@
               const inputForClear = searchIdForClear ? root.getElementById(searchIdForClear) : null;
               if (!inputForClear) break;
               inputForClear.value = '';
-              const wrapForClear = tgtForRuntime.closest('.sidebar-search,.ns-search,.task-search,.pk-search-wrap');
+              const wrapForClear = tgtForRuntime.closest('.sidebar-search,.ns-search,.task-search,.pk-search-wrap,.mp-search-row');
               if (wrapForClear) wrapForClear.classList.remove('has-value');
               if (searchIdForClear === 'chat-search-input') { filterChatListForPanelRuntime(''); writePanelStateSyncForPanelRuntime({ chatSearchQuery: '' }); }
               else if (searchIdForClear === 'notes-search-input') { filterNotesListForPanelRuntime(''); writePanelStateSyncForPanelRuntime({ notesSearchQuery: '' }); }
               else if (searchIdForClear === 'task-search-input') { filterTasksListForPanelRuntime(''); writePanelStateSyncForPanelRuntime({ taskSearchQuery: '' }); }
+              else if (searchIdForClear === 'model-picker-search') { filterModelPickerForPanelRuntime(''); }
               else inputForClear.dispatchEvent(new Event('input'));
               inputForClear.focus();
               break;
@@ -15113,6 +15572,7 @@
             case 'prune-orphaned-blobs':           pruneOrphanedBlobsFromSettingsForPanelRuntime(); break;
             case 'save-alert-sound':               saveAlertSoundForPanelRuntime(tgtForRuntime.checked); break;
             case 'toggle-automation':              handleAutomationToggleForPanelRuntime(tgtForRuntime.checked); break;
+            case 'toggle-offscreen-loop':          handleOffscreenLoopToggleForPanelRuntime(tgtForRuntime.checked); break;
             case 'save-reminder-lead-time':        saveReminderLeadTimeForPanelRuntime(tgtForRuntime.value); break;
             case 'tep-due-change': {
               if (!tgtForRuntime.value) break;
@@ -15182,6 +15642,12 @@
             case 'search-chats':    filterChatListForPanelRuntime(tgtForRuntime.value); tgtForRuntime.closest('.sidebar-search,.ns-search,.task-search').classList.toggle('has-value', tgtForRuntime.value.length > 0); writePanelStateSyncForPanelRuntime({ chatSearchQuery: tgtForRuntime.value }); break;
             case 'search-notes':    filterNotesListForPanelRuntime(tgtForRuntime.value); tgtForRuntime.closest('.sidebar-search,.ns-search,.task-search').classList.toggle('has-value', tgtForRuntime.value.length > 0); writePanelStateSyncForPanelRuntime({ notesSearchQuery: tgtForRuntime.value }); break;
             case 'search-tasks':    filterTasksListForPanelRuntime(tgtForRuntime.value); tgtForRuntime.closest('.sidebar-search,.ns-search,.task-search').classList.toggle('has-value', tgtForRuntime.value.length > 0); writePanelStateSyncForPanelRuntime({ taskSearchQuery: tgtForRuntime.value }); break;
+            case 'filter-models': {
+              filterModelPickerForPanelRuntime(tgtForRuntime.value);
+              const wrapForModelSearch = tgtForRuntime.closest('.mp-search-row');
+              if (wrapForModelSearch) wrapForModelSearch.classList.toggle('has-value', tgtForRuntime.value.length > 0);
+              break;
+            }
           }
         });
       }
@@ -15990,6 +16456,7 @@
     _exposedReclampPanelPositionForPanelRuntime = reclampPanelPositionForPanelRuntime;
     _exposedHandleRemoteStreamEventForPanelRuntime = handleRemoteStreamEventForPanelRuntime;
     _exposedHandleRemoteCancelDeliverForPanelRuntime = handleRemoteCancelDeliverForPanelRuntime;
+    _exposedRunDelegatedPageToolForPanelRuntime = runDelegatedPageToolForPanelRuntime;
     _exposedSetReducedPaneForPanelRuntime = setReducedPaneForMirrorForPanelRuntime;
     _exposedSetChatSubTabForPanelRuntime = setChatSubTabForMirrorForPanelRuntime;
     _exposedSetTaskFilterForPanelRuntime = setTaskFilterForMirrorForPanelRuntime;
@@ -16089,6 +16556,15 @@
       if (_exposedHandleRemoteCancelDeliverForPanelRuntime) {
         _exposedHandleRemoteCancelDeliverForPanelRuntime(chatIdForRelay);
       }
+    },
+    runDelegatedPageTool: function runDelegatedPageToolRelayForPanelRuntime(toolForRelay, argsForRelay) {
+      if (_exposedRunDelegatedPageToolForPanelRuntime) {
+        return _exposedRunDelegatedPageToolForPanelRuntime(toolForRelay, argsForRelay);
+      }
+      return Promise.resolve({ ok: false, error: 'Panel runtime is not initialized in this tab.' });
+    },
+    isRuntimeReady: function isRuntimeReadyRelayForPanelRuntime() {
+      return Boolean(_exposedRunDelegatedPageToolForPanelRuntime);
     },
     setReducedPane: function setReducedPaneRelayForPanelRuntime(tabForRelay, paneForRelay) {
       if (_exposedSetReducedPaneForPanelRuntime) _exposedSetReducedPaneForPanelRuntime(tabForRelay, paneForRelay);

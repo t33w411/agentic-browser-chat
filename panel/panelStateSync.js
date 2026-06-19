@@ -46,13 +46,13 @@
   const contentNamespaceForPanelStateSync = globalScopeForPanelStateSync.ABChatContent || {};
   contentNamespaceForPanelStateSync.ui = contentNamespaceForPanelStateSync.ui || {};
 
-  // When true, `isOpen` changes from other tabs are only applied while this
-  // tab is in the foreground. Hidden tabs stash the latest desired value and
-  // apply it on the next `visibilitychange` to visible. All other mirrored
-  // fields (mode, tab, active ids, popouts, panel position) keep syncing
-  // immediately so a deferred open lands in the right shape.
-  // Flip to false to restore the original "every tab opens together" mode.
-  const VISIBLE_TAB_ONLY_ISOPEN_FOR_PANEL_STATE_SYNC = true;
+  // Panel visibility ("is the panel open, and in which tab") is owned by the
+  // service worker, which combines the persisted `isOpen` bit with the live
+  // active tab. This tab does not decide its own visibility; it pulls the
+  // decision via `resolvePanelStateForTab` (see
+  // reconcilePanelVisibilityForPanelStateSync) on every signal that can change
+  // the answer. All OTHER mirrored fields (mode, tab, active ids, popouts, panel
+  // position, filters) sync immediately and symmetrically via storage.
 
   const LEGACY_PANEL_UI_STATE_KEY_FOR_PANEL_STATE_SYNC = "abchat_panel_ui_state";
   const PANEL_UI_FIELD_KEY_PREFIX_FOR_PANEL_STATE_SYNC = "abchat_panel_ui_state_field_";
@@ -83,17 +83,12 @@
   let pendingWriteForPanelStateSync = {};
   let storageListenerForPanelStateSync = null;
   let initializedForPanelStateSync = false;
-  let pendingIsOpenForPanelStateSync = null; // null = nothing pending; otherwise boolean
-  let hasPendingIsOpenForPanelStateSync = false;
   let visibilityListenerForPanelStateSync = null;
   let windowFocusListenerForPanelStateSync = null;
-  // Background-pushed "is this the currently active tab" cache. `null` means
-  // the SW has not yet answered (initial boot); we fall back to
-  // document.hasFocus() in that window. Once the SW pushes a value, we trust
-  // it: focus leaving the browser entirely (another app) leaves the cache
-  // unchanged, so the last-known active tab keeps applying isOpen updates.
-  let isThisTabActiveCachedForPanelStateSync = null;
   let activeTabPushListenerForPanelStateSync = null;
+  // Monotonic guard so a slow `resolvePanelStateForTab` response from a
+  // superseded reconcile cannot flip visibility back after a newer one resolved.
+  let reconcileSeqForPanelStateSync = 0;
   const fieldSetForPanelStateSync = new Set(PANEL_UI_STATE_FIELDS_FOR_PANEL_STATE_SYNC);
 
   const capturedGenerationForPanelStateSync = window.abchatListenerGeneration || 0;
@@ -228,12 +223,23 @@
 
   function flushPendingWriteForPanelStateSync() {
     writeTimerForPanelStateSync = null;
-    const updatesForPanelStateSync = pendingWriteForPanelStateSync;
-    pendingWriteForPanelStateSync = {};
-    if (!updatesForPanelStateSync || Object.keys(updatesForPanelStateSync).length === 0) {
+    if (!pendingWriteForPanelStateSync || Object.keys(pendingWriteForPanelStateSync).length === 0) {
       return;
     }
-    if (applyingFromRemoteForPanelStateSync) return;
+    // A remote apply is mid-flight. Writing now would race the apply guard, and
+    // consuming the queue first would silently drop it. Keep the pending updates
+    // and retry on the next debounce tick instead. Dropping a queued
+    // isOpen:false here is exactly how a just-closed panel gets persisted as
+    // open and then reopens on the next extension reload.
+    if (applyingFromRemoteForPanelStateSync) {
+      writeTimerForPanelStateSync = setTimeout(
+        flushPendingWriteForPanelStateSync,
+        WRITE_DEBOUNCE_MS_FOR_PANEL_STATE_SYNC
+      );
+      return;
+    }
+    const updatesForPanelStateSync = pendingWriteForPanelStateSync;
+    pendingWriteForPanelStateSync = {};
     try {
       const storageUpdatesForPanelStateSync = {};
       const nowForPanelStateSync = Date.now();
@@ -467,34 +473,75 @@
     }
   }
 
-  function isTabActiveForPanelStateSync() {
+  function getResolveActionForPanelStateSync() {
+    const actionsForResolve =
+      (globalScopeForPanelStateSync.ABChatShared && globalScopeForPanelStateSync.ABChatShared.actions) || {};
+    return actionsForResolve.resolvePanelStateForTab || "resolvePanelStateForTab";
+  }
+
+  // Apply the service worker's authoritative per-tab decision. Guarded by the
+  // monotonic sequence so a superseded reconcile's late response can't apply.
+  function applyResolvedVisibilityForPanelStateSync(shouldBeOpenForApply, seqForApply) {
+    if (seqForApply !== reconcileSeqForPanelStateSync) return;
+    if (isStaleForPanelStateSync()) return;
+    const panelUiForApply = getPanelUiNamespaceForPanelStateSync();
+    if (!panelUiForApply) return;
+    const isVisibleForApply =
+      typeof panelUiForApply.isVisible === "function" ? Boolean(panelUiForApply.isVisible()) : false;
+    if (Boolean(shouldBeOpenForApply) === isVisibleForApply) return;
+    applyStateForPanelStateSync({ isOpen: Boolean(shouldBeOpenForApply) }, new Set(["isOpen"]));
+  }
+
+  // Fallback when the service worker can't be reached: apply only the safe CLOSE
+  // direction, decided from storage alone. Opening requires knowing which tab is
+  // active, which only the SW can answer, so a fallback never opens.
+  function reconcileFallbackCloseOnlyForPanelStateSync(seqForFallback) {
+    readStoredStateForPanelStateSync(function (storedForFallback) {
+      if (seqForFallback !== reconcileSeqForPanelStateSync) return;
+      const storageOpenForFallback = Boolean(storedForFallback && storedForFallback.isOpen === true);
+      if (storageOpenForFallback) return;
+      applyResolvedVisibilityForPanelStateSync(false, seqForFallback);
+    });
+  }
+
+  // Reconcile this tab's panel against the service worker's single source of
+  // truth: "should THIS tab show the panel right now?" = global isOpen AND this
+  // tab is the active tab. The SW combines the persisted isOpen with the live
+  // focused-window active tab (falling back to its tracked active tab when the
+  // browser has lost OS focus, so the panel does not close when focus moves to
+  // another app). The content side no longer decides this itself; it asks.
+  //
+  // A pull (request/response) is used rather than relying on the SW's push
+  // commands, because a push can be silently dropped to a busy or just-injected
+  // tab — which is exactly how a closed panel used to linger open on another
+  // tab. The pull runs on every signal that can change the answer: tab/window
+  // activation, an isOpen change from another tab, and (re-)injection.
+  function reconcilePanelVisibilityForPanelStateSync() {
+    if (isStaleForPanelStateSync()) return;
+    const seqForReconcile = ++reconcileSeqForPanelStateSync;
     try {
-      if (document.visibilityState !== "visible") return false;
-      if (typeof isThisTabActiveCachedForPanelStateSync === "boolean") {
-        return isThisTabActiveCachedForPanelStateSync;
-      }
-      // SW hasn't pushed a value yet. Fall back to document.hasFocus() so
-      // boot-time behavior is roughly the same as before this mechanism
-      // existed, until the first push corrects us.
-      return document.hasFocus();
-    } catch (errorForPanelStateSync) {
-      return true;
+      chrome.runtime.sendMessage(
+        { action: getResolveActionForPanelStateSync() },
+        function (responseForReconcile) {
+          if (chrome.runtime.lastError) {
+            void chrome.runtime.lastError;
+            reconcileFallbackCloseOnlyForPanelStateSync(seqForReconcile);
+            return;
+          }
+          if (
+            !responseForReconcile ||
+            responseForReconcile.ok !== true ||
+            typeof responseForReconcile.shouldBeOpen !== "boolean"
+          ) {
+            reconcileFallbackCloseOnlyForPanelStateSync(seqForReconcile);
+            return;
+          }
+          applyResolvedVisibilityForPanelStateSync(responseForReconcile.shouldBeOpen, seqForReconcile);
+        }
+      );
+    } catch (errorForReconcile) {
+      reconcileFallbackCloseOnlyForPanelStateSync(seqForReconcile);
     }
-  }
-
-  function shouldDeferIsOpenForPanelStateSync() {
-    return (
-      VISIBLE_TAB_ONLY_ISOPEN_FOR_PANEL_STATE_SYNC && !isTabActiveForPanelStateSync()
-    );
-  }
-
-  function flushPendingIsOpenForPanelStateSync() {
-    if (!hasPendingIsOpenForPanelStateSync) return;
-    const desiredForFlush = pendingIsOpenForPanelStateSync;
-    hasPendingIsOpenForPanelStateSync = false;
-    pendingIsOpenForPanelStateSync = null;
-    if (typeof desiredForFlush !== "boolean") return;
-    applyStateForPanelStateSync({ isOpen: desiredForFlush }, new Set(["isOpen"]));
   }
 
   function bindActivationListenersForPanelStateSync() {
@@ -507,8 +554,8 @@
           visibilityListenerForPanelStateSync = null;
           return;
         }
-        if (!isTabActiveForPanelStateSync()) return;
-        flushPendingIsOpenForPanelStateSync();
+        if (document.visibilityState !== "visible") return;
+        reconcilePanelVisibilityForPanelStateSync();
       };
       try {
         document.addEventListener("visibilitychange", visibilityListenerForPanelStateSync, true);
@@ -523,8 +570,7 @@
           windowFocusListenerForPanelStateSync = null;
           return;
         }
-        if (!isTabActiveForPanelStateSync()) return;
-        flushPendingIsOpenForPanelStateSync();
+        reconcilePanelVisibilityForPanelStateSync();
       };
       try {
         window.addEventListener("focus", windowFocusListenerForPanelStateSync, true);
@@ -541,34 +587,20 @@
           activeTabPushListenerForPanelStateSync = null;
           return;
         }
+        // The SW pushes this whenever the active tab changes. The payload is
+        // only a trigger; the authoritative answer comes from the reconcile pull
+        // that follows. Reconcile whether this tab gained OR lost active status:
+        // a tab that just lost active must close if it should no longer show the
+        // panel.
         if (!msgForActiveTabPush || msgForActiveTabPush.action !== "activeTabChanged") return;
-        isThisTabActiveCachedForPanelStateSync = Boolean(msgForActiveTabPush.isActive);
-        if (isThisTabActiveCachedForPanelStateSync && document.visibilityState === "visible") {
-          flushPendingIsOpenForPanelStateSync();
+        if (document.visibilityState === "visible") {
+          reconcilePanelVisibilityForPanelStateSync();
         }
       };
       try {
         chrome.runtime.onMessage.addListener(activeTabPushListenerForPanelStateSync);
       } catch (errorForPanelStateSync) {}
     }
-    // Bootstrap the cache: ask the SW whether this tab is currently the
-    // active one. If the SW hasn't resolved yet (e.g. cold start), it will
-    // push via activeTabChanged once it does.
-    try {
-      chrome.runtime.sendMessage({ action: "getActiveTabStatus" }, function (responseForActiveTabBoot) {
-        if (chrome.runtime.lastError) {
-          void chrome.runtime.lastError;
-          return;
-        }
-        if (isStaleForPanelStateSync()) return;
-        if (responseForActiveTabBoot && typeof responseForActiveTabBoot.isActive === "boolean") {
-          isThisTabActiveCachedForPanelStateSync = responseForActiveTabBoot.isActive;
-          if (isThisTabActiveCachedForPanelStateSync && document.visibilityState === "visible") {
-            flushPendingIsOpenForPanelStateSync();
-          }
-        }
-      });
-    } catch (errorForPanelStateSync) {}
   }
 
   function bindStorageListenerForPanelStateSync() {
@@ -592,6 +624,9 @@
       if (areaForPanelStateSync !== "local") return;
       const incomingForPanelStateSync = {};
       const changedFieldsForDiff = new Set();
+      // isOpen is owned by the SW: a change to it triggers an authoritative
+      // reconcile pull rather than applying the raw stored value directly.
+      let needsVisibilityReconcileForDiff = false;
 
       Object.keys(changesForPanelStateSync).forEach(function (storageKeyForDiff) {
         const fieldNameForDiff = getFieldNameFromStorageKeyForPanelStateSync(storageKeyForDiff);
@@ -608,11 +643,8 @@
         ) {
           return;
         }
-        if (fieldNameForDiff === "isOpen" && shouldDeferIsOpenForPanelStateSync()) {
-          if (typeof nextRecordForField.value === "boolean") {
-            pendingIsOpenForPanelStateSync = nextRecordForField.value;
-            hasPendingIsOpenForPanelStateSync = true;
-          }
+        if (fieldNameForDiff === "isOpen") {
+          needsVisibilityReconcileForDiff = true;
           return;
         }
         incomingForPanelStateSync[fieldNameForDiff] = nextRecordForField.value;
@@ -626,12 +658,8 @@
         PANEL_UI_STATE_FIELDS_FOR_PANEL_STATE_SYNC.forEach(function (fieldNameForLegacy) {
           if (!Object.prototype.hasOwnProperty.call(legacyIncomingForPanelStateSync, fieldNameForLegacy)) return;
           if (valuesEqualForPanelStateSync(legacyPreviousForPanelStateSync[fieldNameForLegacy], legacyIncomingForPanelStateSync[fieldNameForLegacy])) return;
-          if (fieldNameForLegacy === "isOpen" && shouldDeferIsOpenForPanelStateSync()) {
-            const legacyValueForDefer = legacyIncomingForPanelStateSync[fieldNameForLegacy];
-            if (typeof legacyValueForDefer === "boolean") {
-              pendingIsOpenForPanelStateSync = legacyValueForDefer;
-              hasPendingIsOpenForPanelStateSync = true;
-            }
+          if (fieldNameForLegacy === "isOpen") {
+            needsVisibilityReconcileForDiff = true;
             return;
           }
           incomingForPanelStateSync[fieldNameForLegacy] = legacyIncomingForPanelStateSync[fieldNameForLegacy];
@@ -639,8 +667,12 @@
         });
       }
 
-      if (changedFieldsForDiff.size === 0) return;
-      applyStateForPanelStateSync(incomingForPanelStateSync, changedFieldsForDiff);
+      if (changedFieldsForDiff.size > 0) {
+        applyStateForPanelStateSync(incomingForPanelStateSync, changedFieldsForDiff);
+      }
+      if (needsVisibilityReconcileForDiff) {
+        reconcilePanelVisibilityForPanelStateSync();
+      }
     };
     try {
       chrome.storage.onChanged.addListener(storageListenerForPanelStateSync);
@@ -685,8 +717,6 @@
       clearTimeout(writeTimerForPanelStateSync);
       writeTimerForPanelStateSync = null;
     }
-    pendingIsOpenForPanelStateSync = null;
-    hasPendingIsOpenForPanelStateSync = false;
     initializedForPanelStateSync = false;
   }
 
@@ -715,9 +745,9 @@
   // that tab (which would call init() and finally bind the listener).
   //
   // applyState() handles the not-yet-initialized case: the visibility branch
-  // only needs ui.panel (set up by panel.js earlier in the inject list), so an
-  // incoming isOpen=true will auto-open the panel and the rest of the state
-  // is then applied via init() from inside panelRuntime.initialize().
+  // only needs ui.panel (set up by panel.js earlier in the inject list), so a
+  // reconcile that resolves to open will open the panel and the rest of the
+  // state is then applied via init() from inside panelRuntime.initialize().
   //
   // The listener bind is idempotent; init() calling it again is harmless.
   // -----------------------------------------------------------------
@@ -725,44 +755,31 @@
   bindActivationListenersForPanelStateSync();
 
   // -----------------------------------------------------------------
-  // Early boot: if another tab has the panel open, open it here too.
+  // Early boot / re-injection: reconcile this tab's panel against the service
+  // worker's decision (pull). This runs at IIFE time, before the panel runtime
+  // is initialized, and covers both directions:
+  //   - open: when the SW says this tab should show the panel, applyState calls
+  //     panel.setVisible(true) → ensurePanelReadyForPanelBoot →
+  //     panelRuntime.initialize → panelStateSync.init(), and the rest of the
+  //     state is applied there.
+  //   - close: a panel whose DOM survived an extension reload (the old shadow
+  //     host is still display:block) but which should be closed is forced back
+  //     to closed, so it does not reappear after the reload.
   //
-  // panelStateSync.init() runs from inside panelRuntime.initialize(),
-  // which is only called when the panel is first shown — so a fresh
-  // tab that hasn't opened the panel before would never see the
-  // mirrored isOpen=true from another tab.
+  // The reconcile applies via applyState (the applyingFromRemote guard makes the
+  // setVisible write-back a no-op), so it does not re-broadcast as fresh intent.
   //
-  // We call panel.setVisible(true) eagerly here, which triggers
-  // ensurePanelReadyForPanelBoot → panelRuntime.initialize →
-  // panelStateSync.init(), and the rest of the state is applied there.
-  //
-  // The write-back from setVisible(true) is a no-op because the stored
-  // value is already true (merge guard skips identical writes).
-  // -----------------------------------------------------------------
-  function autoOpenIfStoredForPanelStateSync() {
-    readStoredStateForPanelStateSync(function (stateForAutoOpen) {
-      if (!stateForAutoOpen || stateForAutoOpen.isOpen !== true) return;
-      if (shouldDeferIsOpenForPanelStateSync()) {
-        pendingIsOpenForPanelStateSync = true;
-        hasPendingIsOpenForPanelStateSync = true;
-        return;
-      }
-      const panelUiForAutoOpen = getPanelUiNamespaceForPanelStateSync();
-      if (!panelUiForAutoOpen) return;
-      if (typeof panelUiForAutoOpen.isVisible === "function" && panelUiForAutoOpen.isVisible()) return;
-      try {
-        if (typeof panelUiForAutoOpen.ensureReady === "function") panelUiForAutoOpen.ensureReady();
-        if (typeof panelUiForAutoOpen.setVisible === "function") panelUiForAutoOpen.setVisible(true);
-      } catch (errorForAutoOpen) {}
-    });
-  }
-
   // Defer to ensure document.body exists (document_idle should already
   // guarantee this, but the deferral also lets panel.js finish its IIFE
   // setup if injection order ever changes).
+  // -----------------------------------------------------------------
   if (document && document.body) {
-    autoOpenIfStoredForPanelStateSync();
+    reconcilePanelVisibilityForPanelStateSync();
   } else {
-    document.addEventListener("DOMContentLoaded", autoOpenIfStoredForPanelStateSync, { once: true });
+    document.addEventListener(
+      "DOMContentLoaded",
+      reconcilePanelVisibilityForPanelStateSync,
+      { once: true }
+    );
   }
 })();

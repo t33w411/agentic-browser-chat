@@ -166,16 +166,22 @@
                 </div>
                 <div class="model-wrap">
                   <select class="model-select" id="chat-model-select" hidden>
-                    <option value="google/gemini-3.1-flash-lite-preview">Gemini 3.1 Flash Lite Preview</option>
+                    <option value="google/gemini-3.1-flash-lite">Gemini 3.1 Flash Lite</option>
                     <option value="openai/gpt-4.1-mini">GPT-4.1 Mini</option>
                     <option value="anthropic/claude-haiku-4.5">Claude Haiku 4.5</option>
-                    <option value="meta-llama/llama-3.3-70b-instruct">Llama 3.3 70B Instruct</option>
                   </select>
                   <button class="model-picker-btn" id="model-picker-btn" data-action="toggle-model-picker" title="Select model">
                     <span class="model-picker-label" id="model-picker-label">Select model</span>
                     ${icForPanelTemplate.modelPickerChevron10}
                   </button>
-                  <div class="model-picker-dropdown" id="model-picker-dropdown"></div>
+                  <div class="model-picker-dropdown" id="model-picker-dropdown">
+                    <div class="mp-search-row">
+                      <input type="text" class="mp-search" id="model-picker-search" data-action="filter-models" placeholder="Search models" autocomplete="off" spellcheck="false" />
+                      <button class="s-clear mp-search-clear" data-action="clear-search" data-search-id="model-picker-search" title="Clear">${icForPanelTemplate.x10}</button>
+                    </div>
+                    <div class="mp-list" id="model-picker-list"></div>
+                    <div class="mp-empty" id="model-picker-empty" hidden>No matching models</div>
+                  </div>
                 </div>
               </div>
               <button class="send-btn" data-action="send-chat">
@@ -472,6 +478,17 @@
                 <span>Click, type, and act on pages the normal tools cannot reach, such as spreadsheet grids and other canvas apps. Chrome shows a "debugging this browser" banner while it runs.</span>
               </div>
               <label class="ts"><input type="checkbox" id="settings-automation-toggle" data-action="toggle-automation"><span class="ts-slider"></span></label>
+            </div>
+          </div>
+
+          <div class="stg-section">
+            <div class="stg-section-title">Experimental</div>
+            <div class="stg-row">
+              <div class="stg-label">
+                <strong>Keep runs alive across page reloads</strong>
+                <span>Run the assistant in the background so an in-progress task keeps going even when the page navigates or reloads (for example, after it submits a form). If you notice any issues, turn this off to use the in-page mode.</span>
+              </div>
+              <label class="ts"><input type="checkbox" id="settings-offscreen-loop-toggle" data-action="toggle-offscreen-loop"><span class="ts-slider"></span></label>
             </div>
           </div>
 

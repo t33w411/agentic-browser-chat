@@ -161,6 +161,10 @@ The agent calls these tools mid-conversation. Grouped by purpose, with safeguard
 - `web_search` — search the web. Required gateway: the agent must search before it can fetch any URL it didn't already see.
 - `web_fetch` — fetch a URL and either summarize it or answer a specific prompt against it. Handles HTML, plain text, JSON, images (via a vision model), and documents (PDF, DOCX, XLSX, PPTX). **Safeguard:** the runtime **rejects any URL that did not appear in the conversation context** (user message or prior tool result). The model cannot fabricate a URL and fetch it. 15-second timeout per request.
 
+**Browser tabs**
+- `list_tabs` — list the user's open tabs across all windows (id, title, url, active, window, discarded, plus an `accessible` flag for pages extensions cannot read). Read-only: it never switches, opens, or closes a tab.
+- `read_tab` — read the live content of one open tab (by id from `list_tabs`) and get back a summary. A fast secondary model answers a supplied prompt or summarizes the whole tab, so a large page is never dumped into context. Unlike `web_fetch` (which makes a fresh network request to a URL), this reads the actual open page, including logged-in and client-rendered state. Reading a sleeping tab wakes it; the returned content is treated as untrusted external data.
+
 **Generation**
 - `create_document` — generate a downloadable DOCX, XLSX, PDF, PPTX, or CSV file with structured content (headings, bullets, tables, sheets, slides). Files are stored as blobs and displayed inline.
 - `generate_image` — image generation through the configured image model.
