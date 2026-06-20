@@ -166,6 +166,19 @@ function isSupportedPanelTabForServiceWorker(tabForPanelVisibility) {
 }
 
 function readDesiredPanelOpenForServiceWorker(callbackForPanelVisibility) {
+  // Trust the in-memory value once it is known. The content side sets it via the
+  // panelVisibilityChanged notification, which is always sent BEFORE the debounced
+  // storage write of the same change, so the in-memory value is never staler than
+  // storage (and is fresher during the ~50ms write-debounce window). Re-reading
+  // storage here would resolve a just-opened panel as closed within that window:
+  // the residual flash race. Storage is consulted only to hydrate the value after a
+  // cold service-worker start, while it is still null. desiredPanelOpenForServiceWorker
+  // is only ever assigned a boolean (never reset to null), so once set it stays the
+  // source of truth until the next explicit open/close notification updates it.
+  if (typeof desiredPanelOpenForServiceWorker === "boolean") {
+    callbackForPanelVisibility(desiredPanelOpenForServiceWorker);
+    return;
+  }
   try {
     chrome.storage.local.get(
       [panelVisibilityFieldKeyForServiceWorker, legacyPanelUiStateKeyForServiceWorker],

@@ -408,6 +408,22 @@
     return true;
   }
 
+  // Persist + broadcast the panel's open/closed intent. panelStateSync writes it
+  // into the shared isOpen field, which the service worker reads as the
+  // authoritative answer to "should this tab show the panel?". skipSync suppresses
+  // the broadcast for transient LOCAL visibility changes that must not touch the
+  // shared cross-tab open state, e.g. the pre-screenshot hide/restore. Guarded
+  // internally by panelStateSync so applying a remote isOpen change does not echo
+  // back.
+  function writePanelVisibilityIntentForPanelBoot(isVisibleForIntent, skipSyncForIntent) {
+    if (skipSyncForIntent) return;
+    const syncNsForIntent =
+      contentNamespaceForPanelBoot.ui && contentNamespaceForPanelBoot.ui.panelStateSync;
+    if (syncNsForIntent && typeof syncNsForIntent.writeState === 'function') {
+      syncNsForIntent.writeState({ isOpen: Boolean(isVisibleForIntent) });
+    }
+  }
+
   function setPanelVisibleForPanelBoot(isVisibleForPanelBoot, optionsForPanelBoot) {
     const skipSyncForPanelBoot = Boolean(optionsForPanelBoot && optionsForPanelBoot.skipSync);
     const shadowHostForPanelBoot = document.getElementById('abchat-panel-shadow-host');
@@ -420,6 +436,13 @@
     // the wrong mode/theme/position before snapping to the saved state.
     if (isVisibleForPanelBoot && (!panelCssReadyForPanelBoot || !panelStateReadyForPanelBoot)) {
       showPendingForPanelBoot = true;
+      // Persist the open intent now, even though the actual paint is deferred
+      // behind the CSS/state readiness gates. Without this the SW's authoritative
+      // isOpen stays false while the panel is about to become visible, so the next
+      // cross-tab visibility reconcile resolves "should be closed" and tears the
+      // just-opened panel back down: the flash-then-disappear seen on the first
+      // icon click of a freshly loaded tab.
+      writePanelVisibilityIntentForPanelBoot(isVisibleForPanelBoot, skipSyncForPanelBoot);
       return;
     }
     showPendingForPanelBoot = false;
@@ -434,22 +457,10 @@
     if (!isVisibleForPanelBoot) {
       panelClosedAtForPanelBoot = Date.now();
     }
-    // Broadcast visibility to other tabs via panelStateSync (debounced/merged
-    // into the shared abchat_panel_ui_state key). Guarded internally so
-    // applying a remote isOpen change does not echo back.
-    //
-    // skipSync suppresses the broadcast for transient LOCAL hides that must not
-    // touch the shared cross-tab open state — e.g. the pre-screenshot hide,
-    // which briefly drops the panel to capture the page and restores it. Without
-    // this, that hide/restore would flip the global isOpen and flicker panels in
-    // other tabs.
-    if (!skipSyncForPanelBoot) {
-      const syncNsForBootVisibility =
-        contentNamespaceForPanelBoot.ui && contentNamespaceForPanelBoot.ui.panelStateSync;
-      if (syncNsForBootVisibility && typeof syncNsForBootVisibility.writeState === 'function') {
-        syncNsForBootVisibility.writeState({ isOpen: Boolean(isVisibleForPanelBoot) });
-      }
-    }
+    // Broadcast visibility intent (debounced/merged into the shared isOpen
+    // field). The deferred-show branch above fires the same helper so a gated
+    // first paint still records the open before this point is reached.
+    writePanelVisibilityIntentForPanelBoot(isVisibleForPanelBoot, skipSyncForPanelBoot);
     if (isVisibleForPanelBoot) {
       if (pendingVisibleCallbacksForPanelBoot.length > 0) {
         const callbacksForPanelBoot = pendingVisibleCallbacksForPanelBoot.splice(0);
