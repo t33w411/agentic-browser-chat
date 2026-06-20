@@ -28,6 +28,7 @@
   const PANEL_UI_FIELD_KEY_PREFIX_FOR_PANEL_BOOT = 'abchat_panel_ui_state_field_';
   const LEGACY_PANEL_UI_STATE_KEY_FOR_PANEL_BOOT = 'abchat_panel_ui_state';
   const THEME_KEY_FOR_PANEL_BOOT = 'abchat_theme';
+  const HEADER_BTN_KEY_FOR_PANEL_BOOT = 'abchat_header_btn';
 
   function reclampPanelPositionAfterOpenForPanelBoot() {
     requestAnimationFrame(function () {
@@ -56,10 +57,11 @@
         modeKeyForPanelBoot,
         anchorKeyForPanelBoot,
         LEGACY_PANEL_UI_STATE_KEY_FOR_PANEL_BOOT,
-        THEME_KEY_FOR_PANEL_BOOT
+        THEME_KEY_FOR_PANEL_BOOT,
+        HEADER_BTN_KEY_FOR_PANEL_BOOT
       ];
       chrome.storage.local.get(keysForPanelBoot, function (resForPanelBoot) {
-        const outForPanelBoot = { mode: null, theme: null, panelAnchor: null };
+        const outForPanelBoot = { mode: null, theme: null, panelAnchor: null, headerBtn: null };
         const modeRecordForPanelBoot = resForPanelBoot && resForPanelBoot[modeKeyForPanelBoot];
         if (
           modeRecordForPanelBoot && typeof modeRecordForPanelBoot === 'object' &&
@@ -104,6 +106,10 @@
             outForPanelBoot.theme = null;
           }
         }
+        const headerBtnRawForPanelBoot = resForPanelBoot && resForPanelBoot[HEADER_BTN_KEY_FOR_PANEL_BOOT];
+        if (headerBtnRawForPanelBoot === 'sync' || headerBtnRawForPanelBoot === 'theme') {
+          outForPanelBoot.headerBtn = headerBtnRawForPanelBoot;
+        }
         try { callbackForPanelBoot(outForPanelBoot); } catch (errorForPanelBoot) {}
       });
     } catch (errorForPanelBoot) {
@@ -133,6 +139,14 @@
       const elForPanelBoot = shadowRootForPanelBoot.getElementById(idForPanelBoot);
       if (elForPanelBoot) elForPanelBoot.dataset.theme = themeForPanelBoot;
     });
+  }
+
+  function applyPrePaintHeaderBtnForPanelBoot(shadowRootForPanelBoot, headerBtnForPanelBoot) {
+    if (headerBtnForPanelBoot !== 'sync' && headerBtnForPanelBoot !== 'theme') return;
+    const panelHostForPanelBoot = shadowRootForPanelBoot.getElementById('panel-host');
+    if (!panelHostForPanelBoot) return;
+    panelHostForPanelBoot.classList.remove('header-ctrl-sync', 'header-ctrl-theme');
+    panelHostForPanelBoot.classList.add('header-ctrl-' + headerBtnForPanelBoot);
   }
 
   function applyPendingPaintAnchorForPanelBoot(shadowHostForPanelBoot) {
@@ -168,6 +182,7 @@
     readStoredPaintStateForPanelBoot(function (stateForPanelBoot) {
       applyPrePaintModeForPanelBoot(shadowRootForPanelBoot, stateForPanelBoot.mode);
       applyPrePaintThemeForPanelBoot(shadowRootForPanelBoot, stateForPanelBoot.theme);
+      applyPrePaintHeaderBtnForPanelBoot(shadowRootForPanelBoot, stateForPanelBoot.headerBtn);
       if (stateForPanelBoot.panelAnchor && stateForPanelBoot.mode === 'reduced') {
         pendingPaintAnchorForPanelBoot = stateForPanelBoot.panelAnchor;
       }

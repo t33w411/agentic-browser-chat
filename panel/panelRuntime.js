@@ -3253,6 +3253,11 @@
       if (featureTourOverlayForPanelRuntime) featureTourOverlayForPanelRuntime.dataset.theme = theme;
       const btn = root.getElementById('btn-theme');
       btn.innerHTML = theme === 'dark' ? (ic.sun13 + ' Light Mode') : (ic.moon13 + ' Dark Mode');
+      const headerThemeBtnForSet = root.getElementById('header-theme-btn');
+      if (headerThemeBtnForSet) {
+        headerThemeBtnForSet.innerHTML = theme === 'dark' ? ic.sun14 : ic.moon14;
+        headerThemeBtnForSet.title = theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
+      }
       if (previousThemeForSet && previousThemeForSet !== theme) {
         refreshMermaidForThemeChangeForPanelRuntime();
       }
@@ -3380,6 +3385,53 @@
           if (toggleForTransparencySync) toggleForTransparencySync.checked = incomingTransparencyForPanelRuntime;
         };
         chrome.storage.onChanged.addListener(transparencyStorageSyncListenerForPanelRuntime);
+      } catch (e) {}
+    }
+
+    function toggleHeaderThemeForPanelRuntime() {
+      const nextThemeForHeaderToggle = S.theme === 'dark' ? 'light' : 'dark';
+      applyThemeFromSettings(nextThemeForHeaderToggle);
+    }
+
+    function applyHeaderButtonModeForPanelRuntime(modeForHeaderBtn, skipSave) {
+      const valForHeaderBtn = modeForHeaderBtn === 'sync' ? 'sync' : 'theme';
+      host.classList.toggle('header-ctrl-sync', valForHeaderBtn === 'sync');
+      host.classList.toggle('header-ctrl-theme', valForHeaderBtn === 'theme');
+      if (!skipSave) {
+        chrome.storage.local.set({ [HEADER_BTN_KEY_FOR_PANEL_RUNTIME]: valForHeaderBtn });
+      }
+    }
+
+    function loadHeaderButtonIntoSettingsForPanelRuntime() {
+      chrome.storage.local.get([HEADER_BTN_KEY_FOR_PANEL_RUNTIME], function (res) {
+        const savedForHeaderBtn = (res && res[HEADER_BTN_KEY_FOR_PANEL_RUNTIME]) === 'sync' ? 'sync' : 'theme';
+        applyHeaderButtonModeForPanelRuntime(savedForHeaderBtn, true);
+        const selForHeaderBtn = root.querySelector('[data-action="apply-header-btn"]');
+        if (selForHeaderBtn) selForHeaderBtn.value = savedForHeaderBtn;
+      });
+    }
+
+    var headerBtnStorageSyncListenerForPanelRuntime = null;
+    function bindHeaderButtonStorageSyncForPanelRuntime() {
+      try {
+        if (headerBtnStorageSyncListenerForPanelRuntime) {
+          chrome.storage.onChanged.removeListener(headerBtnStorageSyncListenerForPanelRuntime);
+          headerBtnStorageSyncListenerForPanelRuntime = null;
+        }
+        var capturedGenForHeaderBtnSync = window.abchatListenerGeneration || 0;
+        headerBtnStorageSyncListenerForPanelRuntime = function headerBtnStorageSyncHandlerForPanelRuntime(changes, area) {
+          if ((window.abchatListenerGeneration || 0) !== capturedGenForHeaderBtnSync) {
+            chrome.storage.onChanged.removeListener(headerBtnStorageSyncListenerForPanelRuntime);
+            headerBtnStorageSyncListenerForPanelRuntime = null;
+            return;
+          }
+          if (area !== 'local' || !changes[HEADER_BTN_KEY_FOR_PANEL_RUNTIME]) return;
+          const incomingHeaderBtnForPanelRuntime = changes[HEADER_BTN_KEY_FOR_PANEL_RUNTIME].newValue === 'sync' ? 'sync' : 'theme';
+          applyHeaderButtonModeForPanelRuntime(incomingHeaderBtnForPanelRuntime, true);
+          const selForHeaderBtnSync = root.querySelector('[data-action="apply-header-btn"]');
+          if (selForHeaderBtnSync) selForHeaderBtnSync.value = incomingHeaderBtnForPanelRuntime;
+        };
+        chrome.storage.onChanged.addListener(headerBtnStorageSyncListenerForPanelRuntime);
       } catch (e) {}
     }
 
@@ -9357,6 +9409,7 @@
     const ROUTER_EXCEPTION_MODEL_IDS_FOR_PANEL_RUNTIME = ['openrouter/auto', 'openrouter/free'];
     const THEME_KEY_FOR_PANEL_RUNTIME = 'abchat_theme';
     const TRANSPARENCY_KEY_FOR_PANEL_RUNTIME = 'abchat_panel_transparency';
+    const HEADER_BTN_KEY_FOR_PANEL_RUNTIME = 'abchat_header_btn';
     const INPUT_DRAFT_KEY_FOR_PANEL_RUNTIME = 'abchat_input_draft';
     const NOTE_DRAFT_SYNC_KEY_PREFIX_FOR_PANEL_RUNTIME = 'abchat_note_draft_sync:';
     var currentAgentRulesForPanelRuntime = '';
@@ -15260,7 +15313,8 @@
             case 'tour-skip':
             case 'tour-finish': dismissFeatureTourForPanelRuntime(); break;
             case 'save-agent-rules-btn': saveAgentRulesFromSettingsForPanelRuntime(); break;
-            case 'sync-all':             triggerFullSyncForPanelRuntime(tgtForRuntime.closest('.ctrl-btn')); break;
+            case 'sync-all':             triggerFullSyncForPanelRuntime(tgtForRuntime.closest('.ctrl-btn') || tgtForRuntime); break;
+            case 'toggle-header-theme':  toggleHeaderThemeForPanelRuntime(); break;
             case 'set-mode':             setMode(tgtForRuntime.dataset.mode); break;
             case 'toggle-selector':      toggleSelector(tgtForRuntime); break;
             case 'new-chat':             newChat(); break;
@@ -15606,6 +15660,7 @@
           const action = tgtForRuntime.dataset.action;
           switch (action) {
             case 'apply-theme-settings':           applyThemeFromSettings(tgtForRuntime.value); break;
+            case 'apply-header-btn':               applyHeaderButtonModeForPanelRuntime(tgtForRuntime.value); break;
             case 'toggle-panel-transparency':      applyPanelTransparencyForPanelRuntime(tgtForRuntime.checked); break;
             case 'update-correct-option':          updateCorrectOption(tgtForRuntime); break;
             case 'save-api-key':                   saveApiKeyFromSettingsForPanelRuntime(); break;
@@ -15873,6 +15928,8 @@
       bindThemeStorageSyncForPanelRuntime();
       loadPanelTransparencyIntoSettingsForPanelRuntime();
       bindPanelTransparencyStorageSyncForPanelRuntime();
+      loadHeaderButtonIntoSettingsForPanelRuntime();
+      bindHeaderButtonStorageSyncForPanelRuntime();
       bindAutomationStorageSyncForPanelRuntime();
       maybeShowAutomationIntroForPanelRuntime();
       bindAgentRulesStorageSyncForPanelRuntime();

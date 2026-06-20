@@ -147,16 +147,20 @@
   cursor: pointer;
 }
 
-/* Transparency mode (reduced view only): fade the floating panel when the
-   mouse is not over it so the page underneath is visible. Restored to full
-   opacity on hover, or while a field inside has focus (so it does not fade
-   mid-typing). Visual-only: the panel still receives pointer events. */
-.panel-host.mode-reduced.transparency-on .panel {
+/* Transparency mode (reduced view only): fade the floating panel and any
+   popped-out note when the mouse is not over it so the page underneath is
+   visible. Each surface restores to full opacity independently on its own
+   hover, or while a field inside it has focus (so it does not fade
+   mid-typing). Visual-only: the surface still receives pointer events. */
+.panel-host.mode-reduced.transparency-on .panel,
+.panel-host.mode-reduced.transparency-on .note-popout {
   opacity: 0.3;
   transition: opacity 0.2s ease;
 }
 .panel-host.mode-reduced.transparency-on .panel:hover,
-.panel-host.mode-reduced.transparency-on .panel:focus-within {
+.panel-host.mode-reduced.transparency-on .panel:focus-within,
+.panel-host.mode-reduced.transparency-on .note-popout:hover,
+.panel-host.mode-reduced.transparency-on .note-popout:focus-within {
   opacity: 1;
 }
 
@@ -342,6 +346,13 @@
 .ctrl-btn svg { display: block; }
 .ctrl-btn.syncing { pointer-events: none; }
 .ctrl-btn.syncing svg { animation: icspin 0.7s linear infinite; }
+
+/* Header slot shows either the sync button or the theme toggle, never both */
+.panel-host.header-ctrl-theme .ctrl-sync { display: none; }
+.panel-host.header-ctrl-sync .ctrl-header-theme { display: none; }
+
+/* Settings "Sync now" button reuses the sync-all action; reflect in-flight state */
+.btn-ghost.syncing { opacity: 0.6; pointer-events: none; }
 
 /* Show only relevant expand/reduce button per mode */
 .panel-host.mode-expanded .ctrl-expand { display: none; }

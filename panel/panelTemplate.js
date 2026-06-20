@@ -4,7 +4,7 @@
   const icForPanelTemplate = contentNamespaceForPanelTemplate.icons || {};
 
   const panelMarkupForPanelTemplate = `
-<div class="panel-host mode-expanded" id="panel-host" data-theme="light">
+<div class="panel-host mode-expanded header-ctrl-theme" id="panel-host" data-theme="light">
   <div class="panel">
   <div id="abchat-libs-overlay" class="libs-loading-overlay"><div class="libs-loading-spinner"></div><span class="libs-loading-label">Initialising...</span></div>
   <div id="api-key-onboarding-overlay" class="api-key-onboarding-overlay hidden">
@@ -41,6 +41,9 @@
       <div class="panel-controls">
         <button class="ctrl-btn ctrl-sync" id="sync-all-btn" title="Sync chats, notes, tasks, and quiz questions across tabs" data-action="sync-all">
           ${icForPanelTemplate.sync14}
+        </button>
+        <button class="ctrl-btn ctrl-header-theme" id="header-theme-btn" title="Toggle light / dark theme" data-action="toggle-header-theme">
+          ${icForPanelTemplate.moon14}
         </button>
         <!-- Settings: in-panel settings view -->
         <button class="ctrl-btn" title="Settings (opens extension settings)" data-action="set-tab" data-tab="settings">
@@ -396,6 +399,23 @@
                 <option value="dark">Dark</option>
                 <option value="system">System</option>
               </select>
+            </div>
+            <div class="stg-row">
+              <div class="stg-label">
+                <strong>Header button</strong>
+                <span>What the button in the panel header does: quickly toggle light/dark, or sync your data across tabs.</span>
+              </div>
+              <select class="stg-select" data-action="apply-header-btn">
+                <option value="theme">Theme toggle</option>
+                <option value="sync">Sync across tabs</option>
+              </select>
+            </div>
+            <div class="stg-row">
+              <div class="stg-label">
+                <strong>Sync now</strong>
+                <span>Manually refresh chats, notes, tasks, and quiz questions across all open tabs. Handy when the header button is set to theme toggle.</span>
+              </div>
+              <button class="btn-ghost btn-sm" id="settings-sync-now-btn" data-action="sync-all">Sync</button>
             </div>
             <div class="stg-row">
               <div class="stg-label">

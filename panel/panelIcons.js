@@ -77,6 +77,8 @@
   icons.zap12 = svgForPanelIcon(12, 2.2, zapPath);
   icons.moon13 = svgForPanelIcon(13, 2, moonPath);
   icons.sun13 = svgForPanelIcon(13, 2, sunPaths);
+  icons.moon14 = svgForPanelIcon(14, 2.2, moonPath);
+  icons.sun14 = svgForPanelIcon(14, 2.2, sunPaths);
   icons.file10 = svgForPanelIcon(10, 2.5, fileOutlinePaths);
   icons.file13 = svgForPanelIcon(13, 2.5, fileOutlinePaths);
   icons.fileText10 = svgForPanelIcon(10, 2.5, fileOutlinePaths);
