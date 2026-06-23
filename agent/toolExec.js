@@ -3835,7 +3835,7 @@
     };
   }
 
-  // ---- Tool: eval (sandboxed Web Worker) ----
+  // ---- Tool: eval (sandboxed QuickJS / WebAssembly engine) ----
 
   // Maximum bytes allowed for the serialized return value of an eval call.
   // Enforced inside the worker before postMessage so the cap fires even if the
@@ -3854,111 +3854,245 @@
   var EVAL_MAX_BLOB_BYTES_FOR_TOOL_EXEC = 52428800; // 50 MB
   var EVAL_MAX_DOCUMENT_BYTES_FOR_TOOL_EXEC = 52428800; // 50 MB
 
-  var EVAL_WORKER_SRC_FOR_TOOL_EXEC = [
-    // importScripts must be nulled FIRST. It is a synchronous external-script loader
-    // that executes in the worker global scope; if it runs before our other null
-    // assignments it can restore fetch, XHR, or any other global we remove below.
-    'self.importScripts = undefined;',
+  // Model-facing message returned when the eval sandbox cannot start because the
+  // governing Content Security Policy blocks WebAssembly (the QuickJS engine). On the
+  // content-script path the page's CSP governs; on the offscreen path the extension CSP
+  // does (and grants 'wasm-unsafe-eval'). The wording tells the model this is a page
+  // restriction so it changes strategy instead of retrying the same call.
+  var EVAL_CSP_BLOCKED_MESSAGE_FOR_TOOL_EXEC = "eval could not run here: this page's Content Security Policy blocks the sandbox engine (WebAssembly is disabled on this page). This is a page restriction, not an error in your code. Compute the result by reasoning directly, or retry the calculation on a different tab or page.";
 
-    // Null every network primitive available in workers. fetch and WebSocket were
-    // already blocked; XMLHttpRequest was not, leaving an exfiltration path via any
-    // CORS-permissive endpoint.
-    'self.fetch = undefined;',
-    'self.XMLHttpRequest = undefined;',
-    'self.WebSocket = undefined;',
+  // Extra wall-clock budget, beyond the user-supplied timeout, before the host force-
+  // terminates the worker. The QuickJS interrupt handler is armed for exactly `timeout`
+  // and reports a clean "Eval timeout" first; this hard terminate is only a backstop for
+  // a genuinely wedged worker, and the grace also covers one-time WASM instantiation.
+  var EVAL_TIMEOUT_HARD_GRACE_MS_FOR_TOOL_EXEC = 5000;
 
-    // Null self.close: code that calls self.close() terminates the worker silently
-    // without firing onmessage or onerror, causing the outer timeout to drain in
-    // full (up to 30 s) before the caller gets any response.
-    'self.close = undefined;',
+  // Regex identifying a CSP / WebAssembly denial in an error message, used to map an
+  // engine-load failure to the friendly EVAL_CSP_BLOCKED_MESSAGE above.
+  var EVAL_CSP_ERROR_PATTERN_FOR_TOOL_EXEC = /wasm|WebAssembly|Content Security|unsafe-eval|code generation|CSP/i;
 
-    // Null persistent-storage and cross-context messaging APIs.
-    // caches (Cache Storage) and indexedDB persist across separate eval calls within
-    // the same browser session, enabling state smuggling between invocations.
-    // BroadcastChannel can reach the extension service worker or other content scripts
-    // on the same origin, bypassing the isolation the worker is meant to provide.
-    'self.caches = undefined;',
-    'self.indexedDB = undefined;',
-    'self.BroadcastChannel = undefined;',
+  // Pure-JS polyfills injected into the QuickJS VM before user code runs. QuickJS is a
+  // bare ECMAScript engine: it has no Web APIs at all, so the network/storage primitives
+  // the old Web Worker had to strip (fetch, XHR, WebSocket, importScripts, caches,
+  // indexedDB, BroadcastChannel, self.close) are simply absent here, which makes the
+  // "no network / no DOM" sandbox automatic and stronger. What the eval tool advertises
+  // and QuickJS lacks is re-provided: base64 (atob/btoa), UTF-8 TextEncoder/TextDecoder,
+  // and a no-op console so console.* calls do not throw.
+  var EVAL_POLYFILL_SRC_FOR_TOOL_EXEC = `
+(function (g) {
+  if (typeof g.console === 'undefined') {
+    g.console = { log: function () {}, info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, trace: function () {} };
+  }
+  var B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  if (typeof g.btoa === 'undefined') {
+    g.btoa = function (input) {
+      var str = String(input), output = '', map = B64, block, charCode, i = 0;
+      for (; str.charAt(i | 0) || (map = '=', i % 1); output += map.charAt(63 & (block >> (8 - (i % 1) * 8)))) {
+        charCode = str.charCodeAt(i += 3 / 4);
+        if (charCode > 0xFF) { throw new Error('btoa: characters outside the Latin1 range'); }
+        block = (block << 8) | charCode;
+      }
+      return output;
+    };
+  }
+  if (typeof g.atob === 'undefined') {
+    g.atob = function (input) {
+      var str = String(input).replace(/[=]+$/, ''), output = '';
+      if (str.length % 4 === 1) { throw new Error('atob: invalid base64 (bad length)'); }
+      for (var bc = 0, bs = 0, buffer, i = 0; (buffer = str.charAt(i++));) {
+        buffer = B64.indexOf(buffer);
+        if (buffer === -1) continue;
+        bs = bc % 4 ? bs * 64 + buffer : buffer;
+        if (bc++ % 4) { output += String.fromCharCode(255 & (bs >> ((-2 * bc) & 6))); }
+      }
+      return output;
+    };
+  }
+  if (typeof g.TextEncoder === 'undefined') {
+    g.TextEncoder = function TextEncoder() {};
+    g.TextEncoder.prototype.encode = function (str) {
+      str = String(str); var bytes = [], i = 0, n = str.length;
+      for (; i < n; i++) {
+        var c = str.charCodeAt(i);
+        if (c < 0x80) { bytes.push(c); }
+        else if (c < 0x800) { bytes.push(0xC0 | (c >> 6), 0x80 | (c & 0x3F)); }
+        else if (c >= 0xD800 && c <= 0xDBFF && i + 1 < n) {
+          var c2 = str.charCodeAt(i + 1);
+          if (c2 >= 0xDC00 && c2 <= 0xDFFF) {
+            var cp = 0x10000 + ((c - 0xD800) << 10) + (c2 - 0xDC00); i++;
+            bytes.push(0xF0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3F), 0x80 | ((cp >> 6) & 0x3F), 0x80 | (cp & 0x3F));
+          } else { bytes.push(0xE0 | (c >> 12), 0x80 | ((c >> 6) & 0x3F), 0x80 | (c & 0x3F)); }
+        } else { bytes.push(0xE0 | (c >> 12), 0x80 | ((c >> 6) & 0x3F), 0x80 | (c & 0x3F)); }
+      }
+      return new Uint8Array(bytes);
+    };
+  }
+  if (typeof g.TextDecoder === 'undefined') {
+    g.TextDecoder = function TextDecoder() {};
+    g.TextDecoder.prototype.decode = function (buf) {
+      if (!buf) return '';
+      var bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf.buffer ? buf.buffer : buf);
+      var out = '', i = 0, n = bytes.length;
+      while (i < n) {
+        var b = bytes[i++], cp;
+        if (b < 0x80) { cp = b; }
+        else if ((b & 0xE0) === 0xC0) { cp = ((b & 0x1F) << 6) | (bytes[i++] & 0x3F); }
+        else if ((b & 0xF0) === 0xE0) { cp = ((b & 0x0F) << 12) | ((bytes[i++] & 0x3F) << 6) | (bytes[i++] & 0x3F); }
+        else { cp = ((b & 0x07) << 18) | ((bytes[i++] & 0x3F) << 12) | ((bytes[i++] & 0x3F) << 6) | (bytes[i++] & 0x3F); }
+        if (cp > 0xFFFF) { cp -= 0x10000; out += String.fromCharCode(0xD800 + (cp >> 10), 0xDC00 + (cp & 0x3FF)); }
+        else { out += String.fromCharCode(cp); }
+      }
+      return out;
+    };
+  }
+})(globalThis);
+`;
 
-    // Output size cap shared with the caller constant EVAL_MAX_OUTPUT_BYTES_FOR_TOOL_EXEC.
-    // Defined here so it travels with the worker source and cannot be tampered with
-    // from outside after the worker starts. The document cap mirrors the caller
-    // constant EVAL_MAX_DOCUMENT_BYTES_FOR_TOOL_EXEC and bounds the __document__ spec,
-    // which carries the bulk data and rides its own budget instead of the result cap.
-    'var EVAL_WORKER_MAX_OUTPUT_BYTES = ' + EVAL_MAX_OUTPUT_BYTES_FOR_TOOL_EXEC + ';',
-    'var EVAL_WORKER_MAX_DOCUMENT_BYTES = ' + EVAL_MAX_DOCUMENT_BYTES_FOR_TOOL_EXEC + ';',
+  // Worker glue. This source is appended to the QuickJS bundle text (which defines
+  // self.ABNewQuickJSModule) at blob-build time, so by the time this runs the engine
+  // factory is present. It receives the pre-built VM program (runSource), the polyfill
+  // source, the serialized vars/blobs, and the timeout; it instantiates a fresh VM per
+  // message, arms an interrupt deadline, runs the program, and posts back the same
+  // { ok, result, document } / { ok:false, error } shape the caller already handles.
+  var EVAL_WORKER_GLUE_SRC_FOR_TOOL_EXEC = `
+self.onmessage = function (e) {
+  var data = e.data || {};
+  var runSource = data.runSource;
+  var polyfillSrc = data.polyfillSrc || '';
+  var varsJson = data.varsJson || '{}';
+  var blobsJson = data.blobsJson || '[]';
+  var timeout = (typeof data.timeout === 'number' && data.timeout > 0) ? data.timeout : 5000;
+  var cspPattern = /wasm|WebAssembly|Content Security|unsafe-eval|code generation|CSP/i;
 
-    'self.onmessage = function(e) {',
-    '  var code = e.data.code;',
-    // vars arrives as a JSON string (serialized by the caller) rather than a
-    // structured-clone object. This gives a predictable parse error if the payload
-    // is malformed and avoids any prototype-carrying objects crossing the boundary.
-    '  var vars;',
-    '  try { vars = JSON.parse(e.data.varsJson || "{}"); }',
-    '  catch (parseErr) {',
-    '    self.postMessage({ ok: false, error: "vars JSON parse failed: " + (parseErr.message || String(parseErr)) });',
-    '    return;',
-    '  }',
-    // blobs arrives as a separate pre-serialized JSON array (resolved from blob_ids on
-    // the caller side). It is injected as a reserved `blobs` variable, never via vars.
-    '  var blobs;',
-    '  try { blobs = JSON.parse(e.data.blobsJson || "[]"); }',
-    '  catch (blobParseErr) {',
-    '    self.postMessage({ ok: false, error: "blobs JSON parse failed: " + (blobParseErr.message || String(blobParseErr)) });',
-    '    return;',
-    '  }',
-    '  var keys = Object.keys(vars);',
-    // "blobs" is a reserved injected parameter name; a vars key of the same name would
-    // shadow it, silently hiding the attachments. Reject it with a clear message.
-    '  if (keys.indexOf("blobs") !== -1) {',
-    '    self.postMessage({ ok: false, error: "vars cannot contain a key named \\"blobs\\": that name is reserved for the injected attachment array." });',
-    '    return;',
-    '  }',
-    '  var values = keys.map(function(k) { return vars[k]; });',
-    '  keys.push("blobs");',
-    '  values.push(blobs);',
-    '  try {',
-    '    var fn = new Function(keys, code);',
-    '    var result = fn.apply(null, values);',
-    // Pull out a __document__ spec (if any) before applying the model-facing output cap.
-    // The spec carries the bulk data and gets its own larger budget; what remains is the
-    // result the model sees and must stay under the 200 KB cap.
-    '    var documentSpecForEval;',
-    '    if (result && typeof result === "object" && !Array.isArray(result) && Object.prototype.hasOwnProperty.call(result, "__document__")) {',
-    '      documentSpecForEval = result.__document__;',
-    '      var strippedResultForEval = {};',
-    '      Object.keys(result).forEach(function(k) { if (k !== "__document__") strippedResultForEval[k] = result[k]; });',
-    '      result = strippedResultForEval;',
-    '    }',
-    '    if (documentSpecForEval !== undefined) {',
-    '      var serializedDocForEval = JSON.stringify(documentSpecForEval);',
-    '      if (serializedDocForEval === undefined) {',
-    '        self.postMessage({ ok: false, error: "__document__ is not JSON-serializable." });',
-    '        return;',
-    '      }',
-    '      if (serializedDocForEval.length > EVAL_WORKER_MAX_DOCUMENT_BYTES) {',
-    '        self.postMessage({ ok: false, error: "__document__ too large: " + serializedDocForEval.length + " bytes (max " + EVAL_WORKER_MAX_DOCUMENT_BYTES + " bytes / 50 MB)." });',
-    '        return;',
-    '      }',
-    '    }',
-    // Serialize the result to check size before sending. This also validates that the
-    // value is JSON-serializable. JSON.stringify(undefined) is undefined; skip the size
-    // check in that case and report the (undefined) result as-is.
-    '    var serializedResultForEval = JSON.stringify(result);',
-    // Reject results that exceed the output cap. Returning a huge value (e.g.
-    // new Array(100000).fill("x")) would bloat every subsequent API call in the
-    // agent loop; the model should be told to return a smaller value instead.
-    '    if (serializedResultForEval !== undefined && serializedResultForEval.length > EVAL_WORKER_MAX_OUTPUT_BYTES) {',
-    '      self.postMessage({ ok: false, error: "Output too large: " + serializedResultForEval.length + " bytes (max " + EVAL_WORKER_MAX_OUTPUT_BYTES + " bytes / 200 KB). Return a smaller or summarized value." });',
-    '    } else {',
-    '      self.postMessage({ ok: true, result: result, document: documentSpecForEval });',
-    '    }',
-    '  } catch (err) {',
-    '    self.postMessage({ ok: false, error: err.message || String(err) });',
-    '  }',
-    '};'
-  ].join('\n');
+  function fail(msg) { self.postMessage({ ok: false, error: String(msg) }); }
+  function failCsp(msg) { self.postMessage({ ok: false, error: String(msg), cspBlocked: true }); }
+
+  if (typeof self.ABNewQuickJSModule !== 'function') {
+    fail('eval sandbox engine failed to load (QuickJS unavailable).');
+    return;
+  }
+
+  self.ABNewQuickJSModule().then(function (mod) {
+    var ctx = mod.newContext();
+    try {
+      var deadline = Date.now() + timeout;
+      ctx.runtime.setInterruptHandler(function () { return Date.now() > deadline; });
+
+      var pf = ctx.evalCode(polyfillSrc);
+      if (pf.error) { var pe = ctx.dump(pf.error); pf.error.dispose(); throw new Error('polyfill init failed: ' + (pe && pe.message ? pe.message : String(pe))); }
+      pf.value.dispose();
+
+      var vStr = ctx.newString(varsJson); ctx.setProp(ctx.global, '__ABV_STR__', vStr); vStr.dispose();
+      var bStr = ctx.newString(blobsJson); ctx.setProp(ctx.global, '__ABB_STR__', bStr); bStr.dispose();
+      var prep = ctx.evalCode('globalThis.__ABV__ = JSON.parse(__ABV_STR__); globalThis.__ABB__ = JSON.parse(__ABB_STR__);');
+      if (prep.error) { var pre = ctx.dump(prep.error); prep.error.dispose(); throw new Error('input injection failed: ' + (pre && pre.message ? pre.message : String(pre))); }
+      prep.value.dispose();
+
+      var run = ctx.evalCode(runSource);
+      if (run.error) {
+        var re = ctx.dump(run.error); run.error.dispose();
+        var msg = re && re.message ? String(re.message) : String(re);
+        if (/interrupted/i.test(msg)) { fail('Eval timeout: execution exceeded ' + timeout + 'ms'); return; }
+        fail(msg);
+        return;
+      }
+      var envStr = ctx.dump(run.value); run.value.dispose();
+      var env;
+      try { env = JSON.parse(envStr); } catch (parseErr) { fail('eval produced an unparseable result envelope'); return; }
+      if (!env || env.ok !== true) { fail(env && env.error ? env.error : 'eval failed'); return; }
+      var resultForPost = (env.resultJson === null || env.resultJson === undefined) ? undefined : JSON.parse(env.resultJson);
+      var documentForPost = (env.docJson === null || env.docJson === undefined) ? undefined : JSON.parse(env.docJson);
+      self.postMessage({ ok: true, result: resultForPost, document: documentForPost });
+    } catch (innerErr) {
+      var im = innerErr && innerErr.message ? innerErr.message : String(innerErr);
+      if (cspPattern.test(im)) { failCsp(im); } else { fail(im); }
+    } finally {
+      try { ctx.dispose(); } catch (disposeErr) {}
+    }
+  }, function (modErr) {
+    var mm = modErr && modErr.message ? modErr.message : String(modErr);
+    if (cspPattern.test(mm)) { failCsp(mm); } else { fail('eval sandbox failed to initialize: ' + mm); }
+  });
+};
+`;
+
+  // Lazily fetch the QuickJS bundle text and build a cached worker blob URL from
+  // [bundle + glue]. The bundle is fetched once (it is a web_accessible_resource); the
+  // blob URL is reused across calls (a fresh Worker is still spawned per call for
+  // per-call isolation). On failure the caches are reset so a later call can retry.
+  var quickjsLibTextPromiseForToolExec = null;
+  var evalWorkerBlobUrlPromiseForToolExec = null;
+
+  function loadQuickjsLibTextForToolExec() {
+    if (quickjsLibTextPromiseForToolExec) return quickjsLibTextPromiseForToolExec;
+    quickjsLibTextPromiseForToolExec = (async function () {
+      try {
+        var url = chrome.runtime.getURL('lib/quickjs.min.js');
+        var resp = await fetch(url);
+        if (!resp || !resp.ok) throw new Error('HTTP ' + (resp ? resp.status : 'no response'));
+        return await resp.text();
+      } catch (loadErr) {
+        quickjsLibTextPromiseForToolExec = null;
+        throw new Error('Failed to load eval sandbox bundle (lib/quickjs.min.js): ' + ((loadErr && loadErr.message) || String(loadErr)));
+      }
+    })();
+    return quickjsLibTextPromiseForToolExec;
+  }
+
+  function ensureEvalWorkerBlobUrlForToolExec() {
+    if (evalWorkerBlobUrlPromiseForToolExec) return evalWorkerBlobUrlPromiseForToolExec;
+    evalWorkerBlobUrlPromiseForToolExec = (async function () {
+      try {
+        var libText = await loadQuickjsLibTextForToolExec();
+        var source = libText + '\n;\n' + EVAL_WORKER_GLUE_SRC_FOR_TOOL_EXEC;
+        var blob = new Blob([source], { type: 'application/javascript' });
+        return URL.createObjectURL(blob);
+      } catch (blobErr) {
+        evalWorkerBlobUrlPromiseForToolExec = null;
+        throw blobErr;
+      }
+    })();
+    return evalWorkerBlobUrlPromiseForToolExec;
+  }
+
+  // Build the VM program run inside QuickJS. Vars and blobs are NOT interpolated into the
+  // source (they are injected as parsed VM globals __ABV__ / __ABB__); only the user code
+  // and the validated identifier key list are interpolated. Keys reach the function as
+  // named parameters; the reserved `blobs` parameter carries the attachment array. The
+  // __document__ split and the size caps run inside the VM so they fire even though the
+  // result never crosses through new Function on the host.
+  function buildEvalRunSourceForToolExec(code, keys) {
+    var paramList = keys.concat(['blobs']).join(', ');
+    var argList = keys.map(function (k) { return '__ABV__[' + JSON.stringify(k) + ']'; }).concat(['__ABB__']).join(', ');
+    return [
+      '(function () {',
+      '  var __MAXO__ = ' + EVAL_MAX_OUTPUT_BYTES_FOR_TOOL_EXEC + ';',
+      '  var __MAXD__ = ' + EVAL_MAX_DOCUMENT_BYTES_FOR_TOOL_EXEC + ';',
+      '  try {',
+      '    var __fn__ = function (' + paramList + ') {',
+      code,
+      '    };',
+      '    var __result__ = __fn__(' + argList + ');',
+      '    var __doc__;',
+      '    if (__result__ && typeof __result__ === "object" && !Array.isArray(__result__) && Object.prototype.hasOwnProperty.call(__result__, "__document__")) {',
+      '      __doc__ = __result__.__document__;',
+      '      var __stripped__ = {};',
+      '      Object.keys(__result__).forEach(function (k) { if (k !== "__document__") __stripped__[k] = __result__[k]; });',
+      '      __result__ = __stripped__;',
+      '    }',
+      '    var __docJson__;',
+      '    if (__doc__ !== undefined) {',
+      '      __docJson__ = JSON.stringify(__doc__);',
+      '      if (__docJson__ === undefined) { return JSON.stringify({ ok: false, error: "__document__ is not JSON-serializable." }); }',
+      '      if (__docJson__.length > __MAXD__) { return JSON.stringify({ ok: false, error: "__document__ too large: " + __docJson__.length + " bytes (max " + __MAXD__ + " bytes / 50 MB)." }); }',
+      '    }',
+      '    var __resJson__ = JSON.stringify(__result__);',
+      '    if (__resJson__ !== undefined && __resJson__.length > __MAXO__) { return JSON.stringify({ ok: false, error: "Output too large: " + __resJson__.length + " bytes (max " + __MAXO__ + " bytes / 200 KB). Return a smaller or summarized value." }); }',
+      '    return JSON.stringify({ ok: true, resultJson: (__resJson__ === undefined ? null : __resJson__), docJson: (__docJson__ === undefined ? null : __docJson__) });',
+      '  } catch (e) { return JSON.stringify({ ok: false, error: (e && e.message) ? String(e.message) : String(e) }); }',
+      '})()'
+    ].join('\n');
+  }
 
   function getAbortSignalForToolExec(context) {
     return context && context.signal && typeof context.signal.addEventListener === 'function'
@@ -4154,20 +4288,38 @@
     if (blobsJson.length > EVAL_MAX_BLOB_BYTES_FOR_TOOL_EXEC) {
       return { ok: false, error: 'blob_ids payload too large: ' + blobsJson.length + ' bytes (max 50 MB). Pass fewer or smaller attachments.' };
     }
+    // Validate vars keys before they become QuickJS function parameter names. The charset
+    // check prevents any source injection through the key list (the only host-built part
+    // of the VM program that is interpolated); `blobs` is reserved for the attachment array.
+    var varKeysForEval = Object.keys(vars);
+    for (var keyIdxForEval = 0; keyIdxForEval < varKeysForEval.length; keyIdxForEval++) {
+      var keyForEval = varKeysForEval[keyIdxForEval];
+      if (keyForEval === 'blobs') {
+        return { ok: false, error: 'vars cannot contain a key named "blobs": that name is reserved for the injected attachment array.' };
+      }
+      if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(keyForEval)) {
+        return { ok: false, error: 'vars key "' + keyForEval + '" is not a valid JavaScript identifier; use only letters, digits, _ or $, and do not start with a digit.' };
+      }
+    }
+    var runSourceForEval = buildEvalRunSourceForToolExec(code, varKeysForEval);
+
+    var evalWorkerBlobUrlForEval;
+    try {
+      evalWorkerBlobUrlForEval = await ensureEvalWorkerBlobUrlForToolExec();
+    } catch (ensureErr) {
+      return { ok: false, error: (ensureErr && ensureErr.message) || String(ensureErr) };
+    }
     if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
 
     return new Promise(function (resolve) {
-      var blob = new Blob([EVAL_WORKER_SRC_FOR_TOOL_EXEC], { type: 'application/javascript' });
-      var blobUrl = URL.createObjectURL(blob);
-      var worker = new Worker(blobUrl);
+      var worker;
       var settled = false;
 
       var settleEvalForToolExec = function (resultForEval) {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        worker.terminate();
-        URL.revokeObjectURL(blobUrl);
+        try { if (worker) worker.terminate(); } catch (termErr) { /* ignore */ }
         if (signal) signal.removeEventListener('abort', onAbortForEvalToolExec);
         resolve(resultForEval);
       };
@@ -4177,12 +4329,29 @@
       };
       if (signal) signal.addEventListener('abort', onAbortForEvalToolExec, { once: true });
 
+      // The QuickJS interrupt handler self-reports a clean "Eval timeout" at `timeout`;
+      // this hard terminate is only a backstop for a wedged worker and also absorbs the
+      // one-time WASM instantiation, hence the extra grace.
       var timer = setTimeout(function () {
         settleEvalForToolExec({ ok: false, error: 'Eval timeout: execution exceeded ' + timeout + 'ms' });
-      }, timeout);
+      }, timeout + EVAL_TIMEOUT_HARD_GRACE_MS_FOR_TOOL_EXEC);
+
+      try {
+        worker = new Worker(evalWorkerBlobUrlForEval);
+      } catch (workerErr) {
+        var weMsg = (workerErr && workerErr.message) || String(workerErr);
+        settleEvalForToolExec({ ok: false, error: EVAL_CSP_ERROR_PATTERN_FOR_TOOL_EXEC.test(weMsg) ? EVAL_CSP_BLOCKED_MESSAGE_FOR_TOOL_EXEC : ('eval sandbox worker could not start: ' + weMsg) });
+        return;
+      }
 
       worker.onmessage = function (e) {
         var workerDataForEval = e.data || {};
+        // The engine could not start because CSP blocks WebAssembly; surface the friendly,
+        // model-facing explanation instead of the raw engine error.
+        if (workerDataForEval.cspBlocked) {
+          settleEvalForToolExec({ ok: false, error: EVAL_CSP_BLOCKED_MESSAGE_FOR_TOOL_EXEC });
+          return;
+        }
         // A returned __document__ spec is generated into a real file here (outside the
         // worker, which has no document libraries) before the result is settled.
         if (workerDataForEval.ok && workerDataForEval.document !== undefined && workerDataForEval.document !== null) {
@@ -4195,12 +4364,20 @@
       };
 
       worker.onerror = function (e) {
-        settleEvalForToolExec({ ok: false, error: (e && e.message) || 'Worker error' });
+        var oeMsg = (e && e.message) || 'Worker error';
+        settleEvalForToolExec({ ok: false, error: EVAL_CSP_ERROR_PATTERN_FOR_TOOL_EXEC.test(oeMsg) ? EVAL_CSP_BLOCKED_MESSAGE_FOR_TOOL_EXEC : oeMsg });
       };
 
-      // Send vars and blobs as pre-serialized JSON strings rather than raw objects.
-      // See the JSON.stringify blocks above for the reasons.
-      worker.postMessage({ code: code, varsJson: varsJson, blobsJson: blobsJson });
+      // Send the pre-built VM program, the polyfill source, the pre-serialized vars/blobs
+      // (parsed inside the VM, never crossing as raw prototype-carrying objects), and the
+      // execution timeout used to arm the interrupt handler.
+      worker.postMessage({
+        runSource: runSourceForEval,
+        polyfillSrc: EVAL_POLYFILL_SRC_FOR_TOOL_EXEC,
+        varsJson: varsJson,
+        blobsJson: blobsJson,
+        timeout: timeout
+      });
     });
   }
 
