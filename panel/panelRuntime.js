@@ -10878,7 +10878,7 @@
       const latency = log.totalLatencyMs ? (log.totalLatencyMs / 1000).toFixed(2) + 's' : '';
       const preview = statusMetaForLogRow.preview;
       const reqType = log.requestType || log.type || '';
-      const reqTypeLabels = { chat: 'Chat', 'inline-chat': 'Inline', title: 'Title', compaction: 'Compact', web_search: 'Search', generate_image: 'Image', 'web-fetch-vision': 'Vision', 'web-fetch-summary': 'Summarize', 'tab-read': 'Tab', 'screenshot-vision': 'Vision', 'quiz-generate': 'Quiz', 'quiz-fix': 'Quiz Fix' };
+      const reqTypeLabels = { chat: 'Chat', 'inline-chat': 'Inline', title: 'Title', compaction: 'Compact', web_search: 'Search', generate_image: 'Image', 'web-fetch-vision': 'Vision', 'web-fetch-summary': 'Summarize', 'tab-read': 'Tab', 'screenshot-vision': 'Vision', 'image-vision': 'Vision', 'quiz-generate': 'Quiz', 'quiz-fix': 'Quiz Fix', 'quiz-review': 'Quiz Review' };
       const reqTypeLabel = reqTypeLabels[reqType] || escapeHtmlForPanelRuntime(reqType);
       const reqTypeBadge = reqType ? `<span class="log-request-type-badge">${reqTypeLabel}</span>` : '';
       return `<div class="log-row" data-action="view-log-detail" data-log-id="${log.id}">` +
@@ -10914,7 +10914,7 @@
       const statusMetaForLogDetail = getLogStatusMetaForPanelRuntime(log);
 
       const reqTypeRaw = log.requestType || log.type || '';
-      const reqTypeDisplayMap = { chat: 'Chat', 'inline-chat': 'Inline Chat', title: 'Title Generation', compaction: 'Compaction', web_search: 'Web Search', generate_image: 'Image Generation', 'web-fetch-vision': 'Web Fetch Vision', 'web-fetch-summary': 'Web Fetch Summary', 'tab-read': 'Tab Read', 'screenshot-vision': 'Screenshot Vision', 'quiz-generate': 'Quiz Generation', 'quiz-fix': 'Quiz Question Fix' };
+      const reqTypeDisplayMap = { chat: 'Chat', 'inline-chat': 'Inline Chat', title: 'Title Generation', compaction: 'Compaction', web_search: 'Web Search', generate_image: 'Image Generation', 'web-fetch-vision': 'Web Fetch Vision', 'web-fetch-summary': 'Web Fetch Summary', 'tab-read': 'Tab Read', 'screenshot-vision': 'Screenshot Vision', 'image-vision': 'Image Vision', 'quiz-generate': 'Quiz Generation', 'quiz-fix': 'Quiz Question Fix', 'quiz-review': 'Quiz Self-Containment Review' };
       const reqTypeDisplay = reqTypeDisplayMap[reqTypeRaw] || reqTypeRaw;
       let html = `<div class="log-detail-meta">` +
         `<div class="log-detail-row"><span class="log-detail-label">Status</span><span class="log-status-badge ${statusMetaForLogDetail.cssClass}">${escapeHtmlForPanelRuntime(statusMetaForLogDetail.label)}</span></div>` +
@@ -11606,6 +11606,32 @@
       });
     }
 
+    // Order-independent signature of a round's tool calls (name + canonicalized arguments),
+    // used to detect a degenerate loop where the model re-issues the identical failing call
+    // without adapting. Arguments are re-stringified with sorted keys so a pure key reorder
+    // still compares equal; unparseable arguments fall back to the raw string.
+    function canonicalizeJsonForPanelRuntime(valueForCanon) {
+      if (valueForCanon === null || typeof valueForCanon !== 'object') return JSON.stringify(valueForCanon);
+      if (Array.isArray(valueForCanon)) return '[' + valueForCanon.map(canonicalizeJsonForPanelRuntime).join(',') + ']';
+      const keysForCanon = Object.keys(valueForCanon).sort();
+      return '{' + keysForCanon.map(function (k) { return JSON.stringify(k) + ':' + canonicalizeJsonForPanelRuntime(valueForCanon[k]); }).join(',') + '}';
+    }
+
+    function computeToolRoundSignatureForPanelRuntime(toolCallsForSig) {
+      if (!toolCallsForSig || !toolCallsForSig.length) return '';
+      const partsForSig = toolCallsForSig.map(function (tc) {
+        const fnForSig = tc && tc.function ? tc.function : {};
+        const nameForSig = fnForSig.name || '';
+        const argsRawForSig = typeof fnForSig.arguments === 'string' ? fnForSig.arguments : '';
+        let argsCanonForSig;
+        try { argsCanonForSig = canonicalizeJsonForPanelRuntime(JSON.parse(argsRawForSig || '{}')); }
+        catch (e) { argsCanonForSig = argsRawForSig; }
+        return nameForSig + ' ' + argsCanonForSig;
+      });
+      partsForSig.sort();
+      return partsForSig.join('');
+    }
+
     async function sendChatForPanelRuntime(optionsForPanelRuntime) {
       const optsForPanelRuntime = optionsForPanelRuntime || {};
 
@@ -11850,8 +11876,11 @@
 
       const MAX_TOOL_ITERS = 20;
       const MAX_CONSECUTIVE_ALL_FAILURE_ITERS_FOR_SEND = 8;
+      const MAX_IDENTICAL_FAILING_ROUNDS_FOR_SEND = 3;
       let iterCount = 0;
       let consecutiveEmptyItersForSend = 0;
+      let identicalFailingRoundCountForSend = 0;
+      let lastFailingRoundSignatureForSend = null;
       let sideCallCostForSend = 0;
       let turnMainCostAccumForSend = 0;
       let accumulatedSearchSourcesForSend = [];
@@ -12885,11 +12914,28 @@
           const allToolsFailedForIter = toolResultsForLoop.every(function (r) {
             return !r || r.ok === false || (typeof r === 'object' && typeof r.error === 'string');
           });
+          const roundSignatureForSend = computeToolRoundSignatureForPanelRuntime(toolCallsForLoop);
           if (allToolsFailedForIter) {
             consecutiveEmptyItersForSend++;
+            if (roundSignatureForSend && roundSignatureForSend === lastFailingRoundSignatureForSend) {
+              identicalFailingRoundCountForSend++;
+            } else {
+              identicalFailingRoundCountForSend = 1;
+              lastFailingRoundSignatureForSend = roundSignatureForSend;
+            }
           } else {
             consecutiveEmptyItersForSend = 0;
+            identicalFailingRoundCountForSend = 0;
+            lastFailingRoundSignatureForSend = null;
             hadSuccessfulToolCallForSend = true;
+          }
+          if (identicalFailingRoundCountForSend >= MAX_IDENTICAL_FAILING_ROUNDS_FOR_SEND) {
+            if (S.activeChatId === chatId) {
+              appendSystemMsgToContainerForPanelRuntime(
+                'Agent stopped: the same tool call failed ' + identicalFailingRoundCountForSend + ' times in a row with identical arguments. Retrying without changing the call will not help; review the error above and try a different approach.'
+              );
+            }
+            break;
           }
           if (consecutiveEmptyItersForSend >= MAX_CONSECUTIVE_ALL_FAILURE_ITERS_FOR_SEND) {
             if (S.activeChatId === chatId) {
@@ -12904,6 +12950,7 @@
           const mutatedNoteIdsForLoop = new Set();
           const mutatedTaskIdsForLoop = new Set();
           const mutatedQuestionIdsForLoop = new Set();
+          let questionsGeneratedForLoop = false;
           for (var mi = 0; mi < toolCallsForLoop.length; mi++) {
             const tcNameForSync = toolCallsForLoop[mi].function && toolCallsForLoop[mi].function.name;
             const tcResultForSync = toolResultsForLoop[mi];
@@ -12913,10 +12960,16 @@
               else if (tcResultForSync.type === 'task') mutatedTaskIdsForLoop.add(Number(tcResultForSync.id));
               else if (tcResultForSync.type === 'question') mutatedQuestionIdsForLoop.add(Number(tcResultForSync.id));
             }
+            // generate_questions returns { saved, titles } with no ids, so it can't
+            // feed mutatedQuestionIds; flag a full questions refresh instead.
+            if (tcNameForSync === 'generate_questions' && tcResultForSync && tcResultForSync.ok &&
+                Number(tcResultForSync.saved) > 0) {
+              questionsGeneratedForLoop = true;
+            }
           }
           if (mutatedNoteIdsForLoop.size > 0) scheduleStoreRefreshForPanelRuntime('notes');
           if (mutatedTaskIdsForLoop.size > 0) scheduleStoreRefreshForPanelRuntime('tasks');
-          if (mutatedQuestionIdsForLoop.size > 0) scheduleStoreRefreshForPanelRuntime('questions');
+          if (mutatedQuestionIdsForLoop.size > 0 || questionsGeneratedForLoop) scheduleStoreRefreshForPanelRuntime('questions');
 
           if (S.activeChatId === chatId) scrollChatToBottomForPanelRuntime();
           const lbsForToolsDone = liveTurnBubblesForPanelRuntime.get(chatId);

@@ -1470,6 +1470,8 @@ async function fixQuestionForServiceWorker(question, issues, apiKey, model) {
     '- For MCQ: exactly 4 options, exactly 1 isCorrect:true, empty correctAnswer and alternativeAnswers.',
     '- For FITB: options:[], non-empty correctAnswer, questionText must contain "___", alternatives in alternativeAnswers.',
     '- The title must not contain or reveal the correct answer.',
+    '- The question must be fully self-contained: it will be attempted with no access to the source material. Embed any needed context in the questionText and name the subject or topic it concerns.',
+    '- Do not reference the source or its structure (no "according to the passage", "the text above", "the document", "as mentioned", "the author", etc.), and do not refer to a framework, model, theory, argument, or claim as if the reader already knows it (no bare "this hiring model", "the philosophy", "the stated alternative"); introduce or attribute any such idea inside the question and restate the relevant facts.',
     '- Do not include any text outside the JSON object.'
   ].join('\n');
   var userMsgForFix = 'Original question:\n' + JSON.stringify(question, null, 2) + '\n\nIssues to fix:\n' + issues.map(function (i) { return '- ' + i; }).join('\n');
@@ -1567,6 +1569,174 @@ async function fixQuestionForServiceWorker(question, issues, apiKey, model) {
   }
 }
 
+async function reviewQuestionsSelfContainmentForServiceWorker(questions, apiKey, model, signal) {
+  if (!Array.isArray(questions) || questions.length === 0) return questions;
+  if (!apiKey || !model) return questions;
+
+  var systemPromptForReview = [
+    'You are a quiz question reviewer. You check whether each quiz question is REFERENTIALLY SELF-CONTAINED and rewrite the ones that are not. You are intentionally NOT given the source material the questions came from: judge each question only from what it itself contains, exactly as a future quiz-taker will see it with no access to any source.',
+    '',
+    'A question is self-contained when BOTH are true:',
+    '1. It does not refer to unseen material. It must not point at a source the reader has not seen, whether by document structure ("according to the passage", "the text above", "the document", "as mentioned", "the author", "this section") OR by treating a source\'s coined idea as already known ("the scenario", "this model", "the philosophy", "the framework", "the stated alternative", "the speaker\'s example"). Introducing the idea generically is fine ("a proposed hiring framework that sorts roles by AI dependence"); a bare back-reference to it is not.',
+    '2. Its subject is clear. The reader can tell what topic or domain the question is about from the question alone.',
+    '',
+    'Do NOT judge whether the answer can be deduced from general knowledge. A question that tests a specific learned fact (a number, a definition, a claim) is valid and self-contained as long as it satisfies the two points above. Testing recalled facts is the purpose of the quiz; never flag a question merely because you could not answer it yourself without studying.',
+    '',
+    'For each question that is NOT self-contained, rewrite ONLY its questionText (and its title, if the title itself refers to unseen material) so that it stands on its own:',
+    '- Replace each reference to unseen material with the actual context it stood for, drawn from what the question and its answer already tell you. Do not invent new facts or add detail from outside knowledge.',
+    '- Preserve the question\'s specificity; do not broaden it. If a reference pointed at a specific described setup, restate that setup ("in a proposed multi-gigawatt space data center cooling design") rather than deleting it, so the existing correct answer stays uniquely correct.',
+    '- Do not change the question\'s type, options, correct answer, alternative answers, or which option is correct. Only the wording of the stem (and title) may change.',
+    '- For fill-in-the-blank questions, keep at least one run of three or more underscores ("___") in the rewritten questionText.',
+    '',
+    'Return ONLY a JSON object with this exact shape and no other text:',
+    '{"reviews":[{"index":0,"selfContained":true},{"index":1,"selfContained":false,"questionText":"<rewritten stem>","title":"<rewritten title, only if it needed changing>"}]}',
+    '',
+    '- index is the zero-based position of the question in the list you were given.',
+    '- Include one entry for every question, in order.',
+    '- When selfContained is true, include only index and selfContained.',
+    '- When selfContained is false, include the rewritten questionText (required) and title only if you changed it.',
+    '- Do not include any text outside the JSON object.'
+  ].join('\n');
+
+  var reviewInputForReview = questions.map(function (q, idx) {
+    return {
+      index: idx,
+      type: q && q.type === 'fitb' ? 'fitb' : 'mcq',
+      title: q && typeof q.title === 'string' ? q.title : '',
+      questionText: q && typeof q.questionText === 'string' ? q.questionText : '',
+      options: q && Array.isArray(q.options) ? q.options.map(function (o) { return { text: o && typeof o.text === 'string' ? o.text : '', isCorrect: !!(o && o.isCorrect) }; }) : [],
+      correctAnswer: q && typeof q.correctAnswer === 'string' ? q.correctAnswer : '',
+      alternativeAnswers: q && Array.isArray(q.alternativeAnswers) ? q.alternativeAnswers : []
+    };
+  });
+  var userMsgForReview = 'Questions to review (judge each as if you have not seen any source; index is the position starting at 0):\n' + JSON.stringify(reviewInputForReview);
+
+  var reviewLogStartForServiceWorker = Date.now();
+  var reviewRequestMessagesForLog = [
+    { role: 'system', content: systemPromptForReview },
+    { role: 'user', content: userMsgForReview }
+  ];
+  var reviewApiParamsForLog = { stream: false, response_format: { type: 'json_object' }, model: model };
+
+  try {
+    var MAX_RETRIES_FOR_REVIEW = 2;
+    var RETRY_DELAYS_FOR_REVIEW = [1500, 3000];
+    var RETRYABLE_FOR_REVIEW = [429, 502, 503, 504];
+    var respForReview = null;
+    var lastErrForReview = null;
+    for (var retryForReview = 0; retryForReview <= MAX_RETRIES_FOR_REVIEW; retryForReview++) {
+      if (signal && signal.aborted) {
+        writeSecondaryLlmLogForServiceWorker({ requestType: 'quiz-review', startTime: reviewLogStartForServiceWorker, model: model, status: 'cancelled', requestMessages: reviewRequestMessagesForLog, apiParams: reviewApiParamsForLog, responseContent: '' });
+        return questions;
+      }
+      if (retryForReview > 0) await delayForServiceWorker(RETRY_DELAYS_FOR_REVIEW[retryForReview - 1], signal);
+      lastErrForReview = null;
+      try {
+        respForReview = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + apiKey,
+            'HTTP-Referer': 'chrome-extension://agentic-browser-chat',
+            'X-OpenRouter-Title': 'Agentic Browser Chat'
+          },
+          body: JSON.stringify({
+            model: model,
+            response_format: { type: 'json_object' },
+            messages: [
+              { role: 'system', content: systemPromptForReview },
+              { role: 'user', content: userMsgForReview }
+            ]
+          }),
+          signal: signal || undefined
+        });
+        if (!respForReview.ok && RETRYABLE_FOR_REVIEW.indexOf(respForReview.status) !== -1 && retryForReview < MAX_RETRIES_FOR_REVIEW) {
+          lastErrForReview = new Error('HTTP ' + respForReview.status);
+          respForReview = null;
+          continue;
+        }
+        break;
+      } catch (fetchErrForReview) {
+        if (signal && signal.aborted) {
+          writeSecondaryLlmLogForServiceWorker({ requestType: 'quiz-review', startTime: reviewLogStartForServiceWorker, model: model, status: 'cancelled', requestMessages: reviewRequestMessagesForLog, apiParams: reviewApiParamsForLog, responseContent: '' });
+          return questions;
+        }
+        lastErrForReview = fetchErrForReview;
+        if (retryForReview >= MAX_RETRIES_FOR_REVIEW) break;
+      }
+    }
+
+    if (lastErrForReview || !respForReview || !respForReview.ok) {
+      writeSecondaryLlmLogForServiceWorker({
+        requestType: 'quiz-review',
+        startTime: reviewLogStartForServiceWorker,
+        model: model,
+        status: 'error',
+        errorMessage: (lastErrForReview && lastErrForReview.message) || (respForReview ? ('HTTP ' + respForReview.status) : 'Self-containment review request failed.'),
+        requestMessages: reviewRequestMessagesForLog,
+        apiParams: reviewApiParamsForLog,
+        responseContent: ''
+      });
+      return questions;
+    }
+
+    var jsonForReview = await respForReview.json();
+    var rawForReview = jsonForReview.choices && jsonForReview.choices[0] && jsonForReview.choices[0].message
+      ? (jsonForReview.choices[0].message.content || '') : '';
+    writeSecondaryLlmLogForServiceWorker({
+      requestType: 'quiz-review',
+      startTime: reviewLogStartForServiceWorker,
+      model: (jsonForReview && jsonForReview.model) || model,
+      status: 'success',
+      requestMessages: reviewRequestMessagesForLog,
+      apiParams: reviewApiParamsForLog,
+      responseContent: rawForReview,
+      usage: (jsonForReview && jsonForReview.usage) || null
+    });
+
+    var parsedForReview = null;
+    try { parsedForReview = JSON.parse(rawForReview); } catch (e) {}
+    if (!parsedForReview) {
+      var matchForReview = rawForReview.match(/\{[\s\S]*\}/);
+      if (matchForReview) { try { parsedForReview = JSON.parse(matchForReview[0]); } catch (e) {} }
+    }
+    var reviewsForReview = parsedForReview && Array.isArray(parsedForReview.reviews) ? parsedForReview.reviews : null;
+    if (!reviewsForReview) return questions;
+
+    var mergedForReview = questions.map(function (q) {
+      return (q && typeof q === 'object') ? Object.assign({}, q) : q;
+    });
+    for (var riForReview = 0; riForReview < reviewsForReview.length; riForReview++) {
+      var rForReview = reviewsForReview[riForReview];
+      if (!rForReview || typeof rForReview !== 'object') continue;
+      if (rForReview.selfContained !== false) continue;
+      var targetIdxForReview = rForReview.index;
+      if (typeof targetIdxForReview !== 'number' || targetIdxForReview < 0 || targetIdxForReview >= mergedForReview.length) continue;
+      var targetForReview = mergedForReview[targetIdxForReview];
+      if (!targetForReview || typeof targetForReview !== 'object') continue;
+      if (typeof rForReview.questionText === 'string' && rForReview.questionText.trim()) {
+        targetForReview.questionText = rForReview.questionText;
+      }
+      if (typeof rForReview.title === 'string' && rForReview.title.trim()) {
+        targetForReview.title = rForReview.title;
+      }
+    }
+    return mergedForReview;
+  } catch (e) {
+    writeSecondaryLlmLogForServiceWorker({
+      requestType: 'quiz-review',
+      startTime: reviewLogStartForServiceWorker,
+      model: model,
+      status: 'error',
+      errorMessage: (e && e.message) || 'Self-containment review failed.',
+      requestMessages: reviewRequestMessagesForLog,
+      apiParams: reviewApiParamsForLog,
+      responseContent: ''
+    });
+    return questions;
+  }
+}
+
 async function handleAgentGenerateQuestionsForServiceWorker(msgForGenQ, sendResponseForGenQ) {
   var contentForGenQ = typeof msgForGenQ.content === 'string' ? msgForGenQ.content.trim() : '';
   var countForGenQ = (typeof msgForGenQ.count === 'number' && msgForGenQ.count > 0) ? Math.floor(msgForGenQ.count) : 1;
@@ -1602,7 +1772,16 @@ async function handleAgentGenerateQuestionsForServiceWorker(msgForGenQ, sendResp
     '- For FITB: set options to []; set correctAnswer to the expected answer; list accepted variants in alternativeAnswers. The questionText MUST contain at least one sequence of three or more underscores (e.g. "___") to mark the blank.',
     '- title is a short label for the question (used as its display name).',
     '- explanation briefly explains the correct answer.',
-    '- Do not include any text outside the JSON object.'
+    '- Each question MUST be fully self-contained: the user attempts it later with NO access to the source material, seeing only the question itself (and, for MCQ, its options). Write every question so it can be understood and answered on its own.',
+    '- Embed any context needed to answer directly in the questionText, and name the specific subject, topic, or domain the question concerns so the reader is not left guessing what it is about. For example, prefer "In the HTTP protocol, which status code indicates a requested resource was not found?" over "Which status code indicates a requested resource was not found?".',
+    '- Do NOT reference the source material or its structure. This covers two patterns. (1) Document-structure references: avoid phrases such as "according to the passage", "the text above", "in the document", "as mentioned", "the author", "the article", "this section", or "the example shown". (2) Referring to a coined idea, framework, model, theory, argument, or claim as if the reader already knows it: avoid bare phrases such as "in this hiring model", "the philosophy argues", "the framework defines", "the stated alternative", or "the proposed approach". The reader has not seen the source, so a bare "this model" or "the philosophy" means nothing to them.',
+    '- Do not handle a source-specific idea (a named framework, model, theory, argument, or claim) by stripping it out; instead introduce or attribute it inside the question stem before asking about it, so the reader knows what is being discussed and the question carries its own premise.',
+    '- Do not include any text outside the JSON object.',
+    '',
+    'Examples of self-contained questions (the bad versions reference unseen material or omit the subject; the good versions stand on their own):',
+    'MCQ bad: "According to the text, which layer does this protocol operate at?". MCQ good: "In the OSI networking model, at which layer does the TCP protocol operate?" with options "Transport layer" (correct), "Network layer", "Session layer", and "Application layer".',
+    'FITB bad: "As the passage states, the powerhouse of the cell is the ___.". FITB good: "In biology, the organelle known as the powerhouse of the cell is the ___." with correctAnswer "mitochondrion".',
+    'Source-specific idea bad: "What does AI-mandatory mean in this hiring model?" (assumes the reader already knows the model). Good: "A proposed hiring framework sorts roles by how much they depend on AI tools, using categories such as AI-mandatory. In that framework, what does AI-mandatory mean?" with the four options. Introduce or attribute the framework first so the question stands on its own.'
   ].filter(function (l) { return l !== null; }).join('\n');
 
   var genQLogStartForServiceWorker = Date.now();
@@ -1717,6 +1896,13 @@ async function handleAgentGenerateQuestionsForServiceWorker(msgForGenQ, sendResp
     var questionsForGenQ = parsedForGenQ && Array.isArray(parsedForGenQ.questions) ? parsedForGenQ.questions : null;
     if (!questionsForGenQ || questionsForGenQ.length === 0) {
       sendResponseForGenQ({ ok: false, error: 'No questions returned by model. Raw response: ' + rawContentForGenQ.slice(0, 200) });
+      return;
+    }
+
+    questionsForGenQ = await reviewQuestionsSelfContainmentForServiceWorker(questionsForGenQ, apiKeyForGenQ, modelForGenQ, requestRecordForGenQ ? requestRecordForGenQ.signal : null);
+    if (requestRecordForGenQ && requestRecordForGenQ.signal.aborted) {
+      logGenQOnceForServiceWorker({ status: 'cancelled' });
+      sendResponseForGenQ({ ok: false, cancelled: true, error: 'Cancelled' });
       return;
     }
 

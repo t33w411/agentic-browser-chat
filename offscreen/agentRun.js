@@ -32,6 +32,7 @@
   var ITER_TOOL_IMAGE_TIMEOUT_MS_FOR_AGENT_RUN = 3 * 60 * 1000;
   var MAX_TOOL_ITERS_FOR_AGENT_RUN = 20;
   var MAX_CONSECUTIVE_ALL_FAILURE_ITERS_FOR_AGENT_RUN = 8;
+  var MAX_IDENTICAL_FAILING_ROUNDS_FOR_AGENT_RUN = 3;
   var MAX_STREAM_RETRIES_FOR_AGENT_RUN = 3;
   var MAX_CONCURRENT_RUNS_FOR_AGENT_RUN = 3;
   var MIN_TOOL_DISPLAY_MS_FOR_AGENT_RUN = 3000;
@@ -146,6 +147,32 @@
   // fields were meaningless. page_accessibility_tree stays in the offscreen loop because it
   // is a pure CDP read with no document dependency.
   var PAGE_DELEGATED_TOOLS_FOR_AGENT_RUN = { page_query: true, page_fill_form: true, page_act: true };
+
+  // Order-independent signature of a round's tool calls (name + canonicalized arguments),
+  // used to detect a degenerate loop where the model re-issues the identical failing call
+  // without adapting. Arguments are re-stringified with sorted keys so a pure key reorder
+  // still compares equal; unparseable arguments fall back to the raw string.
+  function canonicalizeJsonForAgentRun(value) {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value);
+    if (Array.isArray(value)) return '[' + value.map(canonicalizeJsonForAgentRun).join(',') + ']';
+    var keys = Object.keys(value).sort();
+    return '{' + keys.map(function (k) { return JSON.stringify(k) + ':' + canonicalizeJsonForAgentRun(value[k]); }).join(',') + '}';
+  }
+
+  function computeToolRoundSignatureForAgentRun(toolCalls) {
+    if (!toolCalls || !toolCalls.length) return '';
+    var parts = toolCalls.map(function (tc) {
+      var fn = tc && tc.function ? tc.function : {};
+      var nameForSig = fn.name || '';
+      var argsRaw = typeof fn.arguments === 'string' ? fn.arguments : '';
+      var argsCanon;
+      try { argsCanon = canonicalizeJsonForAgentRun(JSON.parse(argsRaw || '{}')); }
+      catch (e) { argsCanon = argsRaw; }
+      return nameForSig + ' ' + argsCanon;
+    });
+    parts.sort();
+    return parts.join('');
+  }
 
   function executeToolForAgentRun(nameForExec, argsForExec, contextForExec) {
     if (PAGE_DELEGATED_TOOLS_FOR_AGENT_RUN[nameForExec]) {
@@ -328,6 +355,8 @@
 
     var iterCount = 0;
     var consecutiveEmptyItersForRun = 0;
+    var identicalFailingRoundCountForRun = 0;
+    var lastFailingRoundSignatureForRun = null;
     var sideCallCostForRun = 0;
     var turnMainCostAccumForRun = 0;
     var prevTurnMainCostForRun = 0;
@@ -900,11 +929,24 @@
         if (controllerForRun.signal.aborted) { markRunStoppedForRun(); break; }
 
         var allToolsFailedForRun = toolResultsForRun.every(function (r) { return !r || r.ok === false || (typeof r === 'object' && typeof r.error === 'string'); });
+        var roundSignatureForRun = computeToolRoundSignatureForAgentRun(toolCallsForLoop);
         if (allToolsFailedForRun) {
           consecutiveEmptyItersForRun++;
+          if (roundSignatureForRun && roundSignatureForRun === lastFailingRoundSignatureForRun) {
+            identicalFailingRoundCountForRun++;
+          } else {
+            identicalFailingRoundCountForRun = 1;
+            lastFailingRoundSignatureForRun = roundSignatureForRun;
+          }
         } else {
           consecutiveEmptyItersForRun = 0;
+          identicalFailingRoundCountForRun = 0;
+          lastFailingRoundSignatureForRun = null;
           hadSuccessfulToolCallForRun = true;
+        }
+        if (identicalFailingRoundCountForRun >= MAX_IDENTICAL_FAILING_ROUNDS_FOR_AGENT_RUN) {
+          emitForAgentRun('stream_system_notice', chatId, { text: 'Agent stopped: the same tool call failed ' + identicalFailingRoundCountForRun + ' times in a row with identical arguments. Retrying without changing the call will not help; review the error above and try a different approach.' });
+          break;
         }
         if (consecutiveEmptyItersForRun >= MAX_CONSECUTIVE_ALL_FAILURE_ITERS_FOR_AGENT_RUN) {
           emitForAgentRun('stream_system_notice', chatId, { text: 'Agent stopped: ' + MAX_CONSECUTIVE_ALL_FAILURE_ITERS_FOR_AGENT_RUN + ' consecutive rounds of tool calls all returned errors. Review the results above and try a different approach.' });

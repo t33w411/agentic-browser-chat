@@ -10,15 +10,16 @@
       type: 'function',
       function: {
         name: 'read',
-        description: 'Read a note, chat, task, or question by ID. Returns content as an array of {ln, lc} objects (ln: line number, lc: line content) and a revision token (rev). Use offset and limit to read a contiguous range, or use lines to fetch specific non-contiguous line numbers in a single call (useful after grep). lines takes precedence over offset and limit when provided. When limit is omitted, a default cap of 200 lines is applied; if the item has more lines the response includes has_more: true; use offset to page forward. For notes read without an explicit limit or lines parameter, the response also includes an attachments field (string) if the note has file or image attachments; this field is suppressed when has_more is true (i.e. the note did not fit in the default window).',
+        description: 'Read a note, chat, task, question, or file attachment by ID. Returns content as an array of {ln, lc} objects (ln: line number, lc: line content) and a revision token (rev). Use offset and limit to read a contiguous range, or use lines to fetch specific non-contiguous line numbers in a single call (useful after grep). lines takes precedence over offset and limit when provided. When limit is omitted, a default cap of 200 lines is applied; if the item has more lines the response includes has_more: true; use offset to page forward. Two display caps also apply: each line is truncated to 2000 characters (such a line carries lc_truncated: true and lc_len with the original length; raise max_line_chars to see more, or use grep to find within it), and the whole response is capped at ~200 KB (when this trims the page the response carries truncated_by_bytes: true and has_more: true with guidance on the next offset). For notes, the response includes an attachments field (string) listing each attachment with its name, blob_id, type, size, and readability; this is always present when the note has attachments. To read a text attachment\'s content, call read with type "attachment" and id set to the attachment\'s blob_id. For an image attachment, the same call returns a vision-model description in a description field (with is_image: true); if no API key is set or the analysis is unavailable it falls back to image metadata with an explanatory note.',
         parameters: {
           type: 'object',
           properties: {
-            type: { type: 'string', enum: ['note', 'chat', 'task', 'question'], description: 'The data type to read.' },
-            id: { type: 'integer', description: 'The integer ID of the item to read.' },
+            type: { type: 'string', enum: ['note', 'chat', 'task', 'question', 'attachment'], description: 'The data type to read. Use "attachment" to read a file attachment by its blob id (passed as id): text attachments return their content as lines, image attachments return a vision-model description. The blob_id is shown in the attachments field of a note read.' },
+            id: { type: 'integer', description: 'The integer ID of the item to read. For type "attachment" this is the attachment blob id (shown as blob_id in a note read), NOT the note id.' },
             lines: { type: 'array', items: { type: 'integer' }, description: 'Specific 1-indexed line numbers to fetch. Non-contiguous lines are returned in ascending order. Takes precedence over offset and limit. Values less than 1 and values exceeding total_lines are both skipped and reported in a warning field on the response; check total_lines before requesting specific line numbers.' },
             offset: { type: 'integer', description: '1-indexed line number to start reading from. Defaults to 1. Must be 1 or greater and must not exceed the item\'s total_lines; the call fails with an error if either condition is violated. Check total_lines from a prior read or list result before paginating. Ignored when lines is provided.' },
-            limit: { type: 'integer', description: 'Maximum number of lines to return. Defaults to 200 when omitted; pass a larger value to read more. When the default truncates the result, the response includes has_more: true; use offset to page forward. Ignored when lines is provided.' }
+            limit: { type: 'integer', description: 'Maximum number of lines to return. Defaults to 200 when omitted; pass a larger value to read more. When the default truncates the result, the response includes has_more: true; use offset to page forward. Ignored when lines is provided.' },
+            max_line_chars: { type: 'integer', description: 'Maximum characters returned per line before truncation. Defaults to 2000. Raise this to see more of a long line (still bounded by the ~200 KB total response cap). A line longer than this limit carries lc_truncated: true and lc_len (its original length).' }
           },
           required: ['type', 'id']
         }
@@ -36,10 +37,11 @@
             type: { type: 'string', enum: ['note', 'task'], description: 'The data type to create.' },
             title: { type: 'string', description: 'Item title. Required.' },
             content: { type: 'string', description: 'Full content to write. For notes and tasks this is the body text. For questions this is the serialized question format.' },
-            noteType: { type: 'string', enum: ['user', 'agent'], description: "Notes only: fails with an error if used on tasks or questions. noteType to assign. Defaults to 'user'." },
-            tags: { type: 'array', items: { type: 'string' }, description: "Notes only: fails with an error if used on tasks or questions. Array of tag strings." },
-            due_at: { type: 'string', description: "Tasks only: fails with an error if used on other types. ISO 8601 due date/time string. Defaults to tomorrow if omitted." },
-            is_completed: { type: 'boolean', description: "Tasks only: fails with an error if used on other types. Completion status. Defaults to false." }
+            noteType: { type: 'string', enum: ['user', 'agent'], description: "Notes only: ignored if provided for other types. noteType to assign. Defaults to 'user'." },
+            tags: { type: 'array', items: { type: 'string' }, description: "Notes only: ignored if provided for other types. Array of tag strings." },
+            due_at: { type: 'string', description: "Tasks only: ignored if provided for other types. ISO 8601 due date/time string. Defaults to tomorrow if omitted. Unless you also provide reminder_at, the reminder is set automatically to fire before this due date/time (using the user's reminder lead time)." },
+            reminder_at: { type: 'string', description: "Tasks only: ignored if provided for other types. ISO 8601 reminder date/time string. Must be before due_at, otherwise the call is rejected. If omitted, the reminder is derived automatically to fire before the due date/time." },
+            is_completed: { type: 'boolean', description: "Tasks only: ignored if provided for other types. Completion status. Defaults to false." }
           },
           required: ['type', 'title', 'content']
         }
@@ -50,7 +52,7 @@
       type: 'function',
       function: {
         name: 'edit',
-        description: 'Make a targeted edit in a note, task, or question. Requires the rev token from a prior read. Can update the title, content, or both in one call. At least one of title or a content change (old_string or line_start) must be provided. Two content modes: (1) String mode (no line_start): find and replace old_string with new_string. Fails if old_string is empty, not found, or matches more than once without replace_all. (2) Line mode (line_start provided): replace the specified line or line range with new_string. old_string and old_string_end are optional safety checks: in line mode they are substring checks (the target line must contain the string, not match it exactly). Only use line_start: 1 with line_end: total_lines when the new content is substantially different from the original; for small changes use string mode or targeted line replacement. Both modes fail if rev is stale. Returns the updated id, type, and rev.',
+        description: 'Make a targeted edit in a note, task, or question. Requires the rev token from a prior read. Can update the title, content, or both in one call. For tasks it can additionally update the structured fields due_at, reminder_at, and is_completed (these can be changed alone, without any title or content change). At least one of title, a content change (old_string or line_start), or a task field (due_at, reminder_at, is_completed) must be provided. Two content modes: (1) String mode (no line_start): find and replace old_string with new_string. Fails if old_string is empty, not found, or matches more than once without replace_all. (2) Line mode (line_start provided): replace the specified line or line range with new_string. old_string and old_string_end are optional safety checks: in line mode they are substring checks (the target line must contain the string, not match it exactly). Only use line_start: 1 with line_end: total_lines when the new content is substantially different from the original; for small changes use string mode or targeted line replacement. Both modes fail if rev is stale. Returns the updated id, type, and rev.',
         parameters: {
           type: 'object',
           properties: {
@@ -63,7 +65,10 @@
             replace_all: { type: 'boolean', description: 'String mode only: replace every occurrence of old_string. Defaults to false. Fails with an error if line_start is also provided.' },
             line_start: { type: 'integer', description: 'Activates line mode. 1-indexed line number to begin replacing. When line_end is omitted, only this single line is replaced.' },
             line_end: { type: 'integer', description: 'Line mode only: 1-indexed last line of the range to replace (inclusive). Must be >= line_start. Omit to replace only line_start.' },
-            old_string_end: { type: 'string', description: 'Line mode only: optional safety check: edit fails if line_end does not contain this string. Requires line_end to be specified.' }
+            old_string_end: { type: 'string', description: 'Line mode only: optional safety check: edit fails if line_end does not contain this string. Requires line_end to be specified.' },
+            due_at: { type: 'string', description: "Tasks only: ignored (and reported in the response's ignored array) for other types. New ISO 8601 due date/time. When you change this without also setting reminder_at, the reminder is automatically moved to fire before the new due date/time." },
+            reminder_at: { type: 'string', description: "Tasks only: ignored (and reported in the response's ignored array) for other types. New ISO 8601 reminder date/time. Must be before the task's due date/time (the new due_at if you are also changing it in this call), otherwise the edit is rejected." },
+            is_completed: { type: 'boolean', description: "Tasks only: ignored (and reported in the response's ignored array) for other types. Set the task's completion status (true = complete, false = incomplete)." }
           },
           required: ['type', 'id', 'rev']
         }
@@ -103,17 +108,17 @@
           type: 'object',
           properties: {
             type: { type: 'string', enum: ['note', 'chat', 'task', 'question'], description: 'Restrict to one data type. Omit to list all types.' },
-            noteType: { type: 'string', enum: ['user', 'agent'], description: "Filter notes by noteType. Only valid when type is 'note' or omitted; fails with an error if type is set to anything other than 'note'. Omit to include both." },
+            noteType: { type: 'string', enum: ['user', 'agent'], description: "Filter notes by noteType. Applies when type is 'note' or omitted; ignored (and reported in the response's ignored array) if type is set to anything other than 'note'. Omit to include both." },
             limit: { type: 'integer', description: 'Maximum items to return per type. Must be a positive integer if provided; omit to return all.' },
             offset: { type: 'integer', description: 'Number of items to skip per type before returning results. Use with limit for pagination. Defaults to 0.' },
             sort_by: { type: 'string', enum: ['updatedAt', 'createdAt', 'title', 'dueAt', 'intervalStage'], description: "Field to sort by. Defaults to 'updatedAt'. dueAt applies to tasks and questions; intervalStage applies to questions. Both fall back to updatedAt for other types." },
             order: { type: 'string', enum: ['asc', 'desc'], description: "Sort direction. Defaults to 'desc'." },
-            tags: { type: 'array', items: { type: 'string' }, description: "Notes only: return notes that have any of these tags. Fails with an error if type is set to anything other than 'note'." },
-            is_completed: { type: 'boolean', description: "Tasks only: filter by completion status. Fails with an error if type is set to anything other than 'task'." },
-            is_paused: { type: 'boolean', description: "Questions only: filter by paused status. Fails with an error if type is set to anything other than 'question'." },
-            is_pinned: { type: 'boolean', description: "Chats only: filter by pinned status. Fails with an error if type is set to anything other than 'chat'." },
-            due_before: { type: 'string', description: "Tasks and questions: return only items with dueAt on or before this ISO 8601 date string. Fails with an error if type is set to 'note' or 'chat'." },
-            due_after: { type: 'string', description: "Tasks and questions: return only items with dueAt on or after this ISO 8601 date string. Fails with an error if type is set to 'note' or 'chat'." }
+            tags: { type: 'array', items: { type: 'string' }, description: "Notes only: return notes that have any of these tags. Ignored (and reported in the response's ignored array) if type is set to anything other than 'note'." },
+            is_completed: { type: 'boolean', description: "Tasks only: filter by completion status. Ignored (and reported in the response's ignored array) if type is set to anything other than 'task'." },
+            is_paused: { type: 'boolean', description: "Questions only: filter by paused status. Ignored (and reported in the response's ignored array) if type is set to anything other than 'question'." },
+            is_pinned: { type: 'boolean', description: "Chats only: filter by pinned status. Ignored (and reported in the response's ignored array) if type is set to anything other than 'chat'." },
+            due_before: { type: 'string', description: "Tasks and questions: return only items with dueAt on or before this ISO 8601 date string. Ignored (and reported in the response's ignored array) if type is set to 'note' or 'chat'." },
+            due_after: { type: 'string', description: "Tasks and questions: return only items with dueAt on or after this ISO 8601 date string. Ignored (and reported in the response's ignored array) if type is set to 'note' or 'chat'." }
           },
           required: []
         }
@@ -576,7 +581,7 @@
         parameters: {
           type: 'object',
           properties: {
-            content: { type: 'string', description: 'The source material to generate questions from. Pass the relevant text you have already read from the conversation or notes.' },
+            content: { type: 'string', description: 'The source material to generate questions from. Pass the relevant text you have already read from the conversation or notes, and include enough surrounding context to identify the subject, topic, or domain it covers (e.g. the section heading, the concept name, or a one-line framing). The generated questions are stored and attempted later with no access to this material, so each one must stand on its own; the generator can only achieve that if the content you pass makes clear what the material is about. Do not pass a bare, context-free snippet.' },
             count: { type: 'integer', description: 'Number of questions to generate. Defaults to 1 if omitted.' },
             question_type: { type: 'string', enum: ['mcq', 'fitb', 'mix'], description: 'Type of questions to generate. "mcq" = multiple choice only, "fitb" = fill-in-the-blank only, "mix" = freely mix both types. Defaults to "mix" if omitted.' },
             focus: { type: 'string', description: 'Optional natural-language description scoping which topic or concept within the source material to focus on.' }
