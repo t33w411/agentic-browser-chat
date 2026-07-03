@@ -4005,12 +4005,8 @@
     }
 
     function closeRawViewForPanelRuntime() {
-      const rawViewForClose = root.getElementById('chat-raw-view');
-      if (rawViewForClose) rawViewForClose.classList.add('hidden');
-
-      const chatMainForClose = root.getElementById('chat-main');
-      if (chatMainForClose) chatMainForClose.classList.remove('raw-view-active');
-
+      // Raw view is hidden and raw-view-active is stripped centrally inside
+      // showChatMessages, so switching back to empty/conversation is all that is needed.
       showChatMessages(S.activeChatId !== null);
     }
 
@@ -4206,6 +4202,15 @@
       CHAT NAVIGATION
     ============================================================ */
     function showChatMessages(show) {
+      // Showing the empty state or the conversation always means we are leaving the
+      // raw-JSON view, so dismiss it here centrally. This guarantees every caller
+      // (newChat, selectChat, tab switches, etc.) exits the raw view without each
+      // having to remember to close it separately.
+      const rawViewForShowMessages = root.getElementById('chat-raw-view');
+      if (rawViewForShowMessages) rawViewForShowMessages.classList.add('hidden');
+      const chatMainForShowMessages = root.getElementById('chat-main');
+      if (chatMainForShowMessages) chatMainForShowMessages.classList.remove('raw-view-active');
+
       root.getElementById('chat-empty-state').classList.toggle('hidden', show);
       root.getElementById('chat-messages-content').classList.toggle('hidden', !show);
       if (show) {
@@ -7994,7 +7999,7 @@
           ? evtForPasteIntercept.clipboardData.getData('text/plain')
           : '';
         if (!textForPasteIntercept) return;
-        if (textForPasteIntercept.length > 1000) {
+        if (textForPasteIntercept.length > 3000) {
           addInputChipForPanelRuntime({
             type: 'paste',
             label: 'Pasted text',
@@ -8749,6 +8754,38 @@
       openAttachmentPreview(chipNameForPanelRuntime, previewPayloadForPanelRuntime);
     }
 
+    let currentAttachPreviewForPanelRuntime = null;
+
+    function computeAttachPreviewStatsForPanelRuntime(textForStats) {
+      const sForStats = String(textForStats || '');
+      const charsForStats = sForStats.length;
+      const trimmedForStats = sForStats.trim();
+      const wordsForStats = trimmedForStats ? trimmedForStats.split(/\s+/).length : 0;
+      const linesForStats = sForStats ? sForStats.split(/\r\n|\r|\n/).length : 0;
+      return { chars: charsForStats, words: wordsForStats, lines: linesForStats };
+    }
+
+    function formatAttachPreviewStatsForPanelRuntime(statsForFormat) {
+      const pluralizeForStats = function (countForStats, nounForStats) {
+        return countForStats.toLocaleString() + ' ' + nounForStats + (countForStats === 1 ? '' : 's');
+      };
+      return [
+        pluralizeForStats(statsForFormat.chars, 'char'),
+        pluralizeForStats(statsForFormat.words, 'word'),
+        pluralizeForStats(statsForFormat.lines, 'line')
+      ].join(' · ');
+    }
+
+    function deriveAttachPreviewImageFilenameForPanelRuntime(nameForFilename, dataUrlForFilename) {
+      let baseForFilename = String(nameForFilename || '').trim() || 'image';
+      if (/\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(baseForFilename)) return baseForFilename;
+      const mimeMatchForFilename = /^data:image\/([a-z0-9.+-]+)/i.exec(String(dataUrlForFilename || ''));
+      let extForFilename = mimeMatchForFilename ? mimeMatchForFilename[1].toLowerCase() : 'png';
+      if (extForFilename === 'jpeg') extForFilename = 'jpg';
+      if (extForFilename === 'svg+xml') extForFilename = 'svg';
+      return baseForFilename + '.' + extForFilename;
+    }
+
     function openAttachmentPreview(name, payloadForPanelRuntime) {
       const overlay = root.getElementById('attach-preview-overlay');
       const host = root.getElementById('panel-host');
@@ -8783,11 +8820,53 @@
         apContentEl.innerHTML = renderNoteMarkdown(String(normalizedPayloadForPanelRuntime.content || ''));
         hydrateRenderedMarkdownForPanelRuntime(apContentEl);
       }
+      configureAttachPreviewFooterForPanelRuntime(name, normalizedPayloadForPanelRuntime);
       overlay.classList.remove('hidden');
+    }
+
+    function configureAttachPreviewFooterForPanelRuntime(nameForFooter, payloadForFooter) {
+      const footerElForPanelRuntime = root.getElementById('ap-footer');
+      const countsElForPanelRuntime = root.getElementById('ap-counts');
+      const copyBtnForPanelRuntime = root.getElementById('ap-copy-btn');
+      const downloadBtnForPanelRuntime = root.getElementById('ap-download-btn');
+      if (!footerElForPanelRuntime) return;
+      const previewTypeForFooter = String(payloadForFooter.previewType || '').toLowerCase();
+      const textContentForFooter = String(payloadForFooter.content || '');
+      const dataUrlForFooter = String(payloadForFooter.dataUrl || '');
+      const isImageForFooter = previewTypeForFooter === 'image' && dataUrlForFooter.indexOf('data:image/') === 0;
+      const hasTextForFooter = !isImageForFooter && textContentForFooter.length > 0;
+
+      currentAttachPreviewForPanelRuntime = {
+        name: String(nameForFooter || ''),
+        previewType: previewTypeForFooter,
+        content: hasTextForFooter ? textContentForFooter : '',
+        dataUrl: isImageForFooter ? dataUrlForFooter : ''
+      };
+
+      if (copyBtnForPanelRuntime) {
+        copyBtnForPanelRuntime.classList.toggle('hidden', !hasTextForFooter);
+        copyBtnForPanelRuntime.innerHTML = ic.copy12 + '<span class="ap-action-label">Copy</span>';
+      }
+      if (downloadBtnForPanelRuntime) {
+        downloadBtnForPanelRuntime.classList.toggle('hidden', !isImageForFooter);
+      }
+      if (countsElForPanelRuntime) {
+        if (hasTextForFooter) {
+          countsElForPanelRuntime.textContent = formatAttachPreviewStatsForPanelRuntime(
+            computeAttachPreviewStatsForPanelRuntime(textContentForFooter)
+          );
+          countsElForPanelRuntime.classList.remove('hidden');
+        } else {
+          countsElForPanelRuntime.textContent = '';
+          countsElForPanelRuntime.classList.add('hidden');
+        }
+      }
+      footerElForPanelRuntime.classList.toggle('hidden', !hasTextForFooter && !isImageForFooter);
     }
 
     function closeAttachPreview() {
       root.getElementById('attach-preview-overlay').classList.add('hidden');
+      currentAttachPreviewForPanelRuntime = null;
       writePanelStateSyncForPanelRuntime({ attachPreviewOpen: false });
     }
 
@@ -15662,6 +15741,37 @@
             case 'send-inline-message':  sendInlineMessage(); break;
             case 'close-picker-modal':   closePickerModal(); break;
             case 'close-attach-preview': closeAttachPreview(); break;
+            case 'copy-attach-preview': {
+              const textForAttachCopy = currentAttachPreviewForPanelRuntime ? String(currentAttachPreviewForPanelRuntime.content || '') : '';
+              if (!textForAttachCopy) break;
+              const markAttachCopiedForPanelRuntime = function () {
+                tgtForRuntime.classList.add('copied');
+                tgtForRuntime.innerHTML = ic.check12 + '<span class="ap-action-label">Copied</span>';
+                setTimeout(function () {
+                  tgtForRuntime.classList.remove('copied');
+                  tgtForRuntime.innerHTML = ic.copy12 + '<span class="ap-action-label">Copy</span>';
+                }, 1800);
+              };
+              if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+                navigator.clipboard.writeText(textForAttachCopy)
+                  .then(markAttachCopiedForPanelRuntime)
+                  .catch(function () { fallbackCopy(textForAttachCopy, markAttachCopiedForPanelRuntime); });
+              } else {
+                fallbackCopy(textForAttachCopy, markAttachCopiedForPanelRuntime);
+              }
+              break;
+            }
+            case 'download-attach-preview': {
+              const dataUrlForAttachDownload = currentAttachPreviewForPanelRuntime ? String(currentAttachPreviewForPanelRuntime.dataUrl || '') : '';
+              if (dataUrlForAttachDownload.indexOf('data:image/') !== 0) break;
+              const aForAttachDownload = document.createElement('a');
+              aForAttachDownload.href = dataUrlForAttachDownload;
+              aForAttachDownload.download = deriveAttachPreviewImageFilenameForPanelRuntime(
+                currentAttachPreviewForPanelRuntime.name, dataUrlForAttachDownload
+              );
+              aForAttachDownload.click();
+              break;
+            }
             case 'show-hidden-pair':     showHiddenPair(tgtForRuntime); break;
             case 'hide-pair':            hidePair(tgtForRuntime); break;
             case 'remove-tag-pill':      {

@@ -358,13 +358,13 @@
       type: 'function',
       function: {
         name: 'web_search',
-        description: 'Search the web for current information. Use this for news, recent events, real-time data, or any question where up-to-date information is needed. Use this whenever you need to look something up, even if you think you know the URL. Never construct a URL yourself and fetch it directly with web_fetch. Always write specific, detailed queries; vague or short queries produce poor results. After searching, if the result snippets do not provide enough detail, use web_fetch on one or more of the returned URLs to read the full page content.',
+        description: 'Search the web for current information. Use this for news, recent events, real-time data, or any question where up-to-date information is needed. Use this whenever you need to look something up, even if you think you know the URL. Never construct a URL yourself and fetch it directly with web_fetch. Always write specific, detailed queries; vague or short queries produce poor results. Each call returns a grounded summary synthesized from the search plus a list of source results (title and url). Read the summary first; if you need more detail than it provides, use web_fetch on one or more of the returned URLs to read the full page content.',
         parameters: {
           type: 'object',
           properties: {
             query: { type: 'string', description: 'The search query. Write it like an expert searcher: use 4-10 words, include specific terminology and related keywords, add the current year or a date range when recency matters (e.g. "2026"), include a location when the topic is geography-sensitive, and use precise nouns and qualifiers rather than vague generic phrases. Never use single-word or two-word queries.' },
             max_results: { type: 'integer', description: 'Maximum number of results to return (5-10). Defaults to 5.' },
-            academic_only: { type: 'boolean', description: 'If true, restricts results to academic sources (arXiv, PubMed, Google Scholar, Semantic Scholar, JSTOR, bioRxiv, SSRN, IEEE Xplore, ACM Digital Library, ResearchGate, and similar). Best-effort: if no academic results are found the full result set is returned with a note.' }
+            academic_only: { type: 'boolean', description: 'If true, restricts the search to academic sources (arXiv, PubMed, Google Scholar, Semantic Scholar, JSTOR, bioRxiv, SSRN, IEEE Xplore, ACM Digital Library, ResearchGate, and similar). The search is constrained to those domains, so a query with no academic matches may return no results.' }
           },
           required: ['query']
         }

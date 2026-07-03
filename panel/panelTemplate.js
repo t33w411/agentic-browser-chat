@@ -949,6 +949,13 @@
       <button class="ap-close" data-action="close-attach-preview">${icForPanelTemplate.x13}</button>
     </div>
     <div class="ap-body ne-preview" id="ap-content"></div>
+    <div class="ap-footer hidden" id="ap-footer">
+      <span class="ap-counts" id="ap-counts"></span>
+      <div class="ap-footer-actions">
+        <button class="ap-action hidden" id="ap-copy-btn" data-action="copy-attach-preview" title="Copy text">${icForPanelTemplate.copy12}<span class="ap-action-label">Copy</span></button>
+        <button class="ap-action hidden" id="ap-download-btn" data-action="download-attach-preview" title="Download image">${icForPanelTemplate.download13}<span class="ap-action-label">Download</span></button>
+      </div>
+    </div>
   </div>
 </div>
 

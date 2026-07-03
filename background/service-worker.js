@@ -363,10 +363,6 @@ const academicDomainsForServiceWorker = [
   'tandfonline.com', 'journals.sagepub.com', 'academic.oup.com', 'oup.com',
   'journals.cambridge.org', 'cambridge.org', 'royalsocietypublishing.org'
 ];
-const academicSiteOperatorsForServiceWorker = [
-  'arxiv.org', 'pubmed.ncbi.nlm.nih.gov', 'scholar.google.com', 'semanticscholar.org',
-  'jstor.org', 'researchgate.net', 'biorxiv.org', 'ssrn.com', 'ieeexplore.ieee.org', 'dl.acm.org'
-].map(function (d) { return 'site:' + d; }).join(' OR ');
 let isReloadRecoveryRunningForServiceWorker = false;
 
 // ---------------------------------------------------------------------------
@@ -1247,10 +1243,6 @@ async function handleAgentWebSearchForServiceWorker(msgForSearch, sendResponseFo
     ? msgForSearch.model.trim()
     : 'openai/gpt-4o-mini';
 
-  if (academicOnlyForSearch) {
-    queryForSearch = queryForSearch + ' ' + academicSiteOperatorsForServiceWorker;
-  }
-
   if (!queryForSearch) {
     sendResponseForSearch({ ok: false, error: 'query is required' });
     return;
@@ -1265,6 +1257,10 @@ async function handleAgentWebSearchForServiceWorker(msgForSearch, sendResponseFo
 
   try {
     var searchStartTimeForSearch = Date.now();
+    var searchToolParamsForSearch = { engine: 'auto', max_results: maxResultsForSearch };
+    if (academicOnlyForSearch) {
+      searchToolParamsForSearch.allowed_domains = academicDomainsForServiceWorker;
+    }
     var MAX_RETRIES_FOR_SEARCH = 2;
     var RETRY_DELAYS_FOR_SEARCH = [1500, 3000];
     var RETRYABLE_FOR_SEARCH = [429, 502, 503, 504];
@@ -1290,12 +1286,11 @@ async function handleAgentWebSearchForServiceWorker(msgForSearch, sendResponseFo
           },
           body: JSON.stringify({
             model: modelForSearch,
-            tools: [{ type: 'openrouter:web_search', config: { max_results: maxResultsForSearch } }],
-            response_format: { type: 'json_object' },
+            tools: [{ type: 'openrouter:web_search', parameters: searchToolParamsForSearch }],
             messages: [
               {
                 role: 'system',
-                content: 'Search the web for the user\'s query and return the results as a JSON object in this exact format: {"results": [{"title": "...", "url": "...", "snippet": "..."}]}. Include up to ' + maxResultsForSearch + ' results. Output ONLY the JSON object with no other text.'
+                content: 'You are a web search assistant. Always use the web search tool to find current, real information for the user\'s query, then briefly summarize what you found. Do not answer from prior knowledge without searching.'
               },
               {
                 role: 'user',
@@ -1336,54 +1331,41 @@ async function handleAgentWebSearchForServiceWorker(msgForSearch, sendResponseFo
     }
 
     var jsonForSearch = await responseForSearch.json();
-    var contentForSearch = jsonForSearch.choices && jsonForSearch.choices[0] && jsonForSearch.choices[0].message
-      ? (jsonForSearch.choices[0].message.content || '')
+    var messageForSearch = (jsonForSearch.choices && jsonForSearch.choices[0] && jsonForSearch.choices[0].message)
+      ? jsonForSearch.choices[0].message
+      : null;
+    var contentForSearch = (messageForSearch && typeof messageForSearch.content === 'string')
+      ? messageForSearch.content
       : '';
+    var annotationsForSearch = (messageForSearch && Array.isArray(messageForSearch.annotations))
+      ? messageForSearch.annotations
+      : [];
 
-    var parsedForSearch = null;
-    try { parsedForSearch = JSON.parse(contentForSearch); } catch (e) {}
-    if (!parsedForSearch) {
-      var jsonMatchForSearch = contentForSearch.match(/\{[\s\S]*\}/);
-      if (jsonMatchForSearch) {
-        try { parsedForSearch = JSON.parse(jsonMatchForSearch[0]); } catch (e) {}
-      }
+    var seenUrlsForSearch = {};
+    var normalizedForSearch = [];
+    for (var annIdxForSearch = 0; annIdxForSearch < annotationsForSearch.length; annIdxForSearch++) {
+      var annotationForSearch = annotationsForSearch[annIdxForSearch];
+      if (!annotationForSearch || annotationForSearch.type !== 'url_citation' || !annotationForSearch.url_citation) continue;
+      var citationForSearch = annotationForSearch.url_citation;
+      var urlForSearch = typeof citationForSearch.url === 'string' ? citationForSearch.url.trim() : '';
+      if (!urlForSearch || seenUrlsForSearch[urlForSearch]) continue;
+      seenUrlsForSearch[urlForSearch] = true;
+      normalizedForSearch.push({
+        title: typeof citationForSearch.title === 'string' ? citationForSearch.title : '',
+        url: urlForSearch
+      });
     }
-    var resultsForSearch = (parsedForSearch && Array.isArray(parsedForSearch.results)) ? parsedForSearch.results : null;
 
-    if (!Array.isArray(resultsForSearch) || resultsForSearch.length === 0) {
-      sendResponseForSearch({ ok: false, error: 'Web search returned no structured results. Try rephrasing the query.', latencyMs: latencyMsForSearch, rawResponse: contentForSearch });
+    if (normalizedForSearch.length === 0) {
+      sendResponseForSearch({ ok: false, error: 'Web search returned no results (the model did not run a web search, or nothing was found). Try rephrasing the query.', latencyMs: latencyMsForSearch, rawResponse: contentForSearch });
       return;
     }
 
-    var normalizedForSearch = resultsForSearch
-      .map(function (r) {
-        return {
-          title: typeof r.title === 'string' ? r.title : '',
-          url: typeof r.url === 'string' ? r.url : '',
-          snippet: typeof r.snippet === 'string' ? r.snippet : ''
-        };
-      })
-      .filter(function (r) { return r.url; });
-
-    var finalResultsForSearch = normalizedForSearch;
-    var academicFallbackForSearch = false;
-    if (academicOnlyForSearch) {
-      var filteredForSearch = normalizedForSearch.filter(function (r) {
-        try {
-          var hostname = new URL(r.url).hostname.toLowerCase().replace(/^www\./, '');
-          return academicDomainsForServiceWorker.some(function (d) {
-            return hostname === d || hostname.endsWith('.' + d);
-          });
-        } catch (e) { return false; }
-      });
-      if (filteredForSearch.length > 0) {
-        finalResultsForSearch = filteredForSearch;
-      } else {
-        academicFallbackForSearch = true;
-      }
+    if (normalizedForSearch.length > maxResultsForSearch) {
+      normalizedForSearch = normalizedForSearch.slice(0, maxResultsForSearch);
     }
 
-    sendResponseForSearch({ ok: true, results: finalResultsForSearch, academicFallback: academicFallbackForSearch, latencyMs: latencyMsForSearch, rawResponse: contentForSearch, usage: (jsonForSearch && jsonForSearch.usage) || null });
+    sendResponseForSearch({ ok: true, results: normalizedForSearch, academicFallback: false, latencyMs: latencyMsForSearch, rawResponse: contentForSearch, usage: (jsonForSearch && jsonForSearch.usage) || null });
   } catch (errForSearch) {
     if (requestRecordForSearch && requestRecordForSearch.signal.aborted) {
       sendResponseForSearch({ ok: false, cancelled: true, error: 'Cancelled' });

@@ -3081,6 +3081,32 @@ img.ecs-icon {
 #attach-preview-overlay[data-theme="dark"] .ap-code-preview code {
   color: #e2e8f0;
 }
+.ap-footer {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 8px 14px; border-top: 1px solid #c8d5e3; flex-shrink: 0;
+}
+#attach-preview-overlay[data-theme="dark"] .ap-footer { border-color: #3d5272; }
+.ap-counts {
+  font-size: 12px; color: #64748b; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
+#attach-preview-overlay[data-theme="dark"] .ap-counts { color: #94a3b8; }
+.ap-footer-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; margin-left: auto; }
+.ap-action {
+  display: inline-flex; align-items: center; gap: 5px;
+  border: 1px solid #c8d5e3; background: #f8fafc; color: #0f172a;
+  font-size: 12px; font-weight: 500; line-height: 1;
+  padding: 6px 10px; border-radius: 7px; cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.ap-action svg { flex-shrink: 0; }
+.ap-action:hover { background: #eef2f7; border-color: #94a3b8; }
+.ap-action.copied { color: #16a34a; border-color: #16a34a; }
+#attach-preview-overlay[data-theme="dark"] .ap-action {
+  border-color: #3d5272; background: #0f172a; color: #e2e8f0;
+}
+#attach-preview-overlay[data-theme="dark"] .ap-action:hover { background: #243147; border-color: #64748b; }
+#attach-preview-overlay[data-theme="dark"] .ap-action.copied { color: #4ade80; border-color: #4ade80; }
 
 /* Clickable attachment chips in preview mode */
 #note-editor-form:not(.in-edit-mode) .ne-attach-chip,
