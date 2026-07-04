@@ -481,37 +481,39 @@
     return contentBlocksForContextBuilder;
   }
 
-  async function buildContextForContextBuilder(chatMessages, opts) {
-    const optsForBuild = opts || {};
+  // Assembles the full system-prompt string from the same opts buildContext uses. Factored out so
+  // the token-overhead estimator below reproduces the exact prompt without duplicating the layout.
+  function buildSystemPromptTextForContextBuilder(optsForBuild) {
+    const optsForSystem = optsForBuild || {};
     const todayDateForContextBuilder = new Date();
     const today = todayDateForContextBuilder.getFullYear() + '-' +
       String(todayDateForContextBuilder.getMonth() + 1).padStart(2, '0') + '-' +
       String(todayDateForContextBuilder.getDate()).padStart(2, '0');
     let systemText = SYSTEM_PROMPT_BASE_FOR_CONTEXT_BUILDER.replace("{DATE}", today);
 
-    if (optsForBuild.automationEnabled) {
+    if (optsForSystem.automationEnabled) {
       systemText += "\n\n" + AUTOMATION_GUIDANCE_FOR_CONTEXT_BUILDER;
     }
 
     // Only stated for the agent run loop, which passes an explicit boolean (true when the run is
     // offscreen-hosted and survives navigation, false for the in-panel loop). Callers that omit it
     // (e.g. the single-shot inline quick-question, which has no page-acting tools) get no line.
-    if (optsForBuild.pageNavigationAllowed === true) {
+    if (optsForSystem.pageNavigationAllowed === true) {
       systemText += "\n\n" + NAVIGATION_ALLOWED_GUIDANCE_FOR_CONTEXT_BUILDER;
-    } else if (optsForBuild.pageNavigationAllowed === false) {
+    } else if (optsForSystem.pageNavigationAllowed === false) {
       systemText += "\n\n" + NAVIGATION_BLOCKED_GUIDANCE_FOR_CONTEXT_BUILDER;
     }
 
-    if (optsForBuild.agentRules && typeof optsForBuild.agentRules === "string") {
-      systemText += "\n\nUser-defined agent rules:\n" + optsForBuild.agentRules;
+    if (optsForSystem.agentRules && typeof optsForSystem.agentRules === "string") {
+      systemText += "\n\nUser-defined agent rules:\n" + optsForSystem.agentRules;
     }
 
-    var agentMemoryTextForBuild = typeof optsForBuild.agentMemory === 'string' ? optsForBuild.agentMemory.trim() : '';
-    var agentSkillsForBuild = Array.isArray(optsForBuild.agentSkills) ? optsForBuild.agentSkills : [];
+    var agentMemoryTextForBuild = typeof optsForSystem.agentMemory === 'string' ? optsForSystem.agentMemory.trim() : '';
+    var agentSkillsForBuild = Array.isArray(optsForSystem.agentSkills) ? optsForSystem.agentSkills : [];
     if (agentMemoryTextForBuild || agentSkillsForBuild.length > 0) {
       var memorySectionForBuild = '';
       if (agentMemoryTextForBuild) {
-        var memoryIdForBuild = (optsForBuild.agentMemoryId != null) ? ' (note id: ' + optsForBuild.agentMemoryId + ')' : '';
+        var memoryIdForBuild = (optsForSystem.agentMemoryId != null) ? ' (note id: ' + optsForSystem.agentMemoryId + ')' : '';
         memorySectionForBuild += 'Things the user has asked me to remember' + memoryIdForBuild + ':\n' + agentMemoryTextForBuild;
       }
       if (agentSkillsForBuild.length > 0) {
@@ -525,13 +527,37 @@
       systemText += '\n\n' + memorySectionForBuild;
     }
 
-    const compactionSummaryForBuild = typeof optsForBuild.compactionSummary === "string"
-      ? optsForBuild.compactionSummary.trim()
+    const compactionSummaryForBuild = typeof optsForSystem.compactionSummary === "string"
+      ? optsForSystem.compactionSummary.trim()
       : "";
     if (compactionSummaryForBuild) {
       systemText += "\n\nSummary of earlier conversation (older turns have been condensed for length; rely on this summary for any context not present in the messages below):\n"
         + compactionSummaryForBuild;
     }
+
+    return systemText;
+  }
+
+  // Rough (char/4) token estimate of the fixed per-send overhead: the system prompt plus the tool
+  // schemas, both billed inside prompt_tokens every turn. The compaction summary is forced empty
+  // here because the compactor counts it separately; including it would double-count. Used for the
+  // compaction reserve (floored at 10000 by callers) and the panel's hover readout.
+  function estimateSystemOverheadTokensForContextBuilder(optsForEstimate, toolsForEstimate) {
+    var optsNoSummaryForEstimate = Object.assign({}, optsForEstimate || {});
+    optsNoSummaryForEstimate.compactionSummary = '';
+    var systemTextForEstimate = buildSystemPromptTextForContextBuilder(optsNoSummaryForEstimate);
+    var totalCharsForEstimate = (systemTextForEstimate && systemTextForEstimate.length) || 0;
+    if (Array.isArray(toolsForEstimate) && toolsForEstimate.length > 0) {
+      var toolsJsonForEstimate = '';
+      try { toolsJsonForEstimate = JSON.stringify(toolsForEstimate); } catch (errForEstimate) { toolsJsonForEstimate = ''; }
+      totalCharsForEstimate += (toolsJsonForEstimate && toolsJsonForEstimate.length) || 0;
+    }
+    return Math.ceil(totalCharsForEstimate / 4);
+  }
+
+  async function buildContextForContextBuilder(chatMessages, opts) {
+    const optsForBuild = opts || {};
+    let systemText = buildSystemPromptTextForContextBuilder(optsForBuild);
 
     const apiMessages = [{ role: "system", content: systemText }];
 
@@ -583,7 +609,7 @@
             toolCallInfoByIdForBuild[String(toolCallForBuild.id)] = {
               name: toolNameForBuild,
               parsedArgs: parsedArgsForBuild.parsed,
-              signature: toolNameForBuild + " " + parsedArgsForBuild.canonical,
+              signature: toolNameForBuild + "\x00" + parsedArgsForBuild.canonical,
               collapsible: isCollapsibleToolCallForContextBuilder(toolNameForBuild, parsedArgsForBuild.parsed)
             };
           }
@@ -628,7 +654,8 @@
   }
 
   nsForContextBuilder.contextBuilder = {
-    build: buildContextForContextBuilder
+    build: buildContextForContextBuilder,
+    estimateSystemOverheadTokens: estimateSystemOverheadTokensForContextBuilder
   };
 
   globalScopeForContextBuilder.ABChatAgent = nsForContextBuilder;

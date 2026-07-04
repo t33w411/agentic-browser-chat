@@ -168,10 +168,10 @@
       var argsCanon;
       try { argsCanon = canonicalizeJsonForAgentRun(JSON.parse(argsRaw || '{}')); }
       catch (e) { argsCanon = argsRaw; }
-      return nameForSig + ' ' + argsCanon;
+      return nameForSig + '\x00' + argsCanon;
     });
     parts.sort();
-    return parts.join('');
+    return parts.join('\x01');
   }
 
   function executeToolForAgentRun(nameForExec, argsForExec, contextForExec) {
@@ -306,6 +306,7 @@
     var targetTabIdForRun = (typeof paramsForRun.targetTabId === 'number') ? paramsForRun.targetTabId : null;
     var visualPreflightSessionIdForRun = String(paramsForRun.visualPreflightSessionId || ('vp_' + Date.now().toString(36)));
     var userTextForRun = String(paramsForRun.userText || '');
+    var contextWindowForRun = Number(paramsForRun.contextWindow) || null;
     var pricingForRun = paramsForRun.pricing || {};
     var completionCostPerMillionForRun = Number(pricingForRun.completionCostPerMillion) || 0;
     var imageGenCostForRun = Number(pricingForRun.imageGenCost) || 0;
@@ -444,13 +445,23 @@
         try {
           emitForAgentRun('stream_compacting', chatId, { active: true });
           var compactionLogStartForRun = Date.now();
+          var systemOverheadTokensForRun = 10000;
+          if (typeof contextBuilderForRun.estimateSystemOverheadTokens === 'function') {
+            var systemOverheadEstimateForRun = contextBuilderForRun.estimateSystemOverheadTokens({
+              agentRules: agentRulesForRun,
+              automationEnabled: automationEnabledForRun,
+              pageNavigationAllowed: true
+            }, toolDefsForRun);
+            systemOverheadTokensForRun = Math.max(10000, Number(systemOverheadEstimateForRun) || 0);
+          }
           var compactionResultForRun = await compactorForRun.maybeCompact({
             apiKey: apiKey,
             model: model,
             messages: messagesForRun,
             existingSummary: compactionSummaryForRun,
             compactedThroughMessageId: compactedThroughMessageIdForRun,
-            systemOverheadTokens: 10000,
+            systemOverheadTokens: systemOverheadTokensForRun,
+            contextWindow: contextWindowForRun,
             signal: controllerForRun.signal
           });
           compactionSummaryForRun = (compactionResultForRun && typeof compactionResultForRun.summaryText === 'string') ? compactionResultForRun.summaryText : compactionSummaryForRun;

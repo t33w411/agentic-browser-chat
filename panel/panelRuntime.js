@@ -4427,6 +4427,26 @@
       return '$' + costForCostTooltip.toFixed(decimalsForCostTooltip) + ' / 1M output tokens';
     }
 
+    function formatModelHoverTooltipForPanelRuntime(modelForHoverTooltip) {
+      const linesForHoverTooltip = [];
+      const costLineForHoverTooltip = formatModelCostTooltipForPanelRuntime(modelForHoverTooltip);
+      if (costLineForHoverTooltip) linesForHoverTooltip.push(costLineForHoverTooltip);
+      const contextLenForHoverTooltip = Number(modelForHoverTooltip && modelForHoverTooltip.contextLength);
+      if (Number.isFinite(contextLenForHoverTooltip) && contextLenForHoverTooltip > 0) {
+        linesForHoverTooltip.push('Context: ' + formatTokenAmountForPanelRuntime(contextLenForHoverTooltip, false));
+      }
+      if (modelForHoverTooltip && modelForHoverTooltip.canReason) {
+        const reasoningStateForHoverTooltip = modelForHoverTooltip.reasoningMandatory
+          ? 'always on'
+          : (modelForHoverTooltip.reasoningDefaultOn ? 'on by default' : 'off by default');
+        const reasoningEffortForHoverTooltip = modelForHoverTooltip.reasoningDefaultEffort
+          ? ' (' + modelForHoverTooltip.reasoningDefaultEffort + ')'
+          : '';
+        linesForHoverTooltip.push('Reasoning: ' + reasoningStateForHoverTooltip + reasoningEffortForHoverTooltip);
+      }
+      return linesForHoverTooltip.join('\n');
+    }
+
     function buildModelPickerDropdownForPanelRuntime(pickedByProvider, providerKeys, effectiveSelected, getProviderLabel, getDisplayName, getProviderKey) {
       const listForDropdown = root.getElementById('model-picker-list');
       if (!listForDropdown) return;
@@ -4450,8 +4470,8 @@
           const namePart = escHtml(displayNameForItem);
           const tierForBtn = getModelTierForPanelRuntime(m);
           btn.dataset.searchText = (String(displayNameForItem) + ' ' + String(m.id) + ' ' + (tierForBtn ? tierForBtn.label : '')).toLowerCase();
-          const costTooltipForItem = formatModelCostTooltipForPanelRuntime(m);
-          if (costTooltipForItem) btn.title = costTooltipForItem;
+          const hoverTooltipForItem = formatModelHoverTooltipForPanelRuntime(m);
+          if (hoverTooltipForItem) btn.title = hoverTooltipForItem;
           btn.innerHTML = tierForBtn
             ? namePart + ' <span class="' + tierForBtn.cls + '">' + tierForBtn.label + '</span>'
             : namePart;
@@ -9484,7 +9504,8 @@
     const DEFAULT_MODEL_FOR_PANEL_RUNTIME = 'google/gemini-3.1-flash-lite';
     var loadedGlobalDefaultModelForPanelRuntime = '';
     var loadedImageModelsForPanelRuntime = [];
-    const MODEL_CACHE_KEY_FOR_PANEL_RUNTIME = 'abchat_model_cache_v8';
+    var loadedChatModelsForPanelRuntime = [];
+    const MODEL_CACHE_KEY_FOR_PANEL_RUNTIME = 'abchat_model_cache_v10';
     const ROUTER_EXCEPTION_MODEL_IDS_FOR_PANEL_RUNTIME = ['openrouter/auto', 'openrouter/free'];
     const THEME_KEY_FOR_PANEL_RUNTIME = 'abchat_theme';
     const TRANSPARENCY_KEY_FOR_PANEL_RUNTIME = 'abchat_panel_transparency';
@@ -9542,7 +9563,15 @@
         const pricing = m.pricing || {};
         const costRaw = Number(pricing.completion);
         const costPerMillion = Number.isFinite(costRaw) ? (costRaw * 1000000) : null;
-        return { id: m.id, name: m.name || m.id, completionCostPerMillion: costPerMillion, created: m.created || 0 };
+        const contextLengthRaw = Number(m.context_length || (m.top_provider && m.top_provider.context_length));
+        const contextLength = Number.isFinite(contextLengthRaw) && contextLengthRaw > 0 ? contextLengthRaw : null;
+        const reasoningInfo = m.reasoning || null;
+        const supportedParams = Array.isArray(m.supported_parameters) ? m.supported_parameters : [];
+        const canReason = supportedParams.includes('reasoning') || supportedParams.includes('include_reasoning');
+        const reasoningMandatory = !!(reasoningInfo && reasoningInfo.mandatory === true);
+        const reasoningDefaultOn = !!(reasoningInfo && (reasoningInfo.mandatory === true || reasoningInfo.default_enabled === true));
+        const reasoningDefaultEffort = (reasoningInfo && typeof reasoningInfo.default_effort === 'string') ? reasoningInfo.default_effort : '';
+        return { id: m.id, name: m.name || m.id, completionCostPerMillion: costPerMillion, contextLength: contextLength, canReason: canReason, reasoningMandatory: reasoningMandatory, reasoningDefaultOn: reasoningDefaultOn, reasoningDefaultEffort: reasoningDefaultEffort, created: m.created || 0 };
       }).filter(function (m) {
         if (ROUTER_EXCEPTION_MODEL_IDS_FOR_PANEL_RUNTIME.includes(m.id)) return true;
         return m.completionCostPerMillion !== null && m.completionCostPerMillion >= 1;
@@ -9883,6 +9912,7 @@
       const { chatModels, imageModels } = await getAllModelsForPanelRuntime(apiKey);
       const selectedModel = await getDefaultModelForPanelRuntime();
       populateModelSelectsForPanelRuntime(chatModels, selectedModel);
+      loadedChatModelsForPanelRuntime = Array.isArray(chatModels) ? chatModels : [];
       const chatSelectAfterInit = root.getElementById('chat-model-select');
       if (chatSelectAfterInit) loadedGlobalDefaultModelForPanelRuntime = chatSelectAfterInit.value;
       reapplyActiveChatModelToPickerForPanelRuntime();
@@ -10198,6 +10228,81 @@
       return String(numForFormat);
     }
 
+    let systemOverheadEstimateForPanelRuntime = 0;
+    let systemOverheadEstimateRefreshingForPanelRuntime = false;
+    // Real input tokens (prompt_tokens) of the turn currently shown in the counter, used to cap the
+    // system+tools estimate so a current-config estimate can never exceed the turn's actual usage.
+    let overheadCapForPanelRuntime = 0;
+
+    function applySystemOverheadTitleForPanelRuntime() {
+      const counterForOverheadTitle = root.getElementById('abchat-token-counter');
+      if (!counterForOverheadTitle) return;
+      // system+tools is physically a subset of the turn's prompt_tokens, so cap the estimate at the
+      // real input. This also stops a current-config estimate from dwarfing an older turn that was
+      // sent with a smaller (or no) tool set, which otherwise read as overhead larger than the total.
+      const cappedOverheadForTitle = overheadCapForPanelRuntime > 0
+        ? Math.min(systemOverheadEstimateForPanelRuntime, overheadCapForPanelRuntime)
+        : 0;
+      if (cappedOverheadForTitle > 0) {
+        const rawOverheadShareForTitle = (cappedOverheadForTitle / overheadCapForPanelRuntime) * 100;
+        const overheadShareLabelForTitle = rawOverheadShareForTitle < 1
+          ? '<1%'
+          : '~' + Math.min(100, Math.round(rawOverheadShareForTitle)) + '%';
+        counterForOverheadTitle.title = 'System + tools ≈ '
+          + formatTokenAmountForPanelRuntime(cappedOverheadForTitle, true)
+          + ' tok (est.), ' + overheadShareLabelForTitle + " of this turn's input";
+      } else {
+        counterForOverheadTitle.removeAttribute('title');
+      }
+    }
+
+    // Recomputes the fixed system+tools overhead from the CURRENT settings and tool set, then stamps
+    // it onto the counter's hover tooltip. Runs at display time; a concurrency guard keeps the
+    // per-turn display refreshes from overlapping. Memory/skills are included but are tiny; the
+    // conversation summary is excluded by the estimator itself.
+    async function refreshSystemOverheadEstimateForPanelRuntime() {
+      if (systemOverheadEstimateRefreshingForPanelRuntime) return;
+      systemOverheadEstimateRefreshingForPanelRuntime = true;
+      try {
+        const agentNsForOverhead = globalThis.ABChatAgent || {};
+        const contextBuilderForOverhead = agentNsForOverhead.contextBuilder || null;
+        if (!contextBuilderForOverhead || typeof contextBuilderForOverhead.estimateSystemOverheadTokens !== 'function') return;
+        let automationEnabledForOverhead = false;
+        try {
+          automationEnabledForOverhead = await new Promise(function (resolveOverheadAutomation) {
+            chrome.storage.local.get('abchatAutomationEnabled', function (itemsForOverheadAutomation) {
+              resolveOverheadAutomation(!!(itemsForOverheadAutomation && itemsForOverheadAutomation.abchatAutomationEnabled));
+            });
+          });
+        } catch (eOverheadAutomation) { automationEnabledForOverhead = false; }
+        const toolDefsForOverhead = (agentNsForOverhead.toolDefs || []).filter(function (toolDefForOverhead) {
+          const toolNameForOverhead = toolDefForOverhead && toolDefForOverhead.function ? toolDefForOverhead.function.name : '';
+          if ((toolNameForOverhead === 'page_act' || toolNameForOverhead === 'page_accessibility_tree') && !automationEnabledForOverhead) {
+            return false;
+          }
+          return true;
+        });
+        let memCtxForOverhead = null;
+        try {
+          if (typeof loadAgentMemoryContextForPanelRuntime === 'function') {
+            memCtxForOverhead = await loadAgentMemoryContextForPanelRuntime();
+          }
+        } catch (eOverheadMem) { memCtxForOverhead = null; }
+        const estimateForOverhead = contextBuilderForOverhead.estimateSystemOverheadTokens({
+          agentRules: currentAgentRulesForPanelRuntime || '',
+          agentMemory: memCtxForOverhead ? memCtxForOverhead.agentMemory : '',
+          agentMemoryId: memCtxForOverhead ? memCtxForOverhead.agentMemoryId : null,
+          agentSkills: memCtxForOverhead ? memCtxForOverhead.agentSkills : [],
+          automationEnabled: automationEnabledForOverhead
+        }, toolDefsForOverhead);
+        systemOverheadEstimateForPanelRuntime = Number(estimateForOverhead) || 0;
+        applySystemOverheadTitleForPanelRuntime();
+      } catch (eOverhead) {
+      } finally {
+        systemOverheadEstimateRefreshingForPanelRuntime = false;
+      }
+    }
+
     function updateSessionTokenDisplayForPanelRuntime(usageObj, cumulativeCost) {
       const inputBottomForCounter = root.querySelector('.input-bottom');
       if (!inputBottomForCounter) return;
@@ -10219,7 +10324,7 @@
         : 0;
       const totalTokensForDisplay = Math.max(0, rawTotalTokensForDisplay - reasoningTokensForDisplay);
       const numCumulativeCost = Number(cumulativeCost) || 0;
-      if (!totalTokensForDisplay && !numCumulativeCost) { counterElForDisplay.textContent = ''; counterElForDisplay.style.color = 'var(--text-muted,#888)'; return; }
+      if (!totalTokensForDisplay && !numCumulativeCost) { counterElForDisplay.textContent = ''; counterElForDisplay.style.color = 'var(--text-muted,#888)'; counterElForDisplay.removeAttribute('title'); return; }
       const tokensLabelForDisplay = formatTokenAmountForPanelRuntime(totalTokensForDisplay, true);
 
       // Context fill: estimate budget from active model and show fill fraction.
@@ -10234,7 +10339,9 @@
       let contextPercentLabelForDisplay = '';
       let contextColorForDisplay = 'var(--text-muted,#888)';
       if (compactorForCounter && typeof compactorForCounter.getTokenBudget === 'function' && modelForCounter) {
-        const estimatedBudgetForCounter = compactorForCounter.getTokenBudget(modelForCounter);
+        const modelObjForCounter = loadedChatModelsForPanelRuntime.find(function (m) { return m.id === modelForCounter; }) || null;
+        const contextWindowForCounter = modelObjForCounter ? modelObjForCounter.contextLength : null;
+        const estimatedBudgetForCounter = compactorForCounter.getTokenBudget(contextWindowForCounter);
         if (estimatedBudgetForCounter > 0) {
           // Exceeding the estimate proves the real window is larger, so round the
           // displayed denominator up to the next tier. Display-only; compaction unaffected.
@@ -10265,6 +10372,11 @@
         }
       }
       counterElForDisplay.style.color = contextColorForDisplay;
+
+      const rawPromptTokensForOverhead = (usageObj && Number(usageObj.prompt_tokens)) || 0;
+      overheadCapForPanelRuntime = rawPromptTokensForOverhead > 0 ? rawPromptTokensForOverhead : totalTokensForDisplay;
+      applySystemOverheadTitleForPanelRuntime();
+      refreshSystemOverheadEstimateForPanelRuntime();
 
       const tokenPartForDisplay = tokensLabelForDisplay + contextFillLabelForDisplay + ' tok' + contextPercentLabelForDisplay;
       if (numCumulativeCost > 0) {
@@ -11907,6 +12019,7 @@
               userText: getOriginatingUserTextForMemoryGuardForPanelRuntime(chatId, text),
               visualPreflightSessionId: 'vp_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2),
               isResend: isResendForPanelRuntime,
+              contextWindow: modelObjForCostOffscreen ? modelObjForCostOffscreen.contextLength : null,
               pricing: {
                 completionCostPerMillion: completionCostPerMillionOffscreen,
                 imageGenCost: imageGenCostOffscreen,
@@ -12167,13 +12280,23 @@
         try {
           showCompactingBubbleForPanelRuntime();
           const compactionLogStartForSend = Date.now();
+          let systemOverheadTokensForSend = 10000;
+          if (typeof contextBuilderForSend.estimateSystemOverheadTokens === 'function') {
+            const systemOverheadEstimateForSend = contextBuilderForSend.estimateSystemOverheadTokens({
+              agentRules: currentAgentRulesForPanelRuntime || '',
+              automationEnabled: automationEnabledForSend,
+              pageNavigationAllowed: false
+            }, toolDefsForSend);
+            systemOverheadTokensForSend = Math.max(10000, Number(systemOverheadEstimateForSend) || 0);
+          }
           const compactionResultForSend = await compactorForSend.maybeCompact({
             apiKey: apiKey,
             model: model,
             messages: chatRecordForCompactionForSend.messages,
             existingSummary: compactionSummaryForSend,
             compactedThroughMessageId: compactedThroughMessageIdForSend,
-            systemOverheadTokens: 10000,
+            systemOverheadTokens: systemOverheadTokensForSend,
+            contextWindow: modelObjForCostForSend ? modelObjForCostForSend.contextLength : null,
             signal: controllerForSend.signal
           });
           compactionSummaryForSend = compactionResultForSend && typeof compactionResultForSend.summaryText === 'string'

@@ -13,42 +13,14 @@
   var TOOL_CONTENT_FOLD_CAP_FOR_COMPACTOR = 1500;
   var IMAGE_PART_TOKEN_ESTIMATE_FOR_COMPACTOR = 600;
 
-  // Per-model context window estimates, longest prefix wins.
-  var TOKEN_BUDGET_PREFIX_MAP_FOR_COMPACTOR = [
-    { prefix: "openai/gpt-4.1", budget: 1000000 },
-    { prefix: "openai/gpt-4o", budget: 128000 },
-    { prefix: "openai/gpt-4-turbo", budget: 128000 },
-    { prefix: "openai/o1", budget: 200000 },
-    { prefix: "openai/o3", budget: 200000 },
-    { prefix: "openai/o4", budget: 200000 },
-    { prefix: "anthropic/claude-3.5", budget: 200000 },
-    { prefix: "anthropic/claude-3.7", budget: 200000 },
-    { prefix: "anthropic/claude-sonnet-4", budget: 200000 },
-    { prefix: "anthropic/claude-opus-4", budget: 200000 },
-    { prefix: "anthropic/claude-haiku-4", budget: 200000 },
-    { prefix: "anthropic/claude", budget: 200000 },
-    { prefix: "google/gemini-2.5", budget: 1000000 },
-    { prefix: "google/gemini-2", budget: 1000000 },
-    { prefix: "google/gemini", budget: 128000 },
-    { prefix: "x-ai/grok-2", budget: 131072 },
-    { prefix: "x-ai/grok", budget: 256000 },
-    { prefix: "mistralai/", budget: 128000 },
-    { prefix: "deepseek/", budget: 128000 },
-    { prefix: "qwen/", budget: 128000 }
-  ];
-
-  function getTokenBudgetForCompactor(modelIdForCompactor) {
-    var modelTextForCompactor = String(modelIdForCompactor || "").toLowerCase();
-    var bestMatchForCompactor = null;
-    for (var iForCompactor = 0; iForCompactor < TOKEN_BUDGET_PREFIX_MAP_FOR_COMPACTOR.length; iForCompactor++) {
-      var entryForCompactor = TOKEN_BUDGET_PREFIX_MAP_FOR_COMPACTOR[iForCompactor];
-      if (modelTextForCompactor.indexOf(entryForCompactor.prefix) === 0) {
-        if (!bestMatchForCompactor || entryForCompactor.prefix.length > bestMatchForCompactor.prefix.length) {
-          bestMatchForCompactor = entryForCompactor;
-        }
-      }
+  // The context window is sourced from the OpenRouter model fetch (model.context_length),
+  // resolved by the caller and passed in. When absent or invalid, fall back to the default.
+  function getTokenBudgetForCompactor(contextWindowForCompactor) {
+    var windowValueForCompactor = Number(contextWindowForCompactor);
+    if (Number.isFinite(windowValueForCompactor) && windowValueForCompactor > 0) {
+      return windowValueForCompactor;
     }
-    return bestMatchForCompactor ? bestMatchForCompactor.budget : DEFAULT_TOKEN_BUDGET_FOR_COMPACTOR;
+    return DEFAULT_TOKEN_BUDGET_FOR_COMPACTOR;
   }
 
   function estimateTokensFromTextForCompactor(textForCompactor) {
@@ -304,6 +276,7 @@
       ? optsForCompactor.compactedThroughMessageId
       : null;
     var systemOverheadTokensForCompactor = Number(optsForCompactor.systemOverheadTokens) || 0;
+    var contextWindowForCompactor = optsForCompactor.contextWindow;
 
     var alreadyFoldedThroughIndexForCompactor = alreadyFoldedThroughIdForCompactor != null
       ? findIndexByMessageIdForCompactor(messagesForCompactor, alreadyFoldedThroughIdForCompactor)
@@ -334,7 +307,7 @@
     }
     var totalTokensForCompactor = systemOverheadTokensForCompactor + summaryTokensForCompactor + visibleTailTokensForCompactor;
 
-    var budgetForCompactor = getTokenBudgetForCompactor(modelForCompactor);
+    var budgetForCompactor = getTokenBudgetForCompactor(contextWindowForCompactor);
     var thresholdTokensForCompactor = Math.floor(budgetForCompactor * THRESHOLD_FRACTION_FOR_COMPACTOR);
     if (totalTokensForCompactor < thresholdTokensForCompactor) return noOpResultForCompactor;
 
