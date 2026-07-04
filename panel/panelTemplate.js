@@ -25,7 +25,7 @@
         <button class="tab-btn" data-tab="quiz" data-action="set-tab">Quiz<span class="tab-badge-dot" id="quiz-tab-dot"></span></button>
         <!-- Content selector -->
         <button class="tab-icon-btn" id="selector-tab" data-action="toggle-selector">
-          ${icForPanelTemplate.cursor14}
+          ${icForPanelTemplate.contentSelector21}
         </button>
         <!-- New menu (reduced view only) -->
         <div class="new-menu-wrap">
