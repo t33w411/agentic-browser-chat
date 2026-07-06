@@ -4382,6 +4382,8 @@
     /* ============================================================
       MODEL PICKER
     ============================================================ */
+    let reasoningFilterActiveForPanelRuntime = false;
+
     function toggleModelPickerForPanelRuntime() {
       const wasOpen = preclickOpenStateForPanelRuntime;
       preclickOpenStateForPanelRuntime = null;
@@ -4392,6 +4394,12 @@
         if (!dropdown || !btn) return;
         dropdown.classList.add('open');
         btn.classList.add('open');
+        reasoningFilterActiveForPanelRuntime = false;
+        const reasoningChipForOpen = root.getElementById('mp-reasoning-filter');
+        if (reasoningChipForOpen) {
+          reasoningChipForOpen.classList.remove('active');
+          reasoningChipForOpen.setAttribute('aria-pressed', 'false');
+        }
         const searchForOpen = root.getElementById('model-picker-search');
         if (searchForOpen) {
           searchForOpen.value = '';
@@ -4466,6 +4474,7 @@
           if (m.id === effectiveSelected) btn.classList.add('active');
           btn.dataset.action = 'select-model';
           btn.dataset.modelId = m.id;
+          btn.dataset.reasoningDefaultOn = m.reasoningDefaultOn ? '1' : '0';
           const displayNameForItem = getDisplayName(m, providerKey);
           const namePart = escHtml(displayNameForItem);
           const tierForBtn = getModelTierForPanelRuntime(m);
@@ -4487,12 +4496,15 @@
       const listForFilter = root.getElementById('model-picker-list');
       if (!listForFilter) return;
       const queryForFilter = String(rawQueryForFilter || '').trim().toLowerCase();
+      const reasoningOnlyForFilter = reasoningFilterActiveForPanelRuntime;
       let totalVisibleForFilter = 0;
       listForFilter.querySelectorAll('.mp-group').forEach(function (groupForFilter) {
         let visibleInGroupForFilter = 0;
         groupForFilter.querySelectorAll('.mp-item').forEach(function (itemForFilter) {
           const haystackForFilter = itemForFilter.dataset.searchText || itemForFilter.textContent.toLowerCase();
-          const matchesForFilter = !queryForFilter || haystackForFilter.indexOf(queryForFilter) !== -1;
+          const matchesQueryForFilter = !queryForFilter || haystackForFilter.indexOf(queryForFilter) !== -1;
+          const matchesReasoningForFilter = !reasoningOnlyForFilter || itemForFilter.dataset.reasoningDefaultOn === '1';
+          const matchesForFilter = matchesQueryForFilter && matchesReasoningForFilter;
           itemForFilter.style.display = matchesForFilter ? '' : 'none';
           if (matchesForFilter) visibleInGroupForFilter++;
         });
@@ -4501,6 +4513,17 @@
       });
       const emptyForFilter = root.getElementById('model-picker-empty');
       if (emptyForFilter) emptyForFilter.hidden = totalVisibleForFilter > 0;
+    }
+
+    function toggleReasoningFilterForPanelRuntime() {
+      reasoningFilterActiveForPanelRuntime = !reasoningFilterActiveForPanelRuntime;
+      const chipForReasoningFilter = root.getElementById('mp-reasoning-filter');
+      if (chipForReasoningFilter) {
+        chipForReasoningFilter.classList.toggle('active', reasoningFilterActiveForPanelRuntime);
+        chipForReasoningFilter.setAttribute('aria-pressed', reasoningFilterActiveForPanelRuntime ? 'true' : 'false');
+      }
+      const searchForReasoningFilter = root.getElementById('model-picker-search');
+      filterModelPickerForPanelRuntime(searchForReasoningFilter ? searchForReasoningFilter.value : '');
     }
 
     function selectModelForPanelRuntime(modelId) {
@@ -8019,7 +8042,7 @@
           ? evtForPasteIntercept.clipboardData.getData('text/plain')
           : '';
         if (!textForPasteIntercept) return;
-        if (textForPasteIntercept.length > 3000) {
+        if (textForPasteIntercept.length > 10000) {
           addInputChipForPanelRuntime({
             type: 'paste',
             label: 'Pasted text',
@@ -15790,6 +15813,7 @@
             case 'preview-message-chip': previewMessageChipForPanelRuntime(tgtForRuntime.dataset.messageId, tgtForRuntime.dataset.chipIndex); break;
             case 'toggle-attach-picker': toggleAttachPicker(); evtForRuntime.stopPropagation(); break;
             case 'toggle-model-picker':  toggleModelPickerForPanelRuntime(); evtForRuntime.stopPropagation(); break;
+            case 'toggle-reasoning-filter': toggleReasoningFilterForPanelRuntime(); break;
             case 'select-model':         selectModelForPanelRuntime(tgtForRuntime.dataset.modelId); break;
             case 'open-image-upload':    openImageUploadForPanelRuntime(); break;
             case 'capture-screenshot':   captureScreenshotForPanelRuntime(); break;
