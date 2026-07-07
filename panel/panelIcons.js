@@ -60,6 +60,7 @@
   var stopSquarePath = '<rect x="4" y="4" width="16" height="16" rx="2"/>';
   var bellPaths = '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>';
   var paperclipPaths = '<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>';
+  var brainPaths = '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/><path d="M3.477 10.896a4 4 0 0 1 .585-.396"/><path d="M19.938 10.5a4 4 0 0 1 .585.396"/><path d="M6 18a4 4 0 0 1-1.967-.516"/><path d="M19.967 17.484A4 4 0 0 1 18 18"/>';
 
   icons.x10 = svgForPanelIcon(10, 2.5, xPaths);
   icons.x12 = svgForPanelIcon(12, 2.5, xPaths);
@@ -99,7 +100,7 @@
   icons.globe10 = svgForPanelIcon(10, 2, globePaths);
   icons.globe14 = svgForPanelIcon(14, 2, globePaths);
   icons.layers14 = svgForPanelIcon(14, 2, layersPaths);
-  icons.contentSelector21 = svgForPanelIcon(21, 2.2, contentSelectorPaths);
+  icons.contentSelector18 = svgForPanelIcon(18, 2.2, contentSelectorPaths);
   icons.sync14 = svgForPanelIcon(14, 2.2, syncPaths);
   icons.settings14 = svgForPanelIcon(14, 2, settingsPaths);
   icons.reduce14 = svgForPanelIcon(14, 2.2, reducePaths);
@@ -129,6 +130,7 @@
   icons.stopSquare14 = svgForPanelIcon(14, 0, stopSquarePath, '', 'currentColor', 'none');
   icons.bell11 = svgForPanelIcon(11, 2.2, bellPaths);
   icons.paperclip12 = svgForPanelIcon(12, 2.2, paperclipPaths);
+  icons.brain13 = svgForPanelIcon(13, 2, brainPaths);
 
   ns.icons = icons;
   globalScope.ABChatContent = ns;

@@ -4481,9 +4481,12 @@
           btn.dataset.searchText = (String(displayNameForItem) + ' ' + String(m.id) + ' ' + (tierForBtn ? tierForBtn.label : '')).toLowerCase();
           const hoverTooltipForItem = formatModelHoverTooltipForPanelRuntime(m);
           if (hoverTooltipForItem) btn.title = hoverTooltipForItem;
+          const reasoningMarkForItem = m.reasoningDefaultOn
+            ? ' <span class="mp-reasoning-mark" title="Reasoning on by default">' + (ic.brain13 || '') + '</span>'
+            : '';
           btn.innerHTML = tierForBtn
-            ? namePart + ' <span class="' + tierForBtn.cls + '">' + tierForBtn.label + '</span>'
-            : namePart;
+            ? namePart + reasoningMarkForItem + ' <span class="' + tierForBtn.cls + '">' + tierForBtn.label + '</span>'
+            : namePart + reasoningMarkForItem;
           group.appendChild(btn);
         });
         listForDropdown.appendChild(group);

@@ -25,7 +25,7 @@
         <button class="tab-btn" data-tab="quiz" data-action="set-tab">Quiz<span class="tab-badge-dot" id="quiz-tab-dot"></span></button>
         <!-- Content selector -->
         <button class="tab-icon-btn" id="selector-tab" data-action="toggle-selector">
-          ${icForPanelTemplate.contentSelector21}
+          ${icForPanelTemplate.contentSelector18}
         </button>
         <!-- New menu (reduced view only) -->
         <div class="new-menu-wrap">
@@ -183,7 +183,7 @@
                       <button class="s-clear mp-search-clear" data-action="clear-search" data-search-id="model-picker-search" title="Clear">${icForPanelTemplate.x10}</button>
                     </div>
                     <div class="mp-filter-row">
-                      <button type="button" class="mp-filter-chip" id="mp-reasoning-filter" data-action="toggle-reasoning-filter" aria-pressed="false" title="Show only models with reasoning on by default">${icForPanelTemplate.zap12}<span>Reasoning</span></button>
+                      <button type="button" class="mp-filter-chip" id="mp-reasoning-filter" data-action="toggle-reasoning-filter" aria-pressed="false" title="Show only models with reasoning on by default">${icForPanelTemplate.brain13}<span>Reasoning</span></button>
                     </div>
                     <div class="mp-list" id="model-picker-list"></div>
                     <div class="mp-empty" id="model-picker-empty" hidden>No matching models</div>

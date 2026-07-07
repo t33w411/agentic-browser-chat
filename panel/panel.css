@@ -278,7 +278,7 @@
 .tab-icon-btn.active { background: var(--abchat-tab-active-bg); color: var(--abchat-tab-active-fg); }
 
 /* "+ New" menu: reduced view only */
-.new-menu-wrap { position: relative; flex-shrink: 0; display: none; }
+.new-menu-wrap { position: relative; flex-shrink: 0; display: none; margin-left: 5px; }
 .panel-host.mode-reduced .new-menu-wrap { display: inline-flex; }
 .new-menu-btn {
   border: 1px solid var(--abchat-border);
@@ -1454,6 +1454,12 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
   font-size: 10px; font-weight: 600; letter-spacing: 0.03em; vertical-align: middle;
   margin-left: 4px; pointer-events: none;
 }
+.mp-reasoning-mark {
+  display: inline-flex; align-items: center; vertical-align: middle;
+  margin-left: 4px; color: var(--abchat-accent); pointer-events: none;
+}
+.mp-reasoning-mark svg { display: block; flex-shrink: 0; }
+.mp-item.active .mp-reasoning-mark { color: currentColor; }
 .mp-tier-cheap    { background: rgba(34, 197, 94, 0.15); color: #16a34a; }
 .mp-tier-mid      { background: rgba(234, 179, 8, 0.15); color: #b45309; }
 .mp-tier-expensive { background: rgba(239, 68, 68, 0.15); color: #dc2626; }
