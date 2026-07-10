@@ -63,6 +63,7 @@
     createNote:                   function (input)                                    { return sendDbOpForPanelDataRepo('createNote',                   [input]); },
     updateNote:                   function (id, patch, options)                       { return sendDbOpForPanelDataRepo('updateNote',                   [id, patch, options]); },
     deleteNote:                   function (id)                                       { return sendDbOpForPanelDataRepo('deleteNote',                   [id]); },
+    listNoteVersions:             function (noteId)                                   { return sendDbOpForPanelDataRepo('listNoteVersions',             [noteId]); },
     listTasks:                    function ()                                         { return sendDbOpForPanelDataRepo('listTasks',                    []); },
     createTask:                   function (input)                                    { return sendDbOpForPanelDataRepo('createTask',                   [input]); },
     updateTask:                   function (id, patch, options)                       { return sendDbOpForPanelDataRepo('updateTask',                   [id, patch, options]); },

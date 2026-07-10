@@ -524,27 +524,30 @@
 
     // Page-DOM-bound tool delegated by the offscreen-hosted agent loop (which cannot
     // touch the page). Runs against this tab's live document and responds with the tool
-    // result. page_query / page_fill_form go straight to the tool executor, which is
-    // available as soon as the content scripts load — they do NOT require the panel to be
-    // mounted (after a navigation the panel may not be open yet). Only screenshot capture
+    // result. The read-only page tools (page_observe, page_read) go straight to the tool
+    // executor, which is available as soon as the content scripts load — they do NOT require
+    // the panel to be mounted (after a navigation the panel may not be open yet). Only screenshot capture
     // needs the panel (to hide it during capture). Async: keep the channel open (return true).
     if (messageForContentMain.action === (actionsForContentMain.runDelegatedPageTool || "runDelegatedPageTool")) {
       var delegatedToolForContentMain = messageForContentMain.tool;
       var delegatedArgsForContentMain = messageForContentMain.args || {};
-      if (delegatedToolForContentMain === 'page_query' || delegatedToolForContentMain === 'page_fill_form' || delegatedToolForContentMain === 'page_act') {
+      var domToolsForDelegate = { page_observe: 1, page_act: 1, page_read: 1, page_spreadsheet: 1 };
+      if (domToolsForDelegate[delegatedToolForContentMain]) {
         var agentNsForDelegate = (typeof globalThis !== 'undefined' ? globalThis : self).ABChatAgent || {};
         if (typeof agentNsForDelegate.executeTool !== 'function') {
           sendResponseForContentMain({ ok: false, error: 'The page tool executor is not available in this tab yet. The page may still be loading.' });
           return true;
         }
-        // page_act runs here (not in the offscreen doc) so its document references are the live
-        // page. It needs the chat id so its visual-preflight check shares a session key with the
-        // screenshot capture marked below; no tabId is passed, so the unbound CDP client lets the
-        // service worker resolve the target tab from sender.tab (this tab). Every delegated call
-        // carries offscreenRun:true, since delegation only happens for the offscreen-hosted run
-        // loop, which survives page navigation: the navigation gate in the page_query click and
-        // page_act click paths reads this to allow page-leaving clicks (page_fill_form ignores it).
-        var delegateCtxForContentMain = (delegatedToolForContentMain === 'page_act')
+        // The page tools run here (not in the offscreen doc) so their document references are the
+        // live page. Every delegated call carries offscreenRun:true, since delegation only happens
+        // for the offscreen-hosted run loop, which survives page navigation: the navigation gate in
+        // the page_act click path reads this to allow page-leaving clicks. No tabId is passed, so
+        // the unbound CDP client lets the service worker resolve the target tab from sender.tab
+        // (this tab). The trusted page tools (page_act, page_spreadsheet) also need the chat id so
+        // their session-scoped state shares a key with the screenshot capture; the read-only tools
+        // (page_observe, page_read) do not.
+        var chatScopedDelegateTools = { page_act: 1, page_spreadsheet: 1 };
+        var delegateCtxForContentMain = chatScopedDelegateTools[delegatedToolForContentMain]
           ? { chatId: messageForContentMain.chatId, offscreenRun: true }
           : { offscreenRun: true };
         Promise.resolve(agentNsForDelegate.executeTool(delegatedToolForContentMain, delegatedArgsForContentMain, delegateCtxForContentMain))

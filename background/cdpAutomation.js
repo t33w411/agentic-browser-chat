@@ -740,7 +740,7 @@
     return sendCommandForCdp(tabIdForResolveNode, "DOM.resolveNode", { backendNodeId: backendNodeIdForResolveNode }).then(function (resolvedForResolveNode) {
       var objectForResolveNode = resolvedForResolveNode && resolvedForResolveNode.object;
       if (!objectForResolveNode || !objectForResolveNode.objectId) {
-        return Promise.reject(makeCdpErrorForCdp("node-not-found", "The accessibility node could not be resolved to a live element. The page may have changed; re-read page_accessibility_tree for fresh handles."));
+        return Promise.reject(makeCdpErrorForCdp("node-not-found", "The node could not be resolved to a live element. The page may have changed; re-observe the page for a fresh target."));
       }
       var objectIdForResolveNode = objectForResolveNode.objectId;
       var fnForResolveNode = "function () { try { if (typeof this.scrollIntoViewIfNeeded === 'function') { this.scrollIntoViewIfNeeded(); } else if (typeof this.scrollIntoView === 'function') { this.scrollIntoView({ block: 'center', inline: 'center' }); } } catch (e) {} var r = (typeof this.getBoundingClientRect === 'function') ? this.getBoundingClientRect() : null; if (!r) { return JSON.stringify({ error: 'no-rect' }); } return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height }); }";

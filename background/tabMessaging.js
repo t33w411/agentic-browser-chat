@@ -54,6 +54,7 @@
     "agent/contextBuilder.js",
     "agent/client.js",
     "agent/compactor.js",
+    "agent/pageMutatorBatchGate.js",
     "agent/hooks/registry.js",
     "agent/hooks/builtin/memoryClaimGuard.js",
     "agent/hooks/builtin/imageGenerationCap.js",

@@ -183,7 +183,8 @@
           pageUrl: String(chipForPanelDataRepo.pageUrl || ''),
           pageTitle: String(chipForPanelDataRepo.pageTitle || ''),
           elementSelector: String(chipForPanelDataRepo.elementSelector || ''),
-          htmlFormat: String(chipForPanelDataRepo.htmlFormat || '')
+          htmlFormat: String(chipForPanelDataRepo.htmlFormat || ''),
+          sourceHash: String(chipForPanelDataRepo.sourceHash || '')
         };
       })
       .filter(Boolean);
@@ -760,6 +761,17 @@
     return true;
   }
 
+  async function listNoteVersionsForPanelDataRepo(noteIdForPanelDataRepo) {
+    var dbForPanelDataRepo = requireDbForPanelDataRepo();
+    var numericNoteIdForPanelDataRepo = Number(noteIdForPanelDataRepo);
+    if (!Number.isFinite(numericNoteIdForPanelDataRepo)) return [];
+    var versionsForPanelDataRepo = await dbForPanelDataRepo.noteVersions
+      .where('noteId').equals(numericNoteIdForPanelDataRepo).sortBy('id');
+    // Newest first (id is a monotonic autoincrement, so it mirrors save order).
+    versionsForPanelDataRepo.reverse();
+    return versionsForPanelDataRepo;
+  }
+
   async function listTasksForPanelDataRepo() {
     var dbForPanelDataRepo = requireDbForPanelDataRepo();
     var tasksForPanelDataRepo = await dbForPanelDataRepo.tasks.toArray();
@@ -997,6 +1009,7 @@
     createNote:                   createNoteForPanelDataRepo,
     updateNote:                   updateNoteForPanelDataRepo,
     deleteNote:                   deleteNoteForPanelDataRepo,
+    listNoteVersions:             listNoteVersionsForPanelDataRepo,
     listTasks:                    listTasksForPanelDataRepo,
     createTask:                   createTaskForPanelDataRepo,
     updateTask:                   updateTaskForPanelDataRepo,

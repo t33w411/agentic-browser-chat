@@ -249,6 +249,18 @@
     return typeof n === 'number' && Number.isInteger(n) && n > 0;
   }
 
+  // Coerces an id-like value to a positive integer, tolerating numeric strings such as "23" that some
+  // models send despite the schema declaring an integer. Returns the integer, or null when the value
+  // is not a positive whole number (so callers can reject a genuinely malformed reference).
+  function toPositiveIntegerForToolExec(v) {
+    if (typeof v === 'number' && Number.isInteger(v) && v > 0) return v;
+    if (typeof v === 'string' && /^\d+$/.test(v.trim())) {
+      var parsedForToPositive = parseInt(v.trim(), 10);
+      if (Number.isInteger(parsedForToPositive) && parsedForToPositive > 0) return parsedForToPositive;
+    }
+    return null;
+  }
+
   // ---- Read pagination + display caps ----
 
   var READ_DEFAULT_LINE_LIMIT_FOR_TOOL_EXEC = 200;
@@ -305,64 +317,29 @@
     return { entries: outEntriesForCaps, truncatedByBytes: truncatedByBytesForCaps, omittedLines: omittedLinesForCaps };
   }
 
-  // Parses the shared offset/limit/lines/max_line_chars range args. Returns { error } on
-  // validation failure, otherwise the normalized range fields. lines takes precedence over
-  // offset/limit (per the tool contract): when lines is provided, offset/limit are inert.
+  // Parses the shared offset/limit range args. Returns { error } on validation failure,
+  // otherwise the normalized range fields.
   function parseReadRangeArgsForToolExec(args) {
-    var linesSubzeroForRange = [];
-    var linesParamForRange = Array.isArray(args.lines) && args.lines.length > 0
-      ? (function () {
-          linesSubzeroForRange = args.lines.filter(function (n) { return typeof n === 'number' && n < 1; });
-          return args.lines
-            .filter(function (n) { return typeof n === 'number' && n >= 1; })
-            .map(Math.floor)
-            .sort(function (a, b) { return a - b; });
-        })()
-      : null;
-
-    var ignoredFieldsForRange = [];
-    if (linesParamForRange !== null) {
-      if (args.offset !== undefined) ignoredFieldsForRange.push('offset');
-      if (args.limit !== undefined) ignoredFieldsForRange.push('limit');
-    }
-
     var offsetForRange = 1;
-    if (linesParamForRange === null && args.offset !== undefined) {
+    if (args.offset !== undefined) {
       if (typeof args.offset !== 'number' || !Number.isFinite(args.offset) || args.offset < 1) {
         return { error: 'offset must be a positive integer (1 or greater)' };
       }
       offsetForRange = Math.floor(args.offset);
     }
 
-    var userProvidedLimitForRange = linesParamForRange === null && args.limit !== undefined;
-    var limitForRange = null;
-    if (userProvidedLimitForRange) {
+    var limitForRange = READ_DEFAULT_LINE_LIMIT_FOR_TOOL_EXEC;
+    if (args.limit !== undefined) {
       if (typeof args.limit !== 'number' || args.limit <= 0 || !Number.isFinite(args.limit)) {
-        return { error: 'limit must be a positive integer; omit to read to the end' };
+        return { error: 'limit must be a positive integer; omit to use the default 200-line page' };
       }
       limitForRange = Math.floor(args.limit);
-    }
-    if (limitForRange === null && linesParamForRange === null) {
-      limitForRange = READ_DEFAULT_LINE_LIMIT_FOR_TOOL_EXEC;
-    }
-
-    var maxLineCharsForRange = READ_MAX_LINE_CHARS_FOR_TOOL_EXEC;
-    if (args.max_line_chars !== undefined) {
-      if (typeof args.max_line_chars !== 'number' || !Number.isFinite(args.max_line_chars) || args.max_line_chars < 1) {
-        return { error: 'max_line_chars must be a positive integer' };
-      }
-      maxLineCharsForRange = Math.floor(args.max_line_chars);
     }
 
     return {
       error: null,
-      linesParam: linesParamForRange,
-      linesSubzero: linesSubzeroForRange,
-      ignoredFields: ignoredFieldsForRange,
       offset: offsetForRange,
-      userProvidedLimit: userProvidedLimitForRange,
-      limit: limitForRange,
-      maxLineChars: maxLineCharsForRange
+      limit: limitForRange
     };
   }
 
@@ -375,43 +352,16 @@
     var allLinesForBuild = contentStringForBuild.split('\n');
     var totalLinesForBuild = allLinesForBuild.length;
 
-    if (rangeForBuild.linesParam !== null) {
-      var outOfRangeForBuild = rangeForBuild.linesParam.filter(function (n) { return n > totalLinesForBuild; });
-      var rawEntriesForLines = rangeForBuild.linesParam
-        .filter(function (n) { return n <= totalLinesForBuild; })
-        .map(function (n) { return { ln: n, lc: allLinesForBuild[n - 1] }; });
-      var cappedForLines = finalizeReadEntriesForToolExec(rawEntriesForLines, rangeForBuild.maxLineChars, READ_MAX_BYTES_FOR_TOOL_EXEC);
-      var resultForLines = Object.assign({ ok: true }, baseFieldsForBuild, {
-        total_lines: totalLinesForBuild,
-        rev: revForBuild,
-        content: cappedForLines.entries
-      });
-      var warnPartsForBuild = [];
-      if (rangeForBuild.linesSubzero.length > 0) {
-        warnPartsForBuild.push('Line number' + (rangeForBuild.linesSubzero.length === 1 ? ' ' : 's ') + rangeForBuild.linesSubzero.join(', ') + ' ' + (rangeForBuild.linesSubzero.length === 1 ? 'is' : 'are') + ' invalid (must be 1 or greater) and ' + (rangeForBuild.linesSubzero.length === 1 ? 'was' : 'were') + ' skipped.');
-      }
-      if (outOfRangeForBuild.length > 0) {
-        warnPartsForBuild.push('Line number' + (outOfRangeForBuild.length === 1 ? ' ' : 's ') + outOfRangeForBuild.join(', ') + ' exceed' + (outOfRangeForBuild.length === 1 ? 's' : '') + ' the item\'s ' + totalLinesForBuild + ' total line' + (totalLinesForBuild === 1 ? '' : 's') + ' and ' + (outOfRangeForBuild.length === 1 ? 'was' : 'were') + ' skipped.');
-      }
-      if (cappedForLines.truncatedByBytes) {
-        resultForLines.truncated_by_bytes = true;
-        warnPartsForBuild.push('The response reached the ' + READ_MAX_BYTES_FOR_TOOL_EXEC + '-byte cap; line' + (cappedForLines.omittedLines.length === 1 ? ' ' : 's ') + cappedForLines.omittedLines.join(', ') + ' ' + (cappedForLines.omittedLines.length === 1 ? 'was' : 'were') + ' omitted. Request fewer lines per call.');
-      }
-      if (warnPartsForBuild.length > 0) resultForLines.warning = warnPartsForBuild.join(' ');
-      if (rangeForBuild.ignoredFields.length) resultForLines.ignored = rangeForBuild.ignoredFields;
-      return resultForLines;
-    }
-
     if (rangeForBuild.offset > totalLinesForBuild) {
       return { ok: false, error: 'offset ' + rangeForBuild.offset + ' is out of range: the item only has ' + totalLinesForBuild + ' line' + (totalLinesForBuild === 1 ? '' : 's') + '. Use an offset between 1 and ' + totalLinesForBuild + ', or omit offset to read from the beginning.' };
     }
 
     var startIdxForBuild = rangeForBuild.offset - 1;
-    var endIdxForBuild = rangeForBuild.limit !== null ? startIdxForBuild + rangeForBuild.limit : totalLinesForBuild;
+    var endIdxForBuild = startIdxForBuild + rangeForBuild.limit;
     var rawEntriesForOffset = allLinesForBuild.slice(startIdxForBuild, endIdxForBuild).map(function (line, i) {
       return { ln: startIdxForBuild + i + 1, lc: line };
     });
-    var cappedForOffset = finalizeReadEntriesForToolExec(rawEntriesForOffset, rangeForBuild.maxLineChars, READ_MAX_BYTES_FOR_TOOL_EXEC);
+    var cappedForOffset = finalizeReadEntriesForToolExec(rawEntriesForOffset, READ_MAX_LINE_CHARS_FOR_TOOL_EXEC, READ_MAX_BYTES_FOR_TOOL_EXEC);
     var hasMoreForBuild = (endIdxForBuild < totalLinesForBuild) || cappedForOffset.truncatedByBytes;
 
     var responseForBuild = Object.assign({ ok: true }, baseFieldsForBuild, {
@@ -445,8 +395,8 @@
     var type = args.type;
     if (!type) return { ok: false, error: 'type is required; valid values are: note, task, question, chat, attachment' };
     if (!isKnownTypeForToolExec(type)) return { ok: false, error: 'Unknown type "' + type + '"; valid values are: note, task, question, chat, attachment' };
-    if (!isPositiveIntegerForToolExec(args.id)) return { ok: false, error: 'id must be a positive integer' };
-    var id = args.id;
+    var id = toPositiveIntegerForToolExec(args.id);
+    if (id === null) return { ok: false, error: 'id must be a positive integer' };
 
     var range = parseReadRangeArgsForToolExec(args);
     if (range.error) return { ok: false, error: range.error };
@@ -477,10 +427,10 @@
   // ---- Tool: read (attachment sub-mode) ----
 
   async function readAttachmentForToolExec(args, panelDataRepo, context) {
-    if (!isPositiveIntegerForToolExec(args.id)) {
+    var blobIdForAttach = toPositiveIntegerForToolExec(args.id);
+    if (blobIdForAttach === null) {
       return { ok: false, error: 'id must be a positive integer (the attachment blob id, shown as blob_id in a note read)' };
     }
-    var blobIdForAttach = args.id;
 
     var rangeForAttach = parseReadRangeArgsForToolExec(args);
     if (rangeForAttach.error) return { ok: false, error: rangeForAttach.error };
@@ -688,30 +638,81 @@
     if (!panelDataRepo) return { ok: false, error: 'Database not ready' };
 
     var type = args.type;
-    var title = typeof args.title === 'string' ? args.title.trim() : null;
-    if (!title) return { ok: false, error: 'title is required' };
     var content = typeof args.content === 'string' ? args.content : '';
-    var noteType = (args.noteType !== undefined && args.noteType !== null) ? args.noteType : 'user';
-    var tags = Array.isArray(args.tags) ? args.tags : null;
-    if (tags !== null && tags.some(function (t) { return typeof t !== 'string'; })) {
-      return { ok: false, error: 'tags must be an array of strings' };
-    }
-    var dueAt = typeof args.due_at === 'string' ? args.due_at : null;
-    if (dueAt !== null && isNaN(new Date(dueAt).getTime())) {
-      return { ok: false, error: 'due_at must be a valid ISO 8601 date string' };
-    }
-    var reminderAt = typeof args.reminder_at === 'string' ? args.reminder_at : null;
-    if (reminderAt !== null && isNaN(new Date(reminderAt).getTime())) {
-      return { ok: false, error: 'reminder_at must be a valid ISO 8601 date string' };
-    }
-    var isCompleted = typeof args.is_completed === 'boolean' ? args.is_completed : null;
+    var title = typeof args.title === 'string' ? args.title.trim() : null;
     var now = new Date().toISOString();
 
     if (!type) return { ok: false, error: 'type is required; valid values are: note, task' };
     if (type === 'chat') return { ok: false, error: 'Cannot write to chats' };
     if (type === 'question') return { ok: false, error: 'Cannot write questions directly; use generate_questions instead' };
     if (!isKnownTypeForToolExec(type)) return { ok: false, error: 'Unknown type "' + type + '"; valid values are: note, task' };
-    if (args.id !== undefined) return { ok: false, error: 'write only creates new items; to replace an existing item use edit with line_start: 1 and line_end: total_lines' };
+
+    // ---- Overwrite an existing item wholesale (id provided) ----
+    // The full-content analogue of overwriting a whole file: replaces the item body (and optionally
+    // the title) with the supplied content. rev guards against clobbering unseen changes. Structured
+    // task fields and note metadata are not applied here; edit changes those.
+    // A falsy id (0, false, "", null, undefined, NaN) can never reference a real item (ids are
+    // positive integers), so it means "not provided; create" rather than an overwrite attempt. This
+    // truthy gate keeps dumb models that pad every param with a falsy id from being refused a create.
+    // A truthy id is coerced (a numeric string like "23" is accepted and converted); a truthy but
+    // genuinely malformed id still errors below, since it signals a mistyped reference.
+    if (args.id) {
+      var overwriteId = toPositiveIntegerForToolExec(args.id);
+      if (overwriteId === null) return { ok: false, error: 'id must be a positive integer referring to an existing item' };
+      if (typeof args.rev !== 'string' || !args.rev) return { ok: false, error: 'rev is required when id is provided; read the item first to obtain its current rev token' };
+      if (type !== 'note' && type !== 'task') return { ok: false, error: 'write can only overwrite notes and tasks' };
+      var ignoredForOverwrite = [];
+      ['noteType', 'tags', 'due_at', 'reminder_at', 'is_completed'].forEach(function (kForOverwrite) {
+        if (args[kForOverwrite] !== undefined) ignoredForOverwrite.push(kForOverwrite);
+      });
+      try {
+        var gotForOverwrite = await getItemWithContentStringForToolExec(panelDataRepo, type, overwriteId);
+        if (!gotForOverwrite.item) return { ok: false, error: 'Item not found: ' + type + ' ' + overwriteId };
+        if (computeRevTokenForToolExec(gotForOverwrite.contentString) !== args.rev) {
+          return { ok: false, error: 'Stale rev: item was modified since your last read. Read again before overwriting.' };
+        }
+        var overwriteEdit = { body: content, updatedAt: now };
+        if (title !== null && title !== '') overwriteEdit.title = title;
+        if (type === 'note') {
+          await panelDataRepo.updateNote(overwriteId, overwriteEdit);
+        } else {
+          await panelDataRepo.updateTask(overwriteId, overwriteEdit);
+        }
+        var refetchedForOverwrite = await getItemWithContentStringForToolExec(panelDataRepo, type, overwriteId);
+        var responseForOverwrite = {
+          ok: true,
+          id: overwriteId,
+          type: type,
+          title: (refetchedForOverwrite.item && refetchedForOverwrite.item.title) || '',
+          rev: computeRevTokenForToolExec(refetchedForOverwrite.contentString)
+        };
+        if (ignoredForOverwrite.length) responseForOverwrite.ignored = ignoredForOverwrite;
+        return responseForOverwrite;
+      } catch (errOverwrite) {
+        return { ok: false, error: errOverwrite.message || 'Overwrite failed' };
+      }
+    }
+
+    // ---- Create a new item ----
+    if (!title) return { ok: false, error: 'title is required' };
+    var noteType = (args.noteType !== undefined && args.noteType !== null) ? args.noteType : 'user';
+    var tags = Array.isArray(args.tags) ? args.tags : null;
+    if (tags !== null && tags.some(function (t) { return typeof t !== 'string'; })) {
+      return { ok: false, error: 'tags must be an array of strings' };
+    }
+    // Empty/whitespace strings mean "not provided" (defaults apply), not an invalid date.
+    // Only tasks consume these fields, so only validate them when the target is a task; for
+    // other types they are inert and reported via ignoredFieldsForWrite below.
+    var dueAt = typeof args.due_at === 'string' && args.due_at.trim() !== '' ? args.due_at : null;
+    if (type === 'task' && dueAt !== null && isNaN(new Date(dueAt).getTime())) {
+      return { ok: false, error: 'due_at must be a valid ISO 8601 date string' };
+    }
+    var reminderAt = typeof args.reminder_at === 'string' && args.reminder_at.trim() !== '' ? args.reminder_at : null;
+    if (type === 'task' && reminderAt !== null && isNaN(new Date(reminderAt).getTime())) {
+      return { ok: false, error: 'reminder_at must be a valid ISO 8601 date string' };
+    }
+    var isCompleted = typeof args.is_completed === 'boolean' ? args.is_completed : null;
+
     if (type === 'note' && args.noteType !== undefined && args.noteType !== null && ['user', 'agent'].indexOf(args.noteType) === -1) {
       return { ok: false, error: 'Invalid noteType "' + args.noteType + '"; valid values are: user, agent' };
     }
@@ -922,8 +923,8 @@
     if (!panelDataRepo) return { ok: false, error: 'Database not ready' };
 
     var type = args.type;
-    if (!isPositiveIntegerForToolExec(args.id)) return { ok: false, error: 'id must be a positive integer referring to an existing item' };
-    var id = args.id;
+    var id = toPositiveIntegerForToolExec(args.id);
+    if (id === null) return { ok: false, error: 'id must be a positive integer referring to an existing item' };
     if (typeof args.rev !== 'string' || !args.rev) return { ok: false, error: 'rev is required and must be a non-empty string; read the item first to obtain its current rev token' };
     var rev = args.rev;
     var title = typeof args.title === 'string' ? args.title.trim() : null;
@@ -931,33 +932,15 @@
     var oldString = typeof args.old_string === 'string' ? args.old_string : null;
     var newString = typeof args.new_string === 'string' ? args.new_string : null;
     var replaceAll = Boolean(args.replace_all);
-    var lineStart = null;
-    if (args.line_start !== undefined) {
-      if (!isPositiveIntegerForToolExec(args.line_start)) {
-        return { ok: false, error: 'line_start must be a positive integer (1 or greater)' };
-      }
-      lineStart = args.line_start;
-    }
-    var lineEnd = null;
-    if (args.line_end !== undefined) {
-      if (lineStart === null) {
-        return { ok: false, error: 'line_end requires line_start to also be specified' };
-      }
-      if (!isPositiveIntegerForToolExec(args.line_end)) {
-        return { ok: false, error: 'line_end must be a positive integer (1 or greater)' };
-      }
-      lineEnd = args.line_end;
-    }
-    var oldStringEnd = typeof args.old_string_end === 'string' ? args.old_string_end : null;
-    if (oldStringEnd !== null && lineStart === null) {
-      return { ok: false, error: 'old_string_end requires line_start (and line_end) to also be specified' };
-    }
-    var dueAtForEdit = typeof args.due_at === 'string' ? args.due_at : null;
-    if (dueAtForEdit !== null && isNaN(new Date(dueAtForEdit).getTime())) {
+    // Empty/whitespace strings mean "no change", not an invalid date. Only tasks consume these
+    // fields, so only validate them when the target is a task; for other types they are inert
+    // and reported via ignoredFieldsForEdit below.
+    var dueAtForEdit = typeof args.due_at === 'string' && args.due_at.trim() !== '' ? args.due_at : null;
+    if (type === 'task' && dueAtForEdit !== null && isNaN(new Date(dueAtForEdit).getTime())) {
       return { ok: false, error: 'due_at must be a valid ISO 8601 date string' };
     }
-    var reminderAtForEdit = typeof args.reminder_at === 'string' ? args.reminder_at : null;
-    if (reminderAtForEdit !== null && isNaN(new Date(reminderAtForEdit).getTime())) {
+    var reminderAtForEdit = typeof args.reminder_at === 'string' && args.reminder_at.trim() !== '' ? args.reminder_at : null;
+    if (type === 'task' && reminderAtForEdit !== null && isNaN(new Date(reminderAtForEdit).getTime())) {
       return { ok: false, error: 'reminder_at must be a valid ISO 8601 date string' };
     }
     var isCompletedForEdit = typeof args.is_completed === 'boolean' ? args.is_completed : null;
@@ -977,24 +960,17 @@
     }
     var hasTaskFieldChange = type === 'task' && (dueAtForEdit !== null || reminderAtForEdit !== null || isCompletedForEdit !== null);
 
-    var hasContentChange = newString !== null || lineStart !== null;
+    // Content editing is an exact-string find/replace: old_string is the text to find, new_string
+    // replaces it (empty string deletes the match). To replace an item's entire content, use the
+    // write tool with the item's id and rev.
+    var hasContentChange = oldString !== null || newString !== null;
     if (!hasContentChange && title === null && !hasTaskFieldChange) {
-      return { ok: false, error: 'at least one of title, old_string, line_start, or (for tasks) due_at, reminder_at, or is_completed must be provided' };
+      return { ok: false, error: 'at least one of title, old_string (with new_string), or (for tasks) due_at, reminder_at, or is_completed must be provided' };
     }
-
-    if (lineStart !== null) {
-      if (replaceAll) {
-        return { ok: false, error: 'replace_all cannot be used with line_start; replace_all is a string mode parameter only' };
-      }
-      if (oldStringEnd !== null && lineEnd === null) {
-        return { ok: false, error: 'old_string_end requires line_end to also be specified' };
-      }
-      if (lineEnd !== null && lineEnd < lineStart) {
-        return { ok: false, error: 'line_end must be >= line_start' };
-      }
-    } else if (hasContentChange) {
-      if (oldString === null) return { ok: false, error: 'old_string is required when line_start is not provided' };
+    if (hasContentChange) {
+      if (oldString === null) return { ok: false, error: 'old_string is required to change content; provide the exact text to find and replace' };
       if (oldString === '') return { ok: false, error: 'old_string cannot be empty; provide the exact text you want to replace' };
+      if (newString === null) return { ok: false, error: 'new_string is required when old_string is provided; use an empty string to delete the matched text' };
     }
 
     try {
@@ -1008,36 +984,7 @@
 
       var newContent;
 
-      if (lineStart !== null) {
-        var allLines = got.contentString.split('\n');
-        var totalLines = allLines.length;
-        var effectiveLineEnd = lineEnd !== null ? lineEnd : lineStart;
-
-        if (lineStart > totalLines) {
-          return { ok: false, error: 'line_start ' + lineStart + ' is out of range (total lines: ' + totalLines + ')' };
-        }
-        if (effectiveLineEnd > totalLines) {
-          return { ok: false, error: 'line_end ' + effectiveLineEnd + ' is out of range (total lines: ' + totalLines + ')' };
-        }
-
-        if (oldString !== null && oldString !== '') {
-          if (allLines[lineStart - 1].indexOf(oldString) === -1) {
-            return { ok: false, error: 'Safety check failed: line ' + lineStart + ' does not contain old_string' };
-          }
-        }
-        if (oldStringEnd !== null && oldStringEnd !== '') {
-          if (allLines[effectiveLineEnd - 1].indexOf(oldStringEnd) === -1) {
-            return { ok: false, error: 'Safety check failed: line ' + effectiveLineEnd + ' does not contain old_string_end' };
-          }
-        }
-
-        if (newString !== null) {
-          var beforeLines = allLines.slice(0, lineStart - 1);
-          var afterLines = allLines.slice(effectiveLineEnd);
-          var replacementLines = newString === '' ? [] : newString.split('\n');
-          newContent = beforeLines.concat(replacementLines).concat(afterLines).join('\n');
-        }
-      } else if (hasContentChange) {
+      if (hasContentChange) {
         var occurrences = 0;
         var searchPos = 0;
         while (true) {
@@ -1167,10 +1114,13 @@
       return { ok: false, error: 'Invalid scope "' + scope + '"; valid values are: content, title' };
     }
     var type = args.type || null;
-    if (args.id !== undefined && !isPositiveIntegerForToolExec(args.id)) {
-      return { ok: false, error: 'id must be a positive integer when provided' };
+    // id is optional (restrict to one item vs search all). A falsy id means "not provided; search
+    // all"; a truthy id is coerced (numeric strings like "23" accepted) and errors only if malformed.
+    var specificId = null;
+    if (args.id) {
+      specificId = toPositiveIntegerForToolExec(args.id);
+      if (specificId === null) return { ok: false, error: 'id must be a positive integer when provided' };
     }
-    var specificId = isPositiveIntegerForToolExec(args.id) ? args.id : null;
     var noteType = args.noteType || null;
     var caseInsensitive = args.case_insensitive !== false;
     var limit = null;
@@ -1788,12 +1738,25 @@
   }
 
   // Returns a human-readable label for a clickable element (button or link).
-  // Order: innerText → aria-label/aria-labelledby/title (via resolveLabelForPageQuery)
-  // → value attribute (for input-style buttons). Truncates to the given cap. Returns
-  // null when nothing meaningful is found.
+  // Buttons prefer aria-label/aria-labelledby/title over innerText so count-only
+  // visible text ("3.5K") does not hide the control name ("Like" / "Liked").
+  // Links and other clickables keep innerText first (visible link text is usually
+  // the right name). Then value for input-style buttons. Truncates to the given
+  // cap. Returns null when nothing meaningful is found.
   function resolveClickableLabelForPageQuery(elForClickLabel, capForClickLabel) {
     if (!elForClickLabel) return null;
     var capForClickLabelInt = (typeof capForClickLabel === 'number' && capForClickLabel > 0) ? capForClickLabel : 80;
+    var tagForClickLabel = elForClickLabel.tagName;
+    var roleForClickLabel = elForClickLabel.getAttribute && elForClickLabel.getAttribute('role');
+    var isButtonForClickLabel = tagForClickLabel === 'BUTTON' ||
+      (tagForClickLabel === 'INPUT' && /^(submit|button|reset)$/i.test(elForClickLabel.getAttribute('type') || '')) ||
+      roleForClickLabel === 'button';
+    if (isButtonForClickLabel) {
+      var ariaFirstForClickLabel = resolveLabelForPageQuery(elForClickLabel);
+      if (ariaFirstForClickLabel) {
+        return clipWithMarkerForToolExec(ariaFirstForClickLabel, capForClickLabelInt);
+      }
+    }
     var innerTextForClickLabel = (typeof elForClickLabel.innerText === 'string' ? elForClickLabel.innerText : '').replace(/\s+/g, ' ').trim();
     if (innerTextForClickLabel) {
       return clipWithMarkerForToolExec(innerTextForClickLabel, capForClickLabelInt);
@@ -1977,15 +1940,18 @@
   // Set of attributes we surface in attrChanged. style and class are handled separately.
   var TRACKED_ATTRS_FOR_CLICK_DIFF = { disabled: 1, checked: 1, value: 1, href: 1, hidden: 1, open: 1, selected: 1, src: 1, 'aria-expanded': 1, 'aria-selected': 1, 'aria-checked': 1, 'aria-pressed': 1, 'aria-hidden': 1, 'aria-disabled': 1, 'aria-invalid': 1, 'aria-busy': 1, 'aria-current': 1, 'aria-label': 1 };
 
-  // excludeElements (optional Set<Element>): when provided, attrChanged entries whose
-  // target is in the set AND attr is "value" or "checked" are skipped. Used by
-  // page_fill_form so the value/checked writes the tool itself made don't dominate
-  // the diff and leave room for actual cascading effects (validation flips, new
-  // fields appearing, aria-invalid changes elsewhere). Class changes are not
-  // excluded — validation classes (.is-invalid, .has-error) on filled elements
-  // remain useful even when "dirty"/"touched" noise comes along.
+  // excludeElements (optional Set<Element>, or Array coerced to Set): when provided,
+  // attrChanged entries whose target is in the set AND attr is "value" or "checked"
+  // are skipped. Used by page_fill_form so the value/checked writes the tool itself
+  // made don't dominate the diff and leave room for actual cascading effects
+  // (validation flips, new fields appearing, aria-invalid changes elsewhere). Class
+  // changes are not excluded — validation classes (.is-invalid, .has-error) on filled
+  // elements remain useful even when "dirty"/"touched" noise comes along.
   function summarizeMutationDiffForPageQuery(mutationsList, beforeSnap, afterSnap, excludeElements) {
     var CAP_FOR_DIFF = 20;
+    if (excludeElements && typeof excludeElements.has !== 'function') {
+      excludeElements = Array.isArray(excludeElements) ? new Set(excludeElements) : null;
+    }
 
     var addedSetForDiff = new Set();
     var addedEntriesForDiff = [];
@@ -2379,6 +2345,1044 @@
     return rowForView;
   }
 
+  // ================= page_observe: ref-based interactive snapshot (redesign) =================
+  //
+  // Model-facing page automation refers to elements by an opaque integer ref, never a
+  // selector/fingerprint/node id. This registry maps a ref to the resolved element
+  // descriptor and lives module-local, so it is naturally scoped to this content-script
+  // instance: one tab, wiped on navigation or extension re-injection, which is exactly
+  // the lifetime a ref should have. page_act (later phase) resolves a ref through here.
+  var observeRegistryForToolExec = { snapshotId: 0, url: '', builtAt: 0, refs: {} };
+
+  function resetObserveRegistryForToolExec() {
+    observeRegistryForToolExec.snapshotId += 1;
+    observeRegistryForToolExec.url = (typeof window !== 'undefined' && window.location) ? window.location.href : '';
+    observeRegistryForToolExec.builtAt = Date.now();
+    observeRegistryForToolExec.refs = {};
+    return observeRegistryForToolExec.snapshotId;
+  }
+
+  // Occlusion hit-test at snapshot-build time. An element is "covered" when the topmost
+  // element at its box center is neither it nor a descendant (a modal, cookie banner, or
+  // overlay sits on top). Mirrors the elementFromPoint probe page_act runs at dispatch,
+  // moved earlier so a covered control is never offered as actionable. Our own panel/toast
+  // shadow hosts are ignored: page_act toggles them click-through, so they never block.
+  function isElementCoveredForObserve(elForCover) {
+    if (!elForCover || typeof document === 'undefined' || typeof document.elementFromPoint !== 'function') return false;
+    var rectForCover = elForCover.getBoundingClientRect ? elForCover.getBoundingClientRect() : null;
+    if (!rectForCover || rectForCover.width <= 0 || rectForCover.height <= 0) return false;
+    var cxForCover = rectForCover.left + rectForCover.width / 2;
+    var cyForCover = rectForCover.top + rectForCover.height / 2;
+    var vpWForCover = (typeof window !== 'undefined' && window.innerWidth) || 0;
+    var vpHForCover = (typeof window !== 'undefined' && window.innerHeight) || 0;
+    // A center outside the viewport gives elementFromPoint nothing useful; do not claim
+    // covered in that case (the visibility/viewport filters already handled off-screen).
+    if (cxForCover < 0 || cyForCover < 0 || cxForCover > vpWForCover || cyForCover > vpHForCover) return false;
+    var topForCover = null;
+    try { topForCover = document.elementFromPoint(cxForCover, cyForCover); } catch (eCover) { return false; }
+    if (!topForCover) return false;
+    if (topForCover === elForCover) return false;
+    if (elForCover.contains && elForCover.contains(topForCover)) return false; // hit a descendant: reachable
+    if (topForCover.contains && topForCover.contains(elForCover)) return false; // hit an ancestor wrapper: reachable
+    if (topForCover.id && topForCover.id.indexOf('abchat-') === 0) return false; // our own panel/toast UI
+    return true;
+  }
+
+  // Native tags already covered by category collectors; heuristic card/pointer scans skip them.
+  function isNativeInteractiveTagForObserve(tagForNative) {
+    return tagForNative === 'BUTTON' || tagForNative === 'INPUT' || tagForNative === 'SELECT' ||
+      tagForNative === 'TEXTAREA' || tagForNative === 'A' || tagForNative === 'AREA' ||
+      tagForNative === 'LABEL' || tagForNative === 'OPTION' || tagForNative === 'SUMMARY';
+  }
+
+  // True when el introduces cursor:pointer (its own cursor is pointer and its parent's is not).
+  function isPointerIntroducerForObserve(elForPtrIntro) {
+    if (!elForPtrIntro || typeof window.getComputedStyle !== 'function') return false;
+    var styleForPtrIntro = null;
+    try { styleForPtrIntro = window.getComputedStyle(elForPtrIntro); } catch (ePtrIntro) { return false; }
+    if (!styleForPtrIntro || styleForPtrIntro.cursor !== 'pointer' || styleForPtrIntro.pointerEvents === 'none') return false;
+    var parentForPtrIntro = elForPtrIntro.parentElement;
+    if (!parentForPtrIntro) return true;
+    var parentStyleForPtrIntro = null;
+    try { parentStyleForPtrIntro = window.getComputedStyle(parentForPtrIntro); } catch (ePtrParent) { return true; }
+    if (parentStyleForPtrIntro && parentStyleForPtrIntro.cursor === 'pointer') return false;
+    return true;
+  }
+
+  // Focusable tabindex that is not -1 (keyboard-operable custom control / card).
+  function isFocusableTabindexForObserve(elForTab) {
+    if (!elForTab || !elForTab.getAttribute) return false;
+    var tabForTab = elForTab.getAttribute('tabindex');
+    if (tabForTab === null || tabForTab === '') return false;
+    if (String(tabForTab).trim() === '-1') return false;
+    var nForTab = parseInt(tabForTab, 10);
+    if (isNaN(nForTab)) return false;
+    return true;
+  }
+
+  // Row/card semantics used as a keep signal (never as the sole intent signal for bare <article>).
+  function isSemanticRowRoleForObserve(elForRow) {
+    if (!elForRow) return false;
+    var roleForRow = (elForRow.getAttribute && elForRow.getAttribute('role')) || '';
+    roleForRow = String(roleForRow).toLowerCase();
+    if (roleForRow === 'article' || roleForRow === 'listitem' || roleForRow === 'row') return true;
+    var tagForRow = elForRow.tagName ? elForRow.tagName.toLowerCase() : '';
+    return tagForRow === 'article' || tagForRow === 'tr';
+  }
+
+  // Explicit ARIA widget roles that are already click-operated controls.
+  function isExplicitWidgetRoleForObserve(elForWid) {
+    if (!elForWid || !elForWid.getAttribute) return false;
+    var roleForWid = String(elForWid.getAttribute('role') || '').toLowerCase();
+    return roleForWid === 'button' || roleForWid === 'link' || roleForWid === 'option' ||
+      roleForWid === 'menuitem' || roleForWid === 'menuitemradio' || roleForWid === 'menuitemcheckbox' ||
+      roleForWid === 'tab' || roleForWid === 'treeitem' || roleForWid === 'switch' ||
+      roleForWid === 'checkbox' || roleForWid === 'radio' || roleForWid === 'combobox';
+  }
+
+  // Intent signal (A): element looks intentionally clickable / operable, not a plain text node.
+  function hasClickIntentSignalForObserve(elForIntent) {
+    if (!elForIntent) return false;
+    if (isPointerIntroducerForObserve(elForIntent)) return true;
+    if (isFocusableTabindexForObserve(elForIntent)) return true;
+    if (isExplicitWidgetRoleForObserve(elForIntent)) return true;
+    if (elForIntent.hasAttribute && (elForIntent.hasAttribute('onclick') || elForIntent.onclick)) return true;
+    return false;
+  }
+
+  // Row-sized hit area: wide enough to be a feed/list row, tall enough to be a real target.
+  function isLargeHitAreaForObserve(elForSize) {
+    if (!elForSize || !elForSize.getBoundingClientRect) return false;
+    var rectForSize = elForSize.getBoundingClientRect();
+    if (!rectForSize || rectForSize.width <= 0 || rectForSize.height <= 0) return false;
+    if (rectForSize.height < 36) return false;
+    var vwForSize = (typeof window !== 'undefined' && window.innerWidth) ? window.innerWidth : 0;
+    var docWForSize = (typeof document !== 'undefined' && document.documentElement)
+      ? document.documentElement.clientWidth : 0;
+    var basisForSize = Math.max(vwForSize, docWForSize, 0);
+    if (rectForSize.width >= 240) return true;
+    if (basisForSize > 0 && rectForSize.width >= basisForSize * 0.4) return true;
+    return false;
+  }
+
+  // Interactive descendants among a candidate list (or a live DOM probe when no list is given).
+  function listContainedInteractiveForObserve(elForContain, candListForContain) {
+    var outForContain = [];
+    if (!elForContain || !elForContain.contains) return outForContain;
+    if (Array.isArray(candListForContain)) {
+      for (var iForContain = 0; iForContain < candListForContain.length; iForContain++) {
+        var otherForContain = candListForContain[iForContain] && candListForContain[iForContain].el;
+        if (!otherForContain || otherForContain === elForContain) continue;
+        if (elForContain.contains(otherForContain)) outForContain.push(otherForContain);
+      }
+      return outForContain;
+    }
+    // find_text promote path: no full candidate list; probe common interactive descendants.
+    var probeForContain;
+    try {
+      probeForContain = elForContain.querySelectorAll(
+        'a[href], area[href], button, input, select, textarea, summary, [role="button"], [role="link"], ' +
+        '[role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], ' +
+        '[role="tab"], [role="treeitem"], [role="switch"], [role="checkbox"], [role="radio"], [role="combobox"], ' +
+        '[onclick], [tabindex]:not([tabindex="-1"])'
+      );
+    } catch (eContainProbe) { return outForContain; }
+    for (var pForContain = 0; pForContain < probeForContain.length; pForContain++) {
+      var childForContain = probeForContain[pForContain];
+      if (childForContain === elForContain) continue;
+      outForContain.push(childForContain);
+    }
+    return outForContain;
+  }
+
+  // Own visible text not explained solely by a single nested control (card body / author line).
+  function hasSubstantialOwnTextForObserve(elForOwn, nestedInteractiveForOwn) {
+    var fullForOwn = '';
+    try { fullForOwn = normalizeTextForPageQuery(elForOwn.innerText || elForOwn.textContent || '', 200); }
+    catch (eOwnFull) { fullForOwn = ''; }
+    if (!fullForOwn || fullForOwn.length < 8) return false;
+    if (!nestedInteractiveForOwn || nestedInteractiveForOwn.length === 0) return fullForOwn.length >= 8;
+    var nestedTextForOwn = '';
+    for (var iForOwn = 0; iForOwn < nestedInteractiveForOwn.length; iForOwn++) {
+      try {
+        nestedTextForOwn += ' ' + normalizeTextForPageQuery(
+          nestedInteractiveForOwn[iForOwn].innerText || nestedInteractiveForOwn[iForOwn].textContent || '', 80);
+      } catch (eOwnNest) { /* ignore */ }
+    }
+    nestedTextForOwn = normalizeTextForPageQuery(nestedTextForOwn, 200);
+    if (!nestedTextForOwn) return true;
+    // If stripping nested control text still leaves a meaningful remainder, treat as card body.
+    var remainderForOwn = fullForOwn;
+    var partsForOwn = nestedTextForOwn.split(' ');
+    for (var pIdxForOwn = 0; pIdxForOwn < partsForOwn.length; pIdxForOwn++) {
+      var tokenForOwn = partsForOwn[pIdxForOwn];
+      if (tokenForOwn.length < 3) continue;
+      remainderForOwn = remainderForOwn.split(tokenForOwn).join(' ');
+    }
+    remainderForOwn = normalizeTextForPageQuery(remainderForOwn, 200);
+    return remainderForOwn.length >= 8;
+  }
+
+  // Thin wrapper: one nested control whose box roughly fills the container (or container has no own text).
+  function isThinWrapperForObserve(elForThin, onlyChildForThin) {
+    if (!elForThin || !onlyChildForThin) return false;
+    if (elForThin.tagName === 'LABEL') return true;
+    var ownTextForThin = '';
+    try { ownTextForThin = normalizeTextForPageQuery(elForThin.innerText || elForThin.textContent || '', 120); }
+    catch (eThinText) { ownTextForThin = ''; }
+    var childTextForThin = '';
+    try { childTextForThin = normalizeTextForPageQuery(onlyChildForThin.innerText || onlyChildForThin.textContent || '', 120); }
+    catch (eThinChild) { childTextForThin = ''; }
+    if (!ownTextForThin || (childTextForThin && ownTextForThin === childTextForThin)) return true;
+    if (!elForThin.getBoundingClientRect || !onlyChildForThin.getBoundingClientRect) return false;
+    var outerForThin = elForThin.getBoundingClientRect();
+    var innerForThin = onlyChildForThin.getBoundingClientRect();
+    if (!outerForThin.width || !outerForThin.height || !innerForThin.width || !innerForThin.height) return false;
+    var areaRatioForThin = (innerForThin.width * innerForThin.height) / (outerForThin.width * outerForThin.height);
+    return areaRatioForThin >= 0.7;
+  }
+
+  // Primary click surface (shared by observe dedup + find_text promote).
+  // Passes A (intent) and B (not a thin wrapper / is a real card-or-control target).
+  function isPrimaryClickSurfaceForObserve(elForPrimary, candListForPrimary) {
+    if (!elForPrimary || !elForPrimary.tagName) return false;
+    if (isNativeInteractiveTagForObserve(elForPrimary.tagName)) return false;
+    if (!hasClickIntentSignalForObserve(elForPrimary)) return false;
+    if (elForPrimary.tagName === 'LABEL') return false;
+
+    var nestedForPrimary = listContainedInteractiveForObserve(elForPrimary, candListForPrimary);
+    var pointerOrFocusForPrimary = isPointerIntroducerForObserve(elForPrimary) ||
+      isFocusableTabindexForObserve(elForPrimary);
+
+    // B: semantic row/card with an intent signal that is pointer or focusable.
+    if (isSemanticRowRoleForObserve(elForPrimary) && pointerOrFocusForPrimary) return true;
+    // B: row-sized hit area (feed/list cards).
+    if (isLargeHitAreaForObserve(elForPrimary)) return true;
+    // B: multi-control card, or one nested control plus its own body text.
+    if (nestedForPrimary.length >= 2) return true;
+    if (nestedForPrimary.length >= 1 && hasSubstantialOwnTextForObserve(elForPrimary, nestedForPrimary)) return true;
+    // Standalone heuristic control (no nested interactives): keep.
+    if (nestedForPrimary.length === 0) return true;
+    // Single nested control and no other B signal: drop if it is a thin wrapper.
+    if (nestedForPrimary.length === 1 && isThinWrapperForObserve(elForPrimary, nestedForPrimary[0])) return false;
+    // Has intent + one nested control but is not thin (e.g. larger hit area already returned): keep.
+    return nestedForPrimary.length === 1 ? true : false;
+  }
+
+  // Compact name for large card/row surfaces so observe rows stay scannable.
+  function compactCardNameForObserve(elForCard, capForCard) {
+    capForCard = (typeof capForCard === 'number' && capForCard > 0) ? capForCard : 100;
+    var rawForCard = '';
+    try { rawForCard = String(elForCard.innerText || elForCard.textContent || ''); } catch (eCardRaw) { rawForCard = ''; }
+    rawForCard = rawForCard.replace(/\s+/g, ' ').trim();
+    if (!rawForCard) return '';
+    var partsForCard = rawForCard.split(/\s*[·|•—-]\s*/);
+    if (partsForCard.length >= 2) {
+      var headForCard = normalizeTextForPageQuery(partsForCard[0], 40);
+      var bodyForCard = normalizeTextForPageQuery(partsForCard.slice(1).join(' — '), Math.max(20, capForCard - headForCard.length - 3));
+      if (headForCard && bodyForCard) return headForCard + ' — ' + bodyForCard;
+    }
+    return normalizeTextForPageQuery(rawForCard, capForCard);
+  }
+
+  // cursor:pointer scan. Catches clickable elements (React "clickable div", cards, custom
+  // controls) that carry no native tag, ARIA role, href, or onclick attribute and so are
+  // missed by the category collectors. Returns the OUTERMOST element that introduces
+  // cursor:pointer in its ancestor chain (parent is not pointer), so a clickable card is
+  // offered once, not once per inheriting descendant. Bounded so it stays cheap on large
+  // DOMs. (A CDP getEventListeners pass, available only with advanced automation, can be
+  // layered on later for handlers that do not set cursor:pointer.)
+  function collectPointerCandidatesForObserve(seenSetForPointer) {
+    var outForPointer = [];
+    if (typeof document === 'undefined' || !document.body || typeof window.getComputedStyle !== 'function') return outForPointer;
+    var allForPointer;
+    try { allForPointer = document.body.querySelectorAll('*'); } catch (ePtr) { return outForPointer; }
+    var maxIterForPointer = Math.min(allForPointer.length, 20000);
+    var scannedForPointer = 0;
+    for (var pIdxForPointer = 0; pIdxForPointer < maxIterForPointer; pIdxForPointer++) {
+      if (scannedForPointer >= 4000) break;
+      var elForPointer = allForPointer[pIdxForPointer];
+      if (!elForPointer || seenSetForPointer.has(elForPointer)) continue;
+      var tagForPointer = elForPointer.tagName;
+      if (isNativeInteractiveTagForObserve(tagForPointer)) continue;
+      if (!isElementInViewportForPageQuery(elForPointer)) continue;
+      scannedForPointer++;
+      if (!isPointerIntroducerForObserve(elForPointer)) continue;
+      if (!isElementVisibleForPageQuery(elForPointer)) continue;
+      seenSetForPointer.add(elForPointer);
+      outForPointer.push({ el: elForPointer, category: 'custom_elements', viaPointer: true });
+    }
+    return outForPointer;
+  }
+
+  // Focusable non-native cards/rows (tabindex >= 0). Catches targets like X notification
+  // <article role="article" tabindex="0"> that navigate via JS without being an <a> and
+  // without necessarily setting cursor:pointer on the article itself. Cheap query vs *.
+  function collectFocusableCardCandidatesForObserve(seenSetForFocus) {
+    var outForFocus = [];
+    if (typeof document === 'undefined' || !document.body) return outForFocus;
+    var nodesForFocus;
+    try { nodesForFocus = document.body.querySelectorAll('[tabindex]'); } catch (eFocusQ) { return outForFocus; }
+    for (var fIdxForFocus = 0; fIdxForFocus < nodesForFocus.length; fIdxForFocus++) {
+      var elForFocus = nodesForFocus[fIdxForFocus];
+      if (!elForFocus || seenSetForFocus.has(elForFocus)) continue;
+      if (isNativeInteractiveTagForObserve(elForFocus.tagName)) continue;
+      if (!isFocusableTabindexForObserve(elForFocus)) continue;
+      if (isExplicitWidgetRoleForObserve(elForFocus)) continue; // already in category collectors
+      if (!isElementVisibleForPageQuery(elForFocus)) continue;
+      seenSetForFocus.add(elForFocus);
+      outForFocus.push({ el: elForFocus, category: 'custom_elements', viaFocusable: true });
+    }
+    return outForFocus;
+  }
+
+  // Wrapper/label dedup for heuristic (pointer / focusable) candidates only. Native/ARIA
+  // controls are never dropped. A heuristic wrapper that contains other interactive
+  // candidates is kept only when it is a primary click surface (feed card / notification
+  // row); thin wrappers around a single inner control are still removed.
+  function dedupeObserveCandidatesForObserve(candListForDedup) {
+    var keptForDedup = [];
+    for (var iForDedup = 0; iForDedup < candListForDedup.length; iForDedup++) {
+      var candForDedup = candListForDedup[iForDedup];
+      if (candForDedup.viaPointer || candForDedup.viaFocusable) {
+        var elForDedup = candForDedup.el;
+        var containsOtherForDedup = false;
+        for (var jForDedup = 0; jForDedup < candListForDedup.length; jForDedup++) {
+          if (iForDedup === jForDedup) continue;
+          var otherElForDedup = candListForDedup[jForDedup].el;
+          if (elForDedup !== otherElForDedup && elForDedup.contains && elForDedup.contains(otherElForDedup)) {
+            containsOtherForDedup = true;
+            break;
+          }
+        }
+        if (containsOtherForDedup && !isPrimaryClickSurfaceForObserve(elForDedup, candListForDedup)) continue;
+      }
+      keptForDedup.push(candForDedup);
+    }
+    return keptForDedup;
+  }
+
+  // Maps a native tag / category to a friendly role word for the model when no explicit
+  // ARIA role is set, so every observe row reads as "role name" a small model understands.
+  function intrinsicRoleForObserve(elForRole, categoryForRole) {
+    var tagForRole = elForRole.tagName ? elForRole.tagName.toLowerCase() : '';
+    if (tagForRole === 'a' || tagForRole === 'area') return 'link';
+    if (tagForRole === 'button') return 'button';
+    if (tagForRole === 'select') return 'select';
+    if (tagForRole === 'textarea') return 'textbox';
+    if (tagForRole === 'input') {
+      var typeForRole = (elForRole.getAttribute('type') || 'text').toLowerCase();
+      if (typeForRole === 'checkbox') return 'checkbox';
+      if (typeForRole === 'radio') return 'radio';
+      if (typeForRole === 'submit' || typeForRole === 'button' || typeForRole === 'reset') return 'button';
+      return 'textbox';
+    }
+    if (categoryForRole === 'form_fields') return 'textbox';
+    if (categoryForRole === 'links') return 'link';
+    if (categoryForRole === 'buttons') return 'button';
+    if (categoryForRole === 'landmarks') return 'region';
+    return 'clickable';
+  }
+
+  // Builds one model-facing observe item plus the two internal resolution fields
+  // (_selector, _fingerprint) the caller strips into the registry before returning.
+  function buildObserveItemForToolExec(elForItem, categoryForItem, refForItem, inViewportForItem) {
+    var pathForItem = buildCssPathForPageQuery(elForItem);
+    var explicitRoleForItem = (elForItem.getAttribute && elForItem.getAttribute('role')) || '';
+    var itemForObserve = { ref: refForItem, role: explicitRoleForItem || intrinsicRoleForObserve(elForItem, categoryForItem) };
+    var labelForItem = categoryForItem === 'form_fields'
+      ? resolveFormFieldLabelForPageQuery(elForItem)
+      : resolveClickableLabelForPageQuery(elForItem, 120);
+    if (!labelForItem) labelForItem = resolveLabelForPageQuery(elForItem);
+    // Large card/row surfaces often concatenate every nested control into innerText; prefer a
+    // compact author/body name so observe rows stay scannable for a weak model.
+    if ((!labelForItem || labelForItem.length > 100) &&
+        (isSemanticRowRoleForObserve(elForItem) || isLargeHitAreaForObserve(elForItem)) &&
+        (isPointerIntroducerForObserve(elForItem) || isFocusableTabindexForObserve(elForItem))) {
+      var cardNameForItem = compactCardNameForObserve(elForItem, 100);
+      if (cardNameForItem) labelForItem = cardNameForItem;
+    }
+    if (labelForItem) itemForObserve.name = normalizeTextForPageQuery(labelForItem, 120);
+    if (typeof elForItem.value === 'string' && elForItem.value !== '') itemForObserve.value = normalizeTextForPageQuery(elForItem.value, 120);
+    var placeholderForItem = elForItem.getAttribute && elForItem.getAttribute('placeholder');
+    if (placeholderForItem && !itemForObserve.name) itemForObserve.placeholder = normalizeTextForPageQuery(placeholderForItem, 80);
+    var typeForItem = elForItem.getAttribute && elForItem.getAttribute('type');
+    if (typeForItem && categoryForItem === 'form_fields') itemForObserve.type = typeForItem.toLowerCase();
+    var stateForItem = {};
+    if (typeof elForItem.checked === 'boolean') stateForItem.checked = elForItem.checked;
+    var ariaCheckedForItem = elForItem.getAttribute && elForItem.getAttribute('aria-checked');
+    if (ariaCheckedForItem && ariaCheckedForItem !== 'false') stateForItem.checked = ariaCheckedForItem === 'mixed' ? 'mixed' : true;
+    var ariaExpandedForItem = elForItem.getAttribute && elForItem.getAttribute('aria-expanded');
+    if (ariaExpandedForItem === 'true' || ariaExpandedForItem === 'false') stateForItem.expanded = ariaExpandedForItem === 'true';
+    var ariaPressedForItem = elForItem.getAttribute && elForItem.getAttribute('aria-pressed');
+    if (ariaPressedForItem === 'true' || ariaPressedForItem === 'false') stateForItem.pressed = ariaPressedForItem === 'true';
+    if (elForItem.getAttribute && elForItem.getAttribute('aria-selected') === 'true') stateForItem.selected = true;
+    if (elForItem.disabled === true || (elForItem.getAttribute && elForItem.getAttribute('aria-disabled') === 'true')) stateForItem.disabled = true;
+    if (elForItem.required === true) stateForItem.required = true;
+    if (!inViewportForItem) stateForItem.offscreen = true;
+    if (Object.keys(stateForItem).length) itemForObserve.state = stateForItem;
+    if (!itemForObserve.name && !itemForObserve.value && !itemForObserve.placeholder) {
+      var textForItem = '';
+      try { textForItem = normalizeTextForPageQuery(elForItem.innerText || elForItem.textContent || '', 120); } catch (eTextForItem) { textForItem = ''; }
+      if (textForItem) itemForObserve.text = textForItem;
+    }
+    // Icon/logo controls (image-only links, SVG buttons) often carry no accessible name; fall back to
+    // a nested image alt, an SVG <title>, or the control's own title so the row is not blank.
+    if (!itemForObserve.name && !itemForObserve.value && !itemForObserve.placeholder && !itemForObserve.text) {
+      var fallbackNameForItem = '';
+      try {
+        var imgAltForItem = elForItem.querySelector && elForItem.querySelector('img[alt]');
+        if (imgAltForItem) fallbackNameForItem = imgAltForItem.getAttribute('alt') || '';
+        if (!fallbackNameForItem) {
+          var svgTitleForItem = elForItem.querySelector && elForItem.querySelector('svg title, svg [aria-label]');
+          if (svgTitleForItem) fallbackNameForItem = svgTitleForItem.textContent || svgTitleForItem.getAttribute('aria-label') || '';
+        }
+        if (!fallbackNameForItem) {
+          var titleAttrForItem = (elForItem.getAttribute && (elForItem.getAttribute('title') || elForItem.getAttribute('name'))) || '';
+          if (titleAttrForItem) fallbackNameForItem = titleAttrForItem;
+        }
+      } catch (eFallbackForItem) { fallbackNameForItem = ''; }
+      if (fallbackNameForItem) itemForObserve.name = normalizeTextForPageQuery(fallbackNameForItem, 120);
+    }
+    itemForObserve._selector = pathForItem.selector;
+    itemForObserve._fingerprint = getElementFingerprintForPageQuery(elForItem);
+    return itemForObserve;
+  }
+
+  // Snapshot list format for page_observe and the fresh snapshot embedded in page_act.
+  // 'json' (default): return structured items only. 'text': return the compact line list only.
+  // Flip this to compare token cost / model behavior without redesigning the tool surface.
+  var OBSERVE_SNAPSHOT_FORMAT_FOR_TOOL_EXEC = 'json';
+
+  // Compact, human-legible list for the model: one line per element, ref first, so a small
+  // model reads and references it with minimal parsing. e.g.  [12] button "Save"
+  // Used only when OBSERVE_SNAPSHOT_FORMAT_FOR_TOOL_EXEC === 'text'.
+  function buildObserveTextForToolExec(itemsForText, coveredCountForText) {
+    var linesForText = [];
+    for (var iForText = 0; iForText < itemsForText.length; iForText++) {
+      var itForText = itemsForText[iForText];
+      var labelBitForText = itForText.name || itForText.value || itForText.placeholder || itForText.text || '';
+      var lineForText = '[' + itForText.ref + '] ' + (itForText.role || 'clickable');
+      if (itForText.type) lineForText += ' (' + itForText.type + ')';
+      if (labelBitForText) lineForText += ' "' + labelBitForText + '"';
+      var stForText = itForText.state;
+      if (stForText) {
+        var flagsForText = [];
+        if (stForText.checked === true) flagsForText.push('checked');
+        if (stForText.checked === 'mixed') flagsForText.push('mixed');
+        if (stForText.expanded === true) flagsForText.push('expanded');
+        if (stForText.expanded === false) flagsForText.push('collapsed');
+        if (stForText.pressed === true) flagsForText.push('pressed');
+        if (stForText.pressed === false) flagsForText.push('unpressed');
+        if (stForText.selected) flagsForText.push('selected');
+        if (stForText.disabled) flagsForText.push('disabled');
+        if (stForText.required) flagsForText.push('required');
+        if (stForText.offscreen) flagsForText.push('offscreen');
+        if (flagsForText.length) lineForText += ' {' + flagsForText.join(',') + '}';
+      }
+      if (itForText.new) lineForText += ' [NEW]';
+      else if (itForText.changed) lineForText += ' [CHANGED]';
+      linesForText.push(lineForText);
+    }
+    var textForText = linesForText.join('\n');
+    if (coveredCountForText > 0) {
+      textForText += '\n(' + coveredCountForText + ' interactive element' + (coveredCountForText === 1 ? '' : 's') +
+        ' hidden behind an overlay; dismiss it to reach them.)';
+    }
+    return textForText;
+  }
+
+  // Apply OBSERVE_SNAPSHOT_FORMAT_FOR_TOOL_EXEC so the model sees exactly one list
+  // representation (structured items OR compact text), never both.
+  function finalizeObserveSnapshotForToolExec(snapshotForFinalize) {
+    if (!snapshotForFinalize || snapshotForFinalize.ok === false) return snapshotForFinalize;
+    var itemsForFinalize = Array.isArray(snapshotForFinalize.items) ? snapshotForFinalize.items : [];
+    var coveredForFinalize = (snapshotForFinalize.counts && snapshotForFinalize.counts.covered_by_overlay) || 0;
+    if (OBSERVE_SNAPSHOT_FORMAT_FOR_TOOL_EXEC === 'text') {
+      snapshotForFinalize.text = buildObserveTextForToolExec(itemsForFinalize, coveredForFinalize);
+      delete snapshotForFinalize.items;
+    } else {
+      delete snapshotForFinalize.text;
+    }
+    return snapshotForFinalize;
+  }
+
+  // Core builder: gather category + pointer candidates, dedup, filter to visible and
+  // (by default) in-viewport and non-covered, cap, assign sequential refs, store the
+  // resolution registry, and emit items. Call finalizeObserveSnapshotForToolExec before
+  // returning a snapshot to the model. No selector/fingerprint reaches the model; those
+  // are kept registry-side for page_act.
+  function buildObserveSnapshotForToolExec(argsForObserve) {
+    if (typeof document === 'undefined' || !document.body) return { ok: false, error: 'No document body available' };
+    var maxItemsForObserve = (typeof argsForObserve.max_items === 'number' && argsForObserve.max_items > 0)
+      ? Math.min(200, Math.floor(argsForObserve.max_items)) : 80;
+    var includeOffscreenForObserve = argsForObserve.include_offscreen === true;
+
+    // Landmarks (region/nav/main/...) are structural containers, not action targets: you cannot
+    // meaningfully click a region, and their concatenated innerText names are noise that invites a
+    // weak model to mis-pick. They belong to the read surface, not the observe/act surface.
+    var candidatesForObserve = collectInteractiveCandidatesForPageQuery().filter(function (candForFilter) {
+      return candForFilter.category !== 'landmarks';
+    });
+    var seenForObserve = new Set();
+    for (var sIdxForObserve = 0; sIdxForObserve < candidatesForObserve.length; sIdxForObserve++) {
+      seenForObserve.add(candidatesForObserve[sIdxForObserve].el);
+    }
+    var pointerCandidatesForObserve = collectPointerCandidatesForObserve(seenForObserve);
+    for (var ptrIdxForObserve = 0; ptrIdxForObserve < pointerCandidatesForObserve.length; ptrIdxForObserve++) {
+      candidatesForObserve.push(pointerCandidatesForObserve[ptrIdxForObserve]);
+    }
+    var focusableCandidatesForObserve = collectFocusableCardCandidatesForObserve(seenForObserve);
+    for (var focIdxForObserve = 0; focIdxForObserve < focusableCandidatesForObserve.length; focIdxForObserve++) {
+      candidatesForObserve.push(focusableCandidatesForObserve[focIdxForObserve]);
+    }
+    candidatesForObserve.sort(function (aForObserve, bForObserve) {
+      if (aForObserve.el === bForObserve.el) return 0;
+      var posForObserve = aForObserve.el.compareDocumentPosition(bForObserve.el);
+      return (posForObserve & Node.DOCUMENT_POSITION_PRECEDING) ? 1 : -1;
+    });
+    candidatesForObserve = dedupeObserveCandidatesForObserve(candidatesForObserve);
+
+    var totalCandForObserve = candidatesForObserve.length;
+    var visibleCountForObserve = 0;
+    var inViewportCountForObserve = 0;
+    var coveredCountForObserve = 0;
+    var eligibleForObserve = 0;
+    var itemsForObserve = [];
+
+    var snapshotIdForObserve = resetObserveRegistryForToolExec();
+
+    for (var cIdxForObserve = 0; cIdxForObserve < candidatesForObserve.length; cIdxForObserve++) {
+      var candForObserve = candidatesForObserve[cIdxForObserve];
+      var elForObserve = candForObserve.el;
+      if (!isElementVisibleForPageQuery(elForObserve)) continue;
+      visibleCountForObserve++;
+      var inVpForObserve = isElementInViewportForPageQuery(elForObserve);
+      if (inVpForObserve) inViewportCountForObserve++;
+      if (!includeOffscreenForObserve && !inVpForObserve) continue;
+      if (isElementCoveredForObserve(elForObserve)) { coveredCountForObserve++; continue; }
+      eligibleForObserve++;
+      if (itemsForObserve.length >= maxItemsForObserve) continue;
+
+      var refForObserve = itemsForObserve.length + 1;
+      var itemForObserve = buildObserveItemForToolExec(elForObserve, candForObserve.category, refForObserve, inVpForObserve);
+      observeRegistryForToolExec.refs[refForObserve] = {
+        el: elForObserve,
+        selector: itemForObserve._selector,
+        fingerprint: itemForObserve._fingerprint,
+        category: candForObserve.category,
+        role: itemForObserve.role || '',
+        label: itemForObserve.name || itemForObserve.value || itemForObserve.text || ''
+      };
+      delete itemForObserve._selector;
+      delete itemForObserve._fingerprint;
+      itemsForObserve.push(itemForObserve);
+    }
+
+    return {
+      ok: true,
+      snapshotId: snapshotIdForObserve,
+      page: { title: document.title, url: window.location.href },
+      returned: itemsForObserve.length,
+      truncated: eligibleForObserve > itemsForObserve.length,
+      counts: {
+        total_interactive: totalCandForObserve,
+        visible: visibleCountForObserve,
+        in_viewport: inViewportCountForObserve,
+        covered_by_overlay: coveredCountForObserve
+      },
+      items: itemsForObserve
+    };
+  }
+
+  async function pageObserveToolForToolExec(argsForObserveTool) {
+    argsForObserveTool = argsForObserveTool || {};
+    try {
+      return finalizeObserveSnapshotForToolExec(buildObserveSnapshotForToolExec(argsForObserveTool));
+    } catch (eObserveTool) {
+      return { ok: false, error: 'page_observe failed: ' + (eObserveTool && eObserveTool.message ? eObserveTool.message : String(eObserveTool)) };
+    }
+  }
+
+  // ================= page_act: ref-based action orchestrator (redesign) =================
+  //
+  // The model refers to elements by ref (from page_observe). This resolves the ref through
+  // the observe registry (self-healing when the element moved), runs the runtime gates,
+  // routes the action to the cheapest mechanism that works (synthetic DOM first; trusted
+  // CDP input only when synthetic cannot do it), then returns a fresh snapshot with new/
+  // changed rows marked so the model never diffs two lists itself. It delegates the trusted
+  // path to pageActToolForToolExec and value/select writes to the existing fill/select
+  // machinery, so it adds orchestration, not new low-level input code.
+
+  function delayForPageActRefToolExec(msForDelay) {
+    return new Promise(function (resolveForDelay) { setTimeout(resolveForDelay, msForDelay); });
+  }
+
+  // Promise wrapper for a message to the service worker. Swallows a missing receiving end
+  // (returns null) so a messaging hiccup never throws into the action path.
+  function sendServiceWorkerMessageForToolExec(actionForMsg, extraForMsg) {
+    return new Promise(function (resolveForMsg) {
+      try {
+        if (typeof chrome === 'undefined' || !chrome.runtime || typeof chrome.runtime.sendMessage !== 'function') {
+          resolveForMsg(null);
+          return;
+        }
+        var payloadForMsg = Object.assign({ action: actionForMsg }, extraForMsg || {});
+        chrome.runtime.sendMessage(payloadForMsg, function (respForMsg) {
+          void chrome.runtime.lastError;
+          resolveForMsg(respForMsg || null);
+        });
+      } catch (eForMsg) {
+        resolveForMsg(null);
+      }
+    });
+  }
+
+  // Ensure advanced automation is on before a trusted action. If it is off, open the inline
+  // consent prompt (the existing consent window) and poll until the user approves, so the
+  // SAME action continues on approval rather than failing and asking the model to ask. The
+  // wait is bounded and honors the run's abort signal.
+  async function ensureAutomationOrPromptForToolExec(contextForEnsure) {
+    var statusForEnsure = await sendServiceWorkerMessageForToolExec('cdpAutomationStatus', {});
+    if (statusForEnsure && statusForEnsure.enabled) return { ok: true };
+    await sendServiceWorkerMessageForToolExec('cdpAutomationEnable', {});
+    var signalForEnsure = getAbortSignalForToolExec(contextForEnsure);
+    var deadlineForEnsure = Date.now() + 60000;
+    while (Date.now() < deadlineForEnsure) {
+      if (signalForEnsure && signalForEnsure.aborted) {
+        return { ok: false, error: 'Cancelled while waiting for the automation permission prompt.' };
+      }
+      await delayForPageActRefToolExec(700);
+      var stForEnsure = await sendServiceWorkerMessageForToolExec('cdpAutomationStatus', {});
+      if (stForEnsure && stForEnsure.enabled) return { ok: true };
+    }
+    return { ok: false, error: 'Advanced automation was not enabled in time. A permission prompt was opened; approve it, then retry the action.' };
+  }
+
+  // Ref-based targeting is done from a verified structured snapshot, so it stands in for the
+  // screenshot grounding the trusted path otherwise requires: mark the visual preflight
+  // satisfied, then ensure automation (opening the inline prompt if needed).
+  async function prepareTrustedDelegationForToolExec(contextForPrep) {
+    try { markVisualPreflightForToolExec(contextForPrep); } catch (ePrep) { /* ignore */ }
+    return ensureAutomationOrPromptForToolExec(contextForPrep);
+  }
+
+  // Resolve a ref to a live element + stored descriptor. Self-heals: if the stored node
+  // detached, re-locate by its selector and re-verify the stored fingerprint. Returns
+  // { ok, el, descriptor } or { ok:false, unknown|stale } when it cannot be resolved.
+  function resolveObserveRefForToolExec(refValueForResolve) {
+    var descriptorForResolve = observeRegistryForToolExec.refs[String(refValueForResolve)];
+    if (!descriptorForResolve) return { ok: false, unknown: true };
+    var elForResolve = descriptorForResolve.el;
+    if (elForResolve && elForResolve.isConnected) {
+      return { ok: true, el: elForResolve, descriptor: descriptorForResolve };
+    }
+    if (descriptorForResolve.selector) {
+      var relocatedForResolve = null;
+      try { relocatedForResolve = document.querySelector(descriptorForResolve.selector); } catch (eRelocate) { relocatedForResolve = null; }
+      if (relocatedForResolve) {
+        var fpNowForResolve = getElementFingerprintForPageQuery(relocatedForResolve);
+        if (descriptorForResolve.fingerprint && fpNowForResolve !== descriptorForResolve.fingerprint) {
+          return { ok: false, stale: true };
+        }
+        descriptorForResolve.el = relocatedForResolve;
+        return { ok: true, el: relocatedForResolve, descriptor: descriptorForResolve };
+      }
+    }
+    return { ok: false, stale: true };
+  }
+
+  // Compact salient-state signature for an element, so the post-action snapshot can flag
+  // rows whose value/checked/aria-state/text changed as a result of the action.
+  // Includes aria-pressed and aria-label so toggle buttons (Like/Liked) mark changed
+  // even when the visible count text stays the same.
+  function elementStateSignatureForToolExec(elForSig) {
+    try {
+      var partsForSig = [elForSig.tagName || ''];
+      if (typeof elForSig.value === 'string') partsForSig.push('v=' + elForSig.value);
+      if (typeof elForSig.checked === 'boolean') partsForSig.push('c=' + elForSig.checked);
+      if (elForSig.getAttribute) {
+        partsForSig.push('ae=' + (elForSig.getAttribute('aria-expanded') || ''));
+        partsForSig.push('as=' + (elForSig.getAttribute('aria-selected') || ''));
+        partsForSig.push('ac=' + (elForSig.getAttribute('aria-checked') || ''));
+        partsForSig.push('ap=' + (elForSig.getAttribute('aria-pressed') || ''));
+        partsForSig.push('al=' + (elForSig.getAttribute('aria-label') || ''));
+        partsForSig.push('d=' + ((elForSig.disabled === true || elForSig.getAttribute('aria-disabled') === 'true') ? '1' : ''));
+      }
+      var txtForSig = '';
+      try { txtForSig = (elForSig.innerText || elForSig.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80); } catch (eTxtSig) { txtForSig = ''; }
+      partsForSig.push('t=' + txtForSig);
+      return partsForSig.join('|');
+    } catch (eSig) { return ''; }
+  }
+
+  // Element -> signature map for the current interactive set, captured just before an action.
+  function capturePreActSignatureForToolExec() {
+    var sigMapForPre = new Map();
+    var candidatesForPre = collectInteractiveCandidatesForPageQuery();
+    var seenForPre = new Set();
+    for (var iForPre = 0; iForPre < candidatesForPre.length; iForPre++) seenForPre.add(candidatesForPre[iForPre].el);
+    var pointerForPre = collectPointerCandidatesForObserve(seenForPre);
+    var focusableForPre = collectFocusableCardCandidatesForObserve(seenForPre);
+    var allForPre = candidatesForPre.concat(pointerForPre).concat(focusableForPre);
+    for (var jForPre = 0; jForPre < allForPre.length; jForPre++) {
+      sigMapForPre.set(allForPre[jForPre].el, elementStateSignatureForToolExec(allForPre[jForPre].el));
+    }
+    return sigMapForPre;
+  }
+
+  // Tag post-action snapshot rows: `new` when the element was not interactive before the
+  // action, `changed` when its signature differs. Call finalizeObserveSnapshotForToolExec
+  // afterward so the model-facing payload matches OBSERVE_SNAPSHOT_FORMAT_FOR_TOOL_EXEC.
+  function markSnapshotDeltaForToolExec(snapshotForMark, preSigMapForMark) {
+    if (!snapshotForMark || !snapshotForMark.items) return;
+    for (var iForMark = 0; iForMark < snapshotForMark.items.length; iForMark++) {
+      var itemForMark = snapshotForMark.items[iForMark];
+      var regForMark = observeRegistryForToolExec.refs[itemForMark.ref];
+      var elForMark = regForMark ? regForMark.el : null;
+      if (!elForMark) continue;
+      if (!preSigMapForMark.has(elForMark)) {
+        itemForMark.new = true;
+      } else if (preSigMapForMark.get(elForMark) !== elementStateSignatureForToolExec(elForMark)) {
+        itemForMark.changed = true;
+      }
+    }
+  }
+
+  // True when an element that produced no synthetic-click change is still worth escalating
+  // to trusted input (custom widgets commonly ignore synthetic clicks).
+  function elLooksClickableWidgetForToolExec(elForWidget, descriptorForWidget) {
+    if (!elForWidget) return false;
+    if (elForWidget.getAttribute && elForWidget.getAttribute('role')) return true;
+    var tagForWidget = elForWidget.tagName;
+    if (tagForWidget === 'BUTTON' || tagForWidget === 'A' || tagForWidget === 'SUMMARY') return true;
+    if (descriptorForWidget && descriptorForWidget.category === 'custom_elements') return true;
+    try {
+      var styleForWidget = window.getComputedStyle(elForWidget);
+      if (styleForWidget && styleForWidget.cursor === 'pointer') return true;
+    } catch (eWidget) { /* ignore */ }
+    return false;
+  }
+
+  // Category-agnostic synthetic click with the same quiet-window diff the findPageElements
+  // click uses, so it works on pointer-detected <div>s that fit no findPageElements category.
+  async function dispatchSyntheticClickForRefToolExec(elForClick, wantRightForClick, contextForClick) {
+    var blockerForClick = checkClickableBlockerForPageQuery(elForClick);
+    if (blockerForClick) return { ok: false, blocked: true, error: 'Cannot click: ' + blockerForClick };
+    var navBlockerForClick = checkNavigationBlockerForPageQuery(elForClick);
+    if (navBlockerForClick && !(contextForClick && contextForClick.offscreenRun)) {
+      return { ok: false, nav_blocked: true, error: navBlockerForClick };
+    }
+    try { elForClick.scrollIntoView({ block: 'center', inline: 'center' }); } catch (eScrollClick) { /* ignore */ }
+    var beforeSnapForClick = {
+      url: window.location.href,
+      title: document.title,
+      activeElementSelector: describeActiveElementForPageQuery(),
+      visibleAlerts: snapshotVisibleAlertsForPageQuery()
+    };
+    var mutationsForClick = [];
+    var observerForClick = new MutationObserver(function (recordsForClick) {
+      for (var rIdxForClick = 0; rIdxForClick < recordsForClick.length; rIdxForClick++) mutationsForClick.push(recordsForClick[rIdxForClick]);
+    });
+    try {
+      observerForClick.observe(document.documentElement, {
+        subtree: true, childList: true, attributes: true, attributeOldValue: true, characterData: true, characterDataOldValue: true
+      });
+    } catch (eObsClick) { /* ignore */ }
+    var dispatchErrForClick = null;
+    try {
+      if (wantRightForClick) {
+        elForClick.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, view: window, button: 2, buttons: 2 }));
+      } else {
+        elForClick.click();
+      }
+    } catch (eDispatchClick) {
+      dispatchErrForClick = eDispatchClick && eDispatchClick.message ? eDispatchClick.message : String(eDispatchClick);
+    }
+    var startForClick = Date.now();
+    var lastCountForClick = mutationsForClick.length;
+    var lastChangeForClick = Date.now();
+    await new Promise(function (resolveForClick) {
+      (function tickForClick() {
+        var nowForClick = Date.now();
+        if (mutationsForClick.length !== lastCountForClick) { lastCountForClick = mutationsForClick.length; lastChangeForClick = nowForClick; }
+        if (nowForClick - startForClick >= 3000) return resolveForClick();
+        if (nowForClick - lastChangeForClick >= 300) return resolveForClick();
+        setTimeout(tickForClick, 50);
+      })();
+    });
+    try { observerForClick.disconnect(); } catch (eDiscClick) { /* ignore */ }
+    var afterSnapForClick = {
+      url: window.location.href,
+      title: document.title,
+      activeElementSelector: describeActiveElementForPageQuery(),
+      visibleAlerts: snapshotVisibleAlertsForPageQuery()
+    };
+    // Do not exclude the clicked element: toggle controls (Like, checkbox, switch) change
+    // attrs on themselves, and those must count as "page reacted". Diff summarization is
+    // best-effort; a summarizer bug must never turn a successful click into ok:false.
+    var diffForClick = null;
+    try {
+      diffForClick = summarizeMutationDiffForPageQuery(mutationsForClick, beforeSnapForClick, afterSnapForClick);
+    } catch (eDiffClick) {
+      diffForClick = {
+        counts: {
+          added: 0, removed: 0, textChanged: 0, attrChanged: 0,
+          classChanged: mutationsForClick.length ? 1 : 0
+        }
+      };
+    }
+    var changedForClick = !!(diffForClick && (diffForClick.urlChanged || diffForClick.titleChanged || diffForClick.activeElementChanged ||
+      (diffForClick.visibleAlerts && diffForClick.visibleAlerts.length) ||
+      (diffForClick.counts && (diffForClick.counts.added || diffForClick.counts.removed || diffForClick.counts.textChanged || diffForClick.counts.attrChanged || diffForClick.counts.classChanged)) ||
+      (!diffForClick.counts && mutationsForClick.length > 0)));
+    return { ok: !dispatchErrForClick, changed: changedForClick, dispatch_error: dispatchErrForClick };
+  }
+
+  async function performRefClickForToolExec(elForClick, descriptorForClick, argsForClick, contextForClick) {
+    var destructiveForClick = describesDestructiveTargetForToolExec(describeElementForPageActForToolExec(elForClick));
+    if (destructiveForClick && argsForClick.confirm !== true) {
+      return { ok: false, error: 'Refusing to click "' + destructiveForClick + '": it reads as a destructive action, and nothing was dispatched. If the user asked to do exactly this, re-issue with confirm: true.' };
+    }
+    var wantRightForClick = argsForClick.button === 'right';
+    var synthForClick = await dispatchSyntheticClickForRefToolExec(elForClick, wantRightForClick, contextForClick);
+    if (synthForClick.blocked || synthForClick.nav_blocked) return { ok: false, error: synthForClick.error };
+    if (synthForClick.changed) return { ok: true, summary: 'clicked (synthetic); page reacted' };
+    if (!elLooksClickableWidgetForToolExec(elForClick, descriptorForClick)) {
+      return { ok: true, summary: 'clicked (synthetic); no observable change' };
+    }
+    var prepForClick = await prepareTrustedDelegationForToolExec(contextForClick);
+    if (!prepForClick.ok) return { ok: false, consent_required: true, error: prepForClick.error };
+    var trustedForClick = await pageActToolForToolExec({
+      action: wantRightForClick ? 'right_click' : 'click',
+      selector: descriptorForClick.selector,
+      expected_fingerprint: descriptorForClick.fingerprint,
+      confirm_destructive: argsForClick.confirm === true
+    }, contextForClick);
+    if (trustedForClick && trustedForClick.ok) return { ok: true, summary: 'clicked (trusted, escalated after synthetic no-op)' };
+    return { ok: false, error: (trustedForClick && trustedForClick.error) ? trustedForClick.error : 'Click failed.' };
+  }
+
+  async function performRefTypeForToolExec(elForType, descriptorForType, argsForType) {
+    if (typeof argsForType.text !== 'string') return { ok: false, error: 'page_act type requires text.' };
+    var fillResForType = await pageFillFormToolForToolExec({
+      fields: [{ selector: descriptorForType.selector, expected_fingerprint: descriptorForType.fingerprint, value: argsForType.text }]
+    });
+    if (fillResForType && fillResForType.changed_count > 0) {
+      var warnForType = (fillResForType.results && fillResForType.results[0] && fillResForType.results[0].warning) ? (' (' + fillResForType.results[0].warning + ')') : '';
+      return { ok: true, summary: 'typed into field' + warnForType };
+    }
+    var reasonForType = 'Could not type into this field.';
+    if (fillResForType && fillResForType.results && fillResForType.results[0]) {
+      var r0ForType = fillResForType.results[0];
+      reasonForType = r0ForType.error || r0ForType.warning || ('Field ' + (r0ForType.status || 'not changed') + '.');
+    }
+    return { ok: false, error: reasonForType };
+  }
+
+  // Sets a native <select> by matching an option label (exact, then starts-with, then
+  // contains), on visible text or value. Custom comboboxes go through select_option instead.
+  function selectNativeOptionForToolExec(selectElForNative, labelForNative) {
+    var optionsForNative = selectElForNative.options ? Array.prototype.slice.call(selectElForNative.options) : [];
+    var normLabelForNative = labelForNative.replace(/\s+/g, ' ').trim().toLowerCase();
+    var optTextForNative = function (oForNative) { return (oForNative.text || '').replace(/\s+/g, ' ').trim().toLowerCase(); };
+    var tiersForNative = [
+      function (oForNative) { return optTextForNative(oForNative) === normLabelForNative || (oForNative.value || '').toLowerCase() === normLabelForNative; },
+      function (oForNative) { return optTextForNative(oForNative).indexOf(normLabelForNative) === 0; },
+      function (oForNative) { return optTextForNative(oForNative).indexOf(normLabelForNative) !== -1; }
+    ];
+    var matchForNative = null;
+    for (var tForNative = 0; tForNative < tiersForNative.length && !matchForNative; tForNative++) {
+      for (var oIdxForNative = 0; oIdxForNative < optionsForNative.length; oIdxForNative++) {
+        if (tiersForNative[tForNative](optionsForNative[oIdxForNative])) { matchForNative = optionsForNative[oIdxForNative]; break; }
+      }
+    }
+    if (!matchForNative) {
+      var availableForNative = optionsForNative.slice(0, 20).map(function (oForNative) { return (oForNative.text || '').trim(); }).filter(Boolean).join(', ');
+      return { ok: false, error: 'No option matching "' + labelForNative + '" in this select. Available: ' + availableForNative };
+    }
+    selectElForNative.value = matchForNative.value;
+    try { selectElForNative.dispatchEvent(new Event('input', { bubbles: true })); } catch (eInputNative) { /* ignore */ }
+    try { selectElForNative.dispatchEvent(new Event('change', { bubbles: true })); } catch (eChangeNative) { /* ignore */ }
+    return { ok: true, summary: 'selected "' + (matchForNative.text || '').trim() + '"' };
+  }
+
+  async function performRefSelectForToolExec(elForSelect, descriptorForSelect, argsForSelect, contextForSelect) {
+    if (typeof argsForSelect.option !== 'string' || !argsForSelect.option.trim()) {
+      return { ok: false, error: 'page_act select requires option (the visible label to choose).' };
+    }
+    if (elForSelect && elForSelect.tagName === 'SELECT') {
+      return selectNativeOptionForToolExec(elForSelect, argsForSelect.option);
+    }
+    var selResForSelect = await pageQueryToolForToolExec({
+      operation: 'findPageElements',
+      category: descriptorForSelect.category || 'form_fields',
+      selector: descriptorForSelect.selector,
+      sub_operation: 'select_option',
+      option: argsForSelect.option,
+      expected_fingerprint: descriptorForSelect.fingerprint
+    }, contextForSelect);
+    if (selResForSelect && selResForSelect.ok) {
+      return { ok: true, summary: 'selected "' + argsForSelect.option + '"' + (selResForSelect.committed === false ? ' (commit unconfirmed; verify)' : '') };
+    }
+    return { ok: false, error: (selResForSelect && selResForSelect.error) ? selResForSelect.error : 'Could not select that option.' };
+  }
+
+  async function performRefTrustedPointerForToolExec(actionForTrusted, descriptorForTrusted, contextForTrusted) {
+    var prepForTrusted = await prepareTrustedDelegationForToolExec(contextForTrusted);
+    if (!prepForTrusted.ok) return { ok: false, consent_required: true, error: prepForTrusted.error };
+    var resForTrusted = await pageActToolForToolExec({
+      action: actionForTrusted,
+      selector: descriptorForTrusted.selector,
+      expected_fingerprint: descriptorForTrusted.fingerprint
+    }, contextForTrusted);
+    if (resForTrusted && resForTrusted.ok) return { ok: true, summary: actionForTrusted + ' dispatched (trusted)' };
+    return { ok: false, error: (resForTrusted && resForTrusted.error) ? resForTrusted.error : (actionForTrusted + ' failed.') };
+  }
+
+  async function performRefScrollForToolExec(elForScroll, argsForScroll) {
+    if (elForScroll) {
+      try { elForScroll.scrollIntoView({ block: 'center', inline: 'center' }); } catch (eScroll) { /* ignore */ }
+      return { ok: true, summary: 'scrolled element into view' };
+    }
+    var amountForScroll = (typeof argsForScroll.amount === 'number' && isFinite(argsForScroll.amount)) ? argsForScroll.amount : Math.round((window.innerHeight || 600) * 0.8);
+    var dirForScroll = (typeof argsForScroll.direction === 'string') ? argsForScroll.direction.toLowerCase() : 'down';
+    var dxForScroll = 0, dyForScroll = 0;
+    if (dirForScroll === 'up') dyForScroll = -amountForScroll;
+    else if (dirForScroll === 'right') dxForScroll = amountForScroll;
+    else if (dirForScroll === 'left') dxForScroll = -amountForScroll;
+    else dyForScroll = amountForScroll;
+    try { window.scrollBy(dxForScroll, dyForScroll); } catch (eScrollWin) { /* ignore */ }
+    return { ok: true, summary: 'scrolled ' + dirForScroll };
+  }
+
+  async function performRefPressForToolExec(argsForPress, contextForPress) {
+    if (typeof argsForPress.keys !== 'string' || !argsForPress.keys.trim()) {
+      return { ok: false, error: 'page_act press requires keys (e.g. "Enter", "Escape", "Ctrl+A").' };
+    }
+    var prepForPress = await prepareTrustedDelegationForToolExec(contextForPress);
+    if (!prepForPress.ok) return { ok: false, consent_required: true, error: prepForPress.error };
+    var resForPress = await pageActToolForToolExec({ action: 'key', keys: argsForPress.keys }, contextForPress);
+    if (resForPress && resForPress.ok) return { ok: true, summary: 'pressed ' + argsForPress.keys };
+    return { ok: false, error: (resForPress && resForPress.error) ? resForPress.error : 'Key press failed.' };
+  }
+
+  async function performRefDragForToolExec(argsForDrag, contextForDrag) {
+    if (argsForDrag.ref == null || argsForDrag.to_ref == null) {
+      return { ok: false, error: 'page_act drag requires ref (start) and to_ref (end).' };
+    }
+    var fromResForDrag = resolveObserveRefForToolExec(argsForDrag.ref);
+    var toResForDrag = resolveObserveRefForToolExec(argsForDrag.to_ref);
+    if (!fromResForDrag.ok || !toResForDrag.ok) {
+      return { ok: false, error: 'A drag endpoint is no longer on the page. Re-run page_observe and retry with fresh refs.' };
+    }
+    var prepForDrag = await prepareTrustedDelegationForToolExec(contextForDrag);
+    if (!prepForDrag.ok) return { ok: false, consent_required: true, error: prepForDrag.error };
+    var resForDrag = await pageActToolForToolExec({
+      action: 'drag',
+      from_selector: fromResForDrag.descriptor.selector,
+      from_expected_fingerprint: fromResForDrag.descriptor.fingerprint,
+      to_selector: toResForDrag.descriptor.selector,
+      to_expected_fingerprint: toResForDrag.descriptor.fingerprint
+    }, contextForDrag);
+    if (resForDrag && resForDrag.ok) return { ok: true, summary: 'dragged' };
+    return { ok: false, error: (resForDrag && resForDrag.error) ? resForDrag.error : 'Drag failed.' };
+  }
+
+  async function pageActRefToolForToolExec(argsForAct, contextForAct) {
+    argsForAct = argsForAct || {};
+    var actionForAct = (typeof argsForAct.action === 'string') ? argsForAct.action.trim().toLowerCase() : '';
+    var VALID_ACTIONS_FOR_ACT = { click: 1, type: 1, select: 1, hover: 1, scroll: 1, press: 1, drag: 1 };
+    if (!VALID_ACTIONS_FOR_ACT[actionForAct]) {
+      return { ok: false, error: 'page_act: unknown action "' + actionForAct + '". Use one of: click, type, select, hover, scroll, press, drag.' };
+    }
+    if (typeof document === 'undefined' || !document.body) return { ok: false, error: 'No document body available.' };
+
+    // press acts on whatever holds focus; scroll may be a page scroll; both can omit a ref.
+    // drag resolves its own two refs. Every other action targets a single ref.
+    var refOptionalForAct = (actionForAct === 'press') || (actionForAct === 'scroll' && argsForAct.ref == null) || (actionForAct === 'drag');
+    var resolvedForAct = null;
+    if (!refOptionalForAct) {
+      if (argsForAct.ref == null) {
+        return { ok: false, error: 'page_act ' + actionForAct + ' requires a ref from the latest page_observe. Call page_observe first, then act on a ref number.' };
+      }
+      resolvedForAct = resolveObserveRefForToolExec(argsForAct.ref);
+      if (!resolvedForAct.ok) {
+        var freshForStale = finalizeObserveSnapshotForToolExec(buildObserveSnapshotForToolExec({}));
+        var reasonForStale = resolvedForAct.unknown
+          ? 'Ref ' + argsForAct.ref + ' is not in the current snapshot.'
+          : 'Ref ' + argsForAct.ref + ' is no longer on the page (it changed or was removed).';
+        var staleResultForAct = {
+          ok: false, stale_ref: true,
+          error: reasonForStale + ' Here is the current page; pick a ref from it.',
+          snapshotId: freshForStale.snapshotId, page: freshForStale.page,
+          counts: freshForStale.counts
+        };
+        if (freshForStale.items) staleResultForAct.items = freshForStale.items;
+        if (freshForStale.text != null) staleResultForAct.text = freshForStale.text;
+        return staleResultForAct;
+      }
+    }
+
+    var preSigForAct = capturePreActSignatureForToolExec();
+    var elForAct = resolvedForAct ? resolvedForAct.el : null;
+    var descriptorForAct = resolvedForAct ? resolvedForAct.descriptor : null;
+    var effectForAct = null;
+
+    try {
+      if (actionForAct === 'click') {
+        effectForAct = await performRefClickForToolExec(elForAct, descriptorForAct, argsForAct, contextForAct);
+      } else if (actionForAct === 'type') {
+        effectForAct = await performRefTypeForToolExec(elForAct, descriptorForAct, argsForAct);
+      } else if (actionForAct === 'select') {
+        effectForAct = await performRefSelectForToolExec(elForAct, descriptorForAct, argsForAct, contextForAct);
+      } else if (actionForAct === 'hover') {
+        effectForAct = await performRefTrustedPointerForToolExec('move', descriptorForAct, contextForAct);
+      } else if (actionForAct === 'scroll') {
+        effectForAct = await performRefScrollForToolExec(elForAct, argsForAct);
+      } else if (actionForAct === 'press') {
+        effectForAct = await performRefPressForToolExec(argsForAct, contextForAct);
+      } else if (actionForAct === 'drag') {
+        effectForAct = await performRefDragForToolExec(argsForAct, contextForAct);
+      }
+    } catch (eEffectForAct) {
+      // The action may already have mutated the page (e.g. a like toggle) before a
+      // post-dispatch helper threw. Return a fresh snapshot so the model does not
+      // retry and undo a successful toggle.
+      effectForAct = {
+        ok: false,
+        error: (eEffectForAct && eEffectForAct.message) ? eEffectForAct.message : String(eEffectForAct)
+      };
+    }
+
+    if (effectForAct && effectForAct.consent_required) {
+      return { ok: false, consent_required: true, error: effectForAct.error || 'This action needs advanced automation; a permission prompt was opened. Approve it, then retry.' };
+    }
+
+    var postSnapForAct = null;
+    try {
+      postSnapForAct = buildObserveSnapshotForToolExec({});
+      markSnapshotDeltaForToolExec(postSnapForAct, preSigForAct);
+      finalizeObserveSnapshotForToolExec(postSnapForAct);
+    } catch (ePostSnapForAct) {
+      postSnapForAct = { snapshotId: observeRegistryForToolExec.snapshotId || 0, page: { title: (typeof document !== 'undefined' ? document.title : ''), url: (typeof location !== 'undefined' ? location.href : '') }, counts: {}, items: [] };
+    }
+
+    var okForAct = effectForAct ? (effectForAct.ok !== false) : true;
+    var resultForAct = {
+      ok: okForAct,
+      action: actionForAct,
+      effect: effectForAct ? effectForAct.summary : null,
+      snapshotId: postSnapForAct.snapshotId,
+      page: postSnapForAct.page,
+      counts: postSnapForAct.counts
+    };
+    if (postSnapForAct.items) resultForAct.items = postSnapForAct.items;
+    if (postSnapForAct.text != null) resultForAct.text = postSnapForAct.text;
+    if (!okForAct && effectForAct && effectForAct.error) resultForAct.error = effectForAct.error;
+    return resultForAct;
+  }
+
   // Class-name regex for the inferred-widget heuristic. Matches the keyword as a
   // hyphen/underscore/whitespace-bounded token so "dropdown" hits ".my-dropdown"
   // and ".dropdown__trigger" but not ".dropdownItem-collapsed", and "select"
@@ -2510,6 +3514,713 @@
       }
       setTimeout(tickForSettle, 40);
     });
+  }
+
+  // ---- Tool: page_read (ref-based read surface: selection / context / content / find_text) ----
+
+  // element -> ref, read from the live observe registry, so a find_text hit that lands on (or
+  // inside) an interactive control can carry that control's ref straight to page_act.
+  function buildRegistryElementRefMapForToolExec() {
+    var mapForRefLookup = new Map();
+    var refsForLookup = observeRegistryForToolExec.refs || {};
+    var keysForLookup = Object.keys(refsForLookup);
+    for (var iForLookup = 0; iForLookup < keysForLookup.length; iForLookup++) {
+      var entryForLookup = refsForLookup[keysForLookup[iForLookup]];
+      if (entryForLookup && entryForLookup.el) mapForRefLookup.set(entryForLookup.el, Number(keysForLookup[iForLookup]));
+    }
+    return mapForRefLookup;
+  }
+
+  // Nearest ancestor (self included) carrying a ref in the current snapshot, so a match inside a
+  // link/button label resolves to that actionable control rather than the bare text node's parent.
+  function nearestRefForElementToolExec(elForNearest, refMapForNearest) {
+    var nodeForNearest = elForNearest;
+    var guardForNearest = 0;
+    while (nodeForNearest && nodeForNearest !== document.body && guardForNearest < 40) {
+      if (refMapForNearest.has(nodeForNearest)) return refMapForNearest.get(nodeForNearest);
+      nodeForNearest = nodeForNearest.parentElement;
+      guardForNearest++;
+    }
+    return null;
+  }
+
+  // When no registry ref sits above a find_text hit, promote the OUTERMOST primary click
+  // surface (feed card / notification row) into the live snapshot so page_act can use it.
+  // Prefer an existing ref when one is found while walking up; only invent a ref when none exists.
+  function resolveOrPromoteRefForFindTextToolExec(elForPromote, refMapForPromote) {
+    var existingForPromote = nearestRefForElementToolExec(elForPromote, refMapForPromote);
+    if (existingForPromote != null) return existingForPromote;
+
+    var nodeForPromote = elForPromote;
+    var outermostForPromote = null;
+    var guardForPromote = 0;
+    while (nodeForPromote && nodeForPromote !== document.body && guardForPromote < 40) {
+      if (isPrimaryClickSurfaceForObserve(nodeForPromote, null)) {
+        outermostForPromote = nodeForPromote;
+      }
+      nodeForPromote = nodeForPromote.parentElement;
+      guardForPromote++;
+    }
+    if (!outermostForPromote) return null;
+    if (refMapForPromote.has(outermostForPromote)) return refMapForPromote.get(outermostForPromote);
+
+    var nextRefForPromote = 0;
+    var keysForPromote = Object.keys(observeRegistryForToolExec.refs || {});
+    for (var kForPromote = 0; kForPromote < keysForPromote.length; kForPromote++) {
+      var nForPromote = Number(keysForPromote[kForPromote]);
+      if (nForPromote > nextRefForPromote) nextRefForPromote = nForPromote;
+    }
+    nextRefForPromote += 1;
+
+    var inVpForPromote = isElementInViewportForPageQuery(outermostForPromote);
+    var itemForPromote = buildObserveItemForToolExec(
+      outermostForPromote, 'custom_elements', nextRefForPromote, inVpForPromote);
+    var roleForPromote = itemForPromote.role || 'clickable';
+    var labelForPromote = itemForPromote.name || itemForPromote.value || itemForPromote.text ||
+      compactCardNameForObserve(outermostForPromote, 100) || '';
+    observeRegistryForToolExec.refs[nextRefForPromote] = {
+      el: outermostForPromote,
+      selector: itemForPromote._selector,
+      fingerprint: itemForPromote._fingerprint,
+      category: 'custom_elements',
+      role: roleForPromote,
+      label: labelForPromote
+    };
+    refMapForPromote.set(outermostForPromote, nextRefForPromote);
+    return nextRefForPromote;
+  }
+
+  // Compact visible-heading outline for mode "context": page structure at a glance (level + text)
+  // without dumping the whole document.
+  function buildHeadingOutlineForToolExec(maxHeadingsForOutline) {
+    var outlineForHeadings = [];
+    var nodesForHeadings;
+    try { nodesForHeadings = document.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"]'); }
+    catch (eHeadings) { return outlineForHeadings; }
+    for (var iForHeadings = 0; iForHeadings < nodesForHeadings.length; iForHeadings++) {
+      if (outlineForHeadings.length >= maxHeadingsForOutline) break;
+      var elForHeading = nodesForHeadings[iForHeadings];
+      if (!isElementVisibleForPageQuery(elForHeading)) continue;
+      var levelForHeading = 0;
+      var tagForHeading = elForHeading.tagName;
+      if (tagForHeading && tagForHeading.charAt(0) === 'H' && tagForHeading.length === 2) {
+        levelForHeading = parseInt(tagForHeading.charAt(1), 10) || 0;
+      }
+      if (!levelForHeading) {
+        var ariaLevelForHeading = elForHeading.getAttribute('aria-level');
+        levelForHeading = ariaLevelForHeading ? (parseInt(ariaLevelForHeading, 10) || 2) : 2;
+      }
+      var textForHeading = '';
+      try { textForHeading = normalizeTextForPageQuery(elForHeading.innerText || elForHeading.textContent || '', 120); }
+      catch (eHeadingText) { textForHeading = ''; }
+      if (!textForHeading) continue;
+      outlineForHeadings.push({ level: levelForHeading, text: textForHeading });
+    }
+    return outlineForHeadings;
+  }
+
+  async function pageReadToolForToolExec(argsForRead) {
+    argsForRead = argsForRead || {};
+    var modeForRead = String(argsForRead.mode || '').trim();
+    try {
+      if (typeof document === 'undefined' || !document.body) {
+        return { ok: false, error: 'No document body available' };
+      }
+
+      if (modeForRead === 'selection') {
+        var selTextForRead = '';
+        try { selTextForRead = window.getSelection ? String(window.getSelection().toString()) : ''; }
+        catch (eSelRead) { selTextForRead = ''; }
+        return { ok: true, mode: 'selection', selected: selTextForRead.length > 0, text: selTextForRead };
+      }
+
+      if (modeForRead === 'context') {
+        var maxHeadingsForRead = (typeof argsForRead.max_headings === 'number' && argsForRead.max_headings > 0)
+          ? Math.min(120, Math.floor(argsForRead.max_headings)) : 40;
+        var outlineForRead = buildHeadingOutlineForToolExec(maxHeadingsForRead);
+        var linesForContext = [];
+        for (var iForContext = 0; iForContext < outlineForRead.length; iForContext++) {
+          var hForContext = outlineForRead[iForContext];
+          var indentForContext = '';
+          for (var dForContext = 1; dForContext < hForContext.level; dForContext++) indentForContext += '  ';
+          linesForContext.push(indentForContext + 'H' + hForContext.level + ' ' + hForContext.text);
+        }
+        return {
+          ok: true,
+          mode: 'context',
+          page: { title: document.title, url: window.location.href },
+          headings: outlineForRead,
+          text: linesForContext.join('\n')
+        };
+      }
+
+      if (modeForRead === 'content') {
+        var flattenedNsForRead = (globalThis.ABChatContent || {}).tools;
+        flattenedNsForRead = flattenedNsForRead && flattenedNsForRead.flattenedContent;
+        var extractedForRead = '';
+        if (flattenedNsForRead && typeof flattenedNsForRead.getFullPageContent === 'function') {
+          try {
+            var fullForRead = flattenedNsForRead.getFullPageContent();
+            if (fullForRead && fullForRead.ok && typeof fullForRead.result === 'string') extractedForRead = fullForRead.result;
+          } catch (eFullRead) { extractedForRead = ''; }
+        }
+        if (!extractedForRead) {
+          extractedForRead = document.body ? String(document.body.innerText || document.body.textContent || '') : '';
+        }
+        extractedForRead = String(extractedForRead || '').trim();
+        if (!extractedForRead) return { ok: false, error: 'The current page has no readable content to extract.' };
+        var truncatedForRead = false;
+        if (extractedForRead.length > 200000) { extractedForRead = extractedForRead.slice(0, 200000); truncatedForRead = true; }
+        return { ok: true, mode: 'content', truncated: truncatedForRead, text: extractedForRead };
+      }
+
+      if (modeForRead === 'find_text') {
+        var patternForRead = argsForRead.query != null ? String(argsForRead.query)
+          : (argsForRead.pattern != null ? String(argsForRead.pattern) : '');
+        if (!patternForRead) return { ok: false, error: 'find_text requires a query string.' };
+        var limitForRead = (typeof argsForRead.limit === 'number' && argsForRead.limit > 0) ? Math.min(50, Math.floor(argsForRead.limit)) : 20;
+        var flagsForRead = argsForRead.case_sensitive === true ? '' : 'i';
+        // Literal substring search: escape the query so a weak model's plain text is matched as-is,
+        // not interpreted as a regex.
+        var regexForRead;
+        try { regexForRead = new RegExp(patternForRead.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flagsForRead); }
+        catch (eRegexRead) { return { ok: false, error: 'Invalid query.' }; }
+
+        // Fresh snapshot so matched interactive elements carry a usable ref; include_offscreen so a
+        // match anywhere on the page (not only the viewport) can still be acted on by ref. This
+        // renumbers refs (a new snapshotId); the "latest snapshot wins" rule applies as elsewhere.
+        var snapForRead = buildObserveSnapshotForToolExec({ include_offscreen: true, max_items: 200 });
+        var refMapForRead = buildRegistryElementRefMapForToolExec();
+
+        var walkerForRead = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+          acceptNode: function (nForRead) {
+            var pForRead = nForRead.parentElement;
+            if (!pForRead) return NodeFilter.FILTER_REJECT;
+            var tForRead = pForRead.tagName.toLowerCase();
+            if (tForRead === 'script' || tForRead === 'style' || tForRead === 'noscript') return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
+          }
+        }, false);
+
+        var seenForRead = new Map();
+        while (seenForRead.size < limitForRead) {
+          var nodeForRead = walkerForRead.nextNode();
+          if (!nodeForRead) break;
+          var textNodeForRead = nodeForRead.nodeValue || '';
+          regexForRead.lastIndex = 0;
+          var execForRead = regexForRead.exec(textNodeForRead);
+          if (!execForRead) continue;
+          var parentForRead = nodeForRead.parentElement;
+          if (!parentForRead || seenForRead.has(parentForRead)) continue;
+          if (!isElementVisibleForPageQuery(parentForRead)) continue;
+          var idxForRead = execForRead.index;
+          var matchStrForRead = execForRead[0];
+          var radiusForRead = 60;
+          var startForRead = Math.max(0, idxForRead - radiusForRead);
+          var endForRead = Math.min(textNodeForRead.length, idxForRead + matchStrForRead.length + radiusForRead);
+          var snippetForRead = (startForRead > 0 ? '…' : '') +
+            normalizeTextForPageQuery(textNodeForRead.slice(startForRead, endForRead), 160) +
+            (endForRead < textNodeForRead.length ? '…' : '');
+          var refForMatch = resolveOrPromoteRefForFindTextToolExec(parentForRead, refMapForRead);
+          var entryForRead = { snippet: snippetForRead };
+          if (refForMatch != null) {
+            entryForRead.ref = refForMatch;
+            var regEntryForRead = observeRegistryForToolExec.refs[refForMatch];
+            if (regEntryForRead) {
+              if (regEntryForRead.role) entryForRead.role = regEntryForRead.role;
+              if (regEntryForRead.label) entryForRead.name = regEntryForRead.label;
+            }
+          }
+          seenForRead.set(parentForRead, entryForRead);
+        }
+
+        var matchesForRead = [];
+        seenForRead.forEach(function (vForRead) { matchesForRead.push(vForRead); });
+        var linesForRead = [];
+        var actionableForRead = 0;
+        for (var mForRead = 0; mForRead < matchesForRead.length; mForRead++) {
+          var itForRead = matchesForRead[mForRead];
+          if (itForRead.ref != null) {
+            actionableForRead++;
+            linesForRead.push('[' + itForRead.ref + '] ' + (itForRead.role || 'clickable') +
+              (itForRead.name ? ' "' + itForRead.name + '"' : '') + '  — ' + itForRead.snippet);
+          } else {
+            linesForRead.push('(text) ' + itForRead.snippet);
+          }
+        }
+        return {
+          ok: true,
+          mode: 'find_text',
+          query: patternForRead,
+          snapshotId: snapForRead && snapForRead.snapshotId,
+          count: matchesForRead.length,
+          actionable: actionableForRead,
+          matches: matchesForRead,
+          text: linesForRead.length ? linesForRead.join('\n') : 'No matches for "' + patternForRead + '".'
+        };
+      }
+
+      return { ok: false, error: 'Unknown page_read mode "' + modeForRead + '". Use one of: selection, context, content, find_text.' };
+    } catch (eRead) {
+      return { ok: false, error: 'page_read failed: ' + (eRead && eRead.message ? eRead.message : String(eRead)) };
+    }
+  }
+
+  // ---- Tool: page_spreadsheet (high-level Google Sheets intents over the trusted path) ----
+  //
+  // Hides the Name-Box choreography (focus Name Box -> type the A1 reference -> Enter to select
+  // -> type the value -> Enter to commit -> read back the Name Box and formula bar to verify)
+  // behind coarse intents: set_cell / set_range / read_range. It is a pure choreographer over
+  // pageActToolForToolExec, so it reuses that path's panel-occlusion click-through, target
+  // resolution, focus preconditions, dialog handling, and settle logic rather than duplicating any
+  // low-level CDP work. Consent is obtained inline via prepareTrustedDelegationForToolExec.
+
+  var SPREADSHEET_NAME_BOX_SELECTOR_FOR_TOOL_EXEC = '#t-name-box';
+  var SPREADSHEET_FORMULA_BAR_SELECTOR_FOR_TOOL_EXEC = '#t-formula-bar-input';
+
+  function isGoogleSheetsPageForToolExec() {
+    try {
+      var hostForSheets = String(window.location.host || '');
+      var pathForSheets = String(window.location.pathname || '');
+      return /(^|\.)docs\.google\.com$/.test(hostForSheets) && pathForSheets.indexOf('/spreadsheets/') === 0;
+    } catch (eSheetsPage) { return false; }
+  }
+
+  // Normalize an A1 cell or range (e.g. "b2", "A1:C3") to canonical upper-case with no spaces,
+  // returning structure so callers can validate and (for read_range) expand it.
+  function normalizeSpreadsheetRefForToolExec(rawRefForNorm) {
+    var cleanedForNorm = String(rawRefForNorm == null ? '' : rawRefForNorm).replace(/\s+/g, '').toUpperCase();
+    var singleForNorm = /^([A-Z]+)([0-9]+)$/;
+    var rangeForNorm = /^([A-Z]+)([0-9]+):([A-Z]+)([0-9]+)$/;
+    var mSingleForNorm = cleanedForNorm.match(singleForNorm);
+    if (mSingleForNorm) {
+      return { ok: true, ref: cleanedForNorm, isRange: false, startCol: mSingleForNorm[1], startRow: parseInt(mSingleForNorm[2], 10) };
+    }
+    var mRangeForNorm = cleanedForNorm.match(rangeForNorm);
+    if (mRangeForNorm) {
+      return {
+        ok: true, ref: cleanedForNorm, isRange: true,
+        startCol: mRangeForNorm[1], startRow: parseInt(mRangeForNorm[2], 10),
+        endCol: mRangeForNorm[3], endRow: parseInt(mRangeForNorm[4], 10)
+      };
+    }
+    return { ok: false, error: 'Invalid A1 reference "' + rawRefForNorm + '". Use a cell like "B2" or a range like "A1:C3".' };
+  }
+
+  function spreadsheetColLettersToNumForToolExec(lettersForCol) {
+    var numForCol = 0;
+    for (var iForCol = 0; iForCol < lettersForCol.length; iForCol++) {
+      numForCol = numForCol * 26 + (lettersForCol.charCodeAt(iForCol) - 64);
+    }
+    return numForCol;
+  }
+
+  function spreadsheetNumToColLettersForToolExec(numForLetters) {
+    var sForLetters = '';
+    var nForLetters = numForLetters;
+    while (nForLetters > 0) {
+      var rForLetters = (nForLetters - 1) % 26;
+      sForLetters = String.fromCharCode(65 + rForLetters) + sForLetters;
+      nForLetters = Math.floor((nForLetters - 1) / 26);
+    }
+    return sForLetters;
+  }
+
+  // Expand a normalized range into an ordered cell list (row-major), capped so a huge range does
+  // not fan out into thousands of Name-Box navigations.
+  function expandSpreadsheetRangeForToolExec(normRefForExpand, capForExpand) {
+    var cellsForExpand = [];
+    var c1ForExpand = spreadsheetColLettersToNumForToolExec(normRefForExpand.startCol);
+    var c2ForExpand = spreadsheetColLettersToNumForToolExec(normRefForExpand.endCol);
+    var r1ForExpand = normRefForExpand.startRow;
+    var r2ForExpand = normRefForExpand.endRow;
+    var colLoForExpand = Math.min(c1ForExpand, c2ForExpand);
+    var colHiForExpand = Math.max(c1ForExpand, c2ForExpand);
+    var rowLoForExpand = Math.min(r1ForExpand, r2ForExpand);
+    var rowHiForExpand = Math.max(r1ForExpand, r2ForExpand);
+    for (var rForExpand = rowLoForExpand; rForExpand <= rowHiForExpand; rForExpand++) {
+      for (var cForExpand = colLoForExpand; cForExpand <= colHiForExpand; cForExpand++) {
+        if (cellsForExpand.length >= capForExpand) return { cells: cellsForExpand, truncated: true };
+        cellsForExpand.push(spreadsheetNumToColLettersForToolExec(cForExpand) + rForExpand);
+      }
+    }
+    return { cells: cellsForExpand, truncated: false };
+  }
+
+  function fingerprintForSelectorForSpreadsheetToolExec(selectorForFp) {
+    try {
+      var elForFp = document.querySelector(selectorForFp);
+      if (!elForFp) return null;
+      return getElementFingerprintForPageQuery(elForFp);
+    } catch (eFp) { return null; }
+  }
+
+  // Read a Sheets chrome control's live text: the Name Box is an <input> (.value); the formula bar
+  // is a contenteditable (.textContent). Returns null when the element is absent.
+  function readSpreadsheetControlTextForToolExec(selectorForCtrl) {
+    try {
+      var elForCtrl = document.querySelector(selectorForCtrl);
+      if (!elForCtrl) return null;
+      if (typeof elForCtrl.value === 'string') return elForCtrl.value;
+      return String(elForCtrl.innerText || elForCtrl.textContent || '');
+    } catch (eCtrl) { return null; }
+  }
+
+  // Focus the Name Box, type an A1 reference, and Enter to select it, then verify the Name Box
+  // reports the requested reference. Focus lands in the grid editor after the Enter.
+  async function navigateSpreadsheetToRefForToolExec(normRefForNav, contextForNav) {
+    var nameBoxFpForNav = fingerprintForSelectorForSpreadsheetToolExec(SPREADSHEET_NAME_BOX_SELECTOR_FOR_TOOL_EXEC);
+    if (!nameBoxFpForNav) {
+      return { ok: false, error: 'The spreadsheet Name Box (' + SPREADSHEET_NAME_BOX_SELECTOR_FOR_TOOL_EXEC + ') was not found. Open the sheet with its toolbar visible and retry.' };
+    }
+    var clickResForNav = await pageActToolForToolExec({ action: 'click', selector: SPREADSHEET_NAME_BOX_SELECTOR_FOR_TOOL_EXEC, expected_fingerprint: nameBoxFpForNav }, contextForNav);
+    if (!clickResForNav || clickResForNav.ok === false) {
+      return { ok: false, error: 'Could not focus the Name Box: ' + ((clickResForNav && clickResForNav.error) || 'unknown error') };
+    }
+    var typeResForNav = await pageActToolForToolExec({ action: 'type', text: normRefForNav.ref, expected_focus: SPREADSHEET_NAME_BOX_SELECTOR_FOR_TOOL_EXEC }, contextForNav);
+    if (!typeResForNav || typeResForNav.ok === false) {
+      return { ok: false, error: 'Could not type the reference into the Name Box: ' + ((typeResForNav && typeResForNav.error) || 'unknown error') };
+    }
+    var enterResForNav = await pageActToolForToolExec({ action: 'key', keys: 'Enter', expected_focus: SPREADSHEET_NAME_BOX_SELECTOR_FOR_TOOL_EXEC, read_after: [SPREADSHEET_NAME_BOX_SELECTOR_FOR_TOOL_EXEC] }, contextForNav);
+    if (!enterResForNav || enterResForNav.ok === false) {
+      return { ok: false, error: 'Could not select the reference (Enter): ' + ((enterResForNav && enterResForNav.error) || 'unknown error') };
+    }
+    await delayForPageActRefToolExec(150);
+    var selectedRawForNav = readSpreadsheetControlTextForToolExec(SPREADSHEET_NAME_BOX_SELECTOR_FOR_TOOL_EXEC);
+    var selectedNormForNav = selectedRawForNav != null ? String(selectedRawForNav).replace(/\s+/g, '').toUpperCase() : '';
+    return {
+      ok: true,
+      requested: normRefForNav.ref,
+      selected: selectedNormForNav,
+      verified: selectedNormForNav === normRefForNav.ref
+    };
+  }
+
+  function spreadsheetCellToStringForToolExec(cellForStr) {
+    if (typeof cellForStr === 'number' && isFinite(cellForStr)) return String(cellForStr);
+    if (cellForStr == null) return '';
+    return String(cellForStr);
+  }
+
+  // Coerce the many shapes a model may pass as set_range "values" into a rectangular grid of cell
+  // strings (rows of cells). Accepts a 2D array (rows of cells); a flat scalar array (filled
+  // straight down as one column); newline/tab-delimited text (rows by newline, columns by tab);
+  // and rescues rows or a whole value that arrived as JSON text (e.g. the string "[\"James\"]"),
+  // which small models emit when they stringify the inner arrays. A bracket-looking string that
+  // does not parse is rejected rather than typed verbatim. Returns { ok, grid, coerced } or
+  // { ok:false, error }.
+  function normalizeSetRangeValuesForToolExec(rawValuesForNorm) {
+    var coercedNotesForNorm = [];
+
+    function tsvToGridForNorm(strForTsv) {
+      var rowsForTsv = String(strForTsv).replace(/\r\n?/g, '\n').split('\n');
+      while (rowsForTsv.length > 1 && rowsForTsv[rowsForTsv.length - 1] === '') rowsForTsv.pop();
+      return rowsForTsv.map(function (lineForTsv) { return lineForTsv.split('\t'); });
+    }
+
+    var topForNorm = rawValuesForNorm;
+    if (typeof topForNorm === 'string') {
+      var trimmedTopForNorm = topForNorm.trim();
+      if (/^\[[\s\S]*\]$/.test(trimmedTopForNorm)) {
+        var parsedTopForNorm = null;
+        try { parsedTopForNorm = JSON.parse(trimmedTopForNorm); } catch (eTopForNorm) { parsedTopForNorm = null; }
+        if (Array.isArray(parsedTopForNorm)) {
+          topForNorm = parsedTopForNorm;
+          coercedNotesForNorm.push('parsed the JSON-encoded array passed as a "values" string');
+        } else {
+          return { ok: false, error: 'The "values" string looks like a JSON array but did not parse. Pass a real array (e.g. ["James","Robert"] for a column) or newline/tab-delimited text.' };
+        }
+      } else {
+        topForNorm = tsvToGridForNorm(topForNorm);
+        coercedNotesForNorm.push('read "values" as newline/tab-delimited text');
+      }
+    }
+
+    if (!Array.isArray(topForNorm) || topForNorm.length === 0) {
+      return { ok: false, error: 'set_range requires "values": an array of rows (each row an array of cell values), a flat array for a single column, or newline/tab-delimited text.' };
+    }
+
+    var gridForNorm = [];
+    var rescuedRowForNorm = false;
+    for (var iForNorm = 0; iForNorm < topForNorm.length; iForNorm++) {
+      var elForNorm = topForNorm[iForNorm];
+      if (Array.isArray(elForNorm)) {
+        gridForNorm.push(elForNorm.map(spreadsheetCellToStringForToolExec));
+        continue;
+      }
+      if (typeof elForNorm === 'number' && isFinite(elForNorm)) {
+        gridForNorm.push([String(elForNorm)]);
+        continue;
+      }
+      if (typeof elForNorm === 'string') {
+        var trimmedElForNorm = elForNorm.trim();
+        if (/^\[[\s\S]*\]$/.test(trimmedElForNorm)) {
+          var parsedElForNorm = null;
+          try { parsedElForNorm = JSON.parse(trimmedElForNorm); } catch (eElForNorm) { parsedElForNorm = null; }
+          if (Array.isArray(parsedElForNorm)) {
+            rescuedRowForNorm = true;
+            gridForNorm.push(parsedElForNorm.map(spreadsheetCellToStringForToolExec));
+            continue;
+          }
+          return { ok: false, error: 'A "values" row looks like a JSON array but did not parse: ' + JSON.stringify(elForNorm) + '. Pass cell values directly (e.g. ["James","Robert"]), not as JSON text.' };
+        }
+        gridForNorm.push(elForNorm.indexOf('\t') >= 0 ? elForNorm.split('\t') : [elForNorm]);
+        continue;
+      }
+      gridForNorm.push([spreadsheetCellToStringForToolExec(elForNorm)]);
+    }
+    if (rescuedRowForNorm) coercedNotesForNorm.push('parsed JSON-encoded row array(s) in "values"');
+
+    return { ok: true, grid: gridForNorm, coerced: coercedNotesForNorm.join('; ') };
+  }
+
+  // Compare a value read back from the formula bar against the intended cell value. Falls back to
+  // numeric equality so a number typed as "5200" matches the sheet's stored "5200".
+  function spreadsheetValuesEqualForToolExec(actualForEq, expectedForEq) {
+    if (actualForEq === expectedForEq) return true;
+    var aTrimForEq = String(actualForEq).trim();
+    var eTrimForEq = String(expectedForEq).trim();
+    if (aTrimForEq === '' || eTrimForEq === '') return aTrimForEq === eTrimForEq;
+    var aNumForEq = Number(aTrimForEq.replace(/,/g, ''));
+    var eNumForEq = Number(eTrimForEq.replace(/,/g, ''));
+    if (isFinite(aNumForEq) && isFinite(eNumForEq)) return aNumForEq === eNumForEq;
+    return false;
+  }
+
+  // Read the just-filled block back cell by cell (Name Box + formula bar) and compare against the
+  // intended grid, so set_range reports honest success/failure instead of trusting the type count.
+  // Verification is capped so a large block does not fan out into hundreds of Name-Box navigations.
+  async function verifySetRangeForToolExec(anchorNormForVerify, gridForVerify, contextForVerify) {
+    var VERIFY_CAP_FOR_SET_RANGE = 60;
+    var anchorColNumForVerify = spreadsheetColLettersToNumForToolExec(anchorNormForVerify.startCol);
+    var checkedForVerify = 0;
+    var mismatchesForVerify = [];
+    var truncatedForVerify = false;
+    for (var rForVerify = 0; rForVerify < gridForVerify.length && !truncatedForVerify; rForVerify++) {
+      var rowCellsForVerify = gridForVerify[rForVerify] || [];
+      for (var cForVerify = 0; cForVerify < rowCellsForVerify.length; cForVerify++) {
+        if (checkedForVerify >= VERIFY_CAP_FOR_SET_RANGE) { truncatedForVerify = true; break; }
+        var cellRefForVerify = spreadsheetNumToColLettersForToolExec(anchorColNumForVerify + cForVerify) + (anchorNormForVerify.startRow + rForVerify);
+        var oneNormForVerify = normalizeSpreadsheetRefForToolExec(cellRefForVerify);
+        var navForVerify = await navigateSpreadsheetToRefForToolExec(oneNormForVerify, contextForVerify);
+        if (!navForVerify.ok) {
+          return { ok: false, error: 'Could not read back cell ' + cellRefForVerify + ' to verify the fill: ' + navForVerify.error };
+        }
+        await delayForPageActRefToolExec(120);
+        var actualRawForVerify = readSpreadsheetControlTextForToolExec(SPREADSHEET_FORMULA_BAR_SELECTOR_FOR_TOOL_EXEC);
+        var actualForVerify = actualRawForVerify == null ? '' : String(actualRawForVerify).trim();
+        var expectedForVerify = String(rowCellsForVerify[cForVerify] == null ? '' : rowCellsForVerify[cForVerify]).trim();
+        checkedForVerify++;
+        if (!spreadsheetValuesEqualForToolExec(actualForVerify, expectedForVerify)) {
+          mismatchesForVerify.push({ cell: cellRefForVerify, expected: expectedForVerify, actual: actualForVerify });
+        }
+      }
+    }
+    return { ok: true, checked: checkedForVerify, mismatches: mismatchesForVerify, truncated: truncatedForVerify };
+  }
+
+  // Write one cell's value by selecting it via the Name Box (absolute targeting) and committing.
+  // The fill drives each cell absolutely rather than relying on the commit key to advance the
+  // selection, because on Google Sheets the commit can fail to move the selection (a suggestion
+  // dropdown swallows the first Enter), which otherwise piles values two-per-cell. Two Enters are
+  // sent: the first may only dismiss a dropdown, the second commits; when there is no dropdown the
+  // first commits and the second is a harmless downward move, which does not matter because the
+  // next cell is targeted absolutely. An empty value clears the cell with a forward Delete instead.
+  async function writeSpreadsheetCellForToolExec(cellNormForWrite, valueForWrite, contextForWrite) {
+    var navForWrite = await navigateSpreadsheetToRefForToolExec(cellNormForWrite, contextForWrite);
+    if (!navForWrite.ok) return { ok: false, error: navForWrite.error };
+    var valueStrForWrite = String(valueForWrite == null ? '' : valueForWrite);
+    if (valueStrForWrite === '') {
+      var clearForWrite = await pageActToolForToolExec({ action: 'key', keys: 'Delete' }, contextForWrite);
+      if (!clearForWrite || clearForWrite.ok === false) {
+        return { ok: false, error: 'Could not clear cell ' + cellNormForWrite.ref + ' (Delete): ' + ((clearForWrite && clearForWrite.error) || 'unknown error') };
+      }
+      return { ok: true, select_verified: navForWrite.verified };
+    }
+    var typeForWrite = await pageActToolForToolExec({ action: 'type', text: valueStrForWrite, clear_suggestions: true, read_after: [SPREADSHEET_FORMULA_BAR_SELECTOR_FOR_TOOL_EXEC] }, contextForWrite);
+    if (!typeForWrite || typeForWrite.ok === false) {
+      return { ok: false, error: 'Could not type into cell ' + cellNormForWrite.ref + ': ' + ((typeForWrite && typeForWrite.error) || 'unknown error') };
+    }
+    for (var enterIdxForWrite = 0; enterIdxForWrite < 2; enterIdxForWrite++) {
+      var commitForWrite = await pageActToolForToolExec({ action: 'key', keys: 'Enter' }, contextForWrite);
+      if (!commitForWrite || commitForWrite.ok === false) {
+        return { ok: false, error: 'Could not commit cell ' + cellNormForWrite.ref + ' (Enter): ' + ((commitForWrite && commitForWrite.error) || 'unknown error') };
+      }
+    }
+    return { ok: true, select_verified: navForWrite.verified };
+  }
+
+  async function pageSpreadsheetToolForToolExec(argsForSheet, contextForSheet) {
+    argsForSheet = argsForSheet || {};
+    var intentForSheet = String(argsForSheet.intent || argsForSheet.mode || '').trim().toLowerCase();
+    try {
+      if (!isGoogleSheetsPageForToolExec()) {
+        return { ok: false, error: 'page_spreadsheet only drives Google Sheets (docs.google.com/spreadsheets). This page is not a Google Sheet.' };
+      }
+      if (intentForSheet !== 'set_cell' && intentForSheet !== 'set_range' && intentForSheet !== 'read_range') {
+        return { ok: false, error: 'Unknown intent "' + intentForSheet + '". Use one of: set_cell, set_range, read_range.' };
+      }
+
+      var prepForSheet = await prepareTrustedDelegationForToolExec(contextForSheet);
+      if (!prepForSheet || prepForSheet.ok === false) {
+        return { ok: false, error: (prepForSheet && prepForSheet.error) || 'Advanced automation is required for spreadsheet actions and was not enabled.' };
+      }
+
+      if (intentForSheet === 'read_range') {
+        var readRefRawForSheet = argsForSheet.range != null ? argsForSheet.range : argsForSheet.cell;
+        var readNormForSheet = normalizeSpreadsheetRefForToolExec(readRefRawForSheet);
+        if (!readNormForSheet.ok) return { ok: false, error: readNormForSheet.error };
+        var cellsToReadForSheet;
+        var readTruncatedForSheet = false;
+        if (readNormForSheet.isRange) {
+          var expandedForSheet = expandSpreadsheetRangeForToolExec(readNormForSheet, 60);
+          cellsToReadForSheet = expandedForSheet.cells;
+          readTruncatedForSheet = expandedForSheet.truncated;
+        } else {
+          cellsToReadForSheet = [readNormForSheet.ref];
+        }
+        var readValuesForSheet = [];
+        for (var rIdxForSheet = 0; rIdxForSheet < cellsToReadForSheet.length; rIdxForSheet++) {
+          var oneNormForSheet = normalizeSpreadsheetRefForToolExec(cellsToReadForSheet[rIdxForSheet]);
+          var navReadForSheet = await navigateSpreadsheetToRefForToolExec(oneNormForSheet, contextForSheet);
+          if (!navReadForSheet.ok) return { ok: false, error: navReadForSheet.error, read: readValuesForSheet };
+          await delayForPageActRefToolExec(120);
+          var cellValueForSheet = readSpreadsheetControlTextForToolExec(SPREADSHEET_FORMULA_BAR_SELECTOR_FOR_TOOL_EXEC);
+          // The formula-bar contenteditable renders a single trailing newline; strip just that one
+          // artifact so read_range returns the bare value, keeping any internal newlines intact.
+          var cleanedCellValueForSheet = cellValueForSheet == null ? '' : String(cellValueForSheet).replace(/\r?\n$/, '');
+          readValuesForSheet.push({ cell: cellsToReadForSheet[rIdxForSheet], value: cleanedCellValueForSheet });
+        }
+        return {
+          ok: true,
+          intent: 'read_range',
+          range: readNormForSheet.ref,
+          count: readValuesForSheet.length,
+          truncated: readTruncatedForSheet,
+          cells: readValuesForSheet
+        };
+      }
+
+      if (intentForSheet === 'set_cell') {
+        var setCellNormForSheet = normalizeSpreadsheetRefForToolExec(argsForSheet.cell);
+        if (!setCellNormForSheet.ok) return { ok: false, error: setCellNormForSheet.error };
+        if (setCellNormForSheet.isRange) return { ok: false, error: 'set_cell takes a single cell (e.g. "B2"), not a range. Use set_range for multiple cells.' };
+        var rawValueForSheet = argsForSheet.value;
+        if (typeof rawValueForSheet === 'number' && isFinite(rawValueForSheet)) rawValueForSheet = String(rawValueForSheet);
+        if (typeof rawValueForSheet !== 'string') return { ok: false, error: 'set_cell requires a string (or number) "value".' };
+        if (/[\t\n\r]/.test(rawValueForSheet)) return { ok: false, error: 'set_cell value must be a single cell value (no tabs or newlines). Use set_range to fill multiple cells.' };
+
+        // Write and commit via the shared per-cell path (absolute Name-Box navigation + double
+        // Enter), so a first Enter swallowed by an autocomplete dropdown does not leave the value
+        // uncommitted, then read the cell back to confirm what actually committed. The pre-commit
+        // formula-bar mirror can show the typed value even when the commit did not take (or an
+        // autocomplete substituted a different value), so verification is done after the commit.
+        var writeCellResForSheet = await writeSpreadsheetCellForToolExec(setCellNormForSheet, rawValueForSheet, contextForSheet);
+        if (!writeCellResForSheet.ok) {
+          return { ok: false, intent: 'set_cell', cell: setCellNormForSheet.ref, error: writeCellResForSheet.error };
+        }
+        var verifyCellForSheet = await verifySetRangeForToolExec(setCellNormForSheet, [[rawValueForSheet]], contextForSheet);
+        if (verifyCellForSheet.ok === false) {
+          return { ok: false, intent: 'set_cell', cell: setCellNormForSheet.ref, error: verifyCellForSheet.error };
+        }
+        if (verifyCellForSheet.mismatches.length > 0) {
+          var cellMismatchForSheet = verifyCellForSheet.mismatches[0];
+          return {
+            ok: false,
+            intent: 'set_cell',
+            cell: setCellNormForSheet.ref,
+            value: rawValueForSheet,
+            select_verified: writeCellResForSheet.select_verified,
+            value_verified: false,
+            observed: cellMismatchForSheet.actual,
+            error: 'Cell ' + setCellNormForSheet.ref + ' holds "' + cellMismatchForSheet.actual + '" after the write, not "' + rawValueForSheet.trim() + '". The commit may have been swallowed or autocompleted; re-read the cell and set it again.'
+          };
+        }
+        return {
+          ok: true,
+          intent: 'set_cell',
+          cell: setCellNormForSheet.ref,
+          value: rawValueForSheet,
+          select_verified: writeCellResForSheet.select_verified,
+          value_verified: true
+        };
+      }
+
+      // intent === 'set_range'
+      var anchorRawForSheet = argsForSheet.anchor != null ? argsForSheet.anchor : argsForSheet.cell;
+      var anchorNormForSheet = normalizeSpreadsheetRefForToolExec(anchorRawForSheet);
+      if (!anchorNormForSheet.ok) return { ok: false, error: 'set_range needs an "anchor" (top-left cell, e.g. "A2"). ' + anchorNormForSheet.error };
+      if (anchorNormForSheet.isRange) return { ok: false, error: 'set_range "anchor" must be a single top-left cell (e.g. "A2"), not a range; the shape comes from "values".' };
+      var valuesNormForSheet = normalizeSetRangeValuesForToolExec(argsForSheet.values);
+      if (!valuesNormForSheet.ok) return { ok: false, error: valuesNormForSheet.error };
+      var gridForSheet = valuesNormForSheet.grid;
+      var totalCellsForSheet = gridForSheet.reduce(function (accForCells, rowForCells) { return accForCells + (rowForCells ? rowForCells.length : 0); }, 0);
+      if (totalCellsForSheet > 50) {
+        return { ok: false, error: 'set_range fills at most 50 cells per call (got ' + totalCellsForSheet + '). Split into multiple calls.' };
+      }
+      var coercedNoteForSheet = valuesNormForSheet.coerced || '';
+      var anchorColNumForSheet = spreadsheetColLettersToNumForToolExec(anchorNormForSheet.startCol);
+      var anchorSelectVerifiedForSheet = null;
+
+      // Fill each target cell by absolute Name-Box navigation so the fill never depends on the
+      // commit key advancing the selection (see writeSpreadsheetCellForToolExec).
+      var filledCountForSheet = 0;
+      for (var rFillForSheet = 0; rFillForSheet < gridForSheet.length; rFillForSheet++) {
+        var rowCellsForFill = gridForSheet[rFillForSheet] || [];
+        for (var cFillForSheet = 0; cFillForSheet < rowCellsForFill.length; cFillForSheet++) {
+          var cellRefForFill = spreadsheetNumToColLettersForToolExec(anchorColNumForSheet + cFillForSheet) + (anchorNormForSheet.startRow + rFillForSheet);
+          var cellNormForFill = normalizeSpreadsheetRefForToolExec(cellRefForFill);
+          var writeResForFill = await writeSpreadsheetCellForToolExec(cellNormForFill, rowCellsForFill[cFillForSheet], contextForSheet);
+          if (!writeResForFill.ok) {
+            return {
+              ok: false,
+              intent: 'set_range',
+              anchor: anchorNormForSheet.ref,
+              error: 'Range fill stopped at ' + cellRefForFill + ' after filling ' + filledCountForSheet + ' cell(s): ' + writeResForFill.error,
+              coerced: coercedNoteForSheet || undefined
+            };
+          }
+          if (anchorSelectVerifiedForSheet === null) anchorSelectVerifiedForSheet = writeResForFill.select_verified;
+          filledCountForSheet++;
+        }
+      }
+
+      // Verify by reading the block back rather than trusting the writes: a commit can be swallowed
+      // by an autocomplete dropdown, so confirm each cell actually holds the intended value.
+      var verifyForSheet = await verifySetRangeForToolExec(anchorNormForSheet, gridForSheet, contextForSheet);
+      if (verifyForSheet.ok === false) {
+        return { ok: false, intent: 'set_range', anchor: anchorNormForSheet.ref, error: verifyForSheet.error, coerced: coercedNoteForSheet || undefined };
+      }
+      if (verifyForSheet.mismatches.length > 0) {
+        var shownMismatchesForSheet = verifyForSheet.mismatches.slice(0, 10).map(function (mForSheet) {
+          return mForSheet.cell + ' expected "' + mForSheet.expected + '" but has "' + mForSheet.actual + '"';
+        }).join('; ');
+        return {
+          ok: false,
+          intent: 'set_range',
+          anchor: anchorNormForSheet.ref,
+          select_verified: anchorSelectVerifiedForSheet,
+          cells_checked: verifyForSheet.checked,
+          mismatches: verifyForSheet.mismatches.slice(0, 10),
+          verification_truncated: verifyForSheet.truncated || undefined,
+          coerced: coercedNoteForSheet || undefined,
+          error: verifyForSheet.mismatches.length + ' of ' + verifyForSheet.checked + ' checked cell(s) do not contain the intended value: ' + shownMismatchesForSheet + '. Re-read the range with intent "read_range" and set the wrong cells again.'
+        };
+      }
+      return {
+        ok: true,
+        intent: 'set_range',
+        anchor: anchorNormForSheet.ref,
+        select_verified: anchorSelectVerifiedForSheet,
+        rows_entered: gridForSheet.length,
+        cells_verified: verifyForSheet.checked,
+        value_verified: true,
+        verification_truncated: verifyForSheet.truncated || undefined,
+        coerced: coercedNoteForSheet || undefined
+      };
+    } catch (eSheet) {
+      return { ok: false, error: 'page_spreadsheet failed: ' + (eSheet && eSheet.message ? eSheet.message : String(eSheet)) };
+    }
   }
 
   // Returns the category an element belongs to, or null if it belongs to none.
@@ -3129,7 +4840,7 @@
               }
             }
             if (!nativeMatchForSelect) {
-              return { ok: false, operation: operation, sub_operation: subOpForFPE, error: 'No <option> in this native <select> matches "' + targetOptionForSelect + '". Available: ' + JSON.stringify(nativeOptsForSelect.slice(0, 30).map(function (oForList) { return oForList.text; })) + '. (For a native select you can also use page_fill_form with the option value.)' };
+              return { ok: false, operation: operation, sub_operation: subOpForFPE, error: 'No <option> in this native <select> matches "' + targetOptionForSelect + '". Available: ' + JSON.stringify(nativeOptsForSelect.slice(0, 30).map(function (oForList) { return oForList.text; })) + '.' };
             }
             setNativeValueForPageFillForm(matchedElForFPE, nativeMatchForSelect.value);
             matchedElForFPE.dispatchEvent(new Event('input', { bubbles: true }));
@@ -3331,7 +5042,7 @@
               sub_operation: subOpForFPE,
               selector: selectorForFPE,
               opened: true,
-              error: '"' + targetOptionForSelect + '" matched ' + matchForSelect.matches.length + ' options by ' + matchForSelect.tier + ': ' + JSON.stringify(candidateLabelsForSelect) + '. Re-run select_option with the exact option text to disambiguate.'
+              error: '"' + targetOptionForSelect + '" matched ' + matchForSelect.matches.length + ' options by ' + matchForSelect.tier + ': ' + JSON.stringify(candidateLabelsForSelect) + '. Re-run page_act select with the exact option label to disambiguate.'
             };
           }
 
@@ -3922,10 +5633,10 @@
       return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'Invalid selector: ' + (errorForPageFillForm.message || selectorForPageFillForm));
     }
     if (matchesForPageFillForm.length === 0) {
-      return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'No element matches this selector on the current page. Run page_query again.');
+      return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'No element matches on the current page. Re-run page_observe and retry by ref.');
     }
     if (matchesForPageFillForm.length > 1) {
-      return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'Selector matches ' + matchesForPageFillForm.length + ' elements. Run page_query again and use a unique selector.');
+      return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'The target resolved to ' + matchesForPageFillForm.length + ' elements. Re-run page_observe and retry by ref.');
     }
 
     var elForPageFillForm = matchesForPageFillForm[0];
@@ -3953,25 +5664,25 @@
     var fieldRoleForWidget = (elForPageFillForm.getAttribute && elForPageFillForm.getAttribute('role')) || '';
     if (fieldRoleForWidget && tagForPageFillForm !== 'input' && tagForPageFillForm !== 'select' && tagForPageFillForm !== 'textarea') {
       if (fieldRoleForWidget === 'combobox') {
-        return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'This is a custom combobox (role="combobox" on a <' + tagForPageFillForm + '>), not a native <select> or <input>. page_fill_form cannot set its value directly. Use page_query findPageElements with this combobox\'s selector, sub_operation="select_option", and option set to the target value\'s visible label; it opens the dropdown, finds the matching option (handling portal-rendered lists, type-to-filter, and virtualized lists), clicks it, and reports whether the selection committed. Manual fallback: click the combobox to open it, re-run findPageElements category="buttons" to discover the now-visible role="option" elements, then click the matching option.');
+        return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'This is a custom combobox (role="combobox"), not a text field. Do not type into it: use page_act with action "select" and option set to the target option\'s visible label; it opens the dropdown and clicks the matching option for you (handling portal-rendered, type-to-filter, and virtualized lists).');
       }
       if (fieldRoleForWidget === 'checkbox' || fieldRoleForWidget === 'radio') {
-        return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'This is a custom ARIA ' + fieldRoleForWidget + ' (role="' + fieldRoleForWidget + '" on a <' + tagForPageFillForm + '>), not a native checkbox/radio input, so it has no .checked state to write. Toggle it with page_query findPageElements using this element\'s selector and sub_operation="click", then read its aria-checked attribute (surfaced in discovery) to confirm the new state.');
+        return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'This is a custom ARIA ' + fieldRoleForWidget + ' (role="' + fieldRoleForWidget + '"), not a text field, so it has no value to type. Toggle it with page_act action "click", then re-observe to confirm its new state.');
       }
       if (fieldRoleForWidget === 'spinbutton' || fieldRoleForWidget === 'slider') {
-        return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'This is a custom ARIA ' + fieldRoleForWidget + ' (role="' + fieldRoleForWidget + '" on a <' + tagForPageFillForm + '>), not a native number/range input, so it has no value to write. Adjust it via its own increment/decrement controls or drag handle (find them with findPageElements category="buttons"), or focus it with sub_operation="click" and send arrow keys; read aria-valuenow to confirm the result.');
+        return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'This is a custom ARIA ' + fieldRoleForWidget + ' (role="' + fieldRoleForWidget + '"), not a text field, so it has no value to type. Focus it with page_act action "click", then adjust it with page_act action "press" arrow keys, or use its own increment/decrement controls.');
       }
       if (fieldRoleForWidget === 'textbox' || fieldRoleForWidget === 'searchbox') {
         var ceForWidget = elForPageFillForm.getAttribute('contenteditable');
         if (ceForWidget !== 'true' && ceForWidget !== '') {
-          return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'This is a custom ARIA ' + fieldRoleForWidget + ' (role="' + fieldRoleForWidget + '" on a <' + tagForPageFillForm + '>) that is not contenteditable, so it has no writable value. The page captures keystrokes directly and page_fill_form cannot fill it. Focus it with findPageElements sub_operation="click" and rely on the page\'s own input handling, or look for an associated native <input> to fill instead.');
+          return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'This ARIA ' + fieldRoleForWidget + ' (role="' + fieldRoleForWidget + '") is not contenteditable, so it has no writable value. Click it with page_act action "click" and rely on the page\'s own keystroke handling, or find an associated native input to type into instead.');
         }
         // A contenteditable textbox/searchbox is fillable: fall through to the
         // contenteditable path below.
       }
     }
     if (resolveCategoryForPageQuery(elForPageFillForm) !== 'form_fields') {
-      return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'Target is not a supported form field. Use page_query with category form_fields.');
+      return buildFailedResultForPageFillForm(baseForPageFillForm, 'failed', 'Target is not a fillable form field. Re-run page_observe and use the page_act action that matches this control (click, select, or press).');
     }
     if (elForPageFillForm.disabled) {
       return buildFailedResultForPageFillForm(baseForPageFillForm, 'blocked', 'Disabled fields are blocked.');
@@ -6303,13 +8014,13 @@ self.onmessage = function (e) {
       }
     } catch (_visionErrForShot) {}
 
-    return { ok: false, error: 'Screenshot captured but vision analysis returned no usable description. Try again, or rely on page_query for text content.' };
+    return { ok: false, error: 'Screenshot captured but vision analysis returned no usable description. Try again, or rely on page_read for text content.' };
   }
 
   function readDocumentStructureToolForToolExec(args) {
     var refIdForRead = Number(args.ref_id);
     if (!Number.isFinite(refIdForRead) || refIdForRead <= 0) {
-      return Promise.resolve({ ok: false, error: 'ref_id is required and must be a positive integer (the blob id from the [Attached file: "name.docx" (blob id: N)] marker).' });
+      return Promise.resolve({ ok: false, error: 'ref_id is required and must be a positive integer (the blob id from the <file name="name.docx" blob_id="N"> element).' });
     }
     var actionsForRead = (globalScopeForToolExec.ABChatShared || {}).actions || {};
     var actionNameForRead = actionsForRead.parseAttachmentStructure || 'parseAttachmentStructure';
@@ -7246,7 +8957,7 @@ self.onmessage = function (e) {
     var toSelectorForPageAct = (typeof args.to_selector === 'string') ? args.to_selector.trim() : '';
     var toBackendNodeIdForPageAct = (typeof args.to_backend_node_id === 'number' && isFinite(args.to_backend_node_id)) ? args.to_backend_node_id : null;
     if (singleTargetActionForPageAct && !selectorForPageAct && backendNodeIdForPageAct == null) {
-      return { ok: false, error: actionForPageAct + ' requires a selector or backend_node_id identifying the target element. Get a CSS selector from page_query (findText or findPageElements), or a backend_node_id from page_accessibility_tree, then re-issue the action.' };
+      return { ok: false, error: actionForPageAct + ' could not resolve a target element. Re-run page_observe to get a fresh ref, then retry the action by ref.' };
     }
     if (actionForPageAct === 'drag' && ((!fromSelectorForPageAct && fromBackendNodeIdForPageAct == null) || (!toSelectorForPageAct && toBackendNodeIdForPageAct == null))) {
       return { ok: false, error: 'drag requires a start target (from_selector or from_backend_node_id) and an end target (to_selector or to_backend_node_id). Re-issue with both.' };
@@ -7314,14 +9025,14 @@ self.onmessage = function (e) {
     var clickFamilyActionForPageAct = (actionForPageAct === 'click' || actionForPageAct === 'double_click' || actionForPageAct === 'right_click');
     var hasExpectedFingerprintForPageAct = (typeof args.expected_fingerprint === 'string' && args.expected_fingerprint.trim());
     if (clickFamilyActionForPageAct && selectorForPageAct && !hasExpectedFingerprintForPageAct) {
-      return { ok: false, error: 'A selector-based ' + actionForPageAct + ' requires expected_fingerprint. Read the target from page_query getInteractiveView/findText/findPageElements (or a prior page_act dom_delta), then pass that row\'s selector AND its fingerprint as expected_fingerprint so a stale or guessed selector is refused before any input dispatches. Do not hand-write a positional selector; if you already have the element as an accessibility node, target it by backend_node_id instead (no fingerprint needed).' };
+      return { ok: false, error: 'A selector-based ' + actionForPageAct + ' requires expected_fingerprint. Re-run page_observe and act on the target by its ref instead of a hand-written selector.' };
     }
     if (actionForPageAct === 'drag') {
       if (fromSelectorForPageAct && !(typeof args.from_expected_fingerprint === 'string' && args.from_expected_fingerprint.trim())) {
-        return { ok: false, error: 'A selector-based drag start (from_selector) requires from_expected_fingerprint. Read the start element from page_query and pass its fingerprint, or target it by from_backend_node_id instead.' };
+        return { ok: false, error: 'A selector-based drag start requires from_expected_fingerprint. Re-run page_observe and drag by ref instead.' };
       }
       if (toSelectorForPageAct && !(typeof args.to_expected_fingerprint === 'string' && args.to_expected_fingerprint.trim())) {
-        return { ok: false, error: 'A selector-based drag end (to_selector) requires to_expected_fingerprint. Read the end element from page_query and pass its fingerprint, or target it by to_backend_node_id instead.' };
+        return { ok: false, error: 'A selector-based drag end requires to_expected_fingerprint. Re-run page_observe and drag by ref instead.' };
       }
     }
 
@@ -7621,7 +9332,7 @@ self.onmessage = function (e) {
         return { ok: false, error: "The selector '" + selectorForResolve + "' is not valid CSS. Provide a single valid selector (no comma-separated lists)." };
       }
       if (!elForResolve) {
-        return { ok: false, error: "No element matches the selector '" + selectorForResolve + "'. Re-read the page with page_query (findText or findPageElements) to get a current selector, then retry." };
+        return { ok: false, error: "No element matches the resolved target. Re-run page_observe to get a fresh ref, then retry." };
       }
       try { if (typeof elForResolve.scrollIntoView === 'function') elForResolve.scrollIntoView({ block: 'center', inline: 'center' }); } catch (eScrollForResolve) { /* ignore */ }
       var rectForResolve = elForResolve.getBoundingClientRect();
@@ -7654,370 +9365,6 @@ self.onmessage = function (e) {
     return { ok: false, error: 'No selector or backend_node_id was provided to resolve the pointer target.' };
   }
 
-  // ---- Tool: page_accessibility_tree ----
-  // Reads the page's accessibility tree via CDP (Accessibility.getFullAXTree), the
-  // semantic role/name/state view assistive tech sees. The raw CDP response is a flat
-  // node array referencing children by id; this compacts it into a nested role/name
-  // tree, dropping ignored and (optionally) generic nodes, capped by max_nodes. The
-  // read goes through the debugger lease, so it is gated behind the advanced-automation
-  // flag exactly like page_act (acquire enforces that gate and attaches).
-
-  var AX_TREE_DEFAULT_MAX_NODES_FOR_TOOL_EXEC = 400;
-  var AX_TREE_HARD_MAX_NODES_FOR_TOOL_EXEC = 1500;
-
-  // States worth surfacing; default/no-signal values (false) are dropped to cut noise.
-  // 'focusable' is deliberately omitted: nearly every node carries it, so it is pure noise.
-  var AX_STATE_PROPS_FOR_TOOL_EXEC = {
-    focused: true, checked: true, selected: true, expanded: true, pressed: true,
-    disabled: true, required: true, invalid: true, readonly: true, level: true,
-    valuetext: true, valuemin: true, valuemax: true, hasPopup: true, modal: true,
-    multiselectable: true
-  };
-
-  // Roles kept in interesting_only mode even when the node has no accessible name.
-  var AX_INTERESTING_ROLES_FOR_TOOL_EXEC = {
-    button: true, link: true, textbox: true, searchbox: true, checkbox: true, radio: true,
-    combobox: true, listbox: true, option: true, menuitem: true, menuitemcheckbox: true,
-    menuitemradio: true, tab: true, tabpanel: true, switch: true, slider: true, spinbutton: true,
-    heading: true, img: true, image: true, dialog: true, alertdialog: true, alert: true,
-    menu: true, menubar: true, navigation: true, main: true, banner: true, contentinfo: true,
-    complementary: true, form: true, search: true, table: true, row: true, cell: true,
-    columnheader: true, rowheader: true, list: true, listitem: true, article: true, region: true,
-    tree: true, treeitem: true, grid: true, gridcell: true, progressbar: true, status: true,
-    tooltip: true, radiogroup: true, figure: true, separator: true, toolbar: true, disclosure: true
-  };
-
-  function clipAxTextForToolExec(strForClip, maxForClip) {
-    return clipWithMarkerForToolExec(strForClip, maxForClip);
-  }
-
-  // AXValue objects look like { type, value, relatedNodes? }; pull out the scalar.
-  function compactAxValueForToolExec(fieldForAxValue) {
-    if (!fieldForAxValue || typeof fieldForAxValue !== 'object') return undefined;
-    var vForAxValue = fieldForAxValue.value;
-    if (vForAxValue === undefined || vForAxValue === null) return undefined;
-    if (typeof vForAxValue === 'string') {
-      var trimmedForAxValue = vForAxValue.trim();
-      return trimmedForAxValue ? trimmedForAxValue : undefined;
-    }
-    return vForAxValue;
-  }
-
-  function extractAxStatesForToolExec(nodeForStates) {
-    var propsForStates = (nodeForStates && Array.isArray(nodeForStates.properties)) ? nodeForStates.properties : [];
-    var statesForExtract = null;
-    for (var iForStates = 0; iForStates < propsForStates.length; iForStates++) {
-      var pForStates = propsForStates[iForStates];
-      if (!pForStates || !pForStates.name || !AX_STATE_PROPS_FOR_TOOL_EXEC[pForStates.name]) continue;
-      var valForStates = (pForStates.value && typeof pForStates.value === 'object') ? pForStates.value.value : undefined;
-      if (valForStates === undefined || valForStates === null) continue;
-      if (valForStates === false || valForStates === 'false') continue;
-      if (!statesForExtract) statesForExtract = {};
-      statesForExtract[pForStates.name] = valForStates;
-    }
-    return statesForExtract;
-  }
-
-  function buildAxNodeMapForToolExec(nodesForMap) {
-    var mapForAx = Object.create(null);
-    for (var iForMap = 0; iForMap < nodesForMap.length; iForMap++) {
-      var nForMap = nodesForMap[iForMap];
-      if (nForMap && nForMap.nodeId != null) mapForAx[String(nForMap.nodeId)] = nForMap;
-    }
-    return mapForAx;
-  }
-
-  // Roots are the nodes never referenced as anyone's child (one per frame, normally).
-  function findAxRootsForToolExec(nodesForRoots) {
-    var childSetForRoots = Object.create(null);
-    for (var iForRoots = 0; iForRoots < nodesForRoots.length; iForRoots++) {
-      var idsForRoots = (nodesForRoots[iForRoots] && Array.isArray(nodesForRoots[iForRoots].childIds)) ? nodesForRoots[iForRoots].childIds : [];
-      for (var jForRoots = 0; jForRoots < idsForRoots.length; jForRoots++) childSetForRoots[String(idsForRoots[jForRoots])] = true;
-    }
-    var rootsForFind = [];
-    for (var kForRoots = 0; kForRoots < nodesForRoots.length; kForRoots++) {
-      var nForRoots = nodesForRoots[kForRoots];
-      if (nForRoots && nForRoots.nodeId != null && !childSetForRoots[String(nForRoots.nodeId)]) rootsForFind.push(nForRoots);
-    }
-    if (!rootsForFind.length && nodesForRoots.length) rootsForFind.push(nodesForRoots[0]);
-    return rootsForFind;
-  }
-
-  function compactAxTreeForToolExec(nodesForCompact, rootsForCompact, maxNodesForCompact, interestingOnlyForCompact) {
-    var mapForCompact = buildAxNodeMapForToolExec(nodesForCompact);
-    var stateForCompact = { n: 0, truncated: false };
-
-    function isInterestingForCompact(roleForInteresting, nameForInteresting) {
-      if (roleForInteresting === 'StaticText' || roleForInteresting === 'InlineTextBox') return !!nameForInteresting;
-      if (nameForInteresting) return true;
-      return !!(roleForInteresting && AX_INTERESTING_ROLES_FOR_TOOL_EXEC[roleForInteresting]);
-    }
-
-    function buildChildrenIntoForCompact(nodeForChildren, outForChildren, parentNameForChildren) {
-      var idsForChildren = (nodeForChildren && Array.isArray(nodeForChildren.childIds)) ? nodeForChildren.childIds : [];
-      for (var iForChildren = 0; iForChildren < idsForChildren.length; iForChildren++) {
-        var childForChildren = mapForCompact[String(idsForChildren[iForChildren])];
-        if (childForChildren) collectForCompact(childForChildren, outForChildren, parentNameForChildren);
-      }
-    }
-
-    function collectForCompact(nodeForCollect, siblingOutForCollect, parentNameForCollect) {
-      // Ignored nodes contribute nothing themselves, but kept descendants are lifted
-      // up so the tree stays connected.
-      if (nodeForCollect.ignored) {
-        buildChildrenIntoForCompact(nodeForCollect, siblingOutForCollect, parentNameForCollect);
-        return;
-      }
-      var roleForCollect = compactAxValueForToolExec(nodeForCollect.role);
-      var nameForCollect = compactAxValueForToolExec(nodeForCollect.name);
-      // Drop a StaticText/InlineTextBox that merely repeats its parent's accessible
-      // name (the label text already shown on the button/link/heading itself).
-      if ((roleForCollect === 'StaticText' || roleForCollect === 'InlineTextBox') && nameForCollect && parentNameForCollect
-          && String(nameForCollect).trim().toLowerCase() === String(parentNameForCollect).trim().toLowerCase()) {
-        return;
-      }
-      var keepForCollect = !(interestingOnlyForCompact && !isInterestingForCompact(roleForCollect, nameForCollect)
-        && roleForCollect !== 'RootWebArea' && roleForCollect !== 'WebArea');
-      if (!keepForCollect) {
-        buildChildrenIntoForCompact(nodeForCollect, siblingOutForCollect, parentNameForCollect);
-        return;
-      }
-      if (stateForCompact.n >= maxNodesForCompact) {
-        stateForCompact.truncated = true;
-        return;
-      }
-      stateForCompact.n++;
-      var entryForCollect = { role: roleForCollect || '(none)' };
-      // The backend node id is an opaque handle the agent can pass back to scope a
-      // later read to this node's subtree. Absent on synthetic AX nodes (no DOM element).
-      if (nodeForCollect.backendDOMNodeId != null) entryForCollect.backend_node_id = nodeForCollect.backendDOMNodeId;
-      if (nameForCollect) entryForCollect.name = clipAxTextForToolExec(nameForCollect, 200);
-      var valForCollect = compactAxValueForToolExec(nodeForCollect.value);
-      if (valForCollect !== undefined && valForCollect !== '') {
-        entryForCollect.value = (typeof valForCollect === 'string') ? clipAxTextForToolExec(valForCollect, 200) : valForCollect;
-      }
-      var descForCollect = compactAxValueForToolExec(nodeForCollect.description);
-      if (descForCollect) entryForCollect.description = clipAxTextForToolExec(descForCollect, 160);
-      var statesForCollect = extractAxStatesForToolExec(nodeForCollect);
-      if (statesForCollect) entryForCollect.states = statesForCollect;
-      siblingOutForCollect.push(entryForCollect);
-      var kidsForCollect = [];
-      buildChildrenIntoForCompact(nodeForCollect, kidsForCollect, nameForCollect || parentNameForCollect);
-      if (kidsForCollect.length) entryForCollect.children = kidsForCollect;
-    }
-
-    var rootOutForCompact = [];
-    for (var rForCompact = 0; rForCompact < rootsForCompact.length; rForCompact++) {
-      collectForCompact(rootsForCompact[rForCompact], rootOutForCompact, '');
-    }
-    return { roots: rootOutForCompact, node_count: stateForCompact.n, truncated: stateForCompact.truncated };
-  }
-
-  // Hide the extension's own panel from the accessibility tree before reading it, so
-  // the tree reflects PAGE content only. The panel lives in the page's light DOM
-  // (#abchat-panel-shadow-host, an open shadow root), so its controls AND the live
-  // conversation text otherwise appear as page data and feed the chat back on itself.
-  // aria-hidden marks the whole subtree ignored (which the compaction drops) with no
-  // visual change, unlike display:none which would flicker the panel. Returns a restore
-  // function that puts the prior aria-hidden state back.
-  function hidePanelFromAxTreeForToolExec() {
-    var restoreListForAxHide = [];
-    if (typeof document === 'undefined') return function () {};
-    ['abchat-panel-shadow-host', 'abchat-toast-host'].forEach(function (hostIdForAxHide) {
-      var hostElForAxHide = document.getElementById(hostIdForAxHide);
-      if (!hostElForAxHide) return;
-      var hadAttrForAxHide = hostElForAxHide.hasAttribute('aria-hidden');
-      var prevValForAxHide = hadAttrForAxHide ? hostElForAxHide.getAttribute('aria-hidden') : null;
-      try { hostElForAxHide.setAttribute('aria-hidden', 'true'); } catch (eSetForAxHide) { return; }
-      restoreListForAxHide.push(function () {
-        try {
-          if (hadAttrForAxHide) hostElForAxHide.setAttribute('aria-hidden', prevValForAxHide);
-          else hostElForAxHide.removeAttribute('aria-hidden');
-        } catch (eRestoreForAxHide) { /* ignore */ }
-      });
-    });
-    return function () {
-      for (var iForAxRestore = 0; iForAxRestore < restoreListForAxHide.length; iForAxRestore++) {
-        restoreListForAxHide[iForAxRestore]();
-      }
-    };
-  }
-
-  // Resolve a CSS selector to a DOM backend node id through the DOM domain, so the AX
-  // read can be scoped to that element's subtree. The first match is used
-  // (DOM.querySelector semantics); shadow-DOM elements are not reachable (querySelector
-  // does not pierce), mirroring page_query's selector limitation. Returns
-  // { ok, backendNodeId } or { ok:false, error }.
-  async function resolveSelectorToBackendNodeIdForToolExec(cdpClientForResolve, selectorForResolve) {
-    var docResForResolve;
-    try {
-      docResForResolve = await cdpClientForResolve.command(undefined, 'DOM.getDocument', { depth: 0 });
-    } catch (eDocForResolve) {
-      return { ok: false, error: 'Could not read the document for selector resolution: ' + (eDocForResolve && eDocForResolve.message ? eDocForResolve.message : String(eDocForResolve)) };
-    }
-    if (!docResForResolve || !docResForResolve.ok || !docResForResolve.result || !docResForResolve.result.root || docResForResolve.result.root.nodeId == null) {
-      return { ok: false, error: 'Could not read the document for selector resolution.' };
-    }
-    var rootNodeIdForResolve = docResForResolve.result.root.nodeId;
-    var qResForResolve;
-    try {
-      qResForResolve = await cdpClientForResolve.command(undefined, 'DOM.querySelector', { nodeId: rootNodeIdForResolve, selector: selectorForResolve });
-    } catch (eQForResolve) {
-      return { ok: false, error: 'Invalid or unsupported selector "' + selectorForResolve + '": ' + (eQForResolve && eQForResolve.message ? eQForResolve.message : String(eQForResolve)) };
-    }
-    if (qResForResolve && !qResForResolve.ok) {
-      var qErrForResolve = qResForResolve.error || {};
-      return { ok: false, error: 'Invalid or unsupported selector "' + selectorForResolve + '": ' + (qErrForResolve.message || qErrForResolve.code || 'query failed') + '.' };
-    }
-    var targetNodeIdForResolve = (qResForResolve && qResForResolve.result) ? qResForResolve.result.nodeId : 0;
-    if (!targetNodeIdForResolve) {
-      return { ok: false, error: 'No element matched the selector "' + selectorForResolve + '" on this page. Use page_query (findText or getPageOverview) to discover a valid selector, then retry.' };
-    }
-    var descResForResolve;
-    try {
-      descResForResolve = await cdpClientForResolve.command(undefined, 'DOM.describeNode', { nodeId: targetNodeIdForResolve });
-    } catch (eDescForResolve) {
-      return { ok: false, error: 'Could not describe the matched element: ' + (eDescForResolve && eDescForResolve.message ? eDescForResolve.message : String(eDescForResolve)) };
-    }
-    var backendNodeIdForResolve = (descResForResolve && descResForResolve.ok && descResForResolve.result && descResForResolve.result.node) ? descResForResolve.result.node.backendNodeId : null;
-    if (backendNodeIdForResolve == null) {
-      return { ok: false, error: 'Could not resolve the matched element to a backend node id.' };
-    }
-    return { ok: true, backendNodeId: backendNodeIdForResolve };
-  }
-
-  function findAxNodeByBackendIdForToolExec(nodesForFind, backendIdForFind) {
-    for (var iForFind = 0; iForFind < nodesForFind.length; iForFind++) {
-      if (nodesForFind[iForFind] && nodesForFind[iForFind].backendDOMNodeId != null
-          && String(nodesForFind[iForFind].backendDOMNodeId) === String(backendIdForFind)) {
-        return nodesForFind[iForFind];
-      }
-    }
-    return null;
-  }
-
-  function buildScopedToForToolExec(nodeForScoped, baseForScoped) {
-    var scopedForBuild = baseForScoped || {};
-    scopedForBuild.role = compactAxValueForToolExec(nodeForScoped.role) || '(none)';
-    var nameForScoped = compactAxValueForToolExec(nodeForScoped.name);
-    if (nameForScoped) scopedForBuild.name = clipAxTextForToolExec(nameForScoped, 200);
-    return scopedForBuild;
-  }
-
-  async function pageAccessibilityTreeToolForToolExec(args, context) {
-    var cdpClientForAx = bindCdpClientToTabForToolExec(
-      (globalScopeForToolExec.ABChatAgent || {}).cdpClient,
-      resolveCdpTabIdFromContextForToolExec(context)
-    );
-    if (!cdpClientForAx || typeof cdpClientForAx.command !== 'function' || typeof cdpClientForAx.acquire !== 'function') {
-      return { ok: false, error: 'Advanced automation is unavailable in this context.' };
-    }
-    var maxNodesForAx = AX_TREE_DEFAULT_MAX_NODES_FOR_TOOL_EXEC;
-    if (typeof args.max_nodes === 'number' && isFinite(args.max_nodes)) {
-      maxNodesForAx = Math.max(1, Math.min(AX_TREE_HARD_MAX_NODES_FOR_TOOL_EXEC, Math.round(args.max_nodes)));
-    }
-    var interestingOnlyForAx = args.interesting_only !== false;
-    var selectorForAx = (typeof args.selector === 'string') ? args.selector.trim() : '';
-    var backendNodeIdForAx = null;
-    if (typeof args.backend_node_id === 'number' && isFinite(args.backend_node_id)) {
-      backendNodeIdForAx = Math.round(args.backend_node_id);
-    } else if (typeof args.backend_node_id === 'string' && /^\d+$/.test(args.backend_node_id.trim())) {
-      backendNodeIdForAx = parseInt(args.backend_node_id.trim(), 10);
-    }
-    if (selectorForAx && backendNodeIdForAx != null) {
-      return { ok: false, error: 'Pass either backend_node_id or selector to scope the read, not both. backend_node_id (a handle from a prior read of this page) is the preferred, more reliable choice; selector is for when you do not have a handle yet.' };
-    }
-
-    var acquireResForAx = await cdpClientForAx.acquire();
-    if (!acquireResForAx || !acquireResForAx.ok) {
-      var acqErrForAx = (acquireResForAx && acquireResForAx.error) || {};
-      if (acqErrForAx.code === 'automation-disabled') {
-        return { ok: false, error: 'Advanced automation is turned off in settings, so the accessibility tree (which reads through the debugger) is unavailable. Ask the user to enable it, or use page_query instead.' };
-      }
-      if (acqErrForAx.code === 'restricted-page') {
-        return { ok: false, error: 'This page cannot be inspected through the debugger (a browser or extension page). ' + (acqErrForAx.message || '') };
-      }
-      return { ok: false, error: 'Could not attach the debugger to read the accessibility tree: ' + (acqErrForAx.message || acqErrForAx.code || 'attach failed') + '.' };
-    }
-    try {
-      // Accessibility.getFullAXTree returns nothing useful until the domain is enabled.
-      var enableResForAx = await cdpClientForAx.command(undefined, 'Accessibility.enable', {});
-      if (!enableResForAx || !enableResForAx.ok) {
-        var enErrForAx = (enableResForAx && enableResForAx.error) || {};
-        return { ok: false, error: 'Could not enable the accessibility domain: ' + (enErrForAx.message || enErrForAx.code || 'unknown') + '.' };
-      }
-      var restorePanelForAx = hidePanelFromAxTreeForToolExec();
-      var treeResForAx;
-      try {
-        // Let the accessibility tree drop the now-aria-hidden panel subtree before reading.
-        await new Promise(function (resolveForAxSettle) { setTimeout(resolveForAxSettle, 80); });
-        treeResForAx = await cdpClientForAx.command(undefined, 'Accessibility.getFullAXTree', {});
-      } finally {
-        restorePanelForAx();
-      }
-      if (!treeResForAx || !treeResForAx.ok) {
-        var trErrForAx = (treeResForAx && treeResForAx.error) || {};
-        return { ok: false, error: 'Could not read the accessibility tree: ' + (trErrForAx.message || trErrForAx.code || 'unknown') + '.' };
-      }
-      var nodesForAx = (treeResForAx.result && Array.isArray(treeResForAx.result.nodes)) ? treeResForAx.result.nodes : [];
-      if (!nodesForAx.length) {
-        return { ok: true, total_nodes: 0, node_count: 0, truncated: false, interesting_only: interestingOnlyForAx, roots: [], note: 'The accessibility tree is empty for this page.' };
-      }
-      // Scope to a node's subtree (by handle or by selector), or read the whole page.
-      // The full tree is fetched either way (it is the only internally consistent node
-      // map with childIds); scoping re-roots the compaction at the matched node, which
-      // is what shrinks the model-facing output. The backend_node_id handle is the
-      // cheaper path (the id is already in the fetched tree, no DOM round trips); the
-      // selector path costs three DOM calls to resolve the selector to a backend id.
-      var rootsForAx;
-      var scopedToForAx = null;
-      if (backendNodeIdForAx != null) {
-        var matchedByIdForAx = findAxNodeByBackendIdForToolExec(nodesForAx, backendNodeIdForAx);
-        if (!matchedByIdForAx) {
-          return { ok: false, error: 'No accessibility node has backend_node_id ' + backendNodeIdForAx + ' on the current page. Handles are valid only for the page load they were read from and are rejected after navigation, so read the tree again to get fresh handles, then scope with one of those.' };
-        }
-        rootsForAx = [matchedByIdForAx];
-        scopedToForAx = buildScopedToForToolExec(matchedByIdForAx, { backend_node_id: backendNodeIdForAx });
-      } else if (selectorForAx) {
-        var resolvedForAx = await resolveSelectorToBackendNodeIdForToolExec(cdpClientForAx, selectorForAx);
-        if (!resolvedForAx.ok) {
-          return { ok: false, error: resolvedForAx.error };
-        }
-        var matchedBySelForAx = findAxNodeByBackendIdForToolExec(nodesForAx, resolvedForAx.backendNodeId);
-        if (!matchedBySelForAx) {
-          return { ok: false, error: 'The element matched by "' + selectorForAx + '" exists in the DOM but has no accessibility node (it may be hidden, presentational, or excluded from the accessibility tree). Pick a different selector, or omit it to read the whole page.' };
-        }
-        rootsForAx = [matchedBySelForAx];
-        scopedToForAx = buildScopedToForToolExec(matchedBySelForAx, { selector: selectorForAx });
-      } else {
-        rootsForAx = findAxRootsForToolExec(nodesForAx);
-      }
-      var compactionForAx = compactAxTreeForToolExec(nodesForAx, rootsForAx, maxNodesForAx, interestingOnlyForAx);
-      var resultForAx = {
-        ok: true,
-        total_nodes: nodesForAx.length,
-        node_count: compactionForAx.node_count,
-        truncated: compactionForAx.truncated,
-        interesting_only: interestingOnlyForAx,
-        roots: compactionForAx.roots
-      };
-      if (scopedToForAx) {
-        resultForAx.scoped_to = scopedToForAx;
-        if (compactionForAx.node_count === 0) {
-          resultForAx.note = 'The scoped element produced no nodes after compaction. It is likely a generic container with no named or semantic descendants; retry with interesting_only:false to include generic nodes.';
-        }
-      }
-      return resultForAx;
-    } catch (eForAx) {
-      return { ok: false, error: 'Accessibility tree read failed: ' + (eForAx && eForAx.message ? eForAx.message : String(eForAx)) };
-    } finally {
-      // Idle-grace release: lets a run-scoped lease (held when the turn also has
-      // page_act / page_accessibility_tree) keep the session warm; otherwise the idle
-      // timer detaches and the infobar drops shortly after.
-      try { cdpClientForAx.release(); } catch (eRelForAx) { /* ignore */ }
-    }
-  }
-
   async function executeToolForToolExec(name, args, context) {
     args = args || {};
     switch (name) {
@@ -8028,10 +9375,10 @@ self.onmessage = function (e) {
       case 'skill':                 return skillToolForToolExec(args);
       case 'grep':                  return grepToolForToolExec(args);
       case 'ls':                    return lsToolForToolExec(args);
-      case 'page_query':            return pageQueryToolForToolExec(args, context);
-      case 'page_fill_form':        return pageFillFormToolForToolExec(args);
-      case 'page_act':              return pageActToolForToolExec(args, context);
-      case 'page_accessibility_tree': return pageAccessibilityTreeToolForToolExec(args, context);
+      case 'page_observe':          return pageObserveToolForToolExec(args);
+      case 'page_act':              return pageActRefToolForToolExec(args, context);
+      case 'page_read':             return pageReadToolForToolExec(args);
+      case 'page_spreadsheet':      return pageSpreadsheetToolForToolExec(args, context);
       case 'take_screenshot':       return screenshotToolForToolExec(args, context);
       case 'eval':                  return evalToolForToolExec(args, context);
       case 'web_search':            return webSearchToolForToolExec(args, context);
@@ -8048,9 +9395,31 @@ self.onmessage = function (e) {
   }
 
   ns.executeTool = executeToolForToolExec;
+  // Live-turn chip labels: resolve a ref to its accessible name from the latest observe
+  // registry. Returns '' when the ref is unknown or nameless. Panel-only; never sent to the model.
+  ns.getObserveRefLabel = function (refForLabel) {
+    if (refForLabel == null) return '';
+    var entryForLabel = observeRegistryForToolExec.refs[String(refForLabel)];
+    if (!entryForLabel) return '';
+    var labelForRef = entryForLabel.label;
+    return (labelForRef != null && String(labelForRef).trim()) ? String(labelForRef).trim() : '';
+  };
   // Exposed so the content script can record the visual preflight at screenshot-capture time
   // when the offscreen loop delegates the capture here. The check runs in this same content
   // module when page_act is delegated, so marking and checking share one map keyed per chat.
   ns.markVisualPreflight = markVisualPreflightForToolExec;
+  // Rev token for a note/chat by id, computed over the exact same serialization the read tool
+  // uses, so a chip's stored rev is directly comparable to what the model read. Returns '' when
+  // the item is missing. The panel stamps this onto note/chat chips at send time and re-checks it
+  // when previewing an attached chip, to warn when the source changed after it was attached.
+  ns.computeSourceRev = async function (panelDataRepoForRev, typeForRev, idForRev) {
+    try {
+      var gotForRev = await getItemWithContentStringForToolExec(panelDataRepoForRev, typeForRev, idForRev);
+      if (!gotForRev || !gotForRev.item) return '';
+      return computeRevTokenForToolExec(gotForRev.contentString);
+    } catch (errForRev) {
+      return '';
+    }
+  };
   globalScopeForToolExec.ABChatAgent = ns;
 })();

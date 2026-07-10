@@ -27,7 +27,7 @@
         <button class="tab-icon-btn" id="selector-tab" data-action="toggle-selector">
           ${icForPanelTemplate.contentSelector18}
         </button>
-        <!-- New menu (reduced view only) -->
+        <!-- New menu (visible in reduced and expanded views) -->
         <div class="new-menu-wrap">
           <button class="new-menu-btn" id="new-menu-btn" title="Create new" data-action="toggle-new-menu">+ New</button>
           <div class="new-menu-dropdown" id="new-menu-dropdown">
@@ -951,12 +951,37 @@
       </div>
       <button class="ap-close" data-action="close-attach-preview">${icForPanelTemplate.x13}</button>
     </div>
+    <div class="ap-changed-banner hidden" id="ap-changed-banner"></div>
     <div class="ap-body ne-preview" id="ap-content"></div>
     <div class="ap-footer hidden" id="ap-footer">
       <span class="ap-counts" id="ap-counts"></span>
       <div class="ap-footer-actions">
         <button class="ap-action hidden" id="ap-copy-btn" data-action="copy-attach-preview" title="Copy text">${icForPanelTemplate.copy12}<span class="ap-action-label">Copy</span></button>
         <button class="ap-action hidden" id="ap-download-btn" data-action="download-attach-preview" title="Download image">${icForPanelTemplate.download13}<span class="ap-action-label">Download</span></button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     NOTE VERSION HISTORY OVERLAY
+============================================================ -->
+<div id="note-history-overlay" class="hidden" data-theme="light">
+  <div class="nh-modal">
+    <div class="nh-header">
+      <button class="nh-back hidden" data-action="note-history-back" title="Back to versions">${icForPanelTemplate.chevronLeft12}</button>
+      <span class="nh-title" id="nh-title">Version history</span>
+      <button class="nh-close" data-action="close-note-history" title="Close">${icForPanelTemplate.x13}</button>
+    </div>
+    <div class="nh-list" id="nh-list"></div>
+    <div class="nh-detail hidden" id="nh-detail">
+      <div class="nh-detail-scroll">
+        <div class="nh-detail-meta" id="nh-detail-meta"></div>
+        <div class="nh-detail-title" id="nh-detail-title"></div>
+        <div class="nh-detail-preview ne-preview" id="nh-detail-preview"></div>
+      </div>
+      <div class="nh-detail-footer" id="nh-detail-footer">
+        <button class="btn-primary nh-restore-btn" data-action="restore-note-version" type="button">Restore this version</button>
       </div>
     </div>
   </div>

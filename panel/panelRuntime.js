@@ -477,7 +477,8 @@
                 pageUrl: String((chipForPanelRuntime && chipForPanelRuntime.pageUrl) || ''),
                 pageTitle: String((chipForPanelRuntime && chipForPanelRuntime.pageTitle) || ''),
                 elementSelector: String((chipForPanelRuntime && chipForPanelRuntime.elementSelector) || ''),
-                htmlFormat: String((chipForPanelRuntime && chipForPanelRuntime.htmlFormat) || '')
+                htmlFormat: String((chipForPanelRuntime && chipForPanelRuntime.htmlFormat) || ''),
+                sourceHash: String((chipForPanelRuntime && chipForPanelRuntime.sourceHash) || '')
               };
             }).filter(function (chipForPanelRuntime) {
               return chipForPanelRuntime.type && chipForPanelRuntime.label;
@@ -1117,10 +1118,10 @@
     }
 
     // Runs a page-DOM-bound tool on behalf of the offscreen-hosted loop, which cannot
-    // touch the page. The offscreen loop delegates page_query / page_fill_form (which run
-    // against this tab's live document via the local tool executor) and screenshot capture
-    // (which must hide the panel first, so it can only happen here). Returns the tool result
-    // object, forwarded back to the offscreen loop by the service worker.
+    // touch the page. The offscreen loop delegates the page tools (page_observe, page_read,
+    // page_act, page_spreadsheet, which run against this tab's live document via the local tool
+    // executor) and screenshot capture (which must hide the panel first, so it can only happen
+    // here). Returns the tool result object, forwarded back to the offscreen loop by the service worker.
     async function runDelegatedPageToolForPanelRuntime(toolForDelegate, argsForDelegate) {
       if (toolForDelegate === '__capture_screenshot__') {
         try {
@@ -1267,6 +1268,24 @@
     // work was done, but it deliberately does not claim completion: the outcome is unknown
     // because the model never summarized, so it invites the user to verify or continue.
     const AGENT_NEUTRAL_COMPLETION_FOR_PANEL_RUNTIME = "I took some actions. Let me know if it looks right or needs more.";
+    // Tools whose successful execution is a real state change (a create/edit, a generated artifact,
+    // or a page mutation), as opposed to a read. A successful mutating call is what makes the neutral
+    // "I took some actions" completion truthful; a turn where only reads succeeded, or where every
+    // mutation failed, must not claim action was taken. memory always writes; skill mutates only
+    // for specific operations.
+    const MUTATING_TOOL_NAMES_FOR_PANEL_RUNTIME = {
+      write: true, edit: true, create_document: true, generate_image: true,
+      generate_questions: true, page_act: true, memory: true, page_spreadsheet: true
+    };
+    function isMutatingToolCallForPanelRuntime(nameForMutCheck, parsedArgsForMutCheck) {
+      if (MUTATING_TOOL_NAMES_FOR_PANEL_RUNTIME[nameForMutCheck]) return true;
+      const argsForMutCheck = parsedArgsForMutCheck || {};
+      if (nameForMutCheck === 'skill') {
+        const opForMutCheck = String(argsForMutCheck.operation || '');
+        return opForMutCheck === 'create' || opForMutCheck === 'update' || opForMutCheck === 'delete';
+      }
+      return false;
+    }
     // Map<chatId, { wrap, shownAt, hasText, toolsDoneAt, removeTimer, bufferText, renderedLength, renderRafId }> — per-chat live bubble state
     const liveTurnBubblesForPanelRuntime = new Map();
 
@@ -4666,6 +4685,7 @@
       chipForPanelRuntime.dataset.attachPageTitle = pageTitleForChip;
       chipForPanelRuntime.dataset.attachElementSelector = String(chipDataForPanelRuntime.elementSelector || '');
       chipForPanelRuntime.dataset.attachHtmlFormat = String(chipDataForPanelRuntime.htmlFormat || '');
+      chipForPanelRuntime.dataset.attachSourceHash = String(chipDataForPanelRuntime.sourceHash || '');
       const domainForChip = pageUrlForChip ? extractChipDomainForPanelRuntime(pageUrlForChip) : '';
       const domainSuffixForChip = domainForChip
         ? ' <span class="ic-domain">' + escHtml(domainForChip) + '</span>'
@@ -4750,7 +4770,8 @@
           refId: Number(chipSourceForPanelRuntime.dataset.attachRefId),
           mimeType: String(chipSourceForPanelRuntime.dataset.attachMimeType || '').trim(),
           kind: String(chipSourceForPanelRuntime.dataset.attachKind || '').trim(),
-          preview: String(chipSourceForPanelRuntime.dataset.attachPreview || '')
+          preview: String(chipSourceForPanelRuntime.dataset.attachPreview || ''),
+          sourceHash: String(chipSourceForPanelRuntime.dataset.attachSourceHash || '')
         };
       }
       if (typeof chipSourceForPanelRuntime === 'object') {
@@ -4761,7 +4782,8 @@
           refId: Number(chipSourceForPanelRuntime.refId),
           mimeType: String(chipSourceForPanelRuntime.mimeType || '').trim(),
           kind: String(chipSourceForPanelRuntime.kind || '').trim(),
-          preview: String(chipSourceForPanelRuntime.preview || '')
+          preview: String(chipSourceForPanelRuntime.preview || ''),
+          sourceHash: String(chipSourceForPanelRuntime.sourceHash || '')
         };
       }
       return null;
@@ -5066,7 +5088,8 @@
           try {
             var noteForPreview = await repoForNotePreview.getNote(Number(chipMetaForPanelRuntime.refId));
             if (noteForPreview) {
-              return { previewType: 'markdown', content: noteForPreview.body || '' };
+              var noteChangedForPreview = await isChipSourceChangedForPanelRuntime('note', Number(chipMetaForPanelRuntime.refId), chipMetaForPanelRuntime.sourceHash);
+              return { previewType: 'markdown', content: noteForPreview.body || '', sourceChanged: noteChangedForPreview, sourceType: 'note' };
             }
           } catch (eForNotePreview) { /* fall through */ }
         }
@@ -5089,7 +5112,8 @@
               if (contentForChatPreview) linesForChatPreview.push(contentForChatPreview);
             });
             if (linesForChatPreview.length > 0) {
-              return { previewType: 'text', content: linesForChatPreview.join('\n') };
+              var chatChangedForPreview = await isChipSourceChangedForPanelRuntime('chat', Number(chipMetaForPanelRuntime.refId), chipMetaForPanelRuntime.sourceHash);
+              return { previewType: 'text', content: linesForChatPreview.join('\n'), sourceChanged: chatChangedForPreview, sourceType: 'chat' };
             }
           } catch (eForChatPreview) { /* fall through */ }
         }
@@ -6559,6 +6583,10 @@
                 <button class="ni-dd-item" data-action="edit-note" data-note-id="${escHtml(noteIdForPanelRuntime)}">
                   ${ic.noteEdit12}
                   Edit
+                </button>
+                <button class="ni-dd-item" data-action="note-version-history" data-note-id="${escHtml(noteIdForPanelRuntime)}">
+                  ${ic.history12}
+                  History
                 </button>
                 <button class="ni-dd-item danger" data-action="delete-note" data-note-id="${escHtml(noteIdForPanelRuntime)}">
                   ${ic.trash12}
@@ -8343,6 +8371,234 @@
       setReducedPaneForPanelRuntime('notes', 'list');
     }
 
+    /* ============================================================
+      NOTE VERSION HISTORY
+    ============================================================ */
+    var noteHistoryStateForPanelRuntime = { noteId: null, versions: [], selectedVersionId: null };
+
+    function formatNoteVersionTimestampForPanelRuntime(savedAtForVersion) {
+      var msForVersion = savedAtForVersion ? new Date(savedAtForVersion).getTime() : 0;
+      if (!msForVersion || !Number.isFinite(msForVersion)) return '';
+      return new Date(msForVersion).toLocaleString('en-US', {
+        month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit'
+      });
+    }
+
+    function formatNoteVersionRelativeForPanelRuntime(savedAtForVersion) {
+      return formatNoteUpdatedLabelForPanelRuntime({ updatedAt: savedAtForVersion });
+    }
+
+    function showNoteHistoryListViewForPanelRuntime() {
+      var listElForHistory = root.getElementById('nh-list');
+      var detailElForHistory = root.getElementById('nh-detail');
+      var backBtnForHistory = root.querySelector('#note-history-overlay .nh-back');
+      var titleElForHistory = root.getElementById('nh-title');
+      if (listElForHistory) listElForHistory.classList.remove('hidden');
+      if (detailElForHistory) detailElForHistory.classList.add('hidden');
+      if (backBtnForHistory) backBtnForHistory.classList.add('hidden');
+      if (titleElForHistory) titleElForHistory.textContent = 'Version history';
+    }
+
+    function showNoteHistoryDetailViewForPanelRuntime() {
+      var listElForHistory = root.getElementById('nh-list');
+      var detailElForHistory = root.getElementById('nh-detail');
+      var backBtnForHistory = root.querySelector('#note-history-overlay .nh-back');
+      var titleElForHistory = root.getElementById('nh-title');
+      if (listElForHistory) listElForHistory.classList.add('hidden');
+      if (detailElForHistory) detailElForHistory.classList.remove('hidden');
+      if (backBtnForHistory) backBtnForHistory.classList.remove('hidden');
+      if (titleElForHistory) titleElForHistory.textContent = 'Version preview';
+    }
+
+    function renderNoteHistoryListForPanelRuntime() {
+      var listElForHistory = root.getElementById('nh-list');
+      if (!listElForHistory) return;
+      var versionsForHistory = noteHistoryStateForPanelRuntime.versions || [];
+      if (!versionsForHistory.length) {
+        listElForHistory.innerHTML = '<div class="nh-empty">No saved versions for this note yet.</div>';
+        return;
+      }
+      var htmlForHistory = '';
+      if (versionsForHistory.length <= 1) {
+        htmlForHistory += '<div class="nh-empty-hint">No earlier versions yet. A new version is saved each time you edit this note.</div>';
+      }
+      for (var iForHistory = 0; iForHistory < versionsForHistory.length; iForHistory++) {
+        var vForHistory = versionsForHistory[iForHistory];
+        var isCurrentForHistory = iForHistory === 0;
+        var titleForHistory = String(vForHistory.title || '').trim() || 'Untitled';
+        var excerptForHistory = getNoteExcerptForPanelRuntime(vForHistory.body);
+        var attachCountForHistory = Array.isArray(vForHistory.attachments) ? vForHistory.attachments.length : 0;
+        var rightMetaForHistory = isCurrentForHistory
+          ? '<span class="nh-item-badge">Current</span>'
+          : '<span class="nh-item-rel">' + escHtml(formatNoteVersionRelativeForPanelRuntime(vForHistory.savedAt)) + '</span>';
+        var attachFootForHistory = attachCountForHistory
+          ? '<div class="nh-item-foot"><span class="nh-item-attach">' + ic.paperclip12 + ' ' + attachCountForHistory + '</span></div>'
+          : '';
+        htmlForHistory +=
+          '<button class="nh-item" type="button" data-action="note-history-select" data-version-id="' + escHtml(String(vForHistory.id)) + '">' +
+            '<div class="nh-item-top">' +
+              '<span class="nh-item-time">' + escHtml(formatNoteVersionTimestampForPanelRuntime(vForHistory.savedAt)) + '</span>' +
+              rightMetaForHistory +
+            '</div>' +
+            '<div class="nh-item-title">' + escHtml(titleForHistory) + '</div>' +
+            '<div class="nh-item-excerpt">' + escHtml(excerptForHistory) + '</div>' +
+            attachFootForHistory +
+          '</button>';
+      }
+      listElForHistory.innerHTML = htmlForHistory;
+    }
+
+    async function openNoteVersionHistoryForPanelRuntime(noteIdForHistory) {
+      var numericNoteIdForHistory = Number(noteIdForHistory);
+      if (!Number.isFinite(numericNoteIdForHistory) || !NOTE_STORE_FOR_PANEL_RUNTIME[numericNoteIdForHistory]) return;
+      var overlayForHistory = root.getElementById('note-history-overlay');
+      if (!overlayForHistory) return;
+      var hostForHistory = root.getElementById('panel-host');
+      overlayForHistory.dataset.theme = hostForHistory ? (hostForHistory.dataset.theme || 'light') : 'light';
+      noteHistoryStateForPanelRuntime = { noteId: numericNoteIdForHistory, versions: [], selectedVersionId: null };
+      showNoteHistoryListViewForPanelRuntime();
+      var listElForHistory = root.getElementById('nh-list');
+      if (listElForHistory) listElForHistory.innerHTML = '<div class="nh-loading">Loading versions...</div>';
+      overlayForHistory.classList.remove('hidden');
+
+      var versionsForHistory = [];
+      var repoForHistory = getPanelDataRepoForPanelRuntime();
+      if (repoForHistory && typeof repoForHistory.listNoteVersions === 'function') {
+        try {
+          versionsForHistory = await repoForHistory.listNoteVersions(numericNoteIdForHistory);
+        } catch (errForHistory) {
+          versionsForHistory = [];
+        }
+      }
+      // The overlay may have been closed or retargeted while the DB call was in flight.
+      if (noteHistoryStateForPanelRuntime.noteId !== numericNoteIdForHistory) return;
+      noteHistoryStateForPanelRuntime.versions = Array.isArray(versionsForHistory) ? versionsForHistory : [];
+      renderNoteHistoryListForPanelRuntime();
+    }
+
+    function selectNoteHistoryVersionForPanelRuntime(versionIdForHistory) {
+      var numericVersionIdForHistory = Number(versionIdForHistory);
+      var versionsForHistory = noteHistoryStateForPanelRuntime.versions || [];
+      var matchForHistory = null;
+      for (var iForHistory = 0; iForHistory < versionsForHistory.length; iForHistory++) {
+        if (Number(versionsForHistory[iForHistory].id) === numericVersionIdForHistory) {
+          matchForHistory = versionsForHistory[iForHistory];
+          break;
+        }
+      }
+      if (!matchForHistory) return;
+      noteHistoryStateForPanelRuntime.selectedVersionId = numericVersionIdForHistory;
+      var isCurrentForHistory = versionsForHistory.length > 0 && Number(versionsForHistory[0].id) === numericVersionIdForHistory;
+
+      var metaElForHistory = root.getElementById('nh-detail-meta');
+      var titleElForHistory = root.getElementById('nh-detail-title');
+      var previewElForHistory = root.getElementById('nh-detail-preview');
+      var footerElForHistory = root.getElementById('nh-detail-footer');
+      if (metaElForHistory) {
+        metaElForHistory.textContent = formatNoteVersionTimestampForPanelRuntime(matchForHistory.savedAt) +
+          (isCurrentForHistory ? '  •  Current version' : '');
+      }
+      if (titleElForHistory) {
+        var titleTextForHistory = String(matchForHistory.title || '').trim();
+        titleElForHistory.textContent = titleTextForHistory || 'Untitled';
+        titleElForHistory.classList.toggle('untitled', !titleTextForHistory);
+      }
+      if (previewElForHistory) {
+        previewElForHistory.innerHTML = renderNoteMarkdown(String(matchForHistory.body || ''));
+        hydrateRenderedMarkdownForPanelRuntime(previewElForHistory);
+      }
+      if (footerElForHistory) {
+        var restoreBtnForHistory = footerElForHistory.querySelector('.nh-restore-btn');
+        footerElForHistory.classList.toggle('is-current', isCurrentForHistory);
+        if (restoreBtnForHistory) {
+          restoreBtnForHistory.disabled = isCurrentForHistory;
+          restoreBtnForHistory.textContent = isCurrentForHistory ? 'This is the current version' : 'Restore this version';
+        }
+      }
+      showNoteHistoryDetailViewForPanelRuntime();
+    }
+
+    function backToNoteHistoryListForPanelRuntime() {
+      noteHistoryStateForPanelRuntime.selectedVersionId = null;
+      showNoteHistoryListViewForPanelRuntime();
+    }
+
+    function closeNoteVersionHistoryForPanelRuntime() {
+      var overlayForHistory = root.getElementById('note-history-overlay');
+      if (overlayForHistory) overlayForHistory.classList.add('hidden');
+      noteHistoryStateForPanelRuntime = { noteId: null, versions: [], selectedVersionId: null };
+    }
+
+    function confirmRestoreNoteVersionForPanelRuntime() {
+      var overlayForHistory = root.getElementById('note-history-overlay');
+      var modalForHistory = overlayForHistory ? overlayForHistory.querySelector('.nh-modal') : null;
+      if (!modalForHistory) return;
+      var noteIdForHistory = noteHistoryStateForPanelRuntime.noteId;
+      var versionIdForHistory = noteHistoryStateForPanelRuntime.selectedVersionId;
+      if (!noteIdForHistory || !versionIdForHistory) return;
+      showConfirmPromptForPanelRuntime(
+        modalForHistory,
+        'Restore this version? The note’s current title, body and attachments will be replaced. A new version is saved, so you can undo this.',
+        'Restore',
+        function () { restoreNoteVersionForPanelRuntime(noteIdForHistory, versionIdForHistory); }
+      );
+    }
+
+    async function restoreNoteVersionForPanelRuntime(noteIdForHistory, versionIdForHistory) {
+      var numericNoteIdForHistory = Number(noteIdForHistory);
+      var numericVersionIdForHistory = Number(versionIdForHistory);
+      var versionsForHistory = noteHistoryStateForPanelRuntime.versions || [];
+      var matchForHistory = null;
+      for (var iForHistory = 0; iForHistory < versionsForHistory.length; iForHistory++) {
+        if (Number(versionsForHistory[iForHistory].id) === numericVersionIdForHistory) {
+          matchForHistory = versionsForHistory[iForHistory];
+          break;
+        }
+      }
+      if (!matchForHistory || !NOTE_STORE_FOR_PANEL_RUNTIME[numericNoteIdForHistory]) return;
+      var repoForHistory = getPanelDataRepoForPanelRuntime();
+      if (!repoForHistory || typeof repoForHistory.updateNote !== 'function') return;
+
+      var persistedNoteForHistory = null;
+      try {
+        persistedNoteForHistory = await repoForHistory.updateNote(numericNoteIdForHistory, {
+          title: String(matchForHistory.title || ''),
+          body: String(matchForHistory.body || ''),
+          attachments: Array.isArray(matchForHistory.attachments) ? matchForHistory.attachments : []
+        });
+      } catch (errForHistory) {
+        showNoteHistoryToastForPanelRuntime('Could not restore this version.');
+        return;
+      }
+      if (!persistedNoteForHistory || persistedNoteForHistory.id == null) return;
+
+      var savedNoteForHistory = cloneNoteRecordForPanelRuntime(persistedNoteForHistory);
+      NOTE_STORE_FOR_PANEL_RUNTIME[numericNoteIdForHistory] = savedNoteForHistory;
+      syncSearchIndexForPanelRuntime('notes', 'update', numericNoteIdForHistory, savedNoteForHistory);
+      syncMainNoteListItemForPanelRuntime(numericNoteIdForHistory);
+      refreshNoteOrderForPanelRuntime();
+      if (S.activeNoteId === numericNoteIdForHistory) {
+        applyNoteDataToMainEditorForPanelRuntime(numericNoteIdForHistory, false);
+      }
+      syncNotePopoutsForNoteForPanelRuntime(numericNoteIdForHistory);
+      closeNoteVersionHistoryForPanelRuntime();
+      showNoteHistoryToastForPanelRuntime('Version restored');
+    }
+
+    function showNoteHistoryToastForPanelRuntime(msgForHistoryToast) {
+      var toastForHistory = ABChatContent && ABChatContent.ui && ABChatContent.ui.toast;
+      if (toastForHistory && typeof toastForHistory.show === 'function') {
+        toastForHistory.show(String(msgForHistoryToast), { durationMs: 3000 });
+      }
+    }
+
+    var noteHistoryOverlayForBackdrop = root.getElementById('note-history-overlay');
+    if (noteHistoryOverlayForBackdrop) {
+      noteHistoryOverlayForBackdrop.addEventListener('click', function (evtForBackdrop) {
+        if (evtForBackdrop.target === this) closeNoteVersionHistoryForPanelRuntime();
+      });
+    }
+
     const mainTagsWrapForPanelRuntime = root.getElementById('ne-tags-wrap');
     const mainTagsInputForPanelRuntime = root.getElementById('ne-tags-input');
     if (mainTagsWrapForPanelRuntime && mainTagsInputForPanelRuntime) {
@@ -8707,7 +8963,8 @@
       return CHAT_ORDER_FOR_PANEL_RUNTIME
         .filter(function (idForPicker) {
           const cForPicker = CHAT_STORE_FOR_PANEL_RUNTIME[idForPicker];
-          return cForPicker && cForPicker.type !== 'quickq';
+          // The chat being composed in must not be attachable to itself.
+          return cForPicker && cForPicker.type !== 'quickq' && Number(idForPicker) !== Number(S.activeChatId);
         })
         .map(function (idForPicker) {
           const cForPicker = CHAT_STORE_FOR_PANEL_RUNTIME[idForPicker];
@@ -8766,6 +9023,11 @@
     }
 
     function selectPickerItem(item, type) {
+      // Guard against attaching the active chat to itself, in case it ever surfaces in the list.
+      if (type === 'chat' && item && Number(item.id) === Number(S.activeChatId)) {
+        closePickerModal();
+        return;
+      }
       addInputChipForPanelRuntime({
         type: type,
         label: String(item.title || ''),
@@ -8841,6 +9103,17 @@
       const normalizedPayloadForPanelRuntime = payloadForPanelRuntime && typeof payloadForPanelRuntime === 'object' && !Array.isArray(payloadForPanelRuntime)
         ? payloadForPanelRuntime
         : { previewType: 'markdown', content: String(payloadForPanelRuntime || '') };
+      const changedBannerEl = root.getElementById('ap-changed-banner');
+      if (changedBannerEl) {
+        if (normalizedPayloadForPanelRuntime.sourceChanged) {
+          const changedSourceLabel = normalizedPayloadForPanelRuntime.sourceType === 'chat' ? 'chat' : 'note';
+          changedBannerEl.textContent = 'This ' + changedSourceLabel + ' was edited after it was attached. Showing its current content, which may differ from what the assistant read.';
+          changedBannerEl.classList.remove('hidden');
+        } else {
+          changedBannerEl.textContent = '';
+          changedBannerEl.classList.add('hidden');
+        }
+      }
       apContentEl.innerHTML = '';
       if (normalizedPayloadForPanelRuntime.previewType === 'image' && normalizedPayloadForPanelRuntime.dataUrl) {
         const imageNodeForPanelRuntime = document.createElement('img');
@@ -10301,13 +10574,8 @@
             });
           });
         } catch (eOverheadAutomation) { automationEnabledForOverhead = false; }
-        const toolDefsForOverhead = (agentNsForOverhead.toolDefs || []).filter(function (toolDefForOverhead) {
-          const toolNameForOverhead = toolDefForOverhead && toolDefForOverhead.function ? toolDefForOverhead.function.name : '';
-          if ((toolNameForOverhead === 'page_act' || toolNameForOverhead === 'page_accessibility_tree') && !automationEnabledForOverhead) {
-            return false;
-          }
-          return true;
-        });
+        // Every tool is advertised: the trusted page tools prompt inline rather than being hidden.
+        const toolDefsForOverhead = (agentNsForOverhead.toolDefs || []).slice();
         let memCtxForOverhead = null;
         try {
           if (typeof loadAgentMemoryContextForPanelRuntime === 'function') {
@@ -10631,7 +10899,19 @@
       }
     }
 
-    function getLiveTurnToolLabelForPanelRuntime(name, args) {
+    function getObserveRefLabelForLiveTurn(refForLiveTurnLabel) {
+      if (refForLiveTurnLabel == null) return '';
+      try {
+        var agentNsForLiveTurnLabel = globalThis.ABChatAgent || {};
+        if (typeof agentNsForLiveTurnLabel.getObserveRefLabel !== 'function') return '';
+        var labelForLiveTurn = agentNsForLiveTurnLabel.getObserveRefLabel(refForLiveTurnLabel);
+        return (labelForLiveTurn && String(labelForLiveTurn).trim()) ? String(labelForLiveTurn).trim() : '';
+      } catch (eLiveTurnRefLabel) {
+        return '';
+      }
+    }
+
+    function getLiveTurnToolLabelForPanelRuntime(name, args, chatIdForLiveTurnLabel) {
       function trunc(s, max) {
         s = String(s || '');
         return s.length > max ? s.slice(0, max) + '…' : s;
@@ -10643,6 +10923,18 @@
         if (typeForAgentCheck !== 'note' || !idForAgentCheck) return false;
         var noteRecordForAgentCheck = NOTE_STORE_FOR_PANEL_RUNTIME[idForAgentCheck];
         return !!(noteRecordForAgentCheck && noteRecordForAgentCheck.noteType === 'agent');
+      }
+      // Ref labels come from this tab's observe registry. Only resolve when this tab owns
+      // the run (local send or offscreen initiator); a remote receiver's registry is a
+      // different page and would show the wrong name.
+      var canResolveRefLabelsForLiveTurn = chatIdForLiveTurnLabel != null && (
+        sendingChatsForPanelRuntime.has(chatIdForLiveTurnLabel) ||
+        offscreenInitiatedChatsForPanelRuntime.has(chatIdForLiveTurnLabel)
+      );
+      function quotedRefNameForLiveTurn(refForQuoted) {
+        if (!canResolveRefLabelsForLiveTurn || refForQuoted == null) return '';
+        var nameForQuoted = getObserveRefLabelForLiveTurn(refForQuoted);
+        return nameForQuoted ? ' “' + trunc(nameForQuoted, 20) + '”' : '';
       }
       switch (name) {
         case 'read':
@@ -10668,78 +10960,46 @@
         }
         case 'ls':
           return args.type ? 'Listing ' + args.type + 's' : 'Listing workspace';
-        case 'page_query': {
-          var selHintForPageQuery = args.selector ? ' (' + trunc(args.selector, 20) + ')' : '';
-          var catHintForPageQuery = args.category ? ' (' + args.category + ')' : '';
-          var subOpLabelsForPageQuery = {
-            get_inner_text:    'Reading visible text' + selHintForPageQuery,
-            get_outer_html:    'Reading element markup' + selHintForPageQuery,
-            get_attribute:     'Reading attribute' + (args.attribute_name ? ' “' + trunc(args.attribute_name, 16) + '”' : '') + selHintForPageQuery,
-            get_computed_style:'Reading computed CSS' + selHintForPageQuery,
-            traverse:          'Traversing DOM' + selHintForPageQuery + (args.direction ? ' (' + args.direction + ')' : ''),
-            click:             (args.button === 'right' ? 'Right-clicking' : 'Clicking') + ' element' + selHintForPageQuery,
-            select_option:     'Selecting option' + (args.option ? ' “' + trunc(args.option, 20) + '”' : '') + selHintForPageQuery
-          };
-          if (args.operation === 'getSelection')    return 'Reading selection';
-          if (args.operation === 'getPageContext')  return 'Checking page info';
-          if (args.operation === 'getPageContent')  return 'Reading full page';
-          if (args.operation === 'getPageOverview') return 'Scanning page structure';
-          if (args.operation === 'findText')        return 'Finding text' + (args.pattern ? ' “' + trunc(args.pattern, 24) + '”' : '') + (args.selector ? selHintForPageQuery : '');
-          if (args.operation === 'findPageElements') {
-            if (args.sub_operation && subOpLabelsForPageQuery[args.sub_operation]) return subOpLabelsForPageQuery[args.sub_operation];
-            return 'Listing' + catHintForPageQuery + ' elements';
-          }
-          return 'Querying page';
-        }
-        case 'page_fill_form':
-          return 'Filling form fields';
+        case 'page_observe':
+          return 'Looking at the page';
         case 'page_act': {
-          var pointerTargetLabelForPageAct = function (selKey, nodeKey) {
-            if (typeof args[selKey] === 'string' && args[selKey].trim()) return args[selKey].trim();
-            if (typeof args[nodeKey] === 'number') return 'node ' + args[nodeKey];
-            return '';
-          };
-          var aimTargetForPageActLabel = pointerTargetLabelForPageAct('selector', 'backend_node_id');
-          var aimHintForPageActLabel = aimTargetForPageActLabel ? ' “' + trunc(aimTargetForPageActLabel, 24) + '”' : '';
           switch (args.action) {
-            case 'click':        return 'Clicking' + aimHintForPageActLabel;
-            case 'double_click': return 'Double-clicking' + aimHintForPageActLabel;
-            case 'right_click':  return 'Right-clicking' + aimHintForPageActLabel;
-            case 'move':         return aimTargetForPageActLabel
-              ? 'Moving pointer to “' + trunc(aimTargetForPageActLabel, 24) + '”'
-              : 'Moving pointer';
+            case 'click':  return (args.button === 'right' ? 'Right-clicking' : 'Clicking') + quotedRefNameForLiveTurn(args.ref);
+            case 'type':   return args.text != null && String(args.text).trim()
+              ? 'Typing “' + trunc(args.text, 20) + '”'
+              : 'Typing';
+            case 'select': return args.option ? 'Selecting “' + trunc(args.option, 20) + '”' : 'Selecting option';
+            case 'hover':  return 'Hovering' + quotedRefNameForLiveTurn(args.ref);
+            case 'press':  return args.keys ? 'Pressing ' + trunc(args.keys, 24) : 'Pressing key';
+            case 'scroll': return 'Scrolling ' + (args.direction ? String(args.direction) : 'down');
             case 'drag': {
-              var fromTargetForPageActLabel = pointerTargetLabelForPageAct('from_selector', 'from_backend_node_id');
-              var toTargetForPageActLabel = pointerTargetLabelForPageAct('to_selector', 'to_backend_node_id');
-              var fromHintForPageActLabel = fromTargetForPageActLabel ? ' “' + trunc(fromTargetForPageActLabel, 20) + '”' : '';
-              var toHintForPageActLabel = toTargetForPageActLabel ? ' to “' + trunc(toTargetForPageActLabel, 20) + '”' : '';
-              return 'Dragging' + fromHintForPageActLabel + toHintForPageActLabel;
+              var fromQuotedForDrag = quotedRefNameForLiveTurn(args.ref);
+              var toQuotedForDrag = quotedRefNameForLiveTurn(args.to_ref);
+              if (fromQuotedForDrag && toQuotedForDrag) return 'Dragging' + fromQuotedForDrag + ' to' + toQuotedForDrag;
+              if (fromQuotedForDrag) return 'Dragging' + fromQuotedForDrag;
+              if (toQuotedForDrag) return 'Dragging to' + toQuotedForDrag;
+              return 'Dragging';
             }
-            case 'scroll': {
-              var dxForScrollLabel = typeof args.dx === 'number' ? args.dx : 0;
-              var dyForScrollLabel = typeof args.dy === 'number' ? args.dy : 0;
-              var dirForScrollLabel = Math.abs(dyForScrollLabel) >= Math.abs(dxForScrollLabel)
-                ? (dyForScrollLabel >= 0 ? 'down' : 'up')
-                : (dxForScrollLabel >= 0 ? 'right' : 'left');
-              return 'Scrolling ' + dirForScrollLabel;
-            }
-            case 'type':
-              return args.text != null && String(args.text).trim()
-                ? 'Typing “' + trunc(args.text, 20) + '”'
-                : 'Typing';
-            case 'key':
-              return args.keys ? 'Pressing ' + trunc(args.keys, 24) : 'Pressing key';
-            case 'type_sequence': {
-              var lineCountForPageActLabel = Array.isArray(args.lines) ? args.lines.length : 0;
-              if (!lineCountForPageActLabel) return 'Entering values';
-              return 'Entering ' + lineCountForPageActLabel + ' value' + (lineCountForPageActLabel === 1 ? '' : 's');
-            }
-            default:
-              return 'Driving the page';
+            default:       return 'Driving the page';
           }
         }
-        case 'page_accessibility_tree':
-          return 'Reading accessibility tree';
+        case 'page_read': {
+          switch (args.mode) {
+            case 'selection': return 'Reading selection';
+            case 'context':   return 'Scanning page structure';
+            case 'content':   return 'Reading full page';
+            case 'find_text': return 'Finding text' + (args.query ? ' “' + trunc(args.query, 24) + '”' : '');
+            default:          return 'Reading the page';
+          }
+        }
+        case 'page_spreadsheet': {
+          switch (args.intent) {
+            case 'set_cell':   return args.cell ? 'Setting cell ' + trunc(String(args.cell), 12) : 'Setting cell';
+            case 'set_range':  return args.anchor ? 'Filling from ' + trunc(String(args.anchor), 12) : 'Filling cells';
+            case 'read_range': return 'Reading ' + trunc(String(args.range || args.cell || 'cells'), 14);
+            default:           return 'Editing spreadsheet';
+          }
+        }
         case 'take_screenshot':
           return 'Taking a visual look';
         case 'eval':
@@ -10802,7 +11062,7 @@
         const toolName = (tc.function && tc.function.name) ? tc.function.name : 'tool';
         let toolArgs = {};
         try { toolArgs = JSON.parse((tc.function && tc.function.arguments) || '{}'); } catch (e) {}
-        const toolLabel = getLiveTurnToolLabelForPanelRuntime(toolName, toolArgs);
+        const toolLabel = getLiveTurnToolLabelForPanelRuntime(toolName, toolArgs, chatId);
         const chip = document.createElement('span');
         chip.className = 'ic abchat-lt-tool-chip';
         chip.dataset.toolCallId = tc.id || '';
@@ -10890,6 +11150,50 @@
       }
     }
 
+    // Rev token for a note/chat chip's referenced source, delegated to the agent module so the
+    // value matches exactly what the read tool sees. Returns '' when unavailable (missing item,
+    // deleted source, or agent module not yet injected), which callers treat as "cannot tell".
+    async function computeChipSourceRevForPanelRuntime(typeForRev, refIdForRev) {
+      try {
+        const agentNsForRev = globalThis.ABChatAgent;
+        const repoForRev = getPanelDataRepoForPanelRuntime();
+        if (!agentNsForRev || typeof agentNsForRev.computeSourceRev !== 'function' || !repoForRev) return '';
+        const revForRev = await agentNsForRev.computeSourceRev(repoForRev, typeForRev, refIdForRev);
+        return String(revForRev || '');
+      } catch (errForRev) {
+        return '';
+      }
+    }
+
+    // True only when we have a stored baseline rev AND a current rev AND they differ. An empty
+    // stored rev (older message from before this field existed) or an uncomputable current rev
+    // (source deleted) returns false so we never cry wolf.
+    async function isChipSourceChangedForPanelRuntime(typeForCheck, refIdForCheck, storedHashForCheck) {
+      const storedForCheck = String(storedHashForCheck || '').trim();
+      if (!storedForCheck || !Number.isFinite(Number(refIdForCheck))) return false;
+      const currentRevForCheck = await computeChipSourceRevForPanelRuntime(typeForCheck, Number(refIdForCheck));
+      if (!currentRevForCheck) return false;
+      return currentRevForCheck !== storedForCheck;
+    }
+
+    // Stamp the current source rev onto every note/chat input chip just before the message is
+    // collected and sent, capturing what the model is about to read. Runs before the collect call
+    // in both the offscreen and legacy send paths.
+    async function stampInputChipSourceHashesForPanelRuntime() {
+      const rowForStamp = root.querySelector('.input-chips-row');
+      if (!rowForStamp) return;
+      const chipsForStamp = Array.from(rowForStamp.querySelectorAll('.ic'));
+      for (let stampIndexForPanelRuntime = 0; stampIndexForPanelRuntime < chipsForStamp.length; stampIndexForPanelRuntime++) {
+        const chipForStamp = chipsForStamp[stampIndexForPanelRuntime];
+        if (!chipForStamp || !chipForStamp.dataset) continue;
+        const typeForStamp = String(chipForStamp.dataset.attachType || '').trim().toLowerCase();
+        if (typeForStamp !== 'note' && typeForStamp !== 'chat') continue;
+        const refIdForStamp = Number(chipForStamp.dataset.attachRefId);
+        if (!Number.isFinite(refIdForStamp)) continue;
+        chipForStamp.dataset.attachSourceHash = await computeChipSourceRevForPanelRuntime(typeForStamp, refIdForStamp);
+      }
+    }
+
     function collectInputChipsForPanelRuntime() {
       const chipsRowForPanelRuntime = root.querySelector('.input-chips-row');
       if (!chipsRowForPanelRuntime) return [];
@@ -10914,7 +11218,8 @@
           pageUrl: String(chipForPanelRuntime.dataset.attachPageUrl || ''),
           pageTitle: String(chipForPanelRuntime.dataset.attachPageTitle || ''),
           elementSelector: String(chipForPanelRuntime.dataset.attachElementSelector || ''),
-          htmlFormat: String(chipForPanelRuntime.dataset.attachHtmlFormat || '')
+          htmlFormat: String(chipForPanelRuntime.dataset.attachHtmlFormat || ''),
+          sourceHash: String(chipForPanelRuntime.dataset.attachSourceHash || '')
         };
       }).filter(Boolean);
     }
@@ -11964,6 +12269,7 @@
             if (!Number.isFinite(autoChipBlobIdOffscreen)) continue;
             addInputChipForPanelRuntime({ type: 'image', label: 'Generated image', mimeType: 'image/png', refId: autoChipBlobIdOffscreen, size: 0, kind: 'generated_image' });
           }
+          await stampInputChipSourceHashesForPanelRuntime();
           const chipsForOffscreen = collectInputChipsForPanelRuntime();
           await appendMessageToChatForPanelRuntime(chatId, { role: "user", content: text, md: text, chips: chipsForOffscreen, _addedByThisTab: true }, { persistToDb: false });
           chatTaForSend.value = "";
@@ -12148,11 +12454,16 @@
       // whether to append the apologetic fallback: if the user can already see something from
       // the assistant, the fallback is suppressed regardless of what failed afterwards.
       let hasAppendedRenderableAssistantMessageForSend = false;
-      // Set true once at least one tool call this turn returned a non-error result. Drives the
-      // empty-final-turn recovery: if the model ends on an empty completion after real tool work,
-      // that is a missing summary rather than a failure, so we retry once for a confirmation and
-      // otherwise show a neutral completion instead of the apologetic fallback.
+      // Set true once at least one tool call this turn returned a non-error result (reads included).
+      // Only used to suppress the alarming "empty response" note: if any tool succeeded we do not
+      // claim the model returned nothing.
       let hadSuccessfulToolCallForSend = false;
+      // Set true once at least one MUTATING tool call (a create/edit, generated artifact, or page
+      // mutation) succeeded this turn. Drives the empty-final-turn recovery: only when real action
+      // landed do we retry for a confirmation or show the neutral "I took some actions" completion;
+      // a turn where only reads succeeded, or where every mutation failed, gets the apologetic
+      // fallback instead so we never imply changes that did not happen.
+      let hadSuccessfulMutatingToolCallForSend = false;
       let didRetryEmptyFinalTurnForSend = false;
       // Baseline cost from messages persisted before this send; used in live counter updates to avoid
       // double-counting costs that accumulate in turnMainCostAccumForSend during the current send.
@@ -12226,6 +12537,7 @@
             kind: 'generated_image'
           });
         }
+        await stampInputChipSourceHashesForPanelRuntime();
         const chipsForSend = collectInputChipsForPanelRuntime();
         await appendMessageToChatForPanelRuntime(chatId, {
           role: "user",
@@ -12283,15 +12595,10 @@
           });
         });
       } catch (eAutomationEnabledForSend) { automationEnabledForSend = false; }
-      // Advertise the trusted-input automation tools only when the user has enabled the feature,
-      // so the model never tries to drive the page (or attach the debugger) while it is off.
-      const toolDefsForSend = (agentNs.toolDefs || []).filter(function (toolDefForSend) {
-        const toolNameForSend = toolDefForSend && toolDefForSend.function ? toolDefForSend.function.name : '';
-        if ((toolNameForSend === 'page_act' || toolNameForSend === 'page_accessibility_tree') && !automationEnabledForSend) {
-          return false;
-        }
-        return true;
-      });
+      // Every tool is advertised on every send. The trusted page tools (page_act, page_spreadsheet)
+      // are no longer hidden when advanced automation is off; the first trusted action prompts the
+      // user inline and continues once approved.
+      const toolDefsForSend = (agentNs.toolDefs || []).slice();
       const executeToolForSend = agentNs.executeTool;
 
       const chatRecordForCompactionForSend = CHAT_STORE_FOR_PANEL_RUNTIME[chatId] || null;
@@ -12473,7 +12780,7 @@
             logApiParamsForSend = {
               stream: true,
               tool_choice: toolDefsForSend.length > 0 ? "auto" : undefined,
-              parallel_tool_calls: toolDefsForSend.length > 0 ? true : undefined,
+              parallel_tool_calls: toolDefsForSend.length > 0 ? false : undefined,
               provider: { sort: "throughput" },
               tools: toolDefsForSend.map(function (t) { return t && t.function ? t.function.name : (t.type || t.name || ''); })
             };
@@ -12629,10 +12936,12 @@
 
           if (!hasContent && !hasToolCalls) {
             // Some models (notably streamed Gemini) occasionally end a turn that followed
-            // successful tool work with an empty completion: no text, no tool calls. The work
-            // succeeded but the model emitted no closing summary. Re-invoke once with a corrective
-            // note asking it to confirm, before giving up.
-            if (hadSuccessfulToolCallForSend && !didRetryEmptyFinalTurnForSend) {
+            // successful mutating tool work with an empty completion: no text, no tool calls. The
+            // action landed but the model emitted no closing summary. Re-invoke once with a
+            // corrective note asking it to confirm, before giving up. Gated on the mutating flag so
+            // the note only asserts "you have already completed the requested actions" when a real
+            // action actually succeeded; a read-only or all-failed turn must not be told it finished.
+            if (hadSuccessfulMutatingToolCallForSend && !didRetryEmptyFinalTurnForSend) {
               didRetryEmptyFinalTurnForSend = true;
               pendingSystemNotesForSend.push('Your previous response was empty. You have already completed the requested actions. Briefly confirm to the user, in plain language, what you did.');
               continue;
@@ -12683,11 +12992,22 @@
           // streaming bubble's text (which clears on the next iteration).
           broadcastStreamEventForPanelRuntime("stream_message_persisted", chatId, null);
 
+          // At most one page_act / page_spreadsheet per assistant tool batch. Later page
+          // mutators get a synthetic skip result; reads and non-page mutators are unaffected.
+          const pageMutatorGateForSend = agentNs.pageMutatorBatchGate;
+          const skippedPageMutatorIndicesForLoop = (hasToolCalls
+              && pageMutatorGateForSend
+              && typeof pageMutatorGateForSend.getSkippedIndices === 'function')
+            ? pageMutatorGateForSend.getSkippedIndices(toolCallsForLoop)
+            : new Set();
+
           // Make this iter's tool calls visible to Stop/PostModelResponse hooks
           // (the memory-claim guard reads turnContext.toolCallsThisTurn to decide
-          // whether a memory/skill write happened anywhere in the send).
+          // whether a memory/skill write happened anywhere in the send). Skipped
+          // page mutators are omitted so they do not count toward the lifetime cap.
           if (turnContextForSend && hasToolCalls) {
             for (var tcPushIdxForCtx = 0; tcPushIdxForCtx < toolCallsForLoop.length; tcPushIdxForCtx++) {
+              if (skippedPageMutatorIndicesForLoop.has(tcPushIdxForCtx)) continue;
               turnContextForSend.toolCallsThisTurn.push(toolCallsForLoop[tcPushIdxForCtx]);
             }
           }
@@ -12752,9 +13072,10 @@
           // targets against a stable viewport means attaching first (with a brief settle)
           // so coordinates are computed after the resize, not shifted mid-run.
           if (!cdpRunLeaseHeldForSend && automationEnabledForSend && cdpClientForSend && typeof cdpClientForSend.acquire === 'function'
-              && toolCallsForLoop.some(function (tcForLease) {
+              && toolCallsForLoop.some(function (tcForLease, idxForLease) {
+                if (skippedPageMutatorIndicesForLoop.has(idxForLease)) return false;
                 const tcNameForLease = tcForLease.function && tcForLease.function.name;
-                return tcNameForLease === 'page_act' || tcNameForLease === 'page_accessibility_tree';
+                return tcNameForLease === 'page_act' || tcNameForLease === 'page_spreadsheet';
               })) {
             try {
               const runLeaseResForSend = await cdpClientForSend.acquire();
@@ -12793,7 +13114,7 @@
               });
             });
           };
-          const toolExecPromisesForLoop = toolCallsForLoop.map(async function (tc) {
+          const toolExecPromisesForLoop = toolCallsForLoop.map(async function (tc, tcIdxForExec) {
             const tcNameForExec = tc.function ? tc.function.name : '';
             const rawToolArgsForExec = (tc.function && typeof tc.function.arguments === 'string') ? tc.function.arguments : '';
             let toolArgs = {};
@@ -12805,6 +13126,11 @@
             const logEntry = { name: tcNameForExec, args: toolArgsParseErrorForExec ? { _rawArguments: rawToolArgsForExec } : toolArgs };
             logAllToolCallsForSend.push(logEntry);
             toolLogEntriesForLoop.push(logEntry);
+            if (skippedPageMutatorIndicesForLoop.has(tcIdxForExec)
+                && pageMutatorGateForSend
+                && typeof pageMutatorGateForSend.buildSkipResult === 'function') {
+              return pageMutatorGateForSend.buildSkipResult();
+            }
             // Malformed argument JSON: report the parse error back to the model so it
             // can re-issue the call with valid JSON, instead of silently passing {} to
             // the tool and producing a misleading downstream error.
@@ -12964,8 +13290,11 @@
               ? toolResultStrForLog.slice(0, TOOL_RESULT_LOG_MAX_CHARS) + '\u2026'
               : toolResultStrForLog;
             const isToolErrorForLoop = toolResult && typeof toolResult === 'object' && toolResult.error;
+            const isPageMutatorSkipForLoop = isToolErrorForLoop && toolResult.skipped === true;
             const toolStepStatusForLoop = isToolErrorForLoop ? 'error' : 'success';
-            const toolStepStatusTextForLoop = isToolErrorForLoop ? String(toolResult.error) : 'Done';
+            const toolStepStatusTextForLoop = isPageMutatorSkipForLoop
+              ? 'Skipped'
+              : (isToolErrorForLoop ? String(toolResult.error) : 'Done');
             updateLiveTurnToolStepStatusForPanelRuntime(
               chatId,
               tc.id,
@@ -13157,6 +13486,19 @@
             lastFailingRoundSignatureForSend = null;
             hadSuccessfulToolCallForSend = true;
           }
+          if (!hadSuccessfulMutatingToolCallForSend) {
+            for (var muIdxForSend = 0; muIdxForSend < toolCallsForLoop.length; muIdxForSend++) {
+              var muResultForSend = toolResultsForLoop[muIdxForSend];
+              var muSucceededForSend = !(!muResultForSend || muResultForSend.ok === false || (typeof muResultForSend === 'object' && typeof muResultForSend.error === 'string'));
+              if (!muSucceededForSend) continue;
+              var muTcForSend = toolCallsForLoop[muIdxForSend];
+              var muNameForSend = muTcForSend && muTcForSend.function && muTcForSend.function.name ? muTcForSend.function.name : '';
+              var muParsedForSend = {};
+              var muRawForSend = muTcForSend && muTcForSend.function && typeof muTcForSend.function.arguments === 'string' ? muTcForSend.function.arguments : '';
+              if (muRawForSend.trim() !== '') { try { muParsedForSend = JSON.parse(muRawForSend); } catch (muParseErrForSend) { muParsedForSend = {}; } }
+              if (isMutatingToolCallForPanelRuntime(muNameForSend, muParsedForSend)) { hadSuccessfulMutatingToolCallForSend = true; break; }
+            }
+          }
           if (identicalFailingRoundCountForSend >= MAX_IDENTICAL_FAILING_ROUNDS_FOR_SEND) {
             if (S.activeChatId === chatId) {
               appendSystemMsgToContainerForPanelRuntime(
@@ -13300,10 +13642,11 @@
           // (text, generated image, generated document, etc.) and without user cancellation.
           // If anything renderable was already shown, the user has visible output and the
           // apologetic fallback would only confuse them, so we suppress it in that case.
-          // When successful tool work happened but the model never summarized (an empty final
-          // turn after real work), a neutral completion is correct; the apologetic fallback is
-          // reserved for turns where nothing useful happened at all.
-          const fallbackTextForSend = hadSuccessfulToolCallForSend
+          // When a real mutating action landed but the model never summarized (an empty final turn
+          // after actual work), the neutral completion is correct; the apologetic fallback is
+          // reserved for turns where nothing changed at all (only reads succeeded, every mutation
+          // failed, or no tool ran), so we never imply an action that did not happen.
+          const fallbackTextForSend = hadSuccessfulMutatingToolCallForSend
             ? AGENT_NEUTRAL_COMPLETION_FOR_PANEL_RUNTIME
             : AGENT_FALLBACK_RESPONSES_FOR_PANEL_RUNTIME[Math.floor(Math.random() * AGENT_FALLBACK_RESPONSES_FOR_PANEL_RUNTIME.length)];
           try {
@@ -15849,6 +16192,11 @@
             case 'save-note':            saveNoteFromMainEditorForPanelRuntime(); break;
             case 'delete-note':          deleteNoteFromMainEditorForPanelRuntime(Number(tgtForRuntime.dataset.noteId)); break;
             case 'edit-note':            editNoteFromDropdown(Number(tgtForRuntime.dataset.noteId)); break;
+            case 'note-version-history': openNoteVersionHistoryForPanelRuntime(Number(tgtForRuntime.dataset.noteId)); break;
+            case 'close-note-history':   closeNoteVersionHistoryForPanelRuntime(); break;
+            case 'note-history-select':  selectNoteHistoryVersionForPanelRuntime(tgtForRuntime.dataset.versionId); break;
+            case 'note-history-back':    backToNoteHistoryListForPanelRuntime(); break;
+            case 'restore-note-version': confirmRestoreNoteVersionForPanelRuntime(); break;
             case 'back-from-note':       backFromNote(); break;
             case 'enter-note-edit-mode': enterNoteEditMode(); break;
             case 'exit-note-edit-mode':  exitNoteEditMode(); break;

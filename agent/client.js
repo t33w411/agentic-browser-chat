@@ -83,7 +83,7 @@
     if (Array.isArray(tools) && tools.length > 0) {
       bodyForClient.tools = tools;
       bodyForClient.tool_choice = tool_choice || "auto";
-      bodyForClient.parallel_tool_calls = true;
+      bodyForClient.parallel_tool_calls = false;
     }
 
     const headersForClient = {

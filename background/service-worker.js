@@ -1231,6 +1231,64 @@ async function runStartupRecoveryOncePerSessionForServiceWorker() {
   await runReloadRecoveryWithRetriesForServiceWorker();
 }
 
+// Removes utm_* and known click-tracking query params from a search-source URL,
+// leaving functional params intact. Falls back to the original string on any parse error.
+function stripTrackingParamsForSearch(rawUrl) {
+  if (typeof rawUrl !== 'string' || !/^https?:\/\//i.test(rawUrl)) return rawUrl;
+  var urlObjForStrip;
+  try { urlObjForStrip = new URL(rawUrl); } catch (e) { return rawUrl; }
+  var TRACKING_KEYS_FOR_SEARCH = {
+    gclid: 1, dclid: 1, fbclid: 1, yclid: 1, msclkid: 1, twclid: 1,
+    mc_cid: 1, mc_eid: 1, igshid: 1, _hsenc: 1, _hsmi: 1,
+    vero_id: 1, oly_enc_id: 1, oly_anon_id: 1
+  };
+  var keysToDeleteForStrip = [];
+  urlObjForStrip.searchParams.forEach(function (value, key) {
+    var lowerKeyForStrip = key.toLowerCase();
+    if (lowerKeyForStrip.indexOf('utm_') === 0 || TRACKING_KEYS_FOR_SEARCH[lowerKeyForStrip]) {
+      keysToDeleteForStrip.push(key);
+    }
+  });
+  for (var kForStrip = 0; kForStrip < keysToDeleteForStrip.length; kForStrip++) {
+    urlObjForStrip.searchParams.delete(keysToDeleteForStrip[kForStrip]);
+  }
+  return urlObjForStrip.toString().replace(/\?$/, '');
+}
+
+// Follows HTTP redirects (e.g. Google grounding-api-redirect wrappers) to the final
+// destination and returns that URL. Best-effort: a timeout, network error, or abort
+// falls back to the original URL so a search is never blocked by resolution.
+async function resolveFinalUrlForSearch(rawUrl, parentSignalForResolve) {
+  if (typeof rawUrl !== 'string' || !/^https?:\/\//i.test(rawUrl)) return rawUrl;
+  var REDIRECT_TIMEOUT_MS_FOR_SEARCH = 4000;
+  async function attemptForResolve(methodForResolve) {
+    var controllerForResolve = new AbortController();
+    var timeoutIdForResolve = setTimeout(function () { controllerForResolve.abort(); }, REDIRECT_TIMEOUT_MS_FOR_SEARCH);
+    var onParentAbortForResolve = function () { controllerForResolve.abort(); };
+    if (parentSignalForResolve) {
+      if (parentSignalForResolve.aborted) controllerForResolve.abort();
+      else parentSignalForResolve.addEventListener('abort', onParentAbortForResolve, { once: true });
+    }
+    try {
+      var respForResolve = await fetch(rawUrl, { method: methodForResolve, redirect: 'follow', signal: controllerForResolve.signal });
+      return (respForResolve && typeof respForResolve.url === 'string' && respForResolve.url) ? respForResolve.url : rawUrl;
+    } finally {
+      clearTimeout(timeoutIdForResolve);
+      if (parentSignalForResolve) parentSignalForResolve.removeEventListener('abort', onParentAbortForResolve);
+    }
+  }
+  try {
+    return await attemptForResolve('HEAD');
+  } catch (headErrForResolve) {
+    if (parentSignalForResolve && parentSignalForResolve.aborted) return rawUrl;
+    try {
+      return await attemptForResolve('GET');
+    } catch (getErrForResolve) {
+      return rawUrl;
+    }
+  }
+}
+
 async function handleAgentWebSearchForServiceWorker(msgForSearch, sendResponseForSearch) {
   var queryForSearch = typeof msgForSearch.query === 'string' ? msgForSearch.query.trim() : '';
   var maxResultsForSearch = Math.min(
@@ -1364,6 +1422,29 @@ async function handleAgentWebSearchForServiceWorker(msgForSearch, sendResponseFo
     if (normalizedForSearch.length > maxResultsForSearch) {
       normalizedForSearch = normalizedForSearch.slice(0, maxResultsForSearch);
     }
+
+    // Resolve redirect wrappers to their final destination, then strip tracking params.
+    // Parallel and best-effort: any failure falls back to the original URL.
+    var resolvedSourcesForSearch = await Promise.all(normalizedForSearch.map(async function (srcForSearch) {
+      var finalUrlForSearch = await resolveFinalUrlForSearch(srcForSearch.url, requestRecordForSearch ? requestRecordForSearch.signal : null);
+      return { title: srcForSearch.title, url: stripTrackingParamsForSearch(finalUrlForSearch) };
+    }));
+
+    if (requestRecordForSearch && requestRecordForSearch.signal.aborted) {
+      sendResponseForSearch({ ok: false, cancelled: true, error: 'Cancelled' });
+      return;
+    }
+
+    // Re-dedup: distinct wrappers can resolve to the same destination.
+    var seenFinalUrlsForSearch = {};
+    var cleanedSourcesForSearch = [];
+    for (var dIdxForSearch = 0; dIdxForSearch < resolvedSourcesForSearch.length; dIdxForSearch++) {
+      var cleanSrcForSearch = resolvedSourcesForSearch[dIdxForSearch];
+      if (!cleanSrcForSearch.url || seenFinalUrlsForSearch[cleanSrcForSearch.url]) continue;
+      seenFinalUrlsForSearch[cleanSrcForSearch.url] = true;
+      cleanedSourcesForSearch.push(cleanSrcForSearch);
+    }
+    normalizedForSearch = cleanedSourcesForSearch;
 
     sendResponseForSearch({ ok: true, results: normalizedForSearch, academicFallback: false, latencyMs: latencyMsForSearch, rawResponse: contentForSearch, usage: (jsonForSearch && jsonForSearch.usage) || null });
   } catch (errForSearch) {
@@ -2882,15 +2963,28 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
   }
 
   // Page-DOM-bound tool delegation: the offscreen loop cannot touch the page, so it asks
-  // the SW to run page_query / page_fill_form / screenshot capture on the run's target tab.
+  // the SW to run the page tools (page_observe, page_read, page_act, page_spreadsheet) and
+  // screenshot capture on the run's target tab.
   // sendActionToTab is ack-only (it does not surface the content response), so this uses a
   // direct request/response chrome.tabs.sendMessage after ensuring the content script is
   // injected (which also covers the just-reloaded-tab case via re-injection).
   if (messageForServiceWorker.action === "delegatePageTool") {
     const chatIdForDelegate = Number(messageForServiceWorker.chatId);
-    const targetTabIdForDelegate = offscreenRunTargetTabsForServiceWorker.has(chatIdForDelegate)
+    // The chatId -> targetTabId map is in-memory only, so an MV3 service-worker recycle
+    // mid-run wipes it while the offscreen doc keeps running, which otherwise fails every
+    // page tool with "No target tab" for the rest of the run. The offscreen loop carries the
+    // authoritative targetTabId on every delegatePageTool message, so fall back to it and
+    // re-seed the map (which also feeds the navigation-survival predicate and the stream
+    // originator stamp) so a recycled worker self-heals on the first delegated page call.
+    let targetTabIdForDelegate = offscreenRunTargetTabsForServiceWorker.has(chatIdForDelegate)
       ? offscreenRunTargetTabsForServiceWorker.get(chatIdForDelegate)
       : null;
+    if (targetTabIdForDelegate == null && typeof messageForServiceWorker.targetTabId === "number") {
+      targetTabIdForDelegate = messageForServiceWorker.targetTabId;
+      if (Number.isFinite(chatIdForDelegate)) {
+        offscreenRunTargetTabsForServiceWorker.set(chatIdForDelegate, targetTabIdForDelegate);
+      }
+    }
     if (targetTabIdForDelegate == null) {
       sendResponseForServiceWorker({ ok: false, error: "No target tab is associated with this run." });
       return false;
@@ -2901,15 +2995,11 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
     // tab for a document load during the call and resolve with an honest "navigated" result so
     // the model re-reads the new page instead of assuming the click failed. A same-document
     // (pushState) soft-nav does not load a document, so the content script survives and returns
-    // its own result normally; only status==="loading" triggers this. Applies to page_act and to
-    // a page_query findPageElements click sub_operation (both of which an offscreen run is allowed
-    // to let navigate; an in-panel run refuses page-leaving clicks before they reach here).
-    const argsForNavWatch = messageForServiceWorker.args || {};
-    const isPageActForDelegate = messageForServiceWorker.tool === "page_act";
-    const isPageQueryClickForDelegate = messageForServiceWorker.tool === "page_query"
-      && argsForNavWatch.operation === "findPageElements"
-      && argsForNavWatch.sub_operation === "click";
-    const watchNavigationForDelegate = isPageActForDelegate || isPageQueryClickForDelegate;
+    // its own result normally; only status==="loading" triggers this. Applies to the trusted page
+    // tools (page_act, page_spreadsheet); a page_act click is the one an offscreen run is allowed to
+    // let navigate (an in-panel run refuses page-leaving clicks before they reach here).
+    const watchNavigationForDelegate = messageForServiceWorker.tool === "page_act"
+      || messageForServiceWorker.tool === "page_spreadsheet";
     (async function () {
       try {
         if (tabMessagingForServiceWorker && typeof tabMessagingForServiceWorker.ensureContentInjected === "function") {
@@ -2938,16 +3028,14 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
           sendResponseForServiceWorker({ ok: false, error: errorMsgForDelegate });
         };
         const resolveNavigatedForDelegate = function (newUrlForDelegate) {
-          const actionForDelegate = isPageQueryClickForDelegate
-            ? "click"
-            : String((messageForServiceWorker.args && messageForServiceWorker.args.action) || "action");
+          const actionForDelegate = String((messageForServiceWorker.args && messageForServiceWorker.args.action) || "action");
           finishOkForDelegate({
             ok: true,
             result: {
               action: actionForDelegate,
               navigated: true,
               url: newUrlForDelegate || "",
-              navigated_note: "The " + actionForDelegate + " triggered a page navigation, so the post-action page read could not complete. The page is now loading " + (newUrlForDelegate ? '"' + newUrlForDelegate + '"' : "a new URL") + ". This is NOT a failure; re-read the page (page_accessibility_tree or page_query) before the next action."
+              navigated_note: "The " + actionForDelegate + " triggered a page navigation, so the post-action page read could not complete. The page is now loading " + (newUrlForDelegate ? '"' + newUrlForDelegate + '"' : "a new URL") + ". This is NOT a failure; re-read the page (page_observe or page_read) before the next action."
             }
           });
         };

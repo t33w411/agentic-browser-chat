@@ -12,9 +12,9 @@
 // RECEIVER, driven by the stream_* events this loop emits via the service worker.
 //
 // What still runs here: context building, the LLM stream, tool execution, DB persistence,
-// the API log, and the CDP run lease. Page-DOM-bound tools (page_query, page_fill_form,
-// take_screenshot capture) are delegated to the target tab's content script; page_act and
-// page_accessibility_tree reach the page through cdpClient (bound to the target tab id).
+// the API log, and the CDP run lease. The page tools (page_observe, page_read, page_act,
+// page_spreadsheet) are delegated to the target tab's content script, which reads the live
+// DOM directly and, for trusted input, reaches the page through cdpClient (bound to the tab id).
 //
 // Known Phase-1 limitations (page_act from offscreen; tracked for focus-check delegation):
 //   - expected_focus preconditions read the offscreen document's activeElement, so they
@@ -48,6 +48,25 @@
     'Apologies, I couldn\'t finish my response. Let me know if you want me to give it another go.',
     'I hit a snag and couldn\'t send a reply. Let me know if you\'d like me to try again.'
   ];
+
+  // Tools whose successful execution is a real state change (a create/edit, a generated artifact,
+  // or a page mutation), as opposed to a read. A successful mutating call is what makes the neutral
+  // "I took some actions" completion truthful; a turn where only reads succeeded, or where every
+  // mutation failed, must not claim action was taken. memory always writes; skill mutates only
+  // for specific operations.
+  var MUTATING_TOOL_NAMES_FOR_AGENT_RUN = {
+    write: true, edit: true, create_document: true, generate_image: true,
+    generate_questions: true, page_act: true, memory: true, page_spreadsheet: true
+  };
+  function isMutatingToolCallForAgentRun(nameForMutCheck, parsedArgsForMutCheck) {
+    if (MUTATING_TOOL_NAMES_FOR_AGENT_RUN[nameForMutCheck]) return true;
+    var argsForMutCheck = parsedArgsForMutCheck || {};
+    if (nameForMutCheck === 'skill') {
+      var opForMutCheck = String(argsForMutCheck.operation || '');
+      return opForMutCheck === 'create' || opForMutCheck === 'update' || opForMutCheck === 'delete';
+    }
+    return false;
+  }
 
   // chatId -> { controller, toolsDoneAt, textDebounceTimer, pendingText }
   var runsForAgentRun = new Map();
@@ -108,11 +127,19 @@
   function delegatePageToolForAgentRun(toolForDelegate, argsForDelegate, chatIdForDelegate) {
     return new Promise(function (resolveForDelegate) {
       try {
+        // The SW resolves the target tab from an in-memory map that an MV3 recycle can wipe
+        // mid-run. Carry the authoritative targetTabId (held in the run state) so the SW can
+        // re-seed that map instead of failing every page tool with "No target tab".
+        var runForDelegate = runsForAgentRun.get(Number(chatIdForDelegate));
+        var targetTabIdForDelegate = runForDelegate && typeof runForDelegate.targetTabId === 'number'
+          ? runForDelegate.targetTabId
+          : null;
         chrome.runtime.sendMessage({
           action: 'delegatePageTool',
           tool: toolForDelegate,
           args: argsForDelegate || {},
-          chatId: Number(chatIdForDelegate)
+          chatId: Number(chatIdForDelegate),
+          targetTabId: targetTabIdForDelegate
         }, function (responseForDelegate) {
           if (chrome.runtime.lastError) {
             resolveForDelegate({ ok: false, error: 'The page could not be reached to run this action (' + (chrome.runtime.lastError.message || 'no response') + '). The tab may have been closed or be mid-navigation.' });
@@ -139,14 +166,14 @@
     };
   }
 
-  // page_act joins the delegated set so it runs in the target tab's content script, where
-  // `document` is the live page: that is what makes the panel click-through occlusion, the
-  // elementFromPoint target probe, the mutation/URL/title observation, the focus readback,
-  // and selector resolution work. Run from the offscreen document they all targeted the
-  // empty offscreen DOM instead, so the panel silently occluded clicks and the observability
-  // fields were meaningless. page_accessibility_tree stays in the offscreen loop because it
-  // is a pure CDP read with no document dependency.
-  var PAGE_DELEGATED_TOOLS_FOR_AGENT_RUN = { page_query: true, page_fill_form: true, page_act: true };
+  // The page tools all run in the target tab's content script, where `document` is the live
+  // page: that is what makes the ref snapshot, the panel click-through occlusion, the
+  // elementFromPoint target probe, the mutation/URL/title observation, and the focus readback
+  // work. Run from the offscreen document they would target the empty offscreen DOM instead,
+  // so the panel would silently occlude clicks and the observability fields would be meaningless.
+  var PAGE_DELEGATED_TOOLS_FOR_AGENT_RUN = {
+    page_observe: true, page_act: true, page_read: true, page_spreadsheet: true
+  };
 
   // Order-independent signature of a round's tool calls (name + canonicalized arguments),
   // used to detect a degenerate loop where the model re-issues the identical failing call
@@ -325,7 +352,7 @@
     if (typeof clientForRun.streamCompletion !== 'function') { refuseRunForOffscreen('Could not start the agent run: the agent is not ready. Please try again.'); return; }
 
     var controllerForRun = new AbortController();
-    var runStateForRun = { controller: controllerForRun, toolsDoneAt: 0, textDebounceTimer: null, userStopRequested: false, pendingText: null };
+    var runStateForRun = { controller: controllerForRun, toolsDoneAt: 0, textDebounceTimer: null, userStopRequested: false, pendingText: null, targetTabId: targetTabIdForRun };
     runsForAgentRun.set(chatId, runStateForRun);
 
     var timeoutReasonForRun = null;
@@ -409,7 +436,14 @@
     var logStopReasonForRun = null;
     var lastToolTimeoutMsForRun = ITER_TOOL_STD_TIMEOUT_MS_FOR_AGENT_RUN;
     var hasAppendedRenderableAssistantMessageForRun = false;
+    // Set true once any tool call this turn returned a non-error result (reads included); only used
+    // to suppress the alarming "empty response" note.
     var hadSuccessfulToolCallForRun = false;
+    // Set true once a MUTATING tool call (a create/edit, generated artifact, or page mutation)
+    // succeeded this turn. Drives the empty-final-turn recovery: only when real action landed do we
+    // retry for a confirmation or show the neutral "I took some actions" completion; a read-only or
+    // all-failed turn gets the apologetic fallback so we never imply changes that did not happen.
+    var hadSuccessfulMutatingToolCallForRun = false;
     var didRetryEmptyFinalTurnForRun = false;
 
     // In-memory copy of the chat's messages, seeded from the DB (the initiator already
@@ -419,11 +453,10 @@
     var compactionSummaryForRun = '';
     var compactedThroughMessageIdForRun = null;
 
-    var toolDefsForRun = (agentNsForRun.toolDefs || []).filter(function (toolDefForRun) {
-      var toolNameForRun = toolDefForRun && toolDefForRun.function ? toolDefForRun.function.name : '';
-      if ((toolNameForRun === 'page_act' || toolNameForRun === 'page_accessibility_tree') && !automationEnabledForRun) return false;
-      return true;
-    });
+    // Every tool is advertised on every run. The trusted page tools (page_act, page_spreadsheet)
+    // are no longer hidden when advanced automation is off; the first trusted action prompts the
+    // user inline and the same action continues once approved.
+    var toolDefsForRun = (agentNsForRun.toolDefs || []).slice();
 
     try {
       var chatRecordForRun = await repoForRun.getChat(chatId);
@@ -561,7 +594,7 @@
           logApiParamsForRun = {
             stream: true,
             tool_choice: toolDefsForRun.length > 0 ? 'auto' : undefined,
-            parallel_tool_calls: toolDefsForRun.length > 0 ? true : undefined,
+            parallel_tool_calls: toolDefsForRun.length > 0 ? false : undefined,
             provider: { sort: 'throughput' },
             tools: toolDefsForRun.map(function (t) { return t && t.function ? t.function.name : (t.type || t.name || ''); })
           };
@@ -659,7 +692,10 @@
         var hasToolCalls = toolCallsForLoop && toolCallsForLoop.length > 0;
 
         if (!hasContent && !hasToolCalls) {
-          if (hadSuccessfulToolCallForRun && !didRetryEmptyFinalTurnForRun) {
+          // Gated on the mutating flag so the note only asserts "you have already completed the
+          // requested actions" when a real action actually succeeded; a read-only or all-failed
+          // turn must not be told it finished.
+          if (hadSuccessfulMutatingToolCallForRun && !didRetryEmptyFinalTurnForRun) {
             didRetryEmptyFinalTurnForRun = true;
             pendingSystemNotesForRun.push('Your previous response was empty. You have already completed the requested actions. Briefly confirm to the user, in plain language, what you did.');
             continue;
@@ -689,8 +725,18 @@
         if (hasContent) hasAppendedRenderableAssistantMessageForRun = true;
         emitForAgentRun('stream_message_persisted', chatId, null);
 
+        // At most one page_act / page_spreadsheet per assistant tool batch. Later page
+        // mutators get a synthetic skip result; reads and non-page mutators are unaffected.
+        var pageMutatorGateForRun = getAgentNsForAgentRun().pageMutatorBatchGate;
+        var skippedPageMutatorIndicesForRun = (hasToolCalls
+            && pageMutatorGateForRun
+            && typeof pageMutatorGateForRun.getSkippedIndices === 'function')
+          ? pageMutatorGateForRun.getSkippedIndices(toolCallsForLoop)
+          : new Set();
+
         if (turnContextForRun && hasToolCalls) {
           for (var tcPushIdxForRun = 0; tcPushIdxForRun < toolCallsForLoop.length; tcPushIdxForRun++) {
+            if (skippedPageMutatorIndicesForRun.has(tcPushIdxForRun)) continue;
             turnContextForRun.toolCallsThisTurn.push(toolCallsForLoop[tcPushIdxForRun]);
           }
         }
@@ -717,11 +763,12 @@
 
         emitForAgentRun('stream_tool_steps', chatId, { toolCalls: toolCallsForLoop });
 
-        // Acquire the run-scoped CDP lease before page_act/page_accessibility_tree.
+        // Acquire the run-scoped CDP lease before the trusted page tools (page_act, page_spreadsheet).
         if (!cdpRunLeaseHeldForRun && automationEnabledForRun && cdpClientForRun && typeof cdpClientForRun.acquire === 'function'
-            && toolCallsForLoop.some(function (tcForLease) {
+            && toolCallsForLoop.some(function (tcForLease, idxForLease) {
+              if (skippedPageMutatorIndicesForRun.has(idxForLease)) return false;
               var tcNameForLease = tcForLease.function && tcForLease.function.name;
-              return tcNameForLease === 'page_act' || tcNameForLease === 'page_accessibility_tree';
+              return tcNameForLease === 'page_act' || tcNameForLease === 'page_spreadsheet';
             })) {
           try {
             var runLeaseResForRun = await cdpClientForRun.acquire(targetTabIdForRun);
@@ -758,7 +805,7 @@
         };
 
         var captureScreenshotForRun = buildCaptureScreenshotForAgentRun(chatId);
-        var toolExecPromisesForRun = toolCallsForLoop.map(async function (tc) {
+        var toolExecPromisesForRun = toolCallsForLoop.map(async function (tc, tcIdxForExec) {
           var tcNameForExec = tc.function ? tc.function.name : '';
           var rawToolArgsForExec = (tc.function && typeof tc.function.arguments === 'string') ? tc.function.arguments : '';
           var toolArgs = {};
@@ -769,6 +816,11 @@
           var logEntry = { name: tcNameForExec, args: toolArgsParseErrorForExec ? { _rawArguments: rawToolArgsForExec } : toolArgs };
           logAllToolCallsForRun.push(logEntry);
           toolLogEntriesForRun.push(logEntry);
+          if (skippedPageMutatorIndicesForRun.has(tcIdxForExec)
+              && pageMutatorGateForRun
+              && typeof pageMutatorGateForRun.buildSkipResult === 'function') {
+            return pageMutatorGateForRun.buildSkipResult();
+          }
           if (toolArgsParseErrorForExec) {
             return { ok: false, error: 'Tool call arguments were not valid JSON and could not be parsed: ' + (toolArgsParseErrorForExec.message || String(toolArgsParseErrorForExec)) + '. The "arguments" field must be a single valid JSON object with every string value properly escaped (newlines as \\n, quotes as \\", backslashes as \\\\); do not split strings using + concatenation. Re-issue this tool call with corrected JSON.' };
           }
@@ -855,8 +907,11 @@
           var toolResultStr = typeof toolResultForModel === 'string' ? toolResultForModel : JSON.stringify(toolResultForModel);
           toolLogEntriesForRun[ti].result = toolResultStr.length > TOOL_RESULT_LOG_MAX_CHARS_FOR_AGENT_RUN ? toolResultStr.slice(0, TOOL_RESULT_LOG_MAX_CHARS_FOR_AGENT_RUN) + '…' : toolResultStr;
           var isToolErrorForRun = toolResult && typeof toolResult === 'object' && toolResult.error;
+          var isPageMutatorSkipForRun = isToolErrorForRun && toolResult.skipped === true;
           var toolStepStatusForRun = isToolErrorForRun ? 'error' : 'success';
-          var toolStepStatusTextForRun = isToolErrorForRun ? String(toolResult.error) : 'Done';
+          var toolStepStatusTextForRun = isPageMutatorSkipForRun
+            ? 'Skipped'
+            : (isToolErrorForRun ? String(toolResult.error) : 'Done');
           emitForAgentRun('stream_tool_step_status', chatId, { toolCallId: tc.id, status: toolStepStatusForRun, statusText: toolStepStatusTextForRun });
           var toolResultStrForApi = toolResultStr.length > TOOL_RESULT_API_MAX_CHARS_FOR_AGENT_RUN
             ? JSON.stringify({ ok: false, error: 'Tool result too large to send (' + toolResultStr.length + ' bytes; max 500 KB). The tool produced too much output; try a more targeted request.' })
@@ -954,6 +1009,19 @@
           identicalFailingRoundCountForRun = 0;
           lastFailingRoundSignatureForRun = null;
           hadSuccessfulToolCallForRun = true;
+        }
+        if (!hadSuccessfulMutatingToolCallForRun) {
+          for (var muIdxForRun = 0; muIdxForRun < toolCallsForLoop.length; muIdxForRun++) {
+            var muResultForRun = toolResultsForRun[muIdxForRun];
+            var muSucceededForRun = !(!muResultForRun || muResultForRun.ok === false || (typeof muResultForRun === 'object' && typeof muResultForRun.error === 'string'));
+            if (!muSucceededForRun) continue;
+            var muTcForRun = toolCallsForLoop[muIdxForRun];
+            var muNameForRun = muTcForRun && muTcForRun.function && muTcForRun.function.name ? muTcForRun.function.name : '';
+            var muParsedForRun = {};
+            var muRawForRun = muTcForRun && muTcForRun.function && typeof muTcForRun.function.arguments === 'string' ? muTcForRun.function.arguments : '';
+            if (muRawForRun.trim() !== '') { try { muParsedForRun = JSON.parse(muRawForRun); } catch (muParseErrForRun) { muParsedForRun = {}; } }
+            if (isMutatingToolCallForAgentRun(muNameForRun, muParsedForRun)) { hadSuccessfulMutatingToolCallForRun = true; break; }
+          }
         }
         if (identicalFailingRoundCountForRun >= MAX_IDENTICAL_FAILING_ROUNDS_FOR_AGENT_RUN) {
           emitForAgentRun('stream_system_notice', chatId, { text: 'Agent stopped: the same tool call failed ' + identicalFailingRoundCountForRun + ' times in a row with identical arguments. Retrying without changing the call will not help; review the error above and try a different approach.' });
@@ -1075,7 +1143,7 @@
         }).catch(function () {});
       }
       if (!hasAppendedRenderableAssistantMessageForRun && !logStopReasonForRun) {
-        var fallbackTextForRun = hadSuccessfulToolCallForRun
+        var fallbackTextForRun = hadSuccessfulMutatingToolCallForRun
           ? AGENT_NEUTRAL_COMPLETION_FOR_AGENT_RUN
           : AGENT_FALLBACK_RESPONSES_FOR_AGENT_RUN[Math.floor(Math.random() * AGENT_FALLBACK_RESPONSES_FOR_AGENT_RUN.length)];
         try { await repoForRun.createMessage(chatId, { role: 'assistant', content: fallbackTextForRun, md: fallbackTextForRun }); } catch (fallbackErrForRun) {}
