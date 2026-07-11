@@ -190,9 +190,17 @@
                   </div>
                 </div>
               </div>
-              <button class="send-btn" data-action="send-chat">
-                ${icForPanelTemplate.send14}
-              </button>
+              <div class="input-right">
+                <div class="voice-waveform" id="voice-waveform" aria-hidden="true">
+                  <span></span><span></span><span></span><span></span><span></span>
+                </div>
+                <button class="voice-btn" id="voice-input-btn" data-action="toggle-voice-input" title="Voice input" aria-pressed="false">
+                  ${icForPanelTemplate.mic16}
+                </button>
+                <button class="send-btn" data-action="send-chat">
+                  ${icForPanelTemplate.send14}
+                </button>
+              </div>
             </div>
           </div>
         </div><!-- /chat-main -->

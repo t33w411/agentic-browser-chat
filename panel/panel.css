@@ -1341,6 +1341,14 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
   line-height: 1.5;
 }
 .chat-textarea::placeholder { color: var(--abchat-text-muted); }
+/* Keep dictated text legible while the composer is disabled during recording
+   (browsers grey out disabled text by default). */
+.chat-textarea:disabled {
+  color: var(--abchat-text-primary);
+  -webkit-text-fill-color: var(--abchat-text-primary);
+  opacity: 1;
+  cursor: default;
+}
 
 .input-bottom {
   display: flex; align-items: center; justify-content: space-between;
@@ -1482,6 +1490,57 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 .send-btn:hover { background: var(--abchat-accent-hover); }
 .send-btn[data-action="cancel-send"] { background: #b91c1c; }
 .send-btn[data-action="cancel-send"]:hover { background: #991b1b; }
+
+.input-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+
+.voice-btn {
+  border: 1px solid var(--abchat-border);
+  border-radius: 50%;
+  background: var(--abchat-bg-input);
+  color: var(--abchat-text-secondary);
+  cursor: pointer;
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+  flex-shrink: 0;
+}
+.voice-btn:hover { background: var(--abchat-bg-hover); color: var(--abchat-text-primary); border-color: var(--abchat-accent); }
+.voice-btn:disabled { opacity: 0.45; cursor: default; }
+.voice-btn:disabled:hover { background: var(--abchat-bg-input); color: var(--abchat-text-secondary); border-color: var(--abchat-border); }
+.voice-btn.listening {
+  background: #dc2626; color: #fff; border-color: #dc2626;
+  animation: abchat-voice-pulse 1.4s ease-in-out infinite;
+}
+.voice-btn.listening:hover { background: #b91c1c; border-color: #b91c1c; color: #fff; }
+@keyframes abchat-voice-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.45); }
+  70%  { box-shadow: 0 0 0 6px rgba(220, 38, 38, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); }
+}
+
+/* Animated waveform shown while dictation is recording (left of the mic). */
+.voice-waveform { display: none; align-items: center; gap: 2px; height: 22px; padding: 0 2px; }
+.input-right.recording .voice-waveform { display: flex; }
+.input-right.recording .send-btn { display: none; }
+.voice-waveform span {
+  display: block; width: 3px; height: 100%;
+  background: #dc2626; border-radius: 2px;
+  transform: scaleY(0.3); transform-origin: center;
+  animation: abchat-voice-wave 1s ease-in-out infinite;
+}
+.voice-waveform span:nth-child(1) { animation-delay: 0s; }
+.voice-waveform span:nth-child(2) { animation-delay: 0.15s; }
+.voice-waveform span:nth-child(3) { animation-delay: 0.3s; }
+.voice-waveform span:nth-child(4) { animation-delay: 0.45s; }
+.voice-waveform span:nth-child(5) { animation-delay: 0.6s; }
+@keyframes abchat-voice-wave {
+  0%, 100% { transform: scaleY(0.3); }
+  50%      { transform: scaleY(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .voice-btn.listening { animation: none; }
+  .voice-waveform span { animation: none; transform: scaleY(0.6); }
+}
 
 /* ============================================================
    CHAT — REDUCED MODE OVERRIDES

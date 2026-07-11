@@ -3486,7 +3486,8 @@
       try { elForScroll.scrollIntoView({ block: 'center', inline: 'center' }); } catch (eScroll) { /* ignore */ }
       return { ok: true, summary: 'scrolled element into view' };
     }
-    var amountForScroll = (typeof argsForScroll.amount === 'number' && isFinite(argsForScroll.amount)) ? argsForScroll.amount : Math.round((window.innerHeight || 600) * 0.8);
+    var DEFAULT_SCROLL_VIEWPORTS_FOR_SCROLL = 3;
+    var amountForScroll = (typeof argsForScroll.amount === 'number' && isFinite(argsForScroll.amount)) ? argsForScroll.amount : Math.round((window.innerHeight || 600) * DEFAULT_SCROLL_VIEWPORTS_FOR_SCROLL);
     var dirForScroll = (typeof argsForScroll.direction === 'string') ? argsForScroll.direction.toLowerCase() : 'down';
     var dxForScroll = 0, dyForScroll = 0;
     if (dirForScroll === 'up') dyForScroll = -amountForScroll;
@@ -3925,7 +3926,10 @@
         if (!extractedForRead) return { ok: false, error: 'The current page has no readable content to extract.' };
         var truncatedForRead = false;
         if (extractedForRead.length > 200000) { extractedForRead = extractedForRead.slice(0, 200000); truncatedForRead = true; }
-        return { ok: true, mode: 'content', truncated: truncatedForRead, text: extractedForRead };
+        var moreForRead = evaluateMoreContentForToolExec(extractedForRead);
+        var resultObjForRead = { ok: true, mode: 'content', truncated: truncatedForRead, more_content_below: !!moreForRead.more_content_below, text: extractedForRead };
+        if (moreForRead.more_content_reason) resultObjForRead.more_content_reason = moreForRead.more_content_reason;
+        return resultObjForRead;
       }
 
       if (modeForRead === 'find_text') {
@@ -4689,7 +4693,10 @@
         extractedForPageContent = extractedForPageContent.slice(0, 200000);
         truncatedForPageContent = true;
       }
-      return { ok: true, operation: operation, truncated: truncatedForPageContent, result: extractedForPageContent };
+      var moreForPageContent = evaluateMoreContentForToolExec(extractedForPageContent);
+      var resultObjForPageContent = { ok: true, operation: operation, truncated: truncatedForPageContent, more_content_below: !!moreForPageContent.more_content_below, result: extractedForPageContent };
+      if (moreForPageContent.more_content_reason) resultObjForPageContent.more_content_reason = moreForPageContent.more_content_reason;
+      return resultObjForPageContent;
     }
 
     if (operation === 'getPageOverview') {
@@ -9298,6 +9305,147 @@ self.onmessage = function (e) {
       hopsForScrollProbe++;
     }
     return null;
+  }
+
+  // Detect, read-only, whether the page likely holds more content that is NOT yet in
+  // the DOM and would render only on scroll (lazy-load / infinite-scroll / virtualized
+  // lists). A whole-page read already captures everything in the DOM, including nodes
+  // below the fold, so a merely tall page is NOT evidence. We flag only when there is
+  // room to scroll down AND positive evidence of lazy behavior, keeping the signal
+  // trustworthy (precision over recall). Pure DOM inspection: never scrolls, never
+  // throws. Reasons, strongest first: virtualized-list, loading-indicator, lazy-media.
+  function detectMoreContentBelowForToolExec() {
+    var negForMoreContent = { more_content_below: false };
+    try {
+      if (typeof document === 'undefined' || typeof window === 'undefined' || !document.body) return negForMoreContent;
+
+      var MARGIN_FOR_MORE_CONTENT = 64;
+      var MAX_NODES_FOR_MORE_CONTENT = 2500;
+      var MAX_SCROLLERS_FOR_MORE_CONTENT = 30;
+      var vpHForMoreContent = window.innerHeight || (document.documentElement ? document.documentElement.clientHeight : 0) || 0;
+
+      function styleForMoreContent(elForStyleMC) {
+        if (!window.getComputedStyle) return null;
+        try { return window.getComputedStyle(elForStyleMC); } catch (eStyleMC) { return null; }
+      }
+      function isRenderedForMoreContent(elForRenderMC) {
+        if (!elForRenderMC || typeof elForRenderMC.getBoundingClientRect !== 'function') return false;
+        var rForRenderMC;
+        try { rForRenderMC = elForRenderMC.getBoundingClientRect(); } catch (eRectMC) { return false; }
+        return !!rForRenderMC && rForRenderMC.width > 0 && rForRenderMC.height > 0;
+      }
+
+      // Room to scroll down: the main document, or any nested scroll container.
+      var pageScrollHForMoreContent = Math.max(
+        document.documentElement ? document.documentElement.scrollHeight : 0,
+        document.body ? document.body.scrollHeight : 0
+      );
+      var pageTopForMoreContent = window.scrollY || (document.documentElement ? document.documentElement.scrollTop : 0) || 0;
+      var pageRoomBelowForMoreContent = pageScrollHForMoreContent > (pageTopForMoreContent + vpHForMoreContent + MARGIN_FOR_MORE_CONTENT);
+
+      var scrollersForMoreContent = [];
+      var allNodesForMoreContent = Array.prototype.slice.call(document.body.getElementsByTagName('*'), 0, MAX_NODES_FOR_MORE_CONTENT);
+      for (var nIdxForMoreContent = 0; nIdxForMoreContent < allNodesForMoreContent.length; nIdxForMoreContent++) {
+        var elForMoreContent = allNodesForMoreContent[nIdxForMoreContent];
+        if (!elForMoreContent || elForMoreContent.scrollHeight <= elForMoreContent.clientHeight + MARGIN_FOR_MORE_CONTENT) continue;
+        var stForMoreContent = styleForMoreContent(elForMoreContent);
+        if (!stForMoreContent || !/(auto|scroll|overlay)/.test(stForMoreContent.overflowY)) continue;
+        if (elForMoreContent.scrollTop + elForMoreContent.clientHeight >= elForMoreContent.scrollHeight - MARGIN_FOR_MORE_CONTENT) continue;
+        scrollersForMoreContent.push(elForMoreContent);
+        if (scrollersForMoreContent.length >= MAX_SCROLLERS_FOR_MORE_CONTENT) break;
+      }
+
+      if (!pageRoomBelowForMoreContent && scrollersForMoreContent.length === 0) return negForMoreContent;
+
+      // Evidence 1 (strongest): virtualization. A tall scroller whose inner content is a
+      // spacer nearly as tall as the full scroll extent but holding only a small window
+      // of rendered rows (react-window / react-virtualized and similar).
+      for (var vIdxForMoreContent = 0; vIdxForMoreContent < scrollersForMoreContent.length; vIdxForMoreContent++) {
+        var vScrollerForMoreContent = scrollersForMoreContent[vIdxForMoreContent];
+        if (vScrollerForMoreContent.scrollHeight <= vScrollerForMoreContent.clientHeight * 3) continue;
+        var innerNodesForMoreContent = Array.prototype.slice.call(vScrollerForMoreContent.getElementsByTagName('*'), 0, 200);
+        for (var iIdxForMoreContent = 0; iIdxForMoreContent < innerNodesForMoreContent.length; iIdxForMoreContent++) {
+          var innerForMoreContent = innerNodesForMoreContent[iIdxForMoreContent];
+          if (!innerForMoreContent || !innerForMoreContent.children) continue;
+          var childCountForMoreContent = innerForMoreContent.children.length;
+          if (childCountForMoreContent === 0 || childCountForMoreContent > 60) continue;
+          if (innerForMoreContent.offsetHeight >= vScrollerForMoreContent.scrollHeight * 0.7) {
+            return { more_content_below: true, more_content_reason: 'virtualized-list' };
+          }
+        }
+      }
+
+      // Evidence 2: a visible loading indicator at or below the current fold.
+      var loadingSelForMoreContent = '[aria-busy="true"],[role="progressbar"],[role="status"],[class*="loading" i],[class*="spinner" i],[class*="skeleton" i],[class*="loader" i],[class*="shimmer" i],[id*="loading" i],[id*="spinner" i]';
+      var loadingNodesForMoreContent;
+      try { loadingNodesForMoreContent = Array.prototype.slice.call(document.body.querySelectorAll(loadingSelForMoreContent), 0, 200); }
+      catch (eLoadSelMC) { loadingNodesForMoreContent = []; }
+      for (var lIdxForMoreContent = 0; lIdxForMoreContent < loadingNodesForMoreContent.length; lIdxForMoreContent++) {
+        var loadElForMoreContent = loadingNodesForMoreContent[lIdxForMoreContent];
+        if (!isRenderedForMoreContent(loadElForMoreContent)) continue;
+        var loadRectForMoreContent = loadElForMoreContent.getBoundingClientRect();
+        if (loadRectForMoreContent.bottom > 0 && loadRectForMoreContent.top >= vpHForMoreContent * 0.5) {
+          return { more_content_below: true, more_content_reason: 'loading-indicator' };
+        }
+      }
+
+      // Evidence 3 (weakest): lazy images below the fold that have not loaded yet.
+      var lazyNodesForMoreContent;
+      try { lazyNodesForMoreContent = Array.prototype.slice.call(document.body.querySelectorAll('img[loading="lazy"]'), 0, 200); }
+      catch (eLazySelMC) { lazyNodesForMoreContent = []; }
+      for (var zIdxForMoreContent = 0; zIdxForMoreContent < lazyNodesForMoreContent.length; zIdxForMoreContent++) {
+        var lazyElForMoreContent = lazyNodesForMoreContent[zIdxForMoreContent];
+        if (!lazyElForMoreContent || lazyElForMoreContent.naturalWidth > 0) continue;
+        var lazyRectForMoreContent;
+        try { lazyRectForMoreContent = lazyElForMoreContent.getBoundingClientRect(); } catch (eLazyRectMC) { continue; }
+        if (lazyRectForMoreContent && lazyRectForMoreContent.top >= vpHForMoreContent - MARGIN_FOR_MORE_CONTENT) {
+          return { more_content_below: true, more_content_reason: 'lazy-media' };
+        }
+      }
+
+      return negForMoreContent;
+    } catch (eMoreContent) {
+      return negForMoreContent;
+    }
+  }
+
+  // Baseline for growth tracking: the length of the most recent whole-page read, keyed by
+  // URL. Lives for the life of this content-script instance (per tab); resets naturally on
+  // re-injection and whenever the URL changes (covers SPA navigation such as YouTube).
+  var lastContentReadStateForToolExec = { url: '', length: 0 };
+
+  // Decide more_content_below for a whole-page read. Combines the static evidence probe
+  // (the only signal available on a first read) with growth tracking: if this read is
+  // meaningfully longer than the previous read of the same URL, the page is still loading
+  // content as the agent scrolls (append-style infinite scroll / lazy sections), which the
+  // static probe cannot see because the next batch's loader is not in the DOM until scrolled
+  // toward. A merely tall page never trips this: growth only fires when the text actually
+  // grew since last time. Reason precedence: virtualized-list (changes HOW to scroll) wins,
+  // then content-grew, then the remaining static reasons.
+  function evaluateMoreContentForToolExec(textForEval) {
+    var staticForEval = detectMoreContentBelowForToolExec();
+    var grewForEval = false;
+    try {
+      var GROWTH_MIN_FOR_EVAL = 500;
+      var urlForEval = (typeof window !== 'undefined' && window.location) ? String(window.location.href || '') : '';
+      var lengthForEval = (typeof textForEval === 'string') ? textForEval.length : 0;
+      if (lastContentReadStateForToolExec.url === urlForEval &&
+          lengthForEval - lastContentReadStateForToolExec.length >= GROWTH_MIN_FOR_EVAL) {
+        grewForEval = true;
+      }
+      lastContentReadStateForToolExec.url = urlForEval;
+      lastContentReadStateForToolExec.length = lengthForEval;
+    } catch (eEval) { grewForEval = false; }
+
+    var moreForEval = !!staticForEval.more_content_below || grewForEval;
+    var reasonForEval;
+    if (staticForEval.more_content_reason === 'virtualized-list') reasonForEval = 'virtualized-list';
+    else if (grewForEval) reasonForEval = 'content-grew';
+    else reasonForEval = staticForEval.more_content_reason;
+
+    var outForEval = { more_content_below: moreForEval };
+    if (moreForEval && reasonForEval) outForEval.more_content_reason = reasonForEval;
+    return outForEval;
   }
 
   // The CDP client resolves its target tab from sender.tab when no tabId is passed.

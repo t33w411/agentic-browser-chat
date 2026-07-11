@@ -10532,6 +10532,9 @@
         }
       }
       if (chatTaForUI) chatTaForUI.disabled = sending;
+      // Voice input cannot start while a run is in flight for the active chat.
+      const voiceBtnForUI = root.getElementById('voice-input-btn');
+      if (voiceBtnForUI) voiceBtnForUI.disabled = sending;
       const messagesContentForUI = root.getElementById('chat-messages-content');
       if (messagesContentForUI) messagesContentForUI.classList.toggle('run-active', sending);
     }
@@ -10701,9 +10704,12 @@
         counterElForDisplay = document.createElement('div');
         counterElForDisplay.id = 'abchat-token-counter';
         counterElForDisplay.style.cssText = 'font-size:11px;color:var(--text-muted,#888);display:flex;align-items:center;gap:4px;white-space:nowrap;padding:0 4px;';
-        const sendBtnForCounter = inputBottomForCounter.querySelector('.send-btn');
-        if (sendBtnForCounter) {
-          inputBottomForCounter.insertBefore(counterElForDisplay, sendBtnForCounter);
+        // The counter sits as a direct child of .input-bottom, before the right-side
+        // control group (mic + send). Insert before whichever anchor is a direct child.
+        const anchorForCounter = inputBottomForCounter.querySelector(':scope > .input-right')
+          || inputBottomForCounter.querySelector(':scope > .send-btn');
+        if (anchorForCounter) {
+          inputBottomForCounter.insertBefore(counterElForDisplay, anchorForCounter);
         } else {
           inputBottomForCounter.appendChild(counterElForDisplay);
         }
@@ -11057,7 +11063,7 @@
         case 'ls':
           return args.type ? 'Listing ' + args.type + 's' : 'Listing workspace';
         case 'page_observe':
-          return 'Looking at the page';
+          return 'Checking page controls';
         case 'page_act': {
           switch (args.action) {
             case 'click':  return (args.button === 'right' ? 'Right-clicking' : 'Clicking') + quotedRefNameForLiveTurn(args.ref);
@@ -13853,6 +13859,215 @@
       }
     }
 
+    // --- Voice dictation (Web Speech API, run in-page) ---
+    // Recognition runs directly in this content-script context because Chrome's
+    // webkitSpeechRecognition does not work inside an offscreen document. The microphone
+    // permission is therefore per-site (prompted on first use per origin). Dictated text is
+    // appended to whatever the user already typed, so voiceBaseText snapshots that at start.
+    let voiceRecognitionForPanelRuntime = null;
+    let voiceListeningForPanelRuntime = false;
+    let voiceBaseTextForPanelRuntime = '';
+    let voiceFinalAccumForPanelRuntime = '';
+    const voiceCapturedGenerationForPanelRuntime = (typeof window !== 'undefined' && window.abchatListenerGeneration) || 0;
+
+    function getVoiceRecognitionCtorForPanelRuntime() {
+      try {
+        return (typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition)) || null;
+      } catch (errCtorForVoice) {
+        return null;
+      }
+    }
+
+    function isVoiceStaleForPanelRuntime() {
+      if (((typeof window !== 'undefined' && window.abchatListenerGeneration) || 0) !== voiceCapturedGenerationForPanelRuntime) {
+        return true;
+      }
+      try {
+        if (!chrome.runtime || !chrome.runtime.id) return true;
+      } catch (errStaleForVoice) {
+        return true;
+      }
+      return false;
+    }
+
+    function getVoiceButtonForPanelRuntime() {
+      return root ? root.getElementById('voice-input-btn') : null;
+    }
+
+    function setVoiceButtonStateForPanelRuntime(isListeningForVoice) {
+      const btnForVoice = getVoiceButtonForPanelRuntime();
+      if (!btnForVoice) return;
+      btnForVoice.classList.toggle('listening', !!isListeningForVoice);
+      btnForVoice.setAttribute('aria-pressed', isListeningForVoice ? 'true' : 'false');
+      btnForVoice.setAttribute('title', isListeningForVoice ? 'Stop voice input' : 'Voice input');
+    }
+
+    // While recording: reveal the waveform + hide the send button (via .recording on
+    // .input-right), and disable the composer so it cannot be edited mid-dictation. The
+    // disabled textarea still accepts programmatic .value updates from the transcript.
+    function setVoiceRecordingUIForPanelRuntime(activeForVoiceUI) {
+      if (!root) return;
+      const inputRightForVoice = root.querySelector('.input-right');
+      if (inputRightForVoice) inputRightForVoice.classList.toggle('recording', !!activeForVoiceUI);
+      const taForVoiceUI = root.querySelector('.chat-textarea');
+      if (taForVoiceUI) {
+        taForVoiceUI.disabled = !!activeForVoiceUI;
+        if (!activeForVoiceUI) {
+          // Hand focus back so the user can immediately edit or press Enter to send.
+          try {
+            taForVoiceUI.focus();
+            taForVoiceUI.selectionStart = taForVoiceUI.selectionEnd = taForVoiceUI.value.length;
+          } catch (errFocusForVoice) {}
+        }
+      }
+    }
+
+    function showVoiceToastForPanelRuntime(msgForVoiceToast) {
+      const toastForVoice = ABChatContent && ABChatContent.ui && ABChatContent.ui.toast;
+      if (toastForVoice && typeof toastForVoice.show === 'function') {
+        toastForVoice.show(String(msgForVoiceToast), { durationMs: 4000 });
+      }
+    }
+
+    function composeVoiceTextForPanelRuntime(dictatedForVoice) {
+      const baseForVoice = voiceBaseTextForPanelRuntime || '';
+      const dictForVoice = dictatedForVoice || '';
+      if (!dictForVoice) return baseForVoice;
+      if (baseForVoice && !/\s$/.test(baseForVoice)) return baseForVoice + ' ' + dictForVoice;
+      return baseForVoice + dictForVoice;
+    }
+
+    function applyVoiceTranscriptForPanelRuntime(finalTextForVoice, interimForVoice) {
+      const taForVoice = root ? root.querySelector('.chat-textarea') : null;
+      if (!taForVoice) return;
+      const dictatedForVoice = String(finalTextForVoice || '') + String(interimForVoice || '');
+      taForVoice.value = composeVoiceTextForPanelRuntime(dictatedForVoice);
+      // Keep autosize, draft-save and send-enabled state in sync with typed input.
+      try { taForVoice.dispatchEvent(new Event('input', { bubbles: true })); } catch (errInputForVoice) {}
+      try {
+        taForVoice.selectionStart = taForVoice.selectionEnd = taForVoice.value.length;
+        taForVoice.scrollTop = taForVoice.scrollHeight;
+      } catch (errCaretForVoice) {}
+    }
+
+    function voiceErrorMessageForPanelRuntime(codeForVoiceError) {
+      switch (codeForVoiceError) {
+        case 'not-allowed':
+        case 'service-not-allowed':
+          return 'Microphone access is blocked. Allow it for this site to use voice input.';
+        case 'audio-capture':
+          return 'No microphone was found.';
+        case 'network':
+          return 'Voice recognition network error. Please try again.';
+        case 'unsupported':
+          return 'Voice input is not supported in this browser.';
+        default:
+          return 'Voice input error. Please try again.';
+      }
+    }
+
+    function finishVoiceInputForPanelRuntime() {
+      voiceListeningForPanelRuntime = false;
+      voiceRecognitionForPanelRuntime = null;
+      setVoiceButtonStateForPanelRuntime(false);
+      setVoiceRecordingUIForPanelRuntime(false);
+    }
+
+    function toggleVoiceInputForPanelRuntime() {
+      if (voiceListeningForPanelRuntime) {
+        stopVoiceInputForPanelRuntime();
+      } else {
+        startVoiceInputForPanelRuntime();
+      }
+    }
+
+    function startVoiceInputForPanelRuntime() {
+      const CtorForVoice = getVoiceRecognitionCtorForPanelRuntime();
+      if (!CtorForVoice) {
+        showVoiceToastForPanelRuntime(voiceErrorMessageForPanelRuntime('unsupported'));
+        return;
+      }
+      const taForVoiceStart = root ? root.querySelector('.chat-textarea') : null;
+      voiceBaseTextForPanelRuntime = taForVoiceStart ? String(taForVoiceStart.value || '') : '';
+      voiceFinalAccumForPanelRuntime = '';
+
+      let recForVoice;
+      try {
+        recForVoice = new CtorForVoice();
+      } catch (errNewForVoice) {
+        showVoiceToastForPanelRuntime(voiceErrorMessageForPanelRuntime('unsupported'));
+        return;
+      }
+      recForVoice.continuous = true;
+      recForVoice.interimResults = true;
+      try { recForVoice.lang = navigator.language || ''; } catch (errLangForVoice) {}
+
+      recForVoice.onstart = function onVoiceStartForPanelRuntime() {
+        if (isVoiceStaleForPanelRuntime()) { try { recForVoice.abort(); } catch (e) {} return; }
+        voiceListeningForPanelRuntime = true;
+        setVoiceButtonStateForPanelRuntime(true);
+      };
+
+      recForVoice.onresult = function onVoiceResultForPanelRuntime(eventForVoice) {
+        if (isVoiceStaleForPanelRuntime()) { try { recForVoice.abort(); } catch (e) {} return; }
+        let interimForVoice = '';
+        for (let iForVoice = eventForVoice.resultIndex; iForVoice < eventForVoice.results.length; iForVoice++) {
+          const resForVoice = eventForVoice.results[iForVoice];
+          const transcriptForVoice = (resForVoice[0] && resForVoice[0].transcript) || '';
+          if (resForVoice.isFinal) {
+            voiceFinalAccumForPanelRuntime += transcriptForVoice;
+          } else {
+            interimForVoice += transcriptForVoice;
+          }
+        }
+        applyVoiceTranscriptForPanelRuntime(voiceFinalAccumForPanelRuntime, interimForVoice);
+      };
+
+      recForVoice.onerror = function onVoiceErrorForPanelRuntime(eventForVoice) {
+        const codeForVoice = (eventForVoice && eventForVoice.error) || 'unknown';
+        // 'no-speech' / 'aborted' are non-fatal: onend follows and restarts (still listening)
+        // or settles to idle. Everything else stops the session and surfaces a toast.
+        if (codeForVoice === 'no-speech' || codeForVoice === 'aborted') return;
+        voiceListeningForPanelRuntime = false;
+        if (!isVoiceStaleForPanelRuntime()) {
+          showVoiceToastForPanelRuntime(voiceErrorMessageForPanelRuntime(codeForVoice));
+        }
+      };
+
+      recForVoice.onend = function onVoiceEndForPanelRuntime() {
+        // Web Speech ends on silence even with continuous=true; restart while the user still
+        // wants to listen and this is still the active instance for the current generation.
+        if (voiceListeningForPanelRuntime && voiceRecognitionForPanelRuntime === recForVoice && !isVoiceStaleForPanelRuntime()) {
+          try { recForVoice.start(); return; } catch (errRestartForVoice) {}
+        }
+        if (!isVoiceStaleForPanelRuntime()) {
+          applyVoiceTranscriptForPanelRuntime(voiceFinalAccumForPanelRuntime, '');
+        }
+        finishVoiceInputForPanelRuntime();
+      };
+
+      voiceRecognitionForPanelRuntime = recForVoice;
+      voiceListeningForPanelRuntime = true;
+      setVoiceButtonStateForPanelRuntime(true);
+      setVoiceRecordingUIForPanelRuntime(true);
+      try {
+        recForVoice.start();
+      } catch (errStartForVoice) {
+        finishVoiceInputForPanelRuntime();
+        showVoiceToastForPanelRuntime(voiceErrorMessageForPanelRuntime('unknown'));
+      }
+    }
+
+    function stopVoiceInputForPanelRuntime() {
+      voiceListeningForPanelRuntime = false;
+      setVoiceButtonStateForPanelRuntime(false);
+      setVoiceRecordingUIForPanelRuntime(false);
+      const recForVoiceStop = voiceRecognitionForPanelRuntime;
+      if (recForVoiceStop) {
+        try { recForVoiceStop.stop(); } catch (errStopForVoice) {}
+      }
+    }
+
     async function saveApiKeyFromSettingsForPanelRuntime() {
       const inputForKey = root.getElementById('settings-api-key-input');
       if (!inputForKey) return;
@@ -16358,6 +16573,7 @@
             case 'close-pause-dialog':   closePauseDialog(); break;
             case 'send-chat':            sendChatForPanelRuntime(); break;
             case 'cancel-send':          cancelSendForPanelRuntime(); break;
+            case 'toggle-voice-input':   toggleVoiceInputForPanelRuntime(); break;
             case 'close-inline-chat':    closeInlineChat(); break;
             case 'send-inline-message':  sendInlineMessage(); break;
             case 'close-picker-modal':   closePickerModal(); break;
@@ -16599,6 +16815,8 @@
         chatTaForEnter.addEventListener('keydown', function (evtForEnter) {
           if (evtForEnter.key === 'Enter' && !evtForEnter.shiftKey) {
             evtForEnter.preventDefault();
+            // Do not submit while dictation is recording.
+            if (voiceListeningForPanelRuntime) return;
             sendChatForPanelRuntime();
           }
         });
