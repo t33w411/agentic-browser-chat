@@ -951,6 +951,16 @@
       </div>
       <button class="ap-close" data-action="close-attach-preview">${icForPanelTemplate.x13}</button>
     </div>
+    <div class="ap-meta hidden" id="ap-meta">
+      <div class="ap-meta-row hidden" id="ap-meta-url-row">
+        <span class="ap-meta-label">URL</span>
+        <span class="ap-meta-value" id="ap-meta-url"></span>
+      </div>
+      <div class="ap-meta-row hidden" id="ap-meta-title-row">
+        <span class="ap-meta-label">Page</span>
+        <span class="ap-meta-value" id="ap-meta-title"></span>
+      </div>
+    </div>
     <div class="ap-changed-banner hidden" id="ap-changed-banner"></div>
     <div class="ap-body ne-preview" id="ap-content"></div>
     <div class="ap-footer hidden" id="ap-footer">

@@ -313,6 +313,15 @@
         '  font-size: 13px; color: #60748a;',
         '  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;',
         '}',
+        // Dark-theme variants. The pre-paint theme apply stamps data-theme on
+        // #panel-host before the host is unhidden, so these match on first paint
+        // and outspecify the base rules above. Values mirror the dark CSS
+        // variables in panel.css (--abchat-bg-panel/border/accent/text-muted).
+        '[data-theme="dark"] .libs-loading-overlay { background: #1e293b; }',
+        '[data-theme="dark"] .libs-loading-spinner {',
+        '  border-color: #4a657f; border-top-color: #3b82f6;',
+        '}',
+        '[data-theme="dark"] .libs-loading-label { color: #7a95b0; }',
       ].join('\n');
       shadowRootForPanelBoot.appendChild(overlayStyleForPanelBoot);
     } catch (errorForPanelBoot) {

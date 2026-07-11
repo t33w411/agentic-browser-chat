@@ -978,11 +978,19 @@
     return dbForPanelDataRepo.questions.get(Number(idForPanelDataRepo));
   }
 
+  async function getMessageForPanelDataRepo(messageIdForPanelDataRepo) {
+    var dbForPanelDataRepo = requireDbForPanelDataRepo();
+    var numericIdForPanelDataRepo = Number(messageIdForPanelDataRepo);
+    if (!Number.isFinite(numericIdForPanelDataRepo)) throw new Error('Invalid message id');
+    return dbForPanelDataRepo.messages.get(numericIdForPanelDataRepo);
+  }
+
   async function updateMessageForPanelDataRepo(messageIdForPanelDataRepo, updatesForPanelDataRepo) {
     var dbForPanelDataRepo = requireDbForPanelDataRepo();
     var numericIdForPanelDataRepo = Number(messageIdForPanelDataRepo);
     if (!Number.isFinite(numericIdForPanelDataRepo)) throw new Error('Invalid message id');
     var safeUpdatesForPanelDataRepo = {};
+    if (updatesForPanelDataRepo.content != null) safeUpdatesForPanelDataRepo.content = String(updatesForPanelDataRepo.content);
     if (updatesForPanelDataRepo.usagePromptTokens != null) safeUpdatesForPanelDataRepo.usagePromptTokens = Number(updatesForPanelDataRepo.usagePromptTokens) || 0;
     if (updatesForPanelDataRepo.usageCompletionTokens != null) safeUpdatesForPanelDataRepo.usageCompletionTokens = Number(updatesForPanelDataRepo.usageCompletionTokens) || 0;
     if (updatesForPanelDataRepo.usageTotalTokens != null) safeUpdatesForPanelDataRepo.usageTotalTokens = Number(updatesForPanelDataRepo.usageTotalTokens) || 0;
@@ -1002,6 +1010,7 @@
     updateChat:                   updateChatForPanelDataRepo,
     deleteChat:                   deleteChatForPanelDataRepo,
     listMessagesByChatId:         listMessagesByChatIdForPanelDataRepo,
+    getMessage:                   getMessageForPanelDataRepo,
     createMessage:                createMessageForPanelDataRepo,
     updateMessage:                updateMessageForPanelDataRepo,
     bulkReplaceMessagesFromIndex: bulkReplaceMessagesFromIndexForPanelDataRepo,

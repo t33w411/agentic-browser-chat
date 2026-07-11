@@ -6361,12 +6361,108 @@ self.onmessage = function (e) {
     }
   }
 
+  // Stamp result_ref (= persisted tool message id) onto a model-facing tool result JSON
+  // string so the agent can pass that id to eval's vars_from. Only plain objects are
+  // stamped; arrays/primitives are left unchanged (rare for tool results).
+  function stampToolResultRefForToolExec(contentStrForStamp, messageIdForStamp) {
+    var idForStamp = Number(messageIdForStamp);
+    if (!Number.isFinite(idForStamp) || idForStamp <= 0) return contentStrForStamp;
+    if (typeof contentStrForStamp !== 'string' || !contentStrForStamp) return contentStrForStamp;
+    try {
+      var parsedForStamp = JSON.parse(contentStrForStamp);
+      if (!parsedForStamp || typeof parsedForStamp !== 'object' || Array.isArray(parsedForStamp)) {
+        return contentStrForStamp;
+      }
+      parsedForStamp.result_ref = idForStamp;
+      return JSON.stringify(parsedForStamp);
+    } catch (stampErr) {
+      return contentStrForStamp;
+    }
+  }
+
+  // Drop result_ref from a resolved vars_from payload so eval code sees the original
+  // tool-result shape, not the discoverability metadata.
+  function stripResultRefFromPayloadForToolExec(payloadForStrip) {
+    if (!payloadForStrip || typeof payloadForStrip !== 'object' || Array.isArray(payloadForStrip)) {
+      return payloadForStrip;
+    }
+    if (!Object.prototype.hasOwnProperty.call(payloadForStrip, 'result_ref')) return payloadForStrip;
+    var outForStrip = {};
+    Object.keys(payloadForStrip).forEach(function (keyForStrip) {
+      if (keyForStrip !== 'result_ref') outForStrip[keyForStrip] = payloadForStrip[keyForStrip];
+    });
+    return outForStrip;
+  }
+
+  // Resolve eval vars_from: each value is a tool-message id in the current chat. Loads the
+  // persisted content (exact bytes, including after context collapse) and injects it under
+  // the given var name. Rejects invalid keys, missing/wrong-chat/non-tool messages, and
+  // unparseable content.
+  async function resolveVarsFromForToolExec(varsFromForResolve, chatIdForResolve, repoForResolve) {
+    if (varsFromForResolve === undefined || varsFromForResolve === null) {
+      return { ok: true, vars: {} };
+    }
+    if (typeof varsFromForResolve !== 'object' || Array.isArray(varsFromForResolve)) {
+      return { ok: false, error: 'vars_from must be a plain object mapping variable names to tool result_ref message ids.' };
+    }
+    var keysForResolve = Object.keys(varsFromForResolve);
+    if (keysForResolve.length === 0) return { ok: true, vars: {} };
+    var numericChatIdForResolve = Number(chatIdForResolve);
+    if (!Number.isFinite(numericChatIdForResolve)) {
+      return { ok: false, error: 'vars_from requires an active chat; no chat id is available in this context.' };
+    }
+    if (!repoForResolve || typeof repoForResolve.getMessage !== 'function') {
+      return { ok: false, error: 'Message storage is unavailable; cannot resolve vars_from.' };
+    }
+    var resolvedForResolve = {};
+    for (var iForResolve = 0; iForResolve < keysForResolve.length; iForResolve++) {
+      var keyForResolve = keysForResolve[iForResolve];
+      if (keyForResolve === 'blobs') {
+        return { ok: false, error: 'vars_from cannot contain a key named "blobs": that name is reserved for the injected attachment array.' };
+      }
+      if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(keyForResolve)) {
+        return { ok: false, error: 'vars_from key "' + keyForResolve + '" is not a valid JavaScript identifier; use only letters, digits, _ or $, and do not start with a digit.' };
+      }
+      var refIdForResolve = Number(varsFromForResolve[keyForResolve]);
+      if (!Number.isFinite(refIdForResolve) || refIdForResolve <= 0 || Math.floor(refIdForResolve) !== refIdForResolve) {
+        return { ok: false, error: 'vars_from["' + keyForResolve + '"] must be a positive integer result_ref (tool message id).' };
+      }
+      var messageForResolve = null;
+      try {
+        messageForResolve = await repoForResolve.getMessage(refIdForResolve);
+      } catch (getErrForResolve) {
+        return { ok: false, error: 'Failed to load result_ref ' + refIdForResolve + ': ' + ((getErrForResolve && getErrForResolve.message) || String(getErrForResolve)) };
+      }
+      if (!messageForResolve) {
+        return { ok: false, error: 'result_ref ' + refIdForResolve + ' not found (message may have been deleted).' };
+      }
+      if (Number(messageForResolve.chatId) !== numericChatIdForResolve) {
+        return { ok: false, error: 'result_ref ' + refIdForResolve + ' belongs to a different chat; vars_from only resolves tool results from the current chat.' };
+      }
+      if (String(messageForResolve.role || '') !== 'tool') {
+        return { ok: false, error: 'result_ref ' + refIdForResolve + ' is not a tool result message.' };
+      }
+      var contentForResolve = typeof messageForResolve.content === 'string' ? messageForResolve.content : '';
+      var parsedForResolve;
+      try {
+        parsedForResolve = JSON.parse(contentForResolve);
+      } catch (parseErrForResolve) {
+        return { ok: false, error: 'result_ref ' + refIdForResolve + ' content is not valid JSON and cannot be injected into vars.' };
+      }
+      resolvedForResolve[keyForResolve] = stripResultRefFromPayloadForToolExec(parsedForResolve);
+    }
+    return { ok: true, vars: resolvedForResolve };
+  }
+
   async function evalToolForToolExec(args, context) {
     var signal = getAbortSignalForToolExec(context);
     var code = args.code;
     if (typeof code !== 'string') return { ok: false, error: 'code is required' };
     if (args.vars !== undefined && args.vars !== null && (typeof args.vars !== 'object' || Array.isArray(args.vars))) {
       return { ok: false, error: 'vars must be a plain object (key-value map), not an array or primitive' };
+    }
+    if (args.vars_from !== undefined && args.vars_from !== null && (typeof args.vars_from !== 'object' || Array.isArray(args.vars_from))) {
+      return { ok: false, error: 'vars_from must be a plain object mapping variable names to tool result_ref message ids.' };
     }
     if (args.blob_ids !== undefined && args.blob_ids !== null && !Array.isArray(args.blob_ids)) {
       return { ok: false, error: 'blob_ids must be an array of attachment blob IDs (integers).' };
@@ -6375,6 +6471,29 @@ self.onmessage = function (e) {
     var timeout = (typeof args.timeout === 'number' && args.timeout > 0)
       ? Math.min(Math.max(Math.floor(args.timeout), 5000), 30000)
       : 5000;
+
+    var chatIdForEval = (context && context.chatId != null) ? Number(context.chatId) : NaN;
+    var repoForEvalVarsFrom = getPanelDataRepoForToolExec();
+    if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
+    var varsFromResolvedForEval = await resolveVarsFromForToolExec(args.vars_from, chatIdForEval, repoForEvalVarsFrom);
+    if (!varsFromResolvedForEval.ok) return varsFromResolvedForEval;
+    var fromVarsForEval = varsFromResolvedForEval.vars || {};
+    var fromKeysForEval = Object.keys(fromVarsForEval);
+    for (var collisionIdxForEval = 0; collisionIdxForEval < fromKeysForEval.length; collisionIdxForEval++) {
+      var collisionKeyForEval = fromKeysForEval[collisionIdxForEval];
+      if (Object.prototype.hasOwnProperty.call(vars, collisionKeyForEval)) {
+        return { ok: false, error: 'vars and vars_from both define "' + collisionKeyForEval + '"; remove it from one of them.' };
+      }
+    }
+    var mergedVarsForEval = {};
+    for (var fromMergeIdx = 0; fromMergeIdx < fromKeysForEval.length; fromMergeIdx++) {
+      mergedVarsForEval[fromKeysForEval[fromMergeIdx]] = fromVarsForEval[fromKeysForEval[fromMergeIdx]];
+    }
+    var explicitKeysForEval = Object.keys(vars);
+    for (var explicitMergeIdx = 0; explicitMergeIdx < explicitKeysForEval.length; explicitMergeIdx++) {
+      mergedVarsForEval[explicitKeysForEval[explicitMergeIdx]] = vars[explicitKeysForEval[explicitMergeIdx]];
+    }
+    vars = mergedVarsForEval;
 
     // Serialize vars to JSON on the caller side before sending to the worker.
     // Reasons: (1) gives a clean error path if vars contains non-serializable values,
@@ -9395,6 +9514,9 @@ self.onmessage = function (e) {
   }
 
   ns.executeTool = executeToolForToolExec;
+  // Stamp result_ref onto a persisted tool-result JSON string (message id). Used by both
+  // agent loops after createMessage so the model can pass that id to eval vars_from.
+  ns.stampToolResultRef = stampToolResultRefForToolExec;
   // Live-turn chip labels: resolve a ref to its accessible name from the latest observe
   // registry. Returns '' when the ref is unknown or nameless. Panel-only; never sent to the model.
   ns.getObserveRefLabel = function (refForLabel) {

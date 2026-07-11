@@ -3111,6 +3111,7 @@
 
     function startChatEditForPanelRuntime(msgId) {
       if (!Number.isFinite(msgId)) return;
+      if (isActiveChatSendingForPanelRuntime()) return;
       const editableMessageForPanelRuntime = getMsgById(msgId);
       if (!editableMessageForPanelRuntime || editableMessageForPanelRuntime.role !== 'user') return;
       S.chatEditingMsgId = msgId;
@@ -3654,6 +3655,9 @@
         syncMainChatListItemForPanelRuntime(CHAT_ORDER_FOR_PANEL_RUNTIME[iForPage]);
       }
       rebuildChatListGroupingForPanelRuntime();
+      // Newly paged-in items default to display:'' and would otherwise escape an
+      // active favs/sub-tab/search filter, so reapply it over the enlarged set.
+      applyChatListFilterForPanelRuntime();
     }
 
     function renderNextNotePageForPanelRuntime() {
@@ -3664,6 +3668,9 @@
       for (var iForPage = startForPage; iForPage < endForPage; iForPage++) {
         syncMainNoteListItemForPanelRuntime(NOTE_ORDER_FOR_PANEL_RUNTIME[iForPage]);
       }
+      // Newly paged-in items default to display:'' and would otherwise escape an
+      // active search filter, so reapply it over the enlarged set.
+      reapplyActiveSearchForListTypeForPanelRuntime('notes');
     }
 
     function renderNextTaskPageForPanelRuntime() {
@@ -3674,6 +3681,9 @@
       for (var iForPage = startForPage; iForPage < endForPage; iForPage++) {
         syncMainTaskListItemForPanelRuntime(TASK_ORDER_FOR_PANEL_RUNTIME[iForPage]);
       }
+      // Newly paged-in items default to display:'' and would otherwise escape an
+      // active search/status filter, so reapply it over the enlarged set.
+      reapplyActiveSearchForListTypeForPanelRuntime('tasks');
     }
 
     function renderNextQuizPageForPanelRuntime() {
@@ -3684,6 +3694,9 @@
       for (var iForPage = startForPage; iForPage < endForPage; iForPage++) {
         syncMainQuizListItemForPanelRuntime(QUIZ_ORDER_FOR_PANEL_RUNTIME[iForPage]);
       }
+      // Newly paged-in items default to display:'' and would otherwise escape an
+      // active status filter, so reapply it over the enlarged set.
+      setQuizFilter(S.quizFilter, { skipStateSync: true });
     }
 
     function rebuildChatListGroupingForPanelRuntime() {
@@ -4370,6 +4383,7 @@
     }
 
     function hidePair(btn) {
+      if (isActiveChatSendingForPanelRuntime()) return;
       const pairMsgId = Number(btn.dataset.pairMsgId);
       if (!Number.isFinite(pairMsgId)) return;
       S.chatEditingMsgId = null;
@@ -4771,7 +4785,9 @@
           mimeType: String(chipSourceForPanelRuntime.dataset.attachMimeType || '').trim(),
           kind: String(chipSourceForPanelRuntime.dataset.attachKind || '').trim(),
           preview: String(chipSourceForPanelRuntime.dataset.attachPreview || ''),
-          sourceHash: String(chipSourceForPanelRuntime.dataset.attachSourceHash || '')
+          sourceHash: String(chipSourceForPanelRuntime.dataset.attachSourceHash || ''),
+          pageUrl: String(chipSourceForPanelRuntime.dataset.attachPageUrl || '').trim(),
+          pageTitle: String(chipSourceForPanelRuntime.dataset.attachPageTitle || '').trim()
         };
       }
       if (typeof chipSourceForPanelRuntime === 'object') {
@@ -4783,7 +4799,9 @@
           mimeType: String(chipSourceForPanelRuntime.mimeType || '').trim(),
           kind: String(chipSourceForPanelRuntime.kind || '').trim(),
           preview: String(chipSourceForPanelRuntime.preview || ''),
-          sourceHash: String(chipSourceForPanelRuntime.sourceHash || '')
+          sourceHash: String(chipSourceForPanelRuntime.sourceHash || ''),
+          pageUrl: String(chipSourceForPanelRuntime.pageUrl || '').trim(),
+          pageTitle: String(chipSourceForPanelRuntime.pageTitle || '').trim()
         };
       }
       return null;
@@ -5037,6 +5055,16 @@
     }
 
     async function resolveChipPreviewPayloadForPanelRuntime(chipSourceForPanelRuntime) {
+      const resolvedPayloadForPanelRuntime = await resolveChipPreviewPayloadInnerForPanelRuntime(chipSourceForPanelRuntime);
+      const metaForPreviewForPanelRuntime = normalizeChipPreviewSourceForPanelRuntime(chipSourceForPanelRuntime);
+      if (resolvedPayloadForPanelRuntime && typeof resolvedPayloadForPanelRuntime === 'object' && metaForPreviewForPanelRuntime) {
+        resolvedPayloadForPanelRuntime.pageUrl = String(metaForPreviewForPanelRuntime.pageUrl || '');
+        resolvedPayloadForPanelRuntime.pageTitle = String(metaForPreviewForPanelRuntime.pageTitle || '');
+      }
+      return resolvedPayloadForPanelRuntime;
+    }
+
+    async function resolveChipPreviewPayloadInnerForPanelRuntime(chipSourceForPanelRuntime) {
       const chipMetaForPanelRuntime = normalizeChipPreviewSourceForPanelRuntime(chipSourceForPanelRuntime);
       if (!chipMetaForPanelRuntime) {
         return { previewType: 'markdown', content: '' };
@@ -9103,6 +9131,24 @@
       const normalizedPayloadForPanelRuntime = payloadForPanelRuntime && typeof payloadForPanelRuntime === 'object' && !Array.isArray(payloadForPanelRuntime)
         ? payloadForPanelRuntime
         : { previewType: 'markdown', content: String(payloadForPanelRuntime || '') };
+      const metaBlockEl = root.getElementById('ap-meta');
+      const metaUrlRowEl = root.getElementById('ap-meta-url-row');
+      const metaUrlEl = root.getElementById('ap-meta-url');
+      const metaTitleRowEl = root.getElementById('ap-meta-title-row');
+      const metaTitleEl = root.getElementById('ap-meta-title');
+      const pageUrlForMeta = String(normalizedPayloadForPanelRuntime.pageUrl || '').trim();
+      const pageTitleForMeta = String(normalizedPayloadForPanelRuntime.pageTitle || '').trim();
+      if (metaUrlRowEl && metaUrlEl) {
+        metaUrlEl.textContent = pageUrlForMeta;
+        metaUrlRowEl.classList.toggle('hidden', !pageUrlForMeta);
+      }
+      if (metaTitleRowEl && metaTitleEl) {
+        metaTitleEl.textContent = pageTitleForMeta;
+        metaTitleRowEl.classList.toggle('hidden', !pageTitleForMeta);
+      }
+      if (metaBlockEl) {
+        metaBlockEl.classList.toggle('hidden', !pageUrlForMeta && !pageTitleForMeta);
+      }
       const changedBannerEl = root.getElementById('ap-changed-banner');
       if (changedBannerEl) {
         if (normalizedPayloadForPanelRuntime.sourceChanged) {
@@ -10009,10 +10055,21 @@
     function getModelTierForPanelRuntime(m) {
       const cost = Number(m && m.completionCostPerMillion);
       if (!Number.isFinite(cost) || cost <= 0) return null;
-      if (cost <= 1.5) return { label: 'Cheap', cls: 'mp-tier-cheap' };
-      if (cost <= 3) return { label: 'Standard', cls: 'mp-tier-mid' };
-      if (cost <= 15) return { label: 'Expensive', cls: 'mp-tier-expensive' };
-      return { label: 'Extreme', cls: 'mp-tier-extreme' };
+      // Single source of the cost-tier thresholds lives in contextBuilder.costCategoryFor so the UI
+      // badge, the system prompt, and the tool descriptions never drift apart. The inline thresholds
+      // are only a fallback for the unlikely case contextBuilder has not injected yet.
+      const agentNsForTier = globalThis.ABChatAgent || {};
+      const contextBuilderForTier = agentNsForTier.contextBuilder || null;
+      const categoryForTier = (contextBuilderForTier && typeof contextBuilderForTier.costCategoryFor === 'function')
+        ? contextBuilderForTier.costCategoryFor(cost)
+        : (cost <= 1.5 ? 'cheap' : cost <= 3 ? 'standard' : cost <= 15 ? 'expensive' : 'extreme');
+      const tierByCategoryForPanelRuntime = {
+        cheap: { label: 'Cheap', cls: 'mp-tier-cheap' },
+        standard: { label: 'Standard', cls: 'mp-tier-mid' },
+        expensive: { label: 'Expensive', cls: 'mp-tier-expensive' },
+        extreme: { label: 'Extreme', cls: 'mp-tier-extreme' }
+      };
+      return tierByCategoryForPanelRuntime[categoryForTier] || null;
     }
 
     function getImageModelTierForPanelRuntime(m) {
@@ -10437,13 +10494,30 @@
       if (container) container.scrollTop = container.scrollHeight;
     }
 
+    // True when the chat currently being viewed has a run in flight: a local send,
+    // a remote-mirrored stream, OR an offscreen-hosted run this tab just initiated
+    // (before its first stream event arrives). Gates the input and the mutating
+    // per-message options (Edit/Hide) while the turn is live.
+    function isActiveChatSendingForPanelRuntime() {
+      return sendingChatsForPanelRuntime.has(S.activeChatId) ||
+             remoteStreamingChatsForPanelRuntime.has(S.activeChatId) ||
+             offscreenInitiatedChatsForPanelRuntime.has(S.activeChatId);
+    }
+
     function setSendingUIStateForPanelRuntime() {
-      // A local send, a remote-mirrored stream, OR an offscreen-hosted run this tab
-      // just initiated (before its first stream event arrives) for the active chat
-      // turns the send button into a cancel button and disables the input.
-      const sending = sendingChatsForPanelRuntime.has(S.activeChatId) ||
-                      remoteStreamingChatsForPanelRuntime.has(S.activeChatId) ||
-                      offscreenInitiatedChatsForPanelRuntime.has(S.activeChatId);
+      // A run in flight for the active chat turns the send button into a cancel
+      // button, disables the input, and hides the mutating message options.
+      const sending = isActiveChatSendingForPanelRuntime();
+      // A run just became active while a message edit was open: close the edit so
+      // the user can't submit an edit that would rewrite history mid-turn. Only
+      // re-renders in this rare case (chatEditingMsgId is null in the normal flow).
+      if (sending && S.chatEditingMsgId !== null) {
+        S.chatEditingMsgId = null;
+        renderChatMessages();
+        if (liveTurnBubblesForPanelRuntime.has(S.activeChatId)) {
+          reattachLiveTurnBubbleForPanelRuntime(S.activeChatId);
+        }
+      }
       const sendBtnForUI = root.querySelector('.send-btn');
       const chatTaForUI = root.querySelector('.chat-textarea');
       if (sendBtnForUI) {
@@ -10458,6 +10532,8 @@
         }
       }
       if (chatTaForUI) chatTaForUI.disabled = sending;
+      const messagesContentForUI = root.getElementById('chat-messages-content');
+      if (messagesContentForUI) messagesContentForUI.classList.toggle('run-active', sending);
     }
 
     function sumPersistedChatCostForPanelRuntime(chatId) {
@@ -10574,8 +10650,27 @@
             });
           });
         } catch (eOverheadAutomation) { automationEnabledForOverhead = false; }
+        // Resolve the currently selected chat model's cost tier so the estimate matches what a real
+        // send would bill (expensive/extreme models get a trimmed prompt and tool descriptions).
+        let costCategoryForOverhead = 'cheap';
+        try {
+          const chatModelSelectForOverhead = root.getElementById('chat-model-select');
+          let selectedModelIdForOverhead = chatModelSelectForOverhead && chatModelSelectForOverhead.value ? chatModelSelectForOverhead.value : '';
+          if (!selectedModelIdForOverhead && typeof getDefaultModelForPanelRuntime === 'function') {
+            selectedModelIdForOverhead = await getDefaultModelForPanelRuntime();
+          }
+          const cachedForOverhead = await getCachedModelsForPanelRuntime();
+          const cachedChatModelsForOverhead = (cachedForOverhead && cachedForOverhead.chatModels) || [];
+          const modelObjForOverhead = cachedChatModelsForOverhead.find(function (m) { return m.id === selectedModelIdForOverhead; }) || null;
+          const costForOverhead = modelObjForOverhead ? (Number(modelObjForOverhead.completionCostPerMillion) || 0) : 0;
+          if (contextBuilderForOverhead && typeof contextBuilderForOverhead.costCategoryFor === 'function') {
+            costCategoryForOverhead = contextBuilderForOverhead.costCategoryFor(costForOverhead);
+          }
+        } catch (eOverheadCategory) { costCategoryForOverhead = 'cheap'; }
         // Every tool is advertised: the trusted page tools prompt inline rather than being hidden.
-        const toolDefsForOverhead = (agentNsForOverhead.toolDefs || []).slice();
+        const toolDefsForOverhead = (agentNsForOverhead && typeof agentNsForOverhead.resolveAgentConfig === 'function')
+          ? agentNsForOverhead.resolveAgentConfig({ costCategory: costCategoryForOverhead, agentProfile: 'main' }).toolDefs
+          : (agentNsForOverhead.toolDefs || []).slice();
         let memCtxForOverhead = null;
         try {
           if (typeof loadAgentMemoryContextForPanelRuntime === 'function') {
@@ -10587,7 +10682,8 @@
           agentMemory: memCtxForOverhead ? memCtxForOverhead.agentMemory : '',
           agentMemoryId: memCtxForOverhead ? memCtxForOverhead.agentMemoryId : null,
           agentSkills: memCtxForOverhead ? memCtxForOverhead.agentSkills : [],
-          automationEnabled: automationEnabledForOverhead
+          automationEnabled: automationEnabledForOverhead,
+          costCategory: costCategoryForOverhead
         }, toolDefsForOverhead);
         systemOverheadEstimateForPanelRuntime = Number(estimateForOverhead) || 0;
         applySystemOverheadTitleForPanelRuntime();
@@ -12597,8 +12693,14 @@
       } catch (eAutomationEnabledForSend) { automationEnabledForSend = false; }
       // Every tool is advertised on every send. The trusted page tools (page_act, page_spreadsheet)
       // are no longer hidden when advanced automation is off; the first trusted action prompts the
-      // user inline and continues once approved.
-      const toolDefsForSend = (agentNs.toolDefs || []).slice();
+      // user inline and continues once approved. The model's cost tier trims verbose tool
+      // descriptions (and the system prompt) for expensive/extreme models.
+      const costCategoryForSend = (contextBuilderForSend && typeof contextBuilderForSend.costCategoryFor === 'function')
+        ? contextBuilderForSend.costCategoryFor(completionCostPerMillionForSend)
+        : 'cheap';
+      const toolDefsForSend = (agentNs && typeof agentNs.resolveAgentConfig === 'function')
+        ? agentNs.resolveAgentConfig({ costCategory: costCategoryForSend, agentProfile: 'main' }).toolDefs
+        : (agentNs.toolDefs || []).slice();
       const executeToolForSend = agentNs.executeTool;
 
       const chatRecordForCompactionForSend = CHAT_STORE_FOR_PANEL_RUNTIME[chatId] || null;
@@ -12618,7 +12720,8 @@
             const systemOverheadEstimateForSend = contextBuilderForSend.estimateSystemOverheadTokens({
               agentRules: currentAgentRulesForPanelRuntime || '',
               automationEnabled: automationEnabledForSend,
-              pageNavigationAllowed: false
+              pageNavigationAllowed: false,
+              costCategory: costCategoryForSend
             }, toolDefsForSend);
             systemOverheadTokensForSend = Math.max(10000, Number(systemOverheadEstimateForSend) || 0);
           }
@@ -12741,7 +12844,8 @@
                 compactionSummary: compactionSummaryForSend,
                 compactedThroughMessageId: compactedThroughMessageIdForSend,
                 automationEnabled: automationEnabledForSend,
-                pageNavigationAllowed: false
+                pageNavigationAllowed: false,
+                costCategory: costCategoryForSend
               })
             : (function () {
                 const msgsForFallback = chatMsgs.map(function (messageForPanelRuntime) {
@@ -13315,12 +13419,31 @@
             const toolResultStrForApi = toolResultStr.length > TOOL_RESULT_API_MAX_CHARS
               ? JSON.stringify({ ok: false, error: 'Tool result too large to send (' + toolResultStr.length + ' bytes; max 500 KB). The tool produced too much output; try a more targeted request.' })
               : toolResultStr;
-            await appendMessageToChatForPanelRuntime(chatId, {
+            const toolMsgPersistedForSend = await appendMessageToChatForPanelRuntime(chatId, {
               role: 'tool',
               tool_call_id: tc.id,
               content: toolResultStrForApi,
               md: ''
             }, { skipChatUpdate: true });
+            // Stamp result_ref (= message id) so the model can pass it to eval vars_from
+            // instead of retyping the payload. Persist the stamp when the row is in IndexedDB.
+            if (toolMsgPersistedForSend && Number.isFinite(Number(toolMsgPersistedForSend.id))) {
+              const stampFnForSend = (globalThis.ABChatAgent || {}).stampToolResultRef;
+              if (typeof stampFnForSend === 'function') {
+                const stampedContentForSend = stampFnForSend(toolResultStrForApi, Number(toolMsgPersistedForSend.id));
+                if (stampedContentForSend && stampedContentForSend !== toolResultStrForApi) {
+                  toolMsgPersistedForSend.content = stampedContentForSend;
+                  if (toolMsgPersistedForSend._persistedToDb === true) {
+                    const repoForStampSend = getPanelDataRepoForPanelRuntime();
+                    if (repoForStampSend && typeof repoForStampSend.updateMessage === 'function') {
+                      try {
+                        await repoForStampSend.updateMessage(toolMsgPersistedForSend.id, { content: stampedContentForSend });
+                      } catch (stampUpdateErrForSend) { /* best-effort; in-memory stamp still helps this turn */ }
+                    }
+                  }
+                }
+              }
+            }
             // PostToolUse: handlers may only annotate here (no block, no
             // continueWithSystemNote). The tool already ran and its result is
             // persisted; this event is for observers (logging, metrics, etc.).

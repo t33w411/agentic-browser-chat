@@ -56,6 +56,7 @@
     updateChat:                   function (id, patch)                                { return sendDbOpForPanelDataRepo('updateChat',                   [id, patch]); },
     deleteChat:                   function (id, protectedBlobIds)                     { return sendDbOpForPanelDataRepo('deleteChat',                   [id, protectedBlobIds]); },
     listMessagesByChatId:         function (chatId)                                   { return sendDbOpForPanelDataRepo('listMessagesByChatId',         [chatId]); },
+    getMessage:                   function (id)                                       { return sendDbOpForPanelDataRepo('getMessage',                   [id]); },
     createMessage:                function (chatId, input, options)                   { return sendDbOpForPanelDataRepo('createMessage',                [chatId, input, options]); },
     updateMessage:                function (id, patch)                                { return sendDbOpForPanelDataRepo('updateMessage',                [id, patch]); },
     bulkReplaceMessagesFromIndex: function (chatId, fromId, replacements, options)    { return sendDbOpForPanelDataRepo('bulkReplaceMessagesFromIndex', [chatId, fromId, replacements, options]); },

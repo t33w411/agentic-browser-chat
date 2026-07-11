@@ -455,8 +455,14 @@
 
     // Every tool is advertised on every run. The trusted page tools (page_act, page_spreadsheet)
     // are no longer hidden when advanced automation is off; the first trusted action prompts the
-    // user inline and the same action continues once approved.
-    var toolDefsForRun = (agentNsForRun.toolDefs || []).slice();
+    // user inline and the same action continues once approved. The model's cost tier trims verbose
+    // tool descriptions (and the system prompt) for expensive/extreme models.
+    var costCategoryForRun = (contextBuilderForRun && typeof contextBuilderForRun.costCategoryFor === 'function')
+      ? contextBuilderForRun.costCategoryFor(completionCostPerMillionForRun)
+      : 'cheap';
+    var toolDefsForRun = (agentNsForRun && typeof agentNsForRun.resolveAgentConfig === 'function')
+      ? agentNsForRun.resolveAgentConfig({ costCategory: costCategoryForRun, agentProfile: 'main' }).toolDefs
+      : (agentNsForRun.toolDefs || []).slice();
 
     try {
       var chatRecordForRun = await repoForRun.getChat(chatId);
@@ -483,7 +489,8 @@
             var systemOverheadEstimateForRun = contextBuilderForRun.estimateSystemOverheadTokens({
               agentRules: agentRulesForRun,
               automationEnabled: automationEnabledForRun,
-              pageNavigationAllowed: true
+              pageNavigationAllowed: true,
+              costCategory: costCategoryForRun
             }, toolDefsForRun);
             systemOverheadTokensForRun = Math.max(10000, Number(systemOverheadEstimateForRun) || 0);
           }
@@ -568,7 +575,8 @@
               compactionSummary: compactionSummaryForRun,
               compactedThroughMessageId: compactedThroughMessageIdForRun,
               automationEnabled: automationEnabledForRun,
-              pageNavigationAllowed: true
+              pageNavigationAllowed: true,
+              costCategory: costCategoryForRun
             })
           : (function () {
               var msgsForFallbackForRun = messagesForRun.map(function (mForFallback) {
@@ -917,6 +925,22 @@
             ? JSON.stringify({ ok: false, error: 'Tool result too large to send (' + toolResultStr.length + ' bytes; max 500 KB). The tool produced too much output; try a more targeted request.' })
             : toolResultStr;
           var toolMsgPersisted = await repoForRun.createMessage(chatId, { role: 'tool', tool_call_id: tc.id, content: toolResultStrForApi, md: '' }, { touchChat: false });
+          // Stamp result_ref (= message id) so the model can pass it to eval vars_from
+          // instead of retyping the payload. Mirror the panel-loop stamp path.
+          if (toolMsgPersisted && Number.isFinite(Number(toolMsgPersisted.id))) {
+            var stampFnForRun = getAgentNsForAgentRun().stampToolResultRef;
+            if (typeof stampFnForRun === 'function') {
+              var stampedContentForRun = stampFnForRun(toolResultStrForApi, Number(toolMsgPersisted.id));
+              if (stampedContentForRun && stampedContentForRun !== toolResultStrForApi) {
+                toolMsgPersisted.content = stampedContentForRun;
+                if (repoForRun && typeof repoForRun.updateMessage === 'function') {
+                  try {
+                    await repoForRun.updateMessage(toolMsgPersisted.id, { content: stampedContentForRun });
+                  } catch (stampUpdateErrForRun) { /* best-effort; in-memory stamp still helps this turn */ }
+                }
+              }
+            }
+          }
           if (toolMsgPersisted) messagesForRun.push(toolMsgPersisted);
           var parsedToolArgsForPostHook = {};
           try { parsedToolArgsForPostHook = JSON.parse(tc.function.arguments || '{}'); } catch (e) {}
