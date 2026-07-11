@@ -2910,9 +2910,11 @@
   // the observe registry (self-healing when the element moved), runs the runtime gates,
   // routes the action to the cheapest mechanism that works (synthetic DOM first; trusted
   // CDP input only when synthetic cannot do it), then returns a fresh snapshot with new/
-  // changed rows marked so the model never diffs two lists itself. It delegates the trusted
-  // path to pageActToolForToolExec and value/select writes to the existing fill/select
-  // machinery, so it adds orchestration, not new low-level input code.
+  // changed rows marked so the model never diffs two lists itself. Click, type, and select
+  // auto-escalate to the trusted path on synthetic no-ops; hover/press/drag go trusted
+  // immediately. It delegates the trusted path to pageActToolForToolExec and value/select
+  // writes to the existing fill/select machinery, so it adds orchestration, not new
+  // low-level input code.
 
   function delayForPageActRefToolExec(msForDelay) {
     return new Promise(function (resolveForDelay) { setTimeout(resolveForDelay, msForDelay); });
@@ -3163,7 +3165,39 @@
     return { ok: false, error: (trustedForClick && trustedForClick.error) ? trustedForClick.error : 'Click failed.' };
   }
 
-  async function performRefTypeForToolExec(elForType, descriptorForType, argsForType) {
+  // Synthetic fill failures that CDP keystrokes cannot fix (wrong tool, blocked, or
+  // browser format rejection). Everything else (controlled inputs that revert a
+  // native value-set, non-contenteditable ARIA textboxes, etc.) is worth escalating.
+  function shouldEscalateTypeToTrustedForToolExec(fillResForEscalation) {
+    if (!fillResForEscalation) return true;
+    if (fillResForEscalation.changed_count > 0) return false;
+    if (fillResForEscalation.blocked_count > 0) return false;
+    var r0ForEscalation = fillResForEscalation.results && fillResForEscalation.results[0];
+    if (!r0ForEscalation) return true;
+    if (r0ForEscalation.status === 'blocked') return false;
+    var errForEscalation = String(r0ForEscalation.error || r0ForEscalation.warning || '').toLowerCase();
+    if (!errForEscalation) return true;
+    if (errForEscalation.indexOf('combobox') !== -1) return false;
+    if (errForEscalation.indexOf('custom aria') !== -1) return false;
+    if (errForEscalation.indexOf('not a fillable') !== -1) return false;
+    if (errForEscalation.indexOf('unparseable or out of range') !== -1) return false;
+    if (errForEscalation.indexOf('multiple select') !== -1) return false;
+    if (errForEscalation.indexOf('checked must be') !== -1) return false;
+    if (errForEscalation.indexOf('radio fields support') !== -1) return false;
+    return true;
+  }
+
+  function readLiveFieldTextForTypeEscalation(elForRead) {
+    if (!elForRead) return '';
+    try {
+      if (typeof elForRead.value === 'string') return elForRead.value;
+      return String(elForRead.textContent || '');
+    } catch (eReadType) {
+      return '';
+    }
+  }
+
+  async function performRefTypeForToolExec(elForType, descriptorForType, argsForType, contextForType) {
     if (typeof argsForType.text !== 'string') return { ok: false, error: 'page_act type requires text.' };
     var fillResForType = await pageFillFormToolForToolExec({
       fields: [{ selector: descriptorForType.selector, expected_fingerprint: descriptorForType.fingerprint, value: argsForType.text }]
@@ -3177,7 +3211,90 @@
       var r0ForType = fillResForType.results[0];
       reasonForType = r0ForType.error || r0ForType.warning || ('Field ' + (r0ForType.status || 'not changed') + '.');
     }
-    return { ok: false, error: reasonForType };
+    if (!shouldEscalateTypeToTrustedForToolExec(fillResForType)) {
+      return { ok: false, error: reasonForType };
+    }
+    var prepForType = await prepareTrustedDelegationForToolExec(contextForType);
+    if (!prepForType.ok) return { ok: false, consent_required: true, error: prepForType.error };
+    var focusForType = await pageActToolForToolExec({
+      action: 'click',
+      selector: descriptorForType.selector,
+      expected_fingerprint: descriptorForType.fingerprint
+    }, contextForType);
+    if (!focusForType || !focusForType.ok) {
+      return {
+        ok: false,
+        error: 'Synthetic fill failed (' + reasonForType + '), and trusted focus click also failed: '
+          + ((focusForType && focusForType.error) ? focusForType.error : 'click failed')
+      };
+    }
+    // Replace rather than append: select-all then type (or Backspace when clearing).
+    // On macOS Ctrl+A is dispatched as Cmd+A; with focus in the field that selects the
+    // field's contents, which is what we want.
+    await pageActToolForToolExec({
+      action: 'key',
+      keys: 'Ctrl+A',
+      expected_focus: descriptorForType.selector
+    }, contextForType);
+    var trustedForType;
+    if (argsForType.text === '') {
+      trustedForType = await pageActToolForToolExec({
+        action: 'key',
+        keys: 'Backspace',
+        expected_focus: descriptorForType.selector,
+        read_after: [descriptorForType.selector]
+      }, contextForType);
+    } else {
+      trustedForType = await pageActToolForToolExec({
+        action: 'type',
+        text: argsForType.text,
+        expected_focus: descriptorForType.selector,
+        read_after: [descriptorForType.selector]
+      }, contextForType);
+    }
+    if (!trustedForType || !trustedForType.ok) {
+      return {
+        ok: false,
+        error: 'Trusted typing failed after synthetic fill no-op: '
+          + ((trustedForType && trustedForType.error) ? trustedForType.error : 'type failed')
+          + ' (synthetic: ' + reasonForType + ')'
+      };
+    }
+    // Verify against what the trusted path actually typed: the type action normalizes
+    // escape sequences (\n, \t, \r), so compare against the normalized form, not the raw
+    // arg, or a field holding a real newline would falsely fail against a literal "\n".
+    var expectedForType = (argsForType.text === '') ? '' : normalizeTypedTextEscapesForToolExec(argsForType.text).text;
+    var liveAfterForType = readLiveFieldTextForTypeEscalation(elForType);
+    var matchesForType = (expectedForType === '') ? (liveAfterForType === '') : (liveAfterForType.indexOf(expectedForType) !== -1);
+    if (!matchesForType) {
+      // Relocate in case the original node was replaced by a controlled re-render. This
+      // applies to the clear case too: a controlled input can swap its node on clear,
+      // leaving the captured element reading a stale, non-empty value.
+      var relocatedForType = null;
+      try { relocatedForType = document.querySelector(descriptorForType.selector); } catch (eRelocateType) { relocatedForType = null; }
+      liveAfterForType = readLiveFieldTextForTypeEscalation(relocatedForType || elForType);
+      matchesForType = (expectedForType === '') ? (liveAfterForType === '') : (liveAfterForType.indexOf(expectedForType) !== -1);
+    }
+    if (expectedForType === '') {
+      if (!matchesForType) {
+        return {
+          ok: false,
+          error: 'Trusted clear dispatched but the field still reads "'
+            + clipWithMarkerForToolExec(liveAfterForType, 60) + '". Verify before continuing.'
+        };
+      }
+      return { ok: true, summary: 'cleared field (trusted, escalated after synthetic fill failed)' };
+    }
+    if (!matchesForType) {
+      return {
+        ok: false,
+        error: 'Trusted typing dispatched but the field reads "'
+          + clipWithMarkerForToolExec(liveAfterForType, 60)
+          + '" instead of "' + clipWithMarkerForToolExec(expectedForType, 60)
+          + '". The page may still be filtering input.'
+      };
+    }
+    return { ok: true, summary: 'typed (trusted, escalated after synthetic fill failed)' };
   }
 
   // Sets a native <select> by matching an option label (exact, then starts-with, then
@@ -3207,6 +3324,72 @@
     return { ok: true, summary: 'selected "' + (matchForNative.text || '').trim() + '"' };
   }
 
+  // True when a failed/unconfirmed synthetic select is worth a trusted open + option click.
+  // Missing/ambiguous labels are not: CDP cannot invent an option that is not on the page.
+  function shouldEscalateSelectToTrustedForToolExec(selResForEscalation) {
+    if (!selResForEscalation) return true;
+    if (selResForEscalation.ok && selResForEscalation.committed === false) return true;
+    if (selResForEscalation.ok) return false;
+    var errForEscalation = String(selResForEscalation.error || '');
+    if (/matched \d+ options/i.test(errForEscalation)) return false;
+    if (/No <option>/i.test(errForEscalation)) return false;
+    if (/no option matching/i.test(errForEscalation)) {
+      // Opened but no match: label problem. Never opened: synthetic open likely ignored.
+      return selResForEscalation.opened === false;
+    }
+    return true;
+  }
+
+  // Find a visible list option by label after a trusted open, for a trusted option click.
+  function findVisibleSelectOptionElForToolExec(labelForFind) {
+    var normForFind = String(labelForFind || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    if (!normForFind) return null;
+    var nodesForFind = [];
+    try {
+      nodesForFind = Array.prototype.slice.call(document.querySelectorAll(
+        '[role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="treeitem"]'
+      ));
+    } catch (eFindOpt) { nodesForFind = []; }
+    if (!nodesForFind.length) {
+      try {
+        var lbsForFind = Array.prototype.slice.call(document.querySelectorAll(
+          '[role="listbox"], [role="menu"], [role="tree"], [role="grid"]'
+        )).filter(isElementVisibleForSelectOption);
+        for (var liForFind = 0; liForFind < lbsForFind.length; liForFind++) {
+          var extrasForFind = Array.prototype.slice.call(lbsForFind[liForFind].querySelectorAll(
+            'li, a, [data-value], [class*="option" i], [class*="item" i]'
+          ));
+          for (var exForFind = 0; exForFind < extrasForFind.length; exForFind++) nodesForFind.push(extrasForFind[exForFind]);
+        }
+      } catch (eFindExtra) { /* ignore */ }
+    }
+    var exactForFind = null;
+    var startsForFind = null;
+    var containsForFind = null;
+    for (var iForFind = 0; iForFind < nodesForFind.length; iForFind++) {
+      var elForFind = nodesForFind[iForFind];
+      if (!isElementVisibleForSelectOption(elForFind)) continue;
+      var fieldsForFind = getOptionTextFieldsForSelectOption(elForFind);
+      var valsForFind = [
+        fieldsForFind.text, fieldsForFind.aria, fieldsForFind.value, fieldsForFind.title
+      ].map(function (vForFind) {
+        return String(vForFind || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      });
+      var tierForFind = 0;
+      for (var vIdxForFind = 0; vIdxForFind < valsForFind.length; vIdxForFind++) {
+        var vForTier = valsForFind[vIdxForFind];
+        if (!vForTier) continue;
+        if (vForTier === normForFind) { tierForFind = 3; break; }
+        if (vForTier.indexOf(normForFind) === 0) { if (tierForFind < 2) tierForFind = 2; }
+        else if (vForTier.indexOf(normForFind) !== -1) { if (tierForFind < 1) tierForFind = 1; }
+      }
+      if (tierForFind === 3 && !exactForFind) exactForFind = elForFind;
+      else if (tierForFind === 2 && !startsForFind) startsForFind = elForFind;
+      else if (tierForFind === 1 && !containsForFind) containsForFind = elForFind;
+    }
+    return exactForFind || startsForFind || containsForFind;
+  }
+
   async function performRefSelectForToolExec(elForSelect, descriptorForSelect, argsForSelect, contextForSelect) {
     if (typeof argsForSelect.option !== 'string' || !argsForSelect.option.trim()) {
       return { ok: false, error: 'page_act select requires option (the visible label to choose).' };
@@ -3214,18 +3397,76 @@
     if (elForSelect && elForSelect.tagName === 'SELECT') {
       return selectNativeOptionForToolExec(elForSelect, argsForSelect.option);
     }
-    var selResForSelect = await pageQueryToolForToolExec({
+    var selArgsForSelect = {
       operation: 'findPageElements',
       category: descriptorForSelect.category || 'form_fields',
       selector: descriptorForSelect.selector,
       sub_operation: 'select_option',
       option: argsForSelect.option,
       expected_fingerprint: descriptorForSelect.fingerprint
-    }, contextForSelect);
-    if (selResForSelect && selResForSelect.ok) {
-      return { ok: true, summary: 'selected "' + argsForSelect.option + '"' + (selResForSelect.committed === false ? ' (commit unconfirmed; verify)' : '') };
+    };
+    var selResForSelect = await pageQueryToolForToolExec(selArgsForSelect, contextForSelect);
+    if (selResForSelect && selResForSelect.ok && selResForSelect.committed !== false) {
+      return { ok: true, summary: 'selected "' + argsForSelect.option + '"' };
     }
-    return { ok: false, error: (selResForSelect && selResForSelect.error) ? selResForSelect.error : 'Could not select that option.' };
+    if (!shouldEscalateSelectToTrustedForToolExec(selResForSelect)) {
+      return {
+        ok: false,
+        error: (selResForSelect && selResForSelect.error)
+          ? selResForSelect.error
+          : 'Could not select that option.'
+      };
+    }
+    var prepForSelect = await prepareTrustedDelegationForToolExec(contextForSelect);
+    if (!prepForSelect.ok) return { ok: false, consent_required: true, error: prepForSelect.error };
+
+    // Trusted click opens custom widgets that ignore the synthetic pointer sequence.
+    var openForSelect = await pageActToolForToolExec({
+      action: 'click',
+      selector: descriptorForSelect.selector,
+      expected_fingerprint: descriptorForSelect.fingerprint
+    }, contextForSelect);
+    if (!openForSelect || !openForSelect.ok) {
+      return {
+        ok: false,
+        error: 'Could not open the dropdown with trusted input: '
+          + ((openForSelect && openForSelect.error) ? openForSelect.error : 'click failed')
+          + ((selResForSelect && selResForSelect.error) ? ' (synthetic: ' + selResForSelect.error + ')' : '')
+      };
+    }
+
+    // Prefer a trusted click on the matched option when it is already visible.
+    var optionElForSelect = findVisibleSelectOptionElForToolExec(argsForSelect.option);
+    if (optionElForSelect) {
+      var optionPathForSelect = buildCssPathForPageQuery(optionElForSelect);
+      var optionFpForSelect = getElementFingerprintForPageQuery(optionElForSelect);
+      if (optionPathForSelect && optionPathForSelect.selector) {
+        var pickForSelect = await pageActToolForToolExec({
+          action: 'click',
+          selector: optionPathForSelect.selector,
+          expected_fingerprint: optionFpForSelect
+        }, contextForSelect);
+        if (pickForSelect && pickForSelect.ok) {
+          return { ok: true, summary: 'selected "' + argsForSelect.option + '" (trusted, escalated after synthetic select no-op)' };
+        }
+      }
+    }
+
+    // Fallback: re-run select_option now that the list is open via trusted input.
+    var retryForSelect = await pageQueryToolForToolExec(selArgsForSelect, contextForSelect);
+    if (retryForSelect && retryForSelect.ok) {
+      return {
+        ok: true,
+        summary: 'selected "' + argsForSelect.option + '" (trusted open, escalated)'
+          + (retryForSelect.committed === false ? ' (commit unconfirmed; verify)' : '')
+      };
+    }
+    return {
+      ok: false,
+      error: (retryForSelect && retryForSelect.error)
+        ? retryForSelect.error
+        : ((selResForSelect && selResForSelect.error) ? selResForSelect.error : 'Could not select that option.')
+    };
   }
 
   async function performRefTrustedPointerForToolExec(actionForTrusted, descriptorForTrusted, contextForTrusted) {
@@ -3333,7 +3574,7 @@
       if (actionForAct === 'click') {
         effectForAct = await performRefClickForToolExec(elForAct, descriptorForAct, argsForAct, contextForAct);
       } else if (actionForAct === 'type') {
-        effectForAct = await performRefTypeForToolExec(elForAct, descriptorForAct, argsForAct);
+        effectForAct = await performRefTypeForToolExec(elForAct, descriptorForAct, argsForAct, contextForAct);
       } else if (actionForAct === 'select') {
         effectForAct = await performRefSelectForToolExec(elForAct, descriptorForAct, argsForAct, contextForAct);
       } else if (actionForAct === 'hover') {
@@ -3435,6 +3676,19 @@
     if (!styleForVis) return true;
     return styleForVis.display !== 'none' && styleForVis.visibility !== 'hidden' &&
       styleForVis.visibility !== 'collapse' && styleForVis.opacity !== '0';
+  }
+
+  // A genuine dropdown/listbox popup floats over the page (position absolute/fixed,
+  // usually portal-rendered). In-flow site chrome (nav, docs sidebar) is static or
+  // sticky, so it must not satisfy the loose class-based listbox fallback merely by
+  // containing many <li> items.
+  function isFloatingPopupForSelectOption(elForFloat) {
+    var hopsForFloat = 0;
+    for (var nodeForFloat = elForFloat; nodeForFloat && nodeForFloat !== document.body && hopsForFloat < 4; nodeForFloat = nodeForFloat.parentElement, hopsForFloat++) {
+      var stForFloat = window.getComputedStyle ? window.getComputedStyle(nodeForFloat) : null;
+      if (stForFloat && (stForFloat.position === 'absolute' || stForFloat.position === 'fixed')) return true;
+    }
+    return false;
   }
 
   function getOptionTextFieldsForSelectOption(elForOpt) {
@@ -4874,7 +5128,12 @@
             var roleLbsForSelect = Array.from(document.querySelectorAll('[role="listbox"], [role="menu"], [role="tree"], [role="grid"]')).filter(isElementVisibleForSelectOption);
             if (roleLbsForSelect.length === 1) return roleLbsForSelect[0];
             if (roleLbsForSelect.length > 1) return pickRichestForLb(roleLbsForSelect);
-            var classLbsForSelect = Array.from(document.querySelectorAll('[class*="listbox" i], [class*="dropdown-menu" i], [class*="select__menu" i], [class*="-menu" i], [class*="results" i], [class*="options" i]')).filter(isElementVisibleForSelectOption);
+            var classLbsForSelect = Array.from(document.querySelectorAll('[class*="listbox" i], [class*="dropdown-menu" i], [class*="select__menu" i], [class*="-menu" i], [class*="results" i], [class*="options" i]')).filter(isElementVisibleForSelectOption).filter(isFloatingPopupForSelectOption).filter(function (cForClassLb) {
+              // Must actually hold option-like descendants: a class match on an empty
+              // decoration (e.g. a sidebar highlight span with a "-menu" class token) is
+              // not a listbox, and counting it as one falsely reports the popup as open.
+              return cForClassLb.querySelector('[role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="treeitem"], li, [data-value]') != null;
+            });
             if (classLbsForSelect.length) return pickRichestForLb(classLbsForSelect);
             return null;
           }
@@ -4933,7 +5192,25 @@
 
           function isOpenForSelect() {
             if (triggerElForSelect.getAttribute('aria-expanded') === 'true') return true;
+            if (typeaheadInputForSelect && typeaheadInputForSelect.getAttribute('aria-expanded') === 'true') return true;
             return !!resolveListboxForSelect();
+          }
+
+          // Some comboboxes (notably Base UI) open from a sibling toggle button, not from
+          // the input/trigger itself. Find a nearby popup-toggle button so Phase 1 can open
+          // the list when clicking the trigger alone leaves it closed.
+          function findComboboxToggleForSelect() {
+            var scopeForToggle = triggerElForSelect.parentElement;
+            for (var upForToggle = 0; upForToggle < 3 && scopeForToggle; upForToggle++, scopeForToggle = scopeForToggle.parentElement) {
+              var btnsForToggle = Array.prototype.slice.call(scopeForToggle.querySelectorAll('button, [role="button"]'));
+              for (var biForToggle = 0; biForToggle < btnsForToggle.length; biForToggle++) {
+                var bForToggle = btnsForToggle[biForToggle];
+                if (bForToggle === triggerElForSelect) continue;
+                if (!isElementVisibleForSelectOption(bForToggle)) continue;
+                if (bForToggle.hasAttribute('aria-haspopup') || bForToggle.hasAttribute('aria-expanded') || bForToggle.getAttribute('aria-controls')) return bForToggle;
+              }
+            }
+            return null;
           }
 
           function verifyCommitForSelect(labelForVerify) {
@@ -4960,6 +5237,16 @@
           if (!isOpenForSelect()) {
             dispatchRealPointerSequenceForSelectOption(triggerElForSelect);
             await settleQuietWindowForSelectOption(obsForSelect.getCount, 300, 3000);
+          }
+
+          // Phase 1b: if the trigger click left it closed, click an associated toggle
+          // button (Base UI and similar open from a sibling chevron, not the input).
+          if (!isOpenForSelect()) {
+            var toggleForSelect = findComboboxToggleForSelect();
+            if (toggleForSelect) {
+              dispatchRealPointerSequenceForSelectOption(toggleForSelect);
+              await settleQuietWindowForSelectOption(obsForSelect.getCount, 300, 3000);
+            }
           }
 
           // Phase 2: resolve + match options.
