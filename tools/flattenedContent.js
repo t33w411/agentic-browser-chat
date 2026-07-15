@@ -704,7 +704,26 @@
     return tagForFlattenedContent === "p" || /^h[1-6]$/.test(tagForFlattenedContent);
   }
 
+  // Sync with: collectSpacedTextForFetch in agent/toolExec.js
+  function collectSpacedTextForFlattenedContent(nodeForFlattenedContent) {
+    if (!nodeForFlattenedContent || !nodeForFlattenedContent.childNodes) {
+      return "";
+    }
+    let outForFlattenedContent = "";
+    const kidsForFlattenedContent = nodeForFlattenedContent.childNodes;
+    for (let iForFlattenedContent = 0; iForFlattenedContent < kidsForFlattenedContent.length; iForFlattenedContent++) {
+      const kidForFlattenedContent = kidsForFlattenedContent[iForFlattenedContent];
+      if (kidForFlattenedContent.nodeType === Node.TEXT_NODE) {
+        outForFlattenedContent += kidForFlattenedContent.nodeValue || "";
+      } else if (kidForFlattenedContent.nodeType === Node.ELEMENT_NODE) {
+        outForFlattenedContent += " " + collectSpacedTextForFlattenedContent(kidForFlattenedContent) + " ";
+      }
+    }
+    return outForFlattenedContent;
+  }
+
   // Sync with: truncateOverloadedChildrenForFetch in agent/toolExec.js
+  const MIDDLE_TEXT_BUDGET_FOR_FLATTENED_CONTENT = 20000;
   function truncateOverloadedChildrenForFlattenedContent(rootNodeForFlattenedContent) {
     if (!rootNodeForFlattenedContent || !rootNodeForFlattenedContent.querySelectorAll || !document || !document.createComment) {
       return;
@@ -725,22 +744,37 @@
       }
 
       const middleForFlattenedContent = childrenForFlattenedContent.slice(45, childrenForFlattenedContent.length - 5);
-      const removableForFlattenedContent = middleForFlattenedContent.filter(
-        (childForFlattenedContent) => !isProtectedChildForFlattenedContent(childForFlattenedContent)
-      );
 
-      if (!removableForFlattenedContent.length) {
-        return;
-      }
+      let budgetUsedForFlattenedContent = 0;
+      const omittedForFlattenedContent = [];
 
-      const omittedCountForFlattenedContent = removableForFlattenedContent.length;
-      const markerForFlattenedContent = document.createComment(
-        " " + omittedCountForFlattenedContent + " item" + (omittedCountForFlattenedContent !== 1 ? "s" : "") + " omitted "
-      );
-      elForFlattenedContent.insertBefore(markerForFlattenedContent, removableForFlattenedContent[0]);
-      removableForFlattenedContent.forEach((childForFlattenedContent) => {
-        childForFlattenedContent.remove();
+      middleForFlattenedContent.forEach((childForFlattenedContent) => {
+        if (isProtectedChildForFlattenedContent(childForFlattenedContent)) {
+          return;
+        }
+        if (budgetUsedForFlattenedContent < MIDDLE_TEXT_BUDGET_FOR_FLATTENED_CONTENT) {
+          const textForChildForFlattenedContent = stripInvisibleCharsForFlattenedContent(collectSpacedTextForFlattenedContent(childForFlattenedContent)).replace(/\s+/g, " ").trim();
+          if (textForChildForFlattenedContent) {
+            childForFlattenedContent.textContent = textForChildForFlattenedContent;
+            budgetUsedForFlattenedContent += textForChildForFlattenedContent.length;
+          } else {
+            childForFlattenedContent.remove();
+          }
+        } else {
+          omittedForFlattenedContent.push(childForFlattenedContent);
+        }
       });
+
+      if (omittedForFlattenedContent.length) {
+        const omittedCountForFlattenedContent = omittedForFlattenedContent.length;
+        const markerForFlattenedContent = document.createComment(
+          " " + omittedCountForFlattenedContent + " item" + (omittedCountForFlattenedContent !== 1 ? "s" : "") + " omitted "
+        );
+        elForFlattenedContent.insertBefore(markerForFlattenedContent, omittedForFlattenedContent[0]);
+        omittedForFlattenedContent.forEach((childForFlattenedContent) => {
+          childForFlattenedContent.remove();
+        });
+      }
     });
   }
 

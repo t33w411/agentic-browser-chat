@@ -7669,7 +7669,21 @@ self.onmessage = function (e) {
       return tag === 'p' || /^h[1-6]$/.test(tag);
     }
 
+    // Sync with: collectSpacedTextForFlattenedContent in tools/flattenedContent.js
+    function collectSpacedTextForFetch(node) {
+      if (!node || !node.childNodes) return '';
+      var out = '';
+      var kids = node.childNodes;
+      for (var i = 0; i < kids.length; i++) {
+        var k = kids[i];
+        if (k.nodeType === Node.TEXT_NODE) out += k.nodeValue || '';
+        else if (k.nodeType === Node.ELEMENT_NODE) out += ' ' + collectSpacedTextForFetch(k) + ' ';
+      }
+      return out;
+    }
+
     // Sync with: truncateOverloadedChildrenForFlattenedContent in tools/flattenedContent.js
+    var MIDDLE_TEXT_BUDGET_FOR_FETCH = 20000;
     function truncateOverloadedChildrenForFetch(root) {
       if (!root || !root.querySelectorAll || !doc.createComment) return;
       var elements = [root].concat(Array.from(root.querySelectorAll('*')).reverse());
@@ -7678,11 +7692,27 @@ self.onmessage = function (e) {
         var children = Array.from(el.children);
         if (children.length <= 50) return;
         var middle = children.slice(45, children.length - 5);
-        var removable = middle.filter(function (c) { return !isProtectedChildForFetch(c); });
-        if (!removable.length) return;
-        var marker = doc.createComment(' ' + removable.length + ' item' + (removable.length !== 1 ? 's' : '') + ' omitted ');
-        el.insertBefore(marker, removable[0]);
-        removable.forEach(function (c) { c.remove(); });
+        var budgetUsed = 0;
+        var omitted = [];
+        middle.forEach(function (c) {
+          if (isProtectedChildForFetch(c)) return;
+          if (budgetUsed < MIDDLE_TEXT_BUDGET_FOR_FETCH) {
+            var text = stripInvisibleCharsForFetch(collectSpacedTextForFetch(c)).replace(/\s+/g, ' ').trim();
+            if (text) {
+              c.textContent = text;
+              budgetUsed += text.length;
+            } else {
+              c.remove();
+            }
+          } else {
+            omitted.push(c);
+          }
+        });
+        if (omitted.length) {
+          var marker = doc.createComment(' ' + omitted.length + ' item' + (omitted.length !== 1 ? 's' : '') + ' omitted ');
+          el.insertBefore(marker, omitted[0]);
+          omitted.forEach(function (c) { c.remove(); });
+        }
       });
     }
 
