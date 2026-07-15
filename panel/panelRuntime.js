@@ -4026,6 +4026,7 @@
         const clonedMessageForRawDisplay = Object.assign({}, messageForRawDisplay);
         if (
           clonedMessageForRawDisplay.md != null &&
+          clonedMessageForRawDisplay.content &&
           clonedMessageForRawDisplay.md === clonedMessageForRawDisplay.content
         ) {
           clonedMessageForRawDisplay.md = '<identical to content>';
