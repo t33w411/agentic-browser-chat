@@ -908,6 +908,36 @@
     return resultForFlattenedContent;
   }
 
+  // Elements are created in a browsing-context-less document so custom elements defined on the
+  // page are never constructed. A custom element constructor that sets attributes or children
+  // makes the live document.createElement throw NotSupportedError ("The result must not have
+  // attributes"), which would abort the whole flatten (the cloneNode fallback at the call sites
+  // only handles a null return, not a thrown error). An inert document has no custom element
+  // registry, so createElement returns a plain element and the real tag name is preserved.
+  let inertDocumentForFlattenedContent = null;
+
+  function createFlattenedElementForFlattenedContent(tagNameForFlattenedContent) {
+    if (!inertDocumentForFlattenedContent && document.implementation && document.implementation.createHTMLDocument) {
+      try {
+        inertDocumentForFlattenedContent = document.implementation.createHTMLDocument("");
+      } catch (errForInertDoc) {
+        inertDocumentForFlattenedContent = null;
+      }
+    }
+    if (inertDocumentForFlattenedContent) {
+      try {
+        return inertDocumentForFlattenedContent.createElement(tagNameForFlattenedContent);
+      } catch (errForInertCreate) {}
+    }
+    try {
+      return document.createElement(tagNameForFlattenedContent);
+    } catch (errForLiveCreate) {}
+    try {
+      return document.createElement("div");
+    } catch (errForDivCreate) {}
+    return null;
+  }
+
   function cloneNodeWithShadowsForFlattenedContent(liveNodeForFlattenedContent) {
     if (!liveNodeForFlattenedContent || !document || !document.createElement) {
       return null;
@@ -923,11 +953,9 @@
     if (tagNameForFlattenedContent === "slot") {
       return null;
     }
-    let clonedElForFlattenedContent;
-    try {
-      clonedElForFlattenedContent = document.createElement(tagNameForFlattenedContent);
-    } catch (errForFlattenedContent) {
-      clonedElForFlattenedContent = document.createElement("div");
+    const clonedElForFlattenedContent = createFlattenedElementForFlattenedContent(tagNameForFlattenedContent);
+    if (!clonedElForFlattenedContent) {
+      return null;
     }
     Array.from(liveNodeForFlattenedContent.attributes || []).forEach(function (attrForFlattenedContent) {
       try {
@@ -937,14 +965,18 @@
     Array.from(liveNodeForFlattenedContent.childNodes || []).forEach(function (childForFlattenedContent) {
       const clonedChildForFlattenedContent = cloneNodeWithShadowsForFlattenedContent(childForFlattenedContent);
       if (clonedChildForFlattenedContent) {
-        clonedElForFlattenedContent.appendChild(clonedChildForFlattenedContent);
+        try {
+          clonedElForFlattenedContent.appendChild(clonedChildForFlattenedContent);
+        } catch (errForAppendChild) {}
       }
     });
     if (liveNodeForFlattenedContent.shadowRoot && liveNodeForFlattenedContent.id !== "abchat-panel-shadow-host") {
       Array.from(liveNodeForFlattenedContent.shadowRoot.childNodes || []).forEach(function (shadowChildForFlattenedContent) {
         const clonedShadowChildForFlattenedContent = cloneNodeWithShadowsForFlattenedContent(shadowChildForFlattenedContent);
         if (clonedShadowChildForFlattenedContent) {
-          clonedElForFlattenedContent.appendChild(clonedShadowChildForFlattenedContent);
+          try {
+            clonedElForFlattenedContent.appendChild(clonedShadowChildForFlattenedContent);
+          } catch (errForAppendShadowChild) {}
         }
       });
     }

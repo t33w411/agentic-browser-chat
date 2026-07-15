@@ -4022,7 +4022,18 @@
       const rawContentForPanelRuntime = root.getElementById('chat-raw-view-content');
       if (!rawViewForPanelRuntime || !rawContentForPanelRuntime) return;
 
-      rawContentForPanelRuntime.textContent = JSON.stringify(messagesForRaw, null, 2);
+      const displayMessagesForRaw = messagesForRaw.map(function (messageForRawDisplay) {
+        const clonedMessageForRawDisplay = Object.assign({}, messageForRawDisplay);
+        if (
+          clonedMessageForRawDisplay.md != null &&
+          clonedMessageForRawDisplay.md === clonedMessageForRawDisplay.content
+        ) {
+          clonedMessageForRawDisplay.md = '<identical to content>';
+        }
+        return clonedMessageForRawDisplay;
+      });
+
+      rawContentForPanelRuntime.textContent = JSON.stringify(displayMessagesForRaw, null, 2);
       applyRawChatWrapForPanelRuntime();
 
       root.getElementById('chat-empty-state').classList.add('hidden');
