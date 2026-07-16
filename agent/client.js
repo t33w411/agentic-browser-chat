@@ -313,7 +313,28 @@
     bodyForTitle.messages = [
       {
         role: 'system',
-        content: 'Generate a concise 3-6 word title for a chat conversation based on the user\'s first message. Describe the topic or intent of the message; do not answer the question. Reply with only the title. No quotes, no trailing punctuation.'
+        content: [
+          'Generate a concise 3-6 word title for a chat conversation based on the user\'s first message.',
+          'Name the topic or intent only. Do not answer the question, assert facts, fact-check, or correct a false or contested premise.',
+          'Reply with only the title. No quotes, no trailing punctuation.',
+          '',
+          'Examples:',
+          'User: how did lindsey graham die?',
+          'Wrong: Lindsey Graham is alive',
+          'Right: Lindsey Graham death question',
+          '',
+          'User: what is the capital of france?',
+          'Wrong: Paris',
+          'Right: France capital question',
+          '',
+          'User: summarize this article about renewable energy',
+          'Wrong: Renewable energy is growing fast',
+          'Right: Renewable energy article summary',
+          '',
+          'User: why is the sky blue?',
+          'Wrong: Rayleigh scattering',
+          'Right: Why sky is blue'
+        ].join('\n')
       },
       {
         role: 'user',
@@ -382,6 +403,14 @@
     return { title: titleTextForClient, model: jsonForTitle.model || PRIMARY_TITLE_MODEL };
   }
 
+  // Side-call / secondary LLM cost: trust OpenRouter usage.cost only. No token-rate estimates
+  // (those use the wrong model price for vision/summarizer/search). Returns 0 when absent.
+  function costFromUsageForClient(usageForCost) {
+    var cost = Number(usageForCost && usageForCost.cost);
+    return (Number.isFinite(cost) && cost > 0) ? cost : 0;
+  }
+
+  nsForClient.costFromUsage = costFromUsageForClient;
   nsForClient.client = {
     streamCompletion: streamCompletionForClient,
     fetchRawModels: fetchRawModelsForClient,

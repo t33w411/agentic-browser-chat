@@ -9419,6 +9419,7 @@
       let inlineLogRequestMsgsForPanelRuntime = null;
       let inlineLogResponseForPanelRuntime = '';
       let inlineLogResolvedModelForPanelRuntime = null;
+      let inlineLogUsageForPanelRuntime = null;
 
       S.inlineMessages.push({ role: 'user', content: inlineInputForModel });
 
@@ -9462,6 +9463,9 @@
         inlineLogResponseForPanelRuntime = finalInlineTextForPanelRuntime || '';
         if (resultForInline && typeof resultForInline.resolvedModel === 'string' && resultForInline.resolvedModel) {
           inlineLogResolvedModelForPanelRuntime = resultForInline.resolvedModel;
+        }
+        if (resultForInline && resultForInline.usage) {
+          inlineLogUsageForPanelRuntime = resultForInline.usage;
         }
         const finalAssistantNodeForInline = conv.querySelector('.im-msg.asst[data-inline-streaming="1"]');
         if (finalAssistantNodeForInline) {
@@ -9534,9 +9538,9 @@
                 requestMessages: sanitizeMessagesForLogDisplay(inlineLogRequestMsgsForPanelRuntime || []),
                 responseText: inlineLogResponseForPanelRuntime,
                 responseToolCalls: [],
-                usage: null
+                usage: inlineLogUsageForPanelRuntime
               }],
-              usage: null
+              usage: inlineLogUsageForPanelRuntime
             }).catch(function () {});
           }
         }
@@ -11492,18 +11496,18 @@
           preview: agentRunStopForLogMeta.getLogPreviewText(logForStatusMeta)
         };
       }
-      const legacyLabelForLogMeta = statusForLogMeta === 'success' ? 'Success'
+      const legacyLabelForLogMeta = (statusForLogMeta === 'success' || statusForLogMeta === 'success_raw') ? 'Success'
         : statusForLogMeta === 'error' ? 'Error'
         : statusForLogMeta === 'cancelled' ? 'Cancelled'
         : (statusForLogMeta || '');
-      const legacyClassForLogMeta = statusForLogMeta === 'success' ? 'log-status-success'
+      const legacyClassForLogMeta = (statusForLogMeta === 'success' || statusForLogMeta === 'success_raw') ? 'log-status-success'
         : statusForLogMeta === 'error' ? 'log-status-error'
         : 'log-status-cancelled';
       const legacyPreviewForLogMeta = statusForLogMeta === 'error'
         ? ((logForStatusMeta && logForStatusMeta.errorMessage) || 'Error')
         : statusForLogMeta === 'cancelled'
           ? 'Cancelled'
-          : ((logForStatusMeta && logForStatusMeta.responseContent) || '');
+          : ((logForStatusMeta && (logForStatusMeta.responseContent || logForStatusMeta.rawResponse)) || '');
       return { label: legacyLabelForLogMeta, cssClass: legacyClassForLogMeta, preview: legacyPreviewForLogMeta };
     }
 
@@ -11511,7 +11515,8 @@
       const statusMetaForLogRow = getLogStatusMetaForPanelRuntime(log);
       const ts = formatLogTimestampForPanelRuntime(log.timestamp);
       const modelShort = escapeHtmlForPanelRuntime((log.model || '').split('/').pop());
-      const latency = log.totalLatencyMs ? (log.totalLatencyMs / 1000).toFixed(2) + 's' : '';
+      const latencyMsForLogRow = log.totalLatencyMs || log.latencyMs;
+      const latency = latencyMsForLogRow ? (latencyMsForLogRow / 1000).toFixed(2) + 's' : '';
       const preview = statusMetaForLogRow.preview;
       const reqType = log.requestType || log.type || '';
       const reqTypeLabels = { chat: 'Chat', 'inline-chat': 'Inline', title: 'Title', compaction: 'Compact', web_search: 'Search', generate_image: 'Image', 'web-fetch-vision': 'Vision', 'web-fetch-summary': 'Summarize', 'tab-read': 'Tab', 'screenshot-vision': 'Vision', 'image-vision': 'Vision', 'quiz-generate': 'Quiz', 'quiz-fix': 'Quiz Fix', 'quiz-review': 'Quiz Review' };
@@ -11544,12 +11549,106 @@
       });
     }
 
+    function renderLogToolItemForPanelRuntime(tcForLogTool) {
+      let itemHtmlForLogTool = `<div class="log-tool-item"><span class="log-tool-name">${escapeHtmlForPanelRuntime((tcForLogTool && tcForLogTool.name) || '')}</span>`;
+      if (tcForLogTool && tcForLogTool.args && Object.keys(tcForLogTool.args).length > 0) {
+        itemHtmlForLogTool += `<pre class="log-code">${escapeHtmlForPanelRuntime(JSON.stringify(tcForLogTool.args, null, 2))}</pre>`;
+      }
+      if (tcForLogTool && tcForLogTool.result != null) {
+        itemHtmlForLogTool += `<div class="log-tool-result-label">Result</div>` +
+          `<pre class="log-code log-tool-result">${escapeHtmlForPanelRuntime(tcForLogTool.result)}</pre>`;
+      } else if (tcForLogTool && tcForLogTool.resultNotSent) {
+        itemHtmlForLogTool += `<div class="log-tool-result-label">Result</div>` +
+          `<pre class="log-code log-tool-result">Not sent to model (run ended).</pre>`;
+      }
+      itemHtmlForLogTool += `</div>`;
+      return itemHtmlForLogTool;
+    }
+
+    function toolEntryFromResponseToolCallForPanelRuntime(rtcForLogTool) {
+      const fnForLogTool = rtcForLogTool && rtcForLogTool.function ? rtcForLogTool.function : null;
+      const nameForLogTool = (fnForLogTool && fnForLogTool.name) || (rtcForLogTool && rtcForLogTool.name) || '';
+      let argsForLogTool = {};
+      const rawArgsForLogTool = fnForLogTool && typeof fnForLogTool.arguments === 'string' ? fnForLogTool.arguments : '';
+      if (rawArgsForLogTool.trim() !== '') {
+        try { argsForLogTool = JSON.parse(rawArgsForLogTool); }
+        catch (parseErrForLogTool) { argsForLogTool = { _rawArguments: rawArgsForLogTool }; }
+      } else if (rtcForLogTool && rtcForLogTool.args && typeof rtcForLogTool.args === 'object') {
+        argsForLogTool = rtcForLogTool.args;
+      }
+      return { name: nameForLogTool, args: argsForLogTool };
+    }
+
+    // Wire-faithful tool result: content from the immediate next turn's requestMessages
+    // (what contextBuilder sent to the model), matched by tool_call_id.
+    function findWireToolResultForLogDetail(turnsForWireResult, turnIndexForWireResult, toolCallIdForWireResult) {
+      if (!toolCallIdForWireResult || !Array.isArray(turnsForWireResult)) return null;
+      if (turnIndexForWireResult + 1 >= turnsForWireResult.length) return null;
+      const nextTurnForWireResult = turnsForWireResult[turnIndexForWireResult + 1];
+      const msgsForWireResult = nextTurnForWireResult && nextTurnForWireResult.requestMessages;
+      if (!Array.isArray(msgsForWireResult)) return null;
+      for (var miForWireResult = 0; miForWireResult < msgsForWireResult.length; miForWireResult++) {
+        const msgForWireResult = msgsForWireResult[miForWireResult];
+        if (msgForWireResult && msgForWireResult.role === 'tool' &&
+            msgForWireResult.tool_call_id === toolCallIdForWireResult) {
+          if (typeof msgForWireResult.content === 'string') return msgForWireResult.content;
+          if (msgForWireResult.content == null) return '';
+          return String(msgForWireResult.content);
+        }
+      }
+      return null;
+    }
+
+    function formatLogUserMessageContentForPanelRuntime(contentForLogUser) {
+      if (typeof contentForLogUser === 'string') return contentForLogUser;
+      if (!Array.isArray(contentForLogUser)) {
+        return contentForLogUser == null ? '' : String(contentForLogUser);
+      }
+      const partsForLogUser = [];
+      for (var piForLogUser = 0; piForLogUser < contentForLogUser.length; piForLogUser++) {
+        const blockForLogUser = contentForLogUser[piForLogUser];
+        if (!blockForLogUser) continue;
+        if (typeof blockForLogUser === 'string') {
+          partsForLogUser.push(blockForLogUser);
+        } else if (blockForLogUser.type === 'text' && typeof blockForLogUser.text === 'string') {
+          partsForLogUser.push(blockForLogUser.text);
+        } else if (blockForLogUser.type === 'image_url') {
+          partsForLogUser.push('[image]');
+        }
+      }
+      return partsForLogUser.join('\n');
+    }
+
+    function getStartingUserMessageTextForLogDetail(logForUserMsg) {
+      let msgsForUserMsg = logForUserMsg && Array.isArray(logForUserMsg.requestMessages)
+        ? logForUserMsg.requestMessages
+        : null;
+      if ((!msgsForUserMsg || msgsForUserMsg.length === 0) &&
+          logForUserMsg && Array.isArray(logForUserMsg.turns) && logForUserMsg.turns[0] &&
+          Array.isArray(logForUserMsg.turns[0].requestMessages)) {
+        msgsForUserMsg = logForUserMsg.turns[0].requestMessages;
+      }
+      if (!msgsForUserMsg || msgsForUserMsg.length === 0) return '';
+      for (var miForUserMsg = msgsForUserMsg.length - 1; miForUserMsg >= 0; miForUserMsg--) {
+        const msgForUserMsg = msgsForUserMsg[miForUserMsg];
+        if (msgForUserMsg && msgForUserMsg.role === 'user') {
+          return formatLogUserMessageContentForPanelRuntime(msgForUserMsg.content);
+        }
+      }
+      return '';
+    }
+
     function renderLogDetailForPanelRuntime(log) {
       const ts = formatLogTimestampForPanelRuntime(log.timestamp);
-      const latency = log.totalLatencyMs ? (log.totalLatencyMs / 1000).toFixed(2) + 's' : 'N/A';
+      const latencyMsForLogDetail = log.totalLatencyMs || log.latencyMs;
+      const latency = latencyMsForLogDetail ? (latencyMsForLogDetail / 1000).toFixed(2) + 's' : 'N/A';
       const statusMetaForLogDetail = getLogStatusMetaForPanelRuntime(log);
+      // web_search (legacy) stores the model text in rawResponse, not responseContent.
+      const responseTextForLogDetail = log.responseContent || log.rawResponse || '';
 
       const reqTypeRaw = log.requestType || log.type || '';
+      const isChatLogDetailForPanelRuntime = reqTypeRaw === 'chat';
+      const hasChatTurnsForPanelRuntime = isChatLogDetailForPanelRuntime && Array.isArray(log.turns) && log.turns.length > 0;
       const reqTypeDisplayMap = { chat: 'Chat', 'inline-chat': 'Inline Chat', title: 'Title Generation', compaction: 'Compaction', web_search: 'Web Search', generate_image: 'Image Generation', 'web-fetch-vision': 'Web Fetch Vision', 'web-fetch-summary': 'Web Fetch Summary', 'tab-read': 'Tab Read', 'screenshot-vision': 'Screenshot Vision', 'image-vision': 'Image Vision', 'quiz-generate': 'Quiz Generation', 'quiz-fix': 'Quiz Question Fix', 'quiz-review': 'Quiz Self-Containment Review' };
       const reqTypeDisplay = reqTypeDisplayMap[reqTypeRaw] || reqTypeRaw;
       let html = `<div class="log-detail-meta">` +
@@ -11559,7 +11658,9 @@
         (reqTypeDisplay ? `<div class="log-detail-row"><span class="log-detail-label">Type</span><span>${escapeHtmlForPanelRuntime(reqTypeDisplay)}</span></div>` : '') +
         `<div class="log-detail-row"><span class="log-detail-label">Model</span><span class="log-mono">${escapeHtmlForPanelRuntime(log.model || '')}</span></div>` +
         `<div class="log-detail-row"><span class="log-detail-label">Latency</span><span>${escapeHtmlForPanelRuntime(latency)}</span></div>` +
-        `<div class="log-detail-row"><span class="log-detail-label">Iterations</span><span>${Number(log.iterationCount) || 0}</span></div>` +
+        (log.iterationCount != null || isChatLogDetailForPanelRuntime
+          ? `<div class="log-detail-row"><span class="log-detail-label">Iterations</span><span>${Number(log.iterationCount) || 0}</span></div>`
+          : '') +
         `</div>`;
 
       if (reqTypeRaw === 'generate_image') {
@@ -11567,6 +11668,14 @@
           `<div class="log-detail-meta">` +
           (log.prompt ? `<div class="log-detail-row"><span class="log-detail-label">Prompt</span><span>${escapeHtmlForPanelRuntime(log.prompt)}</span></div>` : '') +
           (log.aspectRatio ? `<div class="log-detail-row"><span class="log-detail-label">Aspect Ratio</span><span>${escapeHtmlForPanelRuntime(log.aspectRatio)}</span></div>` : '') +
+          `</div>`;
+      }
+
+      if (reqTypeRaw === 'web_search' && log.query) {
+        html += `<div class="log-detail-section-title">Request</div>` +
+          `<div class="log-detail-meta">` +
+          `<div class="log-detail-row"><span class="log-detail-label">Query</span><span>${escapeHtmlForPanelRuntime(log.query)}</span></div>` +
+          (log.resultCount != null ? `<div class="log-detail-row"><span class="log-detail-label">Results</span><span>${Number(log.resultCount) || 0}</span></div>` : '') +
           `</div>`;
       }
 
@@ -11584,20 +11693,12 @@
           `</div>`;
       }
 
-      if (log.toolCalls && log.toolCalls.length > 0) {
+      // Chat with turns: tools live under each turn. Otherwise keep the flat tool list.
+      if (!hasChatTurnsForPanelRuntime && log.toolCalls && log.toolCalls.length > 0) {
         html += `<div class="log-detail-section-title">Tool Calls (${log.toolCalls.length})</div>` +
           `<div class="log-detail-tools">`;
         for (var tci = 0; tci < log.toolCalls.length; tci++) {
-          const tc = log.toolCalls[tci];
-          html += `<div class="log-tool-item"><span class="log-tool-name">${escapeHtmlForPanelRuntime(tc.name || '')}</span>`;
-          if (tc.args && Object.keys(tc.args).length > 0) {
-            html += `<pre class="log-code">${escapeHtmlForPanelRuntime(JSON.stringify(tc.args, null, 2).slice(0, 500))}</pre>`;
-          }
-          if (tc.result != null) {
-            html += `<div class="log-tool-result-label">Result</div>` +
-              `<pre class="log-code log-tool-result">${escapeHtmlForPanelRuntime(tc.result)}</pre>`;
-          }
-          html += `</div>`;
+          html += renderLogToolItemForPanelRuntime(log.toolCalls[tci]);
         }
         html += `</div>`;
       }
@@ -11607,9 +11708,29 @@
           `<pre class="log-code log-error-text">${escapeHtmlForPanelRuntime(log.errorMessage)}</pre>`;
       }
 
-      if (log.responseContent) {
+      // Chat with turns: final response is shown on the last turn that has text.
+      if (!hasChatTurnsForPanelRuntime && responseTextForLogDetail) {
         html += `<div class="log-detail-section-title">Response</div>` +
-          `<pre class="log-code">${escapeHtmlForPanelRuntime(log.responseContent.slice(0, 3000))}</pre>`;
+          `<pre class="log-code">${escapeHtmlForPanelRuntime(responseTextForLogDetail)}</pre>`;
+      }
+
+      if (reqTypeRaw === 'web_search' && Array.isArray(log.results) && log.results.length > 0) {
+        html += `<div class="log-detail-section-title">Sources (${log.results.length})</div>` +
+          `<ol class="log-sources-list">`;
+        for (var riForSearchLog = 0; riForSearchLog < log.results.length; riForSearchLog++) {
+          const srcForSearchLog = log.results[riForSearchLog] || {};
+          const titleForSearchLog = srcForSearchLog.title || srcForSearchLog.url || ('Source ' + (riForSearchLog + 1));
+          const urlForSearchLog = srcForSearchLog.url || '';
+          html += `<li class="log-sources-item">`;
+          if (urlForSearchLog) {
+            html += `<a class="log-sources-title" href="${escapeHtmlForPanelRuntime(urlForSearchLog)}" target="_blank" rel="noopener noreferrer">${escapeHtmlForPanelRuntime(titleForSearchLog)}</a>` +
+              `<div class="log-sources-url">${escapeHtmlForPanelRuntime(urlForSearchLog)}</div>`;
+          } else {
+            html += `<span class="log-sources-title">${escapeHtmlForPanelRuntime(titleForSearchLog)}</span>`;
+          }
+          html += `</li>`;
+        }
+        html += `</ol>`;
       }
 
       if (log.apiParams) {
@@ -11617,9 +11738,18 @@
           `<pre class="log-code">${escapeHtmlForPanelRuntime(JSON.stringify(log.apiParams, null, 2))}</pre>`;
       }
 
-      if (log.requestMessages && log.requestMessages.length > 0) {
+      // Chat omits request dumps in formatted view (still available in JSON).
+      if (!isChatLogDetailForPanelRuntime && log.requestMessages && log.requestMessages.length > 0) {
         html += `<div class="log-detail-section-title">Request (${log.requestMessages.length} messages)</div>` +
           `<pre class="log-code">${escapeHtmlForPanelRuntime(JSON.stringify(sanitizeMessagesForLogDisplay(log.requestMessages), null, 2))}</pre>`;
+      }
+
+      if (isChatLogDetailForPanelRuntime) {
+        const startingUserMsgForLogDetail = getStartingUserMessageTextForLogDetail(log);
+        if (startingUserMsgForLogDetail) {
+          html += `<div class="log-detail-section-title">User Message</div>` +
+            `<pre class="log-code">${escapeHtmlForPanelRuntime(startingUserMsgForLogDetail)}</pre>`;
+        }
       }
 
       if (log.turns && log.turns.length > 0) {
@@ -11640,15 +11770,35 @@
               '<span>' + (turn.usage.prompt_tokens || 0) + ' prompt / ' + (turn.usage.completion_tokens || 0) + ' completion</span>' +
               '</div>';
           }
-          if (turn.requestMessages && turn.requestMessages.length > 0) {
+          if (!isChatLogDetailForPanelRuntime && turn.requestMessages && turn.requestMessages.length > 0) {
             html += '<div class="log-turn-sub-label">Request (' + turn.requestMessages.length + ' messages)</div>' +
               '<pre class="log-code">' + escapeHtmlForPanelRuntime(JSON.stringify(turn.requestMessages, null, 2)) + '</pre>';
           }
           if (turn.responseText) {
             html += '<div class="log-turn-sub-label">Response</div>' +
-              '<pre class="log-code">' + escapeHtmlForPanelRuntime(turn.responseText.slice(0, 2000)) + '</pre>';
+              '<pre class="log-code">' + escapeHtmlForPanelRuntime(turn.responseText) + '</pre>';
           }
-          if (turn.responseToolCalls && turn.responseToolCalls.length > 0) {
+          if (hasChatTurnsForPanelRuntime) {
+            const rtcListForChatTurn = Array.isArray(turn.responseToolCalls) ? turn.responseToolCalls : [];
+            if (rtcListForChatTurn.length > 0) {
+              html += '<div class="log-turn-sub-label">Tool Calls (' + rtcListForChatTurn.length + ')</div>' +
+                '<div class="log-detail-tools">';
+              for (var rtiForChatTurn = 0; rtiForChatTurn < rtcListForChatTurn.length; rtiForChatTurn++) {
+                const rtcForChatTurn = rtcListForChatTurn[rtiForChatTurn];
+                const tcForChatTurn = toolEntryFromResponseToolCallForPanelRuntime(rtcForChatTurn);
+                const wireResultForChatTurn = findWireToolResultForLogDetail(
+                  log.turns, tti, rtcForChatTurn && rtcForChatTurn.id
+                );
+                if (wireResultForChatTurn != null) {
+                  tcForChatTurn.result = wireResultForChatTurn;
+                } else {
+                  tcForChatTurn.resultNotSent = true;
+                }
+                html += renderLogToolItemForPanelRuntime(tcForChatTurn);
+              }
+              html += '</div>';
+            }
+          } else if (turn.responseToolCalls && turn.responseToolCalls.length > 0) {
             html += '<div class="log-turn-sub-label">Tool Calls Requested (' + turn.responseToolCalls.length + ')</div>' +
               '<pre class="log-code">' + escapeHtmlForPanelRuntime(JSON.stringify(turn.responseToolCalls, null, 2)) + '</pre>';
           }
@@ -11718,9 +11868,89 @@
       if (wrapBtnForClose) { wrapBtnForClose.classList.add('hidden'); wrapBtnForClose.setAttribute('aria-pressed', 'false'); }
     }
 
+    function logJsonMessagesEqualForPanelRuntime(aForLogJsonEq, bForLogJsonEq) {
+      try {
+        return JSON.stringify(aForLogJsonEq) === JSON.stringify(bForLogJsonEq);
+      } catch (eForLogJsonEq) {
+        return false;
+      }
+    }
+
+    // Chat JSON display: turn 1 keeps a full request window; later turns emit only the
+    // new suffix when the prior window is an exact prefix. Compaction / collapse /
+    // system drift that rewrites the prefix forces a full window again (requestWindowReset).
+    function compactChatTurnsForLogJsonDisplay(turnsForLogJson) {
+      if (!Array.isArray(turnsForLogJson)) return turnsForLogJson;
+      const compactedTurnsForLogJson = [];
+      let prevMsgsForLogJson = null;
+      for (var tiForLogJson = 0; tiForLogJson < turnsForLogJson.length; tiForLogJson++) {
+        const srcTurnForLogJson = turnsForLogJson[tiForLogJson] || {};
+        const turnForLogJson = Object.assign({}, srcTurnForLogJson);
+        const msgsForLogJson = Array.isArray(turnForLogJson.requestMessages)
+          ? turnForLogJson.requestMessages
+          : null;
+        if (!msgsForLogJson) {
+          compactedTurnsForLogJson.push(turnForLogJson);
+          continue;
+        }
+        if (tiForLogJson === 0 || !prevMsgsForLogJson) {
+          compactedTurnsForLogJson.push(turnForLogJson);
+          prevMsgsForLogJson = msgsForLogJson;
+          continue;
+        }
+        let isPrefixForLogJson = prevMsgsForLogJson.length <= msgsForLogJson.length;
+        if (isPrefixForLogJson) {
+          for (var piForLogJson = 0; piForLogJson < prevMsgsForLogJson.length; piForLogJson++) {
+            if (!logJsonMessagesEqualForPanelRuntime(prevMsgsForLogJson[piForLogJson], msgsForLogJson[piForLogJson])) {
+              isPrefixForLogJson = false;
+              break;
+            }
+          }
+        }
+        if (isPrefixForLogJson) {
+          turnForLogJson.unchangedPrefixCount = prevMsgsForLogJson.length;
+          turnForLogJson.requestMessagesDelta = msgsForLogJson.slice(prevMsgsForLogJson.length);
+          delete turnForLogJson.requestMessages;
+        } else {
+          turnForLogJson.requestWindowReset = true;
+        }
+        compactedTurnsForLogJson.push(turnForLogJson);
+        prevMsgsForLogJson = msgsForLogJson;
+      }
+      return compactedTurnsForLogJson;
+    }
+
+    function buildLogJsonDisplayForPanelRuntime(logForJsonDisplay) {
+      if (!logForJsonDisplay) return logForJsonDisplay;
+      const displayForLogJson = Object.assign({}, logForJsonDisplay);
+      if (displayForLogJson.requestMessages) {
+        displayForLogJson.requestMessages = sanitizeMessagesForLogDisplay(displayForLogJson.requestMessages);
+      }
+      if (Array.isArray(displayForLogJson.turns)) {
+        displayForLogJson.turns = displayForLogJson.turns.map(function (turnSrcForLogJson) {
+          const turnCopyForLogJson = Object.assign({}, turnSrcForLogJson);
+          if (turnCopyForLogJson.requestMessages) {
+            turnCopyForLogJson.requestMessages = sanitizeMessagesForLogDisplay(turnCopyForLogJson.requestMessages);
+          }
+          return turnCopyForLogJson;
+        });
+      }
+      const reqTypeForLogJson = displayForLogJson.requestType || displayForLogJson.type || '';
+      if (reqTypeForLogJson !== 'chat') {
+        return displayForLogJson;
+      }
+      // Top-level requestMessages mirrors turn 1; responseContent mirrors the final turn text.
+      delete displayForLogJson.requestMessages;
+      delete displayForLogJson.responseContent;
+      if (Array.isArray(displayForLogJson.turns)) {
+        displayForLogJson.turns = compactChatTurnsForLogJsonDisplay(displayForLogJson.turns);
+      }
+      return displayForLogJson;
+    }
+
     function copyLogDetailForPanelRuntime(btn) {
       if (!activeLogDetailForPanelRuntime) return;
-      const text = JSON.stringify(activeLogDetailForPanelRuntime, null, 2);
+      const text = JSON.stringify(buildLogJsonDisplayForPanelRuntime(activeLogDetailForPanelRuntime), null, 2);
       navigator.clipboard.writeText(text).then(function () {
         if (btn) {
           const prev = btn.textContent;
@@ -11738,19 +11968,9 @@
       if (!body || !btn) return;
       const wrapBtnForToggle = root.getElementById('log-wrap-toggle-btn');
       if (activeLogViewRawForPanelRuntime) {
-        const sanitized = Object.assign({}, activeLogDetailForPanelRuntime);
-        if (sanitized.requestMessages) {
-          sanitized.requestMessages = sanitizeMessagesForLogDisplay(sanitized.requestMessages);
-        }
-        if (sanitized.turns) {
-          sanitized.turns = sanitized.turns.map(function (t) {
-            const tc = Object.assign({}, t);
-            if (tc.requestMessages) { tc.requestMessages = sanitizeMessagesForLogDisplay(tc.requestMessages); }
-            return tc;
-          });
-        }
+        const displayForLogJson = buildLogJsonDisplayForPanelRuntime(activeLogDetailForPanelRuntime);
         const wrapClassForJson = activeLogViewWrapForPanelRuntime ? ' log-json-wrap' : '';
-        body.innerHTML = '<pre class="log-code log-json-pre' + wrapClassForJson + '">' + escapeHtmlForPanelRuntime(JSON.stringify(sanitized, null, 2)) + '</pre>';
+        body.innerHTML = '<pre class="log-code log-json-pre' + wrapClassForJson + '">' + escapeHtmlForPanelRuntime(JSON.stringify(displayForLogJson, null, 2)) + '</pre>';
         btn.textContent = 'Formatted';
         btn.classList.add('log-view-raw');
         if (wrapBtnForToggle) {
@@ -12436,8 +12656,6 @@
         const completionCostPerMillionOffscreen = modelObjForCostOffscreen ? (Number(modelObjForCostOffscreen.completionCostPerMillion) || 0) : 0;
         const imageModelObjForCostOffscreen = loadedImageModelsForPanelRuntime.find(function (m) { return m.id === imageModelForOffscreen; }) || null;
         const imageGenCostOffscreen = imageModelObjForCostOffscreen ? (Number(imageModelObjForCostOffscreen.imageCost) || 0) : 0;
-        const compactorModelObjOffscreen = cachedModelsForCostOffscreen.find(function (m) { return m.id === 'openai/gpt-4.1-nano'; }) || null;
-        const compactorCostPerMillionOffscreen = compactorModelObjOffscreen ? (Number(compactorModelObjOffscreen.completionCostPerMillion) || 0) : 0;
 
         let automationEnabledOffscreen = false;
         try {
@@ -12468,8 +12686,7 @@
               contextWindow: modelObjForCostOffscreen ? modelObjForCostOffscreen.contextLength : null,
               pricing: {
                 completionCostPerMillion: completionCostPerMillionOffscreen,
-                imageGenCost: imageGenCostOffscreen,
-                compactorCostPerMillion: compactorCostPerMillionOffscreen
+                imageGenCost: imageGenCostOffscreen
               }
             }
           }, function () { void chrome.runtime.lastError; });
@@ -12765,17 +12982,10 @@
             chatRecordForCompactionForSend.compactedThroughMessageId = compactedThroughMessageIdForSend;
             chatRecordForCompactionForSend.compactionUpdatedAt = compactionUpdatedAtForSend;
             if (compactionResultForSend.summarizerUsage) {
-              const actualCompactionCostForSend = Number(compactionResultForSend.summarizerUsage.cost);
-              if (Number.isFinite(actualCompactionCostForSend) && actualCompactionCostForSend > 0) {
-                sideCallCostForSend += actualCompactionCostForSend;
-              } else {
-                const compactionTotalTokensForCost = Number(compactionResultForSend.summarizerUsage.total_tokens) || 0;
-                const compactorModelObjForCost = cachedModelsForCostForSend.find(function (m) { return m.id === 'openai/gpt-4.1-nano'; }) || null;
-                const compactorCostPerMillionForSend = compactorModelObjForCost ? (Number(compactorModelObjForCost.completionCostPerMillion) || 0) : 0;
-                if (compactionTotalTokensForCost > 0 && compactorCostPerMillionForSend > 0) {
-                  sideCallCostForSend += (compactionTotalTokensForCost * compactorCostPerMillionForSend) / 1000000;
-                }
-              }
+              const costFromUsageForCompaction = (globalThis.ABChatAgent || {}).costFromUsage;
+              sideCallCostForSend += typeof costFromUsageForCompaction === 'function'
+                ? costFromUsageForCompaction(compactionResultForSend.summarizerUsage)
+                : 0;
             }
             const panelDataRepoForCompactionForSend = getPanelDataRepoForPanelRuntime();
             if (panelDataRepoForCompactionForSend && typeof panelDataRepoForCompactionForSend.updateChat === 'function') {
@@ -13209,7 +13419,6 @@
           }
 
           // Execute all tool calls in parallel, then append results in order
-          const toolLogEntriesForLoop = [];
           const wrapToolPromiseWithAbortForSend = function (toolPromiseForSend) {
             return new Promise(function (resolveForToolAbort) {
               if (controllerForSend.signal.aborted) {
@@ -13245,9 +13454,10 @@
               try { toolArgs = JSON.parse(rawToolArgsForExec); }
               catch (parseErrForExec) { toolArgsParseErrorForExec = parseErrForExec; }
             }
-            const logEntry = { name: tcNameForExec, args: toolArgsParseErrorForExec ? { _rawArguments: rawToolArgsForExec } : toolArgs };
-            logAllToolCallsForSend.push(logEntry);
-            toolLogEntriesForLoop.push(logEntry);
+            logAllToolCallsForSend.push({
+              name: tcNameForExec,
+              args: toolArgsParseErrorForExec ? { _rawArguments: rawToolArgsForExec } : toolArgs
+            });
             if (skippedPageMutatorIndicesForLoop.has(tcIdxForExec)
                 && pageMutatorGateForSend
                 && typeof pageMutatorGateForSend.buildSkipResult === 'function') {
@@ -13309,8 +13519,6 @@
             break;
           }
 
-          const TOOL_RESULT_LOG_MAX_CHARS = 500;
-
           // Persist all tool results. Strip dataUrl from generators so base64 never reaches the model.
           for (var ti = 0; ti < toolCallsForLoop.length; ti++) {
             if (controllerForSend.signal.aborted) {
@@ -13345,22 +13553,18 @@
                 }
               };
             }
-            // Strip internal tracking fields before the model sees the result
+            // Side-call cost from any secondary LLM usage on the tool result (usage.cost only).
+            // Read from toolResult (not toolResultForModel): generators replace the model-facing
+            // object and drop _usage. Then strip _usage before the model sees the result.
+            if (toolResult && typeof toolResult === 'object' && toolResult._usage) {
+              const costFromUsageForTool = (globalThis.ABChatAgent || {}).costFromUsage;
+              if (typeof costFromUsageForTool === 'function') {
+                sideCallCostForSend += costFromUsageForTool(toolResult._usage);
+              }
+            }
             if (toolResultForModel && typeof toolResultForModel === 'object' && '_usage' in toolResultForModel) {
               toolResultForModel = Object.assign({}, toolResultForModel);
               delete toolResultForModel._usage;
-            }
-            // Accumulate web search side cost using usage data returned from the search API call
-            if (tcNameForResult === 'web_search' && toolResult && toolResult._usage) {
-              const actualSearchCostForSend = Number(toolResult._usage.cost);
-              if (Number.isFinite(actualSearchCostForSend) && actualSearchCostForSend > 0) {
-                sideCallCostForSend += actualSearchCostForSend;
-              } else {
-                const searchTotalTokensForCost = Number(toolResult._usage.total_tokens) || 0;
-                if (searchTotalTokensForCost > 0 && completionCostPerMillionForSend > 0) {
-                  sideCallCostForSend += (searchTotalTokensForCost * completionCostPerMillionForSend) / 1000000;
-                }
-              }
             }
             // Accumulate web search sources for display
             if (tcNameForResult === 'web_search' && toolResult && Array.isArray(toolResult.results)) {
@@ -13371,46 +13575,7 @@
                 }
               });
             }
-            // Accumulate image gen side cost
-            if (tcNameForResult === 'generate_image' && toolResult && toolResult._usage) {
-              const actualImageCostForSend = Number(toolResult._usage.cost);
-              if (Number.isFinite(actualImageCostForSend) && actualImageCostForSend > 0) {
-                sideCallCostForSend += actualImageCostForSend;
-              } else {
-                const imageGenTotalTokensForCost = Number(toolResult._usage.total_tokens) || 0;
-                if (imageGenTotalTokensForCost > 0 && completionCostPerMillionForSend > 0) {
-                  sideCallCostForSend += (imageGenTotalTokensForCost * completionCostPerMillionForSend) / 1000000;
-                }
-              }
-            }
-            // Accumulate web_fetch summarizer side cost
-            if (tcNameForResult === 'web_fetch' && toolResult && toolResult._usage) {
-              const actualFetchCostForSend = Number(toolResult._usage.cost);
-              if (Number.isFinite(actualFetchCostForSend) && actualFetchCostForSend > 0) {
-                sideCallCostForSend += actualFetchCostForSend;
-              } else {
-                const fetchSummaryTotalTokensForCost = Number(toolResult._usage.total_tokens) || 0;
-                if (fetchSummaryTotalTokensForCost > 0 && completionCostPerMillionForSend > 0) {
-                  sideCallCostForSend += (fetchSummaryTotalTokensForCost * completionCostPerMillionForSend) / 1000000;
-                }
-              }
-            }
-            if (tcNameForResult === 'read_tab' && toolResult && toolResult._usage) {
-              const actualReadTabCostForSend = Number(toolResult._usage.cost);
-              if (Number.isFinite(actualReadTabCostForSend) && actualReadTabCostForSend > 0) {
-                sideCallCostForSend += actualReadTabCostForSend;
-              } else {
-                const readTabTotalTokensForCost = Number(toolResult._usage.total_tokens) || 0;
-                if (readTabTotalTokensForCost > 0 && completionCostPerMillionForSend > 0) {
-                  sideCallCostForSend += (readTabTotalTokensForCost * completionCostPerMillionForSend) / 1000000;
-                }
-              }
-            }
             const toolResultStr = typeof toolResultForModel === 'string' ? toolResultForModel : JSON.stringify(toolResultForModel);
-            const toolResultStrForLog = typeof toolResultForModel === 'string' ? toolResultForModel : JSON.stringify(toolResultForModel);
-            toolLogEntriesForLoop[ti].result = toolResultStrForLog.length > TOOL_RESULT_LOG_MAX_CHARS
-              ? toolResultStrForLog.slice(0, TOOL_RESULT_LOG_MAX_CHARS) + '\u2026'
-              : toolResultStrForLog;
             const isToolErrorForLoop = toolResult && typeof toolResult === 'object' && toolResult.error;
             const isPageMutatorSkipForLoop = isToolErrorForLoop && toolResult.skipped === true;
             const toolStepStatusForLoop = isToolErrorForLoop ? 'error' : 'success';
@@ -13536,7 +13701,15 @@
               if (blobRecordForImage && blobRecordForImage.id != null) {
                 const blobIdForImage = Number(blobRecordForImage.id);
                 setImageBlobCacheForPanelRuntime(blobIdForImage, toolResultForImage.dataUrl);
-                sideCallCostForSend += imageGenCostForSend;
+                // Prefer OpenRouter usage.cost (already added via _usage above). Fall back to
+                // catalog imageCost only when usage.cost was absent, to avoid double-counting.
+                const costFromUsageForImageBlob = (globalThis.ABChatAgent || {}).costFromUsage;
+                const countedImageUsageCostForSend = typeof costFromUsageForImageBlob === 'function'
+                  ? costFromUsageForImageBlob(toolResultForImage._usage)
+                  : 0;
+                if (countedImageUsageCostForSend <= 0 && imageGenCostForSend > 0) {
+                  sideCallCostForSend += imageGenCostForSend;
+                }
                 // content must stay '' so the chat renderer shows only the image (via md) and the
                 // context builder falls through to md, giving the agent the __blob:N__ ref it needs
                 // for source_blob_id without producing a visible extra text bubble.

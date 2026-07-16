@@ -48,6 +48,7 @@
   function getStatusLabelForAgentRunStop(statusForLabel) {
     var labelsForAgentRunStop = {
       success: 'Success',
+      success_raw: 'Success',
       error: 'Error',
       cancelled: 'Cancelled',
       'cancelled-user': 'Stopped by user',
@@ -59,7 +60,7 @@
   }
 
   function getStatusCssClassForAgentRunStop(statusForClass) {
-    if (statusForClass === 'success') return 'log-status-success';
+    if (statusForClass === 'success' || statusForClass === 'success_raw') return 'log-status-success';
     if (statusForClass === 'error') return 'log-status-error';
     if (statusForClass === 'cancelled-user') return 'log-status-cancelled-user';
     if (statusForClass && String(statusForClass).indexOf('timeout-') === 0) return 'log-status-timeout';
@@ -73,10 +74,11 @@
     if (stopReasonForPreview) {
       return buildNoticeForAgentRunStop(stopReasonForPreview, logForPreview.toolTimeoutMs);
     }
-    if (logForPreview.status && logForPreview.status !== 'success') {
+    if (logForPreview.status && logForPreview.status !== 'success' && logForPreview.status !== 'success_raw') {
       return getStatusLabelForAgentRunStop(logForPreview.status);
     }
-    return logForPreview.responseContent || '';
+    // web_search logs use legacy rawResponse instead of responseContent.
+    return logForPreview.responseContent || logForPreview.rawResponse || '';
   }
 
   nsForAgentRunStop.agentRunStop = {

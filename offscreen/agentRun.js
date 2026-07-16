@@ -36,7 +36,6 @@
   var MAX_STREAM_RETRIES_FOR_AGENT_RUN = 3;
   var MAX_CONCURRENT_RUNS_FOR_AGENT_RUN = 3;
   var MIN_TOOL_DISPLAY_MS_FOR_AGENT_RUN = 3000;
-  var TOOL_RESULT_LOG_MAX_CHARS_FOR_AGENT_RUN = 500;
   var TOOL_RESULT_API_MAX_CHARS_FOR_AGENT_RUN = 512000;
 
   var AGENT_NEUTRAL_COMPLETION_FOR_AGENT_RUN = 'I took some actions. Let me know if it looks right or needs more.';
@@ -337,7 +336,6 @@
     var pricingForRun = paramsForRun.pricing || {};
     var completionCostPerMillionForRun = Number(pricingForRun.completionCostPerMillion) || 0;
     var imageGenCostForRun = Number(pricingForRun.imageGenCost) || 0;
-    var compactorCostPerMillionForRun = Number(pricingForRun.compactorCostPerMillion) || 0;
 
     if (!apiKey || !model) { refuseRunForOffscreen('Could not start the agent run: missing API key or model.'); return; }
 
@@ -345,6 +343,7 @@
     if (!repoForRun || typeof repoForRun.getChat !== 'function' || typeof repoForRun.createMessage !== 'function') { refuseRunForOffscreen('Could not start the agent run: storage is unavailable. Please try again.'); return; }
 
     var agentNsForRun = getAgentNsForAgentRun();
+    var costFromUsageForRun = typeof agentNsForRun.costFromUsage === 'function' ? agentNsForRun.costFromUsage : null;
     var clientForRun = agentNsForRun.client || {};
     var contextBuilderForRun = agentNsForRun.contextBuilder || {};
     var compactorForRun = agentNsForRun.compactor || null;
@@ -508,16 +507,8 @@
           compactedThroughMessageIdForRun = (compactionResultForRun && compactionResultForRun.compactedThroughMessageId != null) ? compactionResultForRun.compactedThroughMessageId : compactedThroughMessageIdForRun;
           if (compactionResultForRun && compactionResultForRun.didCompact) {
             var compactionUpdatedAtForRun = new Date().toISOString();
-            if (compactionResultForRun.summarizerUsage) {
-              var actualCompactionCostForRun = Number(compactionResultForRun.summarizerUsage.cost);
-              if (Number.isFinite(actualCompactionCostForRun) && actualCompactionCostForRun > 0) {
-                sideCallCostForRun += actualCompactionCostForRun;
-              } else {
-                var compactionTotalTokensForRun = Number(compactionResultForRun.summarizerUsage.total_tokens) || 0;
-                if (compactionTotalTokensForRun > 0 && compactorCostPerMillionForRun > 0) {
-                  sideCallCostForRun += (compactionTotalTokensForRun * compactorCostPerMillionForRun) / 1000000;
-                }
-              }
+            if (compactionResultForRun.summarizerUsage && costFromUsageForRun) {
+              sideCallCostForRun += costFromUsageForRun(compactionResultForRun.summarizerUsage);
             }
             if (typeof repoForRun.updateChat === 'function') {
               try {
@@ -787,7 +778,6 @@
           } catch (eRunLeaseForRun) {}
         }
 
-        var toolLogEntriesForRun = [];
         var wrapToolPromiseWithAbortForRun = function (toolPromiseForRun) {
           return new Promise(function (resolveForToolAbort) {
             if (controllerForRun.signal.aborted) { resolveForToolAbort({ ok: false, cancelled: true, error: 'Cancelled' }); return; }
@@ -821,9 +811,10 @@
           if (rawToolArgsForExec.trim() !== '') {
             try { toolArgs = JSON.parse(rawToolArgsForExec); } catch (parseErrForExec) { toolArgsParseErrorForExec = parseErrForExec; }
           }
-          var logEntry = { name: tcNameForExec, args: toolArgsParseErrorForExec ? { _rawArguments: rawToolArgsForExec } : toolArgs };
-          logAllToolCallsForRun.push(logEntry);
-          toolLogEntriesForRun.push(logEntry);
+          logAllToolCallsForRun.push({
+            name: tcNameForExec,
+            args: toolArgsParseErrorForExec ? { _rawArguments: rawToolArgsForExec } : toolArgs
+          });
           if (skippedPageMutatorIndicesForRun.has(tcIdxForExec)
               && pageMutatorGateForRun
               && typeof pageMutatorGateForRun.buildSkipResult === 'function') {
@@ -880,14 +871,15 @@
           } else if (tcNameForResult === 'eval' && toolResult && toolResult.ok && toolResult._generatedDocument && typeof toolResult._generatedDocument.dataUrl === 'string') {
             toolResultForModel = { ok: true, result: toolResult.result, document: { format: toolResult._generatedDocument.format || '', filename: toolResult._generatedDocument.filename || '', mimeType: toolResult._generatedDocument.mimeType || '', size: Number(toolResult._generatedDocument.size) || 0, note: 'The generated document has been saved and displayed to the user.' } };
           }
+          // Side-call cost from any secondary LLM usage on the tool result (usage.cost only).
+          // Read from toolResult (not toolResultForModel): generators replace the model-facing
+          // object and drop _usage. Then strip _usage before the model sees the result.
+          if (toolResult && typeof toolResult === 'object' && toolResult._usage && costFromUsageForRun) {
+            sideCallCostForRun += costFromUsageForRun(toolResult._usage);
+          }
           if (toolResultForModel && typeof toolResultForModel === 'object' && '_usage' in toolResultForModel) {
             toolResultForModel = Object.assign({}, toolResultForModel);
             delete toolResultForModel._usage;
-          }
-          if (tcNameForResult === 'web_search' && toolResult && toolResult._usage) {
-            var actualSearchCostForRun = Number(toolResult._usage.cost);
-            if (Number.isFinite(actualSearchCostForRun) && actualSearchCostForRun > 0) sideCallCostForRun += actualSearchCostForRun;
-            else { var searchTotalTokensForRun = Number(toolResult._usage.total_tokens) || 0; if (searchTotalTokensForRun > 0 && completionCostPerMillionForRun > 0) sideCallCostForRun += (searchTotalTokensForRun * completionCostPerMillionForRun) / 1000000; }
           }
           if (tcNameForResult === 'web_search' && toolResult && Array.isArray(toolResult.results)) {
             toolResult.results.forEach(function (r) {
@@ -897,23 +889,7 @@
               }
             });
           }
-          if (tcNameForResult === 'generate_image' && toolResult && toolResult._usage) {
-            var actualImageCostForRun = Number(toolResult._usage.cost);
-            if (Number.isFinite(actualImageCostForRun) && actualImageCostForRun > 0) sideCallCostForRun += actualImageCostForRun;
-            else { var imageGenTotalTokensForRun = Number(toolResult._usage.total_tokens) || 0; if (imageGenTotalTokensForRun > 0 && completionCostPerMillionForRun > 0) sideCallCostForRun += (imageGenTotalTokensForRun * completionCostPerMillionForRun) / 1000000; }
-          }
-          if (tcNameForResult === 'web_fetch' && toolResult && toolResult._usage) {
-            var actualFetchCostForRun = Number(toolResult._usage.cost);
-            if (Number.isFinite(actualFetchCostForRun) && actualFetchCostForRun > 0) sideCallCostForRun += actualFetchCostForRun;
-            else { var fetchTotalTokensForRun = Number(toolResult._usage.total_tokens) || 0; if (fetchTotalTokensForRun > 0 && completionCostPerMillionForRun > 0) sideCallCostForRun += (fetchTotalTokensForRun * completionCostPerMillionForRun) / 1000000; }
-          }
-          if (tcNameForResult === 'read_tab' && toolResult && toolResult._usage) {
-            var actualReadTabCostForRun = Number(toolResult._usage.cost);
-            if (Number.isFinite(actualReadTabCostForRun) && actualReadTabCostForRun > 0) sideCallCostForRun += actualReadTabCostForRun;
-            else { var readTabTotalTokensForRun = Number(toolResult._usage.total_tokens) || 0; if (readTabTotalTokensForRun > 0 && completionCostPerMillionForRun > 0) sideCallCostForRun += (readTabTotalTokensForRun * completionCostPerMillionForRun) / 1000000; }
-          }
           var toolResultStr = typeof toolResultForModel === 'string' ? toolResultForModel : JSON.stringify(toolResultForModel);
-          toolLogEntriesForRun[ti].result = toolResultStr.length > TOOL_RESULT_LOG_MAX_CHARS_FOR_AGENT_RUN ? toolResultStr.slice(0, TOOL_RESULT_LOG_MAX_CHARS_FOR_AGENT_RUN) + '…' : toolResultStr;
           var isToolErrorForRun = toolResult && typeof toolResult === 'object' && toolResult.error;
           var isPageMutatorSkipForRun = isToolErrorForRun && toolResult.skipped === true;
           var toolStepStatusForRun = isToolErrorForRun ? 'error' : 'success';
@@ -980,7 +956,12 @@
             }
             if (blobRecordForImage && blobRecordForImage.id != null) {
               var blobIdForImage = Number(blobRecordForImage.id);
-              sideCallCostForRun += imageGenCostForRun;
+              // Prefer OpenRouter usage.cost (already added via _usage above). Fall back to
+              // catalog imageCost only when usage.cost was absent, to avoid double-counting.
+              var countedImageUsageCostForRun = costFromUsageForRun ? costFromUsageForRun(toolResultForImage._usage) : 0;
+              if (countedImageUsageCostForRun <= 0 && imageGenCostForRun > 0) {
+                sideCallCostForRun += imageGenCostForRun;
+              }
               var imgMsgPersisted = await repoForRun.createMessage(chatId, { role: 'assistant', content: '', md: '![Generated image](__blob:' + blobIdForImage + '__)' }, { touchChat: false });
               if (imgMsgPersisted) messagesForRun.push(imgMsgPersisted);
               hasAppendedRenderableAssistantMessageForRun = true;

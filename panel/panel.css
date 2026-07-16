@@ -784,6 +784,9 @@
   flex-direction: column;
   gap: 14px;
 }
+#chat-messages-content > .msg-wrap:last-child {
+  margin-bottom: 80px;
+}
 
 /* Raw JSON view */
 #chat-raw-view {
@@ -2440,6 +2443,43 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 .log-status-badge.log-status-cancelled-user { background: #e2e8f0; color: #475569; }
 .log-status-badge.log-status-timeout { background: #fef3c7; color: #b45309; }
 .log-mono { font-family: "SF Mono","Fira Code",monospace; font-size: 12px; }
+
+.log-sources-list {
+  list-style: decimal;
+  margin: 0;
+  padding: 8px 12px 8px 28px;
+  border: 1px solid var(--abchat-border);
+  border-radius: var(--abchat-r-md);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.log-sources-item {
+  min-width: 0;
+  max-width: 100%;
+}
+.log-sources-title {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--abchat-accent);
+  text-decoration: none;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+a.log-sources-title:hover { text-decoration: underline; }
+.log-sources-url {
+  margin-top: 2px;
+  font-size: 11px;
+  font-family: "SF Mono","Fira Code",monospace;
+  color: var(--abchat-text-muted);
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
 
 .log-detail-tools { display: flex; flex-direction: column; gap: 6px; }
 .log-tool-item {

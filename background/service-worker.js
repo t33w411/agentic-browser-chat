@@ -1415,7 +1415,7 @@ async function handleAgentWebSearchForServiceWorker(msgForSearch, sendResponseFo
     }
 
     if (normalizedForSearch.length === 0) {
-      sendResponseForSearch({ ok: false, error: 'Web search returned no results (the model did not run a web search, or nothing was found). Try rephrasing the query.', latencyMs: latencyMsForSearch, rawResponse: contentForSearch });
+      sendResponseForSearch({ ok: false, error: 'Web search returned no results (the model did not run a web search, or nothing was found). Try rephrasing the query.', latencyMs: latencyMsForSearch, rawResponse: contentForSearch, usage: (jsonForSearch && jsonForSearch.usage) || null });
       return;
     }
 
