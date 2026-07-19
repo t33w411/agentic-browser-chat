@@ -100,7 +100,7 @@ A single browser-side agent that can read the current page, search the web and f
   - On a text selection: *Explain selection*, *Summarize selection*, *Proofread selection*, *Quick Question about selection*, *Add selection to chat*.
   - On an image: *Add image to chat*.
 - **Content selector**: a hover-highlight mode you can toggle on. Click any page element to add its content to the chat. Right-clicking the highlight opens a small menu that lets you choose **Add simple HTML to chat** (cleaned, flattened representation) or **Add raw HTML to chat** (the literal markup).
-- **Leave-warning**: if you try to navigate away while the agent is mid-task, the extension warns you before the page unloads.
+- **Runs survive navigation**: agent turns are hosted in an offscreen document, so an in-progress task keeps going across page reloads or navigations (the panel re-subscribes when it comes back).
 
 ### Attachments
 
@@ -356,7 +356,6 @@ agentic-browser-chat/
 ├── content/                   # Content-script bootstrap
 │   ├── preInit.js             # First in the load order; bumps the listener-generation counter
 │   ├── keyboardShield.js      # Captures keys early to protect panel inputs
-│   ├── agentLeaveWarning.js   # Warns on navigate-away while agent is working
 │   └── main.js                # Last in the load order; runs re-init recovery
 ├── panel/                     # The injected overlay panel (shadow-DOM UI)
 │   ├── panel.js               # Boot controller; attaches the shadow root

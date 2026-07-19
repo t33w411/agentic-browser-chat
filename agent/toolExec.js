@@ -1811,53 +1811,6 @@
     return null;
   }
 
-  // Returns a reason string if clicking el would unload the current document via
-  // an <a>/<area> ancestor navigation, otherwise null. Same-document hash links,
-  // target="_blank"/"_new"/"new window" links, mailto:/tel:/etc., and javascript:
-  // URLs are not considered unloading navigations.
-  function checkNavigationBlockerForPageQuery(el) {
-    var anchorForNav = el;
-    while (anchorForNav && anchorForNav !== document.body) {
-      var tagForNav = anchorForNav.tagName;
-      if (tagForNav === 'A' || tagForNav === 'AREA') break;
-      anchorForNav = anchorForNav.parentElement;
-    }
-    if (!anchorForNav || anchorForNav === document.body) return null;
-    if (anchorForNav.tagName !== 'A' && anchorForNav.tagName !== 'AREA') return null;
-
-    var hrefRawForNav = anchorForNav.getAttribute('href');
-    if (!hrefRawForNav) return null;
-    var hrefTrimForNav = hrefRawForNav.trim();
-    if (!hrefTrimForNav) return null;
-    if (hrefTrimForNav.charAt(0) === '#') return null;
-
-    var schemeMatchForNav = /^([a-zA-Z][a-zA-Z0-9+\-.]*):/.exec(hrefTrimForNav);
-    if (schemeMatchForNav) {
-      var schemeForNav = schemeMatchForNav[1].toLowerCase();
-      if (schemeForNav === 'javascript') return null;
-      if (schemeForNav === 'mailto' || schemeForNav === 'tel' || schemeForNav === 'sms' || schemeForNav === 'callto') return null;
-    }
-
-    var targetForNav = (anchorForNav.getAttribute('target') || '').toLowerCase();
-    if (targetForNav === '_blank' || targetForNav === '_new' || (targetForNav && targetForNav !== '_self' && targetForNav !== '_top' && targetForNav !== '_parent')) {
-      return null;
-    }
-
-    var resolvedHrefForNav;
-    try {
-      resolvedHrefForNav = anchorForNav.href;
-    } catch (eForNavResolve) {
-      resolvedHrefForNav = hrefTrimForNav;
-    }
-    if (!resolvedHrefForNav) return null;
-
-    var currentNoHashForNav = window.location.href.split('#')[0];
-    var targetNoHashForNav = String(resolvedHrefForNav).split('#')[0];
-    if (currentNoHashForNav === targetNoHashForNav) return null;
-
-    return 'Clicking this element would navigate the page to "' + resolvedHrefForNav + '" and unload the current document. Page-leaving navigation is not permitted through click. Find a non-navigating alternative (e.g. a button or in-page toggle), or proceed without clicking.';
-  }
-
   function snapshotVisibleAlertsForPageQuery() {
     var alertsForSnap = [];
     var nodesForSnap;
@@ -3239,13 +3192,9 @@
 
   // Category-agnostic synthetic click with the same quiet-window diff the findPageElements
   // click uses, so it works on pointer-detected <div>s that fit no findPageElements category.
-  async function dispatchSyntheticClickForRefToolExec(elForClick, wantRightForClick, contextForClick) {
+  async function dispatchSyntheticClickForRefToolExec(elForClick, wantRightForClick) {
     var blockerForClick = checkClickableBlockerForPageQuery(elForClick);
     if (blockerForClick) return { ok: false, blocked: true, error: 'Cannot click: ' + blockerForClick };
-    var navBlockerForClick = checkNavigationBlockerForPageQuery(elForClick);
-    if (navBlockerForClick && !(contextForClick && contextForClick.offscreenRun)) {
-      return { ok: false, nav_blocked: true, error: navBlockerForClick };
-    }
     try { elForClick.scrollIntoView({ block: 'center', inline: 'center' }); } catch (eScrollClick) { /* ignore */ }
     var beforeSnapForClick = {
       url: window.location.href,
@@ -3318,8 +3267,8 @@
       return { ok: false, error: 'Refusing to click "' + destructiveForClick + '": it reads as a destructive action, and nothing was dispatched. If the user asked to do exactly this, re-issue with confirm: true.' };
     }
     var wantRightForClick = argsForClick.button === 'right';
-    var synthForClick = await dispatchSyntheticClickForRefToolExec(elForClick, wantRightForClick, contextForClick);
-    if (synthForClick.blocked || synthForClick.nav_blocked) return { ok: false, error: synthForClick.error };
+    var synthForClick = await dispatchSyntheticClickForRefToolExec(elForClick, wantRightForClick);
+    if (synthForClick.blocked) return { ok: false, error: synthForClick.error };
     if (synthForClick.changed) return { ok: true, summary: 'clicked (synthetic); page reacted' };
     if (!elLooksClickableWidgetForToolExec(elForClick, descriptorForClick)) {
       return { ok: true, summary: 'clicked (synthetic); no observable change' };
@@ -5296,14 +5245,6 @@
               }
             }
             return { ok: false, error: 'Cannot click element matching "' + selectorForFPE + '": ' + blockerForClick };
-          }
-
-          // Page-leaving navigation gate: refused in-panel (the run loop is hosted in this page's
-          // content script and dies on navigation), allowed for an offscreen-hosted run (it
-          // survives the page load). offscreenRun is set only on the delegated path.
-          var navBlockerForClick = checkNavigationBlockerForPageQuery(matchedElForFPE);
-          if (navBlockerForClick && !(context && context.offscreenRun)) {
-            return { ok: false, error: navBlockerForClick };
           }
 
           // Bring the target into view so the click lands on the intended pixel and so the
@@ -10115,8 +10056,8 @@ self.onmessage = function (e) {
   // That works from a content script, but the offscreen-hosted run loop has no
   // sender.tab, so it must name the target tab explicitly. This wrapper binds a tabId
   // into every cdpClient call without touching the many downstream call sites. When
-  // tabId is null/undefined (the legacy in-panel path) the raw client is returned
-  // unchanged, so sender.tab resolution still applies.
+  // tabId is null/undefined the raw client is returned unchanged, so sender.tab
+  // resolution still applies.
   function bindCdpClientToTabForToolExec(cdpClientForBind, tabIdForBind) {
     if (!cdpClientForBind || tabIdForBind == null) return cdpClientForBind;
     return {
@@ -10374,17 +10315,6 @@ self.onmessage = function (e) {
           return { ok: false, error: 'Refusing this ' + actionForPageAct + ': the element under the resolved point reads as a destructive action ("' + destructiveLabelForPageAct + '"), and nothing was dispatched. If you did NOT mean to hit this, you targeted the wrong element, re-read the page (a prior dom_delta.added or getInteractiveView) and pick the intended control by its label. If destroying this is genuinely what the user asked for, re-issue the same ' + actionForPageAct + ' with confirm_destructive: true.' };
         }
       }
-      // Page-leaving navigation gate (anchor-based, parity with the page_query click gate):
-      // refuse a click/double_click whose resolved target sits under an <a>/<area> that would
-      // unload the document. In-panel runs die on navigation, so they are gated; an offscreen
-      // run survives the page load and passes offscreenRun, so it is not. right_click opens a
-      // context menu rather than navigating, so it is not gated here.
-      if ((actionForPageAct === 'click' || actionForPageAct === 'double_click') && !(context && context.offscreenRun)) {
-        var navBlockerForPageAct = checkNavigationBlockerForPageQuery(targetElForPageActProbe);
-        if (navBlockerForPageAct) {
-          return { ok: false, error: navBlockerForPageAct };
-        }
-      }
       if (observeDomForPageAct && typeof MutationObserver === 'function' && typeof document !== 'undefined' && document.documentElement) {
         try {
           deltaObserverForPageAct = new MutationObserver(function (recordsForPageActObs) {
@@ -10602,8 +10532,8 @@ self.onmessage = function (e) {
       case 'web_fetch':             return webFetchToolForToolExec(args, context);
       case 'list_tabs':             return listTabsToolForToolExec(args, context);
       case 'read_tab':              return readTabToolForToolExec(args, context);
-      // switch_tab/create_tab/close_tab are wired for the offscreen loop only (the legacy
-      // in-panel loop is deprecated). The run-target rebind after these lives in agentRun.js.
+      // switch_tab/create_tab/close_tab are wired for the offscreen loop. The run-target
+      // rebind after these lives in agentRun.js.
       case 'switch_tab':            return switchTabToolForToolExec(args, context);
       case 'create_tab':            return createTabToolForToolExec(args, context);
       case 'close_tab':             return closeTabToolForToolExec(args, context);

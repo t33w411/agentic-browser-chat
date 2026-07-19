@@ -433,9 +433,8 @@
     var prevTurnMainCostForRun = 0;
     var preSendCostForRun = 0;
 
-    // Push the live session token/cost counter to the panel, mirroring the legacy in-panel
-    // loop's per-turn updateSessionTokenDisplay call. The receiver updates only when this
-    // chat is active.
+    // Push the live session token/cost counter to the panel once per turn. The receiver
+    // updates only when this chat is active.
     function emitUsageDisplayForRun() {
       emitForAgentRun('stream_usage', chatId, {
         usage: logUsageForRun,
@@ -513,7 +512,7 @@
       compactedThroughMessageIdForRun = (chatRecordForRun && chatRecordForRun.compactedThroughMessageId != null) ? chatRecordForRun.compactedThroughMessageId : null;
 
       // Cost already persisted on this chat before this run, for the live token/cost counter.
-      // Mirrors the panel's sumPersistedChatCost + the legacy per-turn updateSessionTokenDisplay.
+      // Mirrors the panel's sumPersistedChatCost baseline used by the stream_usage display.
       for (var pscIForRun = 0; pscIForRun < messagesForRun.length; pscIForRun++) {
         var pscMsgForRun = messagesForRun[pscIForRun];
         if (pscMsgForRun && pscMsgForRun.role === 'assistant' && Number(pscMsgForRun.usageCost) > 0) {
@@ -722,8 +721,8 @@
           turnMainCostAccumForRun += (Number.isFinite(actualMainCostForRun) && actualMainCostForRun > 0)
             ? actualMainCostForRun
             : (Number(logUsageForRun.total_tokens) || 0) * completionCostPerMillionForRun / 1000000;
-          // Push the counter as soon as usage arrives (mirroring the in-panel loop) so an empty
-          // final turn — which breaks below before the post-persist emit — still reflects its tokens.
+          // Push the counter as soon as usage arrives so an empty final turn — which breaks
+          // below before the post-persist emit — still reflects its tokens.
           emitUsageDisplayForRun();
         }
 
@@ -1083,8 +1082,8 @@
         }
 
         // Tell every tab's panel which data stores this round mutated so their sidebars
-        // refresh live. The legacy in-panel loop called scheduleStoreRefresh directly; the
-        // offscreen loop signals via a stream event instead.
+        // refresh live. The offscreen loop cannot call scheduleStoreRefresh directly, so it
+        // signals via a stream event instead.
         var mutatedStoresForRound = {};
         for (var msi = 0; msi < toolCallsForLoop.length; msi++) {
           var tcNameForMutate = toolCallsForLoop[msi].function && toolCallsForLoop[msi].function.name;

@@ -37,7 +37,6 @@
   var _exposedSetPopoutPositionsForPanelRuntime = null;
   var _exposedReclampPanelPositionForPanelRuntime = null;
   var _exposedHandleRemoteStreamEventForPanelRuntime = null;
-  var _exposedHandleRemoteCancelDeliverForPanelRuntime = null;
   var _exposedRunDelegatedPageToolForPanelRuntime = null;
   var _exposedSetReducedPaneForPanelRuntime = null;
   var _exposedSetChatSubTabForPanelRuntime = null;
@@ -767,72 +766,22 @@
       pickerTabs: []
     };
     // -------------------------------------------------------------------
-    // Cross-tab live chat streaming broadcast (streaming text + live bubble).
+    // Cross-tab live chat streaming (streaming text + live bubble).
     //
-    // The originating tab emits stream events here; the SW relays each event
-    // to every other tab, where receivers drive a mirrored live bubble using
-    // the same liveTurnBubblesForPanelRuntime machinery as the originator.
+    // The offscreen-hosted loop emits stream events via the SW, which relays
+    // each event to every tab, where receivers drive a mirrored live bubble
+    // using the liveTurnBubblesForPanelRuntime machinery.
     //
     // remoteStreamingChatsForPanelRuntime tracks chats whose live bubble on
-    // THIS tab is being driven by remote events (not a local sendChat).
-    // Used to dedupe, distinguish from local sends, and tear down on end.
-    //
-    // textDebounceTimersForStreamBroadcast: per-chat debounce timer. Text
-    // deltas in a fast stream can arrive dozens of times per second; we
-    // collapse to at most one broadcast per ~120ms with a final flush on
-    // stream_end so the last token batch isn't lost.
+    // THIS tab is being driven by remote events. Used to dedupe and to tear
+    // down the mirrored bubble on end.
     // -------------------------------------------------------------------
     const remoteStreamingChatsForPanelRuntime = new Set();
     // Chats this tab handed off to the offscreen-hosted loop. Tracked locally so we can
     // guard against a duplicate send before stream_start arrives, route a cancel during
-    // that window, and re-focus the chat input when the run ends (the offscreen path
-    // makes this tab a pure stream receiver, so the legacy finally-block focus is gone).
+    // that window, and re-focus the chat input when the run ends (this tab is a pure
+    // stream receiver, so focus restore happens here on stream_end).
     const offscreenInitiatedChatsForPanelRuntime = new Set();
-    const textDebounceTimersForStreamBroadcast = new Map();
-    const textPendingAccForStreamBroadcast = new Map();
-    const STREAM_TEXT_DEBOUNCE_MS_FOR_PANEL_RUNTIME = 120;
-
-    function broadcastStreamEventForPanelRuntime(eventForBroadcast, chatIdForBroadcast, payloadForBroadcast) {
-      if (!chrome || !chrome.runtime || !chrome.runtime.sendMessage) return;
-      try {
-        chrome.runtime.sendMessage({
-          action: "streamOriginatorBroadcast",
-          event: eventForBroadcast,
-          chatId: Number(chatIdForBroadcast),
-          payload: payloadForBroadcast || null
-        }, function () {
-          // Fire-and-forget; ignore any lastError so no console noise.
-          void chrome.runtime.lastError;
-        });
-      } catch (errorForBroadcast) {}
-    }
-
-    function broadcastStreamTextDebouncedForPanelRuntime(chatIdForDebounce, accTextForDebounce) {
-      textPendingAccForStreamBroadcast.set(chatIdForDebounce, accTextForDebounce);
-      if (textDebounceTimersForStreamBroadcast.has(chatIdForDebounce)) return;
-      const timerForDebounce = setTimeout(function flushBroadcastTextForPanelRuntime() {
-        textDebounceTimersForStreamBroadcast.delete(chatIdForDebounce);
-        const finalAccForDebounce = textPendingAccForStreamBroadcast.get(chatIdForDebounce);
-        textPendingAccForStreamBroadcast.delete(chatIdForDebounce);
-        if (typeof finalAccForDebounce === "string") {
-          broadcastStreamEventForPanelRuntime("stream_text", chatIdForDebounce, { accText: finalAccForDebounce });
-        }
-      }, STREAM_TEXT_DEBOUNCE_MS_FOR_PANEL_RUNTIME);
-      textDebounceTimersForStreamBroadcast.set(chatIdForDebounce, timerForDebounce);
-    }
-
-    function flushStreamTextBroadcastForPanelRuntime(chatIdForFlush) {
-      const timerForFlush = textDebounceTimersForStreamBroadcast.get(chatIdForFlush);
-      if (timerForFlush) {
-        clearTimeout(timerForFlush);
-        textDebounceTimersForStreamBroadcast.delete(chatIdForFlush);
-      }
-      const pendingAccForFlush = textPendingAccForStreamBroadcast.get(chatIdForFlush);
-      textPendingAccForStreamBroadcast.delete(chatIdForFlush);
-      if (typeof pendingAccForFlush === "string") {
-        broadcastStreamEventForPanelRuntime("stream_text", chatIdForFlush, { accText: pendingAccForFlush });
-      }
-    }
 
     // Ensure the receiver has a live bubble for the given chat. Idempotent.
     // Used by all bubble-mutating events (text, tool_steps, etc.) so they can
@@ -870,8 +819,6 @@
       if (!Number.isFinite(numericChatIdForSnapshot)) return;
       // Bubble already exists locally — no catch-up needed.
       if (liveTurnBubblesForPanelRuntime.has(numericChatIdForSnapshot)) return;
-      // We are the originator — no catch-up needed.
-      if (sendingChatsForPanelRuntime.has(numericChatIdForSnapshot)) return;
       try {
         chrome.runtime.sendMessage(
           { action: "streamSnapshotRequest", chatId: numericChatIdForSnapshot },
@@ -884,7 +831,6 @@
             // finished, etc.).
             if (S.activeChatId !== numericChatIdForSnapshot) return;
             if (liveTurnBubblesForPanelRuntime.has(numericChatIdForSnapshot)) return;
-            if (sendingChatsForPanelRuntime.has(numericChatIdForSnapshot)) return;
 
             ensureRemoteBubbleForPanelRuntime(numericChatIdForSnapshot);
             // Replay tool steps (if any) before text so the chip row sits
@@ -923,9 +869,6 @@
     function handleRemoteStreamEventForPanelRuntime(eventForRemote, chatIdForRemote, payloadForRemote) {
       const numericChatIdForRemote = Number(chatIdForRemote);
       if (!Number.isFinite(numericChatIdForRemote)) return;
-      // If this tab is itself the originator for this chat, ignore — the SW
-      // already excludes the sender, but belt-and-suspenders.
-      if (sendingChatsForPanelRuntime.has(numericChatIdForRemote)) return;
 
       if (eventForRemote === "stream_start") {
         // Show the user message the originator just persisted, above the live streaming bubble.
@@ -1025,9 +968,8 @@
         return;
       }
 
-      // Emitted by the offscreen-hosted loop where the legacy in-panel loop appended a
-      // transient system message (timeout/error/empty-response/cap notices). Shown only on
-      // the active chat, mirroring the legacy S.activeChatId gate.
+      // Emitted by the offscreen-hosted loop for a transient system message
+      // (timeout/error/empty-response/cap notices). Shown only on the active chat.
       if (eventForRemote === "stream_system_notice") {
         if (S.activeChatId !== numericChatIdForRemote) return;
         const noticeTextForRemote = payloadForRemote && typeof payloadForRemote.text === 'string' ? payloadForRemote.text : '';
@@ -1035,8 +977,8 @@
         return;
       }
 
-      // Emitted by the offscreen-hosted loop around history compaction, replacing the
-      // legacy showCompactingBubble/removeCompactingBubble calls.
+      // Emitted by the offscreen-hosted loop around history compaction to toggle the
+      // compacting bubble.
       if (eventForRemote === "stream_compacting") {
         if (S.activeChatId !== numericChatIdForRemote) return;
         if (payloadForRemote && payloadForRemote.active) showCompactingBubbleForPanelRuntime();
@@ -1044,9 +986,8 @@
         return;
       }
 
-      // Live session token/cost counter, emitted per turn by the offscreen-hosted loop in
-      // place of the legacy in-panel loop's direct updateSessionTokenDisplay calls. Only the
-      // tab viewing this chat updates its counter.
+      // Live session token/cost counter, emitted per turn by the offscreen-hosted loop.
+      // Only the tab viewing this chat updates its counter.
       if (eventForRemote === "stream_usage") {
         if (S.activeChatId !== numericChatIdForRemote) return;
         if (!payloadForRemote) return;
@@ -1055,8 +996,8 @@
       }
 
       // Emitted by the offscreen-hosted loop after a tool round that created or edited
-      // notes/tasks/questions. The legacy in-panel loop called scheduleStoreRefresh
-      // directly for the mutated stores; the offscreen loop cannot, so it signals here.
+      // notes/tasks/questions. The loop runs in the offscreen doc and cannot call
+      // scheduleStoreRefresh directly for the mutated stores, so it signals here.
       // A full refresh (no ops) is used deliberately rather than relying on the cross-tab
       // incremental DB-change broadcast, which renders new notes but was observed to leave
       // new tasks/questions unrendered until a later full refresh.
@@ -1072,14 +1013,11 @@
       }
 
       if (eventForRemote === "stream_end") {
-        // If this tab initiated an offscreen-hosted run for this chat, the legacy
-        // finally-block input re-focus no longer runs here (the loop is in the offscreen
-        // doc), so restore focus now.
+        // If this tab initiated the run, restore chat-input focus here (the panel is a
+        // stream receiver; the offscreen loop cannot focus this tab's textarea).
         const wasInitiatorForEnd = offscreenInitiatedChatsForPanelRuntime.has(numericChatIdForRemote);
         if (wasInitiatorForEnd) {
           offscreenInitiatedChatsForPanelRuntime.delete(numericChatIdForRemote);
-          // Offscreen runs survive page navigation/reload, so they never arm the
-          // leave-warning beforeunload; agentIsWorking tracks only legacy in-panel runs.
           if (S.activeChatId === numericChatIdForRemote) {
             const chatTaForOffscreenFocus = root.querySelector('.chat-textarea');
             if (chatTaForOffscreenFocus) chatTaForOffscreenFocus.focus();
@@ -1112,8 +1050,8 @@
         // transient bubble. remoteStreaming is now cleared, so the active chat re-renders.
         scheduleStoreRefreshForPanelRuntime("chats");
         // Also refresh the notes/tasks/questions sidebars in case the run created or edited
-        // any of them. The legacy in-panel loop did this per tool round via scheduleStoreRefresh;
-        // the offscreen loop can't, so the viewing/initiator tab reconciles here at run end.
+        // any of them. The offscreen loop can't refresh these per tool round, so the
+        // viewing/initiator tab reconciles here at run end.
         // Done in the receiver (always-fresh page context) and via a full refresh, so it does
         // not depend on the offscreen loop emitting an extra signal.
         scheduleStoreRefreshForPanelRuntime("notes");
@@ -1257,9 +1195,6 @@
     // capture-phase close handler runs. Toggle functions read this to know whether
     // to re-open the dropdown after the capture handler has already closed everything.
     let preclickOpenStateForPanelRuntime = null;
-    // Map<chatId, AbortController> — one entry per chat that is actively streaming
-    const sendingChatsForPanelRuntime = new Map();
-    const userStopRequestedChatsForPanelRuntime = new Set();
     const AGENT_FALLBACK_RESPONSES_FOR_PANEL_RUNTIME = [
       "Sorry, something went wrong. Please let me know if I should try again.",
       "I wasn't able to complete that. Feel free to ask me to try again.",
@@ -5683,7 +5618,7 @@
 
         var activeChatIdForRefresh = S.activeChatId;
         var activeChatRecordChangedForRefresh = false;
-        if (activeChatIdForRefresh && dbChatIdSetForRefresh.has(activeChatIdForRefresh) && !sendingChatsForPanelRuntime.has(activeChatIdForRefresh)) {
+        if (activeChatIdForRefresh && dbChatIdSetForRefresh.has(activeChatIdForRefresh)) {
           // Did the active chat's row itself change? An unchanged updatedAt
           // means messages and metadata are identical to what we already
           // hold in memory, so listMessagesByChatId would just round-trip
@@ -5728,8 +5663,6 @@
           // Cross-tab model-picker sync: if another tab sent a message that
           // changed this chat's lastModel, mirror it into our picker so the
           // next send here uses the same model the user last chose remotely.
-          // Skipped while a local send is in flight (handled by the outer
-          // sendingChatsForPanelRuntime guard).
           var activeStoreForModelSync = CHAT_STORE_FOR_PANEL_RUNTIME[activeChatIdForRefresh];
           var lastModelForModelSync = activeStoreForModelSync && activeStoreForModelSync.lastModel;
           if (lastModelForModelSync) {
@@ -5785,7 +5718,6 @@
           refreshedActiveChatIdForRefresh === activeChatIdAtRefreshStart &&
           activeChatRecordChangedForRefresh &&
           dbChatIdSetForRefresh.has(refreshedActiveChatIdForRefresh) &&
-          !sendingChatsForPanelRuntime.has(refreshedActiveChatIdForRefresh) &&
           !remoteStreamingChatsForPanelRuntime.has(refreshedActiveChatIdForRefresh)
         ) {
           var convContainerForRefresh = root.querySelector('.messages-area');
@@ -5795,7 +5727,6 @@
             : true;
           loadGeneratedBlobsForMessagesForPanelRuntime(getActiveChatMessagesForPanelRuntime()).then(function () {
             if (S.activeChatId !== refreshedActiveChatIdForRefresh) return;
-            if (sendingChatsForPanelRuntime.has(refreshedActiveChatIdForRefresh)) return;
             var mermaidDoneForDbRefresh = renderChatMessages();
             // Sync the session token/cost counter from the freshly-loaded
             // messages so remote tabs reflect the latest usage after a
@@ -6381,9 +6312,9 @@
         }
 
         // Active-chat refetch + re-render. Same gates as the full-refresh path:
-        // skip during local send or during a remote-mirrored stream.
+        // skip during a remote-mirrored stream.
         var activeChatChangedForApply = false;
-        if (Number(S.activeChatId) === idForApply && !sendingChatsForPanelRuntime.has(idForApply)) {
+        if (Number(S.activeChatId) === idForApply) {
           activeChatChangedForApply =
             previousUpdatedAtForApply !== newUpdatedAtForApply ||
             !chatMessagesLoadedSetForPanelRuntime.has(idForApply);
@@ -6436,7 +6367,6 @@
         // Active-chat re-render (gated identically to the full-refresh path).
         if (activeChatChangedForApply &&
             Number(S.activeChatId) === idForApply &&
-            !sendingChatsForPanelRuntime.has(idForApply) &&
             !remoteStreamingChatsForPanelRuntime.has(idForApply)) {
           var convContainerForApply = root.querySelector('.messages-area');
           var savedScrollTopForApply = convContainerForApply ? convContainerForApply.scrollTop : 0;
@@ -6446,7 +6376,6 @@
           var chatIdForApplyRender = idForApply;
           loadGeneratedBlobsForMessagesForPanelRuntime(getActiveChatMessagesForPanelRuntime()).then(function () {
             if (S.activeChatId !== chatIdForApplyRender) return;
-            if (sendingChatsForPanelRuntime.has(chatIdForApplyRender)) return;
             var mermaidDoneForApply = renderChatMessages();
             rebuildTokenCounterFromMessagesForPanelRuntime(chatIdForApplyRender);
             reattachLiveTurnBubbleForPanelRuntime(chatIdForApplyRender);
@@ -6702,8 +6631,7 @@
       const starClassForSync = wasStarredForSync ? ' starred' : '';
       const starTitleForSync = wasStarredForSync ? 'Unfavorite' : 'Favorite';
       const starGlyphForSync = wasStarredForSync ? '&#9733;' : '&#9734;';
-      const isStreamingForSync = sendingChatsForPanelRuntime.has(chatIdForSync) ||
-        remoteStreamingChatsForPanelRuntime.has(chatIdForSync) ||
+      const isStreamingForSync = remoteStreamingChatsForPanelRuntime.has(chatIdForSync) ||
         offscreenInitiatedChatsForPanelRuntime.has(chatIdForSync);
       const needsChatItemShellForSync = !chatItemForSync.querySelector('.chat-item-body') ||
         !chatItemForSync.querySelector('.chat-item-title') ||
@@ -10526,13 +10454,12 @@
       if (container) container.scrollTop = container.scrollHeight;
     }
 
-    // True when the chat currently being viewed has a run in flight: a local send,
-    // a remote-mirrored stream, OR an offscreen-hosted run this tab just initiated
-    // (before its first stream event arrives). Gates the input and the mutating
-    // per-message options (Edit/Hide) while the turn is live.
+    // True when the chat currently being viewed has a run in flight: a remote-mirrored
+    // stream, OR an offscreen-hosted run this tab just initiated (before its first stream
+    // event arrives). Gates the input and the mutating per-message options (Edit/Hide)
+    // while the turn is live.
     function isActiveChatSendingForPanelRuntime() {
-      return sendingChatsForPanelRuntime.has(S.activeChatId) ||
-             remoteStreamingChatsForPanelRuntime.has(S.activeChatId) ||
+      return remoteStreamingChatsForPanelRuntime.has(S.activeChatId) ||
              offscreenInitiatedChatsForPanelRuntime.has(S.activeChatId);
     }
 
@@ -11067,12 +10994,10 @@
         return !!(noteRecordForAgentCheck && noteRecordForAgentCheck.noteType === 'agent');
       }
       // Ref labels come from this tab's observe registry. Only resolve when this tab owns
-      // the run (local send or offscreen initiator); a remote receiver's registry is a
-      // different page and would show the wrong name.
-      var canResolveRefLabelsForLiveTurn = chatIdForLiveTurnLabel != null && (
-        sendingChatsForPanelRuntime.has(chatIdForLiveTurnLabel) ||
-        offscreenInitiatedChatsForPanelRuntime.has(chatIdForLiveTurnLabel)
-      );
+      // the run (offscreen initiator); a remote receiver's registry is a different page and
+      // would show the wrong name.
+      var canResolveRefLabelsForLiveTurn = chatIdForLiveTurnLabel != null &&
+        offscreenInitiatedChatsForPanelRuntime.has(chatIdForLiveTurnLabel);
       function quotedRefNameForLiveTurn(refForQuoted) {
         if (!canResolveRefLabelsForLiveTurn || refForQuoted == null) return '';
         var nameForQuoted = getObserveRefLabelForLiveTurn(refForQuoted);
@@ -11320,7 +11245,7 @@
 
     // Stamp the current source rev onto every note/chat input chip just before the message is
     // collected and sent, capturing what the model is about to read. Runs before the collect call
-    // in both the offscreen and legacy send paths.
+    // in the send path.
     async function stampInputChipSourceHashesForPanelRuntime() {
       const rowForStamp = root.querySelector('.input-chips-row');
       if (!rowForStamp) return;
@@ -12461,31 +12386,6 @@
       return '';
     }
 
-    // Feature flag: when enabled, the orchestration loop runs in the offscreen document
-    // (so it survives a page reload) instead of in this content script. Controlled by the
-    // "Keep runs alive across page reloads" toggle in Settings. The default below applies
-    // only when the user has never toggled it. It is on by default; set it to false to make
-    // the legacy in-panel loop the default again. The toggle init and storage-sync read the
-    // same default.
-    const OFFSCREEN_LOOP_DEFAULT_ENABLED_FOR_PANEL_RUNTIME = true;
-    function resolveOffscreenLoopEnabledForPanelRuntime(itemsForFlag) {
-      if (!itemsForFlag || itemsForFlag.abchatOffscreenLoopEnabled === undefined) {
-        return OFFSCREEN_LOOP_DEFAULT_ENABLED_FOR_PANEL_RUNTIME;
-      }
-      return !!itemsForFlag.abchatOffscreenLoopEnabled;
-    }
-    function isOffscreenLoopEnabledForPanelRuntime() {
-      return new Promise(function (resolveForFlag) {
-        try {
-          chrome.storage.local.get('abchatOffscreenLoopEnabled', function (itemsForFlag) {
-            resolveForFlag(resolveOffscreenLoopEnabledForPanelRuntime(itemsForFlag));
-          });
-        } catch (errForFlag) {
-          resolveForFlag(OFFSCREEN_LOOP_DEFAULT_ENABLED_FOR_PANEL_RUNTIME);
-        }
-      });
-    }
-
     // Order-independent signature of a round's tool calls (name + canonicalized arguments),
     // used to detect a degenerate loop where the model re-issues the identical failing call
     // without adapting. Arguments are re-stringified with sorted keys so a pure key reorder
@@ -12558,20 +12458,18 @@
 
       const chatId = Number(optsForPanelRuntime.chatId || S.activeChatId);
       if (!Number.isFinite(chatId)) return;
-      if (sendingChatsForPanelRuntime.has(chatId)) return;
       // Another tab is already streaming this chat — refuse to start a second
-      // local stream that would conflict with the mirrored one.
+      // run that would conflict with the mirrored one.
       if (remoteStreamingChatsForPanelRuntime.has(chatId)) {
         appendSystemMsgToContainerForPanelRuntime('This chat is currently streaming on another tab. Wait for it to finish or cancel it before sending again.');
         return;
       }
       // Concurrent-session cap. Count distinct chats with an active run this tab knows about:
-      // local (legacy) sends, offscreen runs this tab initiated, and offscreen runs from other
-      // tabs whose stream this tab is mirroring. The sets overlap (an initiator is also a
-      // receiver of its own run), so de-duplicate by chat id, and exclude this chat since it is
-      // the one being started. The offscreen document enforces the same cap authoritatively.
+      // offscreen runs this tab initiated, and offscreen runs from other tabs whose stream this
+      // tab is mirroring. The sets overlap (an initiator is also a receiver of its own run), so
+      // de-duplicate by chat id, and exclude this chat since it is the one being started. The
+      // offscreen document enforces the same cap authoritatively.
       const activeRunChatIdsForCapForSend = new Set();
-      sendingChatsForPanelRuntime.forEach(function (controllerForCap, chatIdForCapKey) { activeRunChatIdsForCapForSend.add(Number(chatIdForCapKey)); });
       offscreenInitiatedChatsForPanelRuntime.forEach(function (chatIdForCapKey) { activeRunChatIdsForCapForSend.add(Number(chatIdForCapKey)); });
       remoteStreamingChatsForPanelRuntime.forEach(function (chatIdForCapKey) { activeRunChatIdsForCapForSend.add(Number(chatIdForCapKey)); });
       activeRunChatIdsForCapForSend.delete(chatId);
@@ -12590,1461 +12488,138 @@
         }
       }
 
-      // Offscreen-hosted run path. Do the send-initiation DOM work (append + render the
-      // user message, clear the input, kick off title generation), persist the user message
-      // to the DB, then hand the run to the offscreen document and become a pure stream
-      // receiver. The entire legacy in-panel loop below is skipped. Reuses all the entry
-      // guards above; the legacy path is untouched so flag-off behavior is unchanged.
-      const offscreenLoopEnabledForSend = await isOffscreenLoopEnabledForPanelRuntime();
-      if (offscreenLoopEnabledForSend) {
-        if (offscreenInitiatedChatsForPanelRuntime.has(chatId)) return;
-        const modelForOffscreen = (modelSelectForSend && modelSelectForSend.value) ? modelSelectForSend.value : DEFAULT_MODEL_FOR_PANEL_RUNTIME;
-        if (CHAT_STORE_FOR_PANEL_RUNTIME[chatId]) CHAT_STORE_FOR_PANEL_RUNTIME[chatId].lastModel = modelForOffscreen;
-        // Persist lastModel to the DB now, at handoff. Every tab (this initiator included)
-        // reconciles from the DB on stream_end, overwriting the in-memory lastModel. The
-        // offscreen loop's end-of-run lastModel write is skipped when a run errors or is
-        // refused, and a new chat is created with no model, so without this early write the
-        // stream_end refresh would wipe the model the user actually used.
-        const panelDataRepoForOffscreenModel = getPanelDataRepoForPanelRuntime();
-        if (panelDataRepoForOffscreenModel && typeof panelDataRepoForOffscreenModel.updateChat === 'function' && CHAT_STORE_FOR_PANEL_RUNTIME[chatId]) {
-          try { await panelDataRepoForOffscreenModel.updateChat(chatId, { lastModel: modelForOffscreen }); } catch (eOffscreenModelPersist) {}
-        }
-
-        if (!isResendForPanelRuntime) {
-          const msgsForAutoChipScanOffscreen = (CHAT_STORE_FOR_PANEL_RUNTIME[chatId] || {}).messages || [];
-          const blobIdPatternForAutoChipOffscreen = /__blob:(\d+)__/;
-          let lastUserIndexForAutoChipOffscreen = -1;
-          for (var aciOffscreen = msgsForAutoChipScanOffscreen.length - 1; aciOffscreen >= 0; aciOffscreen--) {
-            const msgForAutoChipOffscreen = msgsForAutoChipScanOffscreen[aciOffscreen];
-            if (msgForAutoChipOffscreen && msgForAutoChipOffscreen.role === 'user') { lastUserIndexForAutoChipOffscreen = aciOffscreen; break; }
-          }
-          for (var acjOffscreen = lastUserIndexForAutoChipOffscreen + 1; acjOffscreen < msgsForAutoChipScanOffscreen.length; acjOffscreen++) {
-            const msgForAutoChipAssistantOffscreen = msgsForAutoChipScanOffscreen[acjOffscreen];
-            if (!msgForAutoChipAssistantOffscreen || msgForAutoChipAssistantOffscreen.role !== 'assistant') continue;
-            const autoChipMatchOffscreen = blobIdPatternForAutoChipOffscreen.exec(String(msgForAutoChipAssistantOffscreen.md || ''));
-            if (!autoChipMatchOffscreen) continue;
-            const autoChipBlobIdOffscreen = Number(autoChipMatchOffscreen[1]);
-            if (!Number.isFinite(autoChipBlobIdOffscreen)) continue;
-            addInputChipForPanelRuntime({ type: 'image', label: 'Generated image', mimeType: 'image/png', refId: autoChipBlobIdOffscreen, size: 0, kind: 'generated_image' });
-          }
-          await stampInputChipSourceHashesForPanelRuntime();
-          const chipsForOffscreen = collectInputChipsForPanelRuntime();
-          await appendMessageToChatForPanelRuntime(chatId, { role: "user", content: text, md: text, chips: chipsForOffscreen, _addedByThisTab: true }, { persistToDb: false });
-          chatTaForSend.value = "";
-          clearInputChipsForPanelRuntime();
-          clearDraftForPanelRuntime();
-          updateAutoExpandForTextareaForPanelRuntime(chatTaForSend);
-          renderChatMessages();
-          scrollChatToBottomForPanelRuntime();
-          const chatForFirstMsgCheckOffscreen = CHAT_STORE_FOR_PANEL_RUNTIME[chatId];
-          if (chatForFirstMsgCheckOffscreen && chatForFirstMsgCheckOffscreen.messages.length === 1) {
-            const firstMessageSummaryOffscreen = getChatSummaryFromMessagesForPanelRuntime(chatForFirstMsgCheckOffscreen.messages);
-            if (firstMessageSummaryOffscreen && chatForFirstMsgCheckOffscreen.summary !== firstMessageSummaryOffscreen) {
-              chatForFirstMsgCheckOffscreen.summary = firstMessageSummaryOffscreen;
-              upsertChatUiForPanelRuntime(chatId, true);
-            }
-            // Persist the first-message summary now, mirroring the in-panel path. Without this
-            // the DB summary stays empty until the offscreen loop's end-of-run updateChat, so
-            // other tabs and fresh panel loads would show no summary for the whole run.
-            const panelDataRepoForFirstSummaryOffscreen = getPanelDataRepoForPanelRuntime();
-            if (firstMessageSummaryOffscreen && panelDataRepoForFirstSummaryOffscreen && typeof panelDataRepoForFirstSummaryOffscreen.updateChat === 'function') {
-              try {
-                await panelDataRepoForFirstSummaryOffscreen.updateChat(chatId, {
-                  summary: firstMessageSummaryOffscreen,
-                  updatedAt: chatForFirstMsgCheckOffscreen.updatedAt || new Date().toISOString()
-                });
-              } catch (eFirstSummaryOffscreen) {}
-            }
-          }
-          if (chatForFirstMsgCheckOffscreen && chatForFirstMsgCheckOffscreen.messages.length === 1 && !chatForFirstMsgCheckOffscreen.hasCustomTitle) {
-            let titleContextOffscreen = text;
-            if (chipsForOffscreen.length > 0) {
-              const chipContextPartsOffscreen = chipsForOffscreen.map(function (chipForTitleOffscreen) {
-                const snippetForTitleOffscreen = chipForTitleOffscreen.content ? chipForTitleOffscreen.content.slice(0, 200) : '';
-                return chipForTitleOffscreen.label + (snippetForTitleOffscreen ? ': ' + snippetForTitleOffscreen : '');
-              });
-              titleContextOffscreen = (text ? text + '\n' : '') + chipContextPartsOffscreen.join('\n');
-            }
-            autoGenerateChatTitleForPanelRuntime(chatId, titleContextOffscreen, apiKey, modelForOffscreen);
-          }
-        }
-
-        // Persist the user message to the DB so the offscreen loop's getChat sees it.
-        try { await persistPendingUserMessagesForChatForPanelRuntime(chatId, { touchChat: false }); } catch (ePersistOffscreen) {}
-
-        // Pricing for the offscreen loop's cost accounting.
-        const imageModelForOffscreen = await getImageModelForPanelRuntime();
-        const cachedForCostOffscreen = await getCachedModelsForPanelRuntime();
-        const cachedModelsForCostOffscreen = (cachedForCostOffscreen && cachedForCostOffscreen.chatModels) || [];
-        const modelObjForCostOffscreen = cachedModelsForCostOffscreen.find(function (m) { return m.id === modelForOffscreen; }) || null;
-        const completionCostPerMillionOffscreen = modelObjForCostOffscreen ? (Number(modelObjForCostOffscreen.completionCostPerMillion) || 0) : 0;
-        const imageModelObjForCostOffscreen = loadedImageModelsForPanelRuntime.find(function (m) { return m.id === imageModelForOffscreen; }) || null;
-        const imageGenCostOffscreen = imageModelObjForCostOffscreen ? (Number(imageModelObjForCostOffscreen.imageCost) || 0) : 0;
-
-        let automationEnabledOffscreen = false;
-        try {
-          automationEnabledOffscreen = await new Promise(function (resAutoOffscreen) {
-            chrome.storage.local.get('abchatAutomationEnabled', function (itAutoOffscreen) { resAutoOffscreen(!!(itAutoOffscreen && itAutoOffscreen.abchatAutomationEnabled)); });
-          });
-        } catch (eAutoOffscreen) { automationEnabledOffscreen = false; }
-
-        offscreenInitiatedChatsForPanelRuntime.add(chatId);
-        // No leave-warning flag here: an offscreen-hosted run survives page reload, so
-        // navigating away does not lose it (the reloaded panel re-subscribes).
-        setSendingUIStateForPanelRuntime();
-        syncMainChatListItemForPanelRuntime(chatId);
-
-        try {
-          chrome.runtime.sendMessage({
-            action: 'agentRunStart',
-            params: {
-              chatId: chatId,
-              model: modelForOffscreen,
-              apiKey: apiKey,
-              imageModel: imageModelForOffscreen,
-              automationEnabled: automationEnabledOffscreen,
-              agentRules: currentAgentRulesForPanelRuntime || '',
-              userText: getOriginatingUserTextForMemoryGuardForPanelRuntime(chatId, text),
-              visualPreflightSessionId: 'vp_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2),
-              isResend: isResendForPanelRuntime,
-              contextWindow: modelObjForCostOffscreen ? modelObjForCostOffscreen.contextLength : null,
-              pricing: {
-                completionCostPerMillion: completionCostPerMillionOffscreen,
-                imageGenCost: imageGenCostOffscreen
-              }
-            }
-          }, function () { void chrome.runtime.lastError; });
-        } catch (eAgentRunStart) {
-          offscreenInitiatedChatsForPanelRuntime.delete(chatId);
-          setSendingUIStateForPanelRuntime();
-          appendSystemMsgToContainerForPanelRuntime('Could not start the agent run. Please try again.');
-        }
-        return;
-      }
-
-      // Guard must be set before the first await so the UI and shared state immediately know this chat is active.
-      const controllerForSend = new AbortController();
-      const TURN_TOTAL_TIMEOUT_MS = 10 * 60 * 1000;
-      const ITER_STREAM_TIMEOUT_MS = 90 * 1000;
-      const ITER_TOOL_STD_TIMEOUT_MS = 90 * 1000;
-      const ITER_TOOL_IMAGE_TIMEOUT_MS = 3 * 60 * 1000;
-      let timeoutReasonForSend = null;
-      const buildTimeoutNoticeForSend = function (reasonForNotice, toolTimeoutMsForNotice) {
-        if (reasonForNotice === 'total') {
-          return 'Agent stopped: turn exceeded the 10-minute time limit.';
-        }
-        if (reasonForNotice === 'stream') {
-          return 'Agent stopped: the model stopped responding (no data for 90s).';
-        }
-        const toolSecsForNotice = Math.round((toolTimeoutMsForNotice || ITER_TOOL_STD_TIMEOUT_MS) / 1000);
-        const toolLabelForNotice = toolSecsForNotice % 60 === 0
-          ? (toolSecsForNotice / 60) + '-minute limit'
-          : toolSecsForNotice + '-second limit';
-        return 'Agent stopped: tool execution took too long (' + toolLabelForNotice + ').';
-      };
-      const turnTotalTimeoutIdForSend = setTimeout(function () {
-        if (!timeoutReasonForSend) timeoutReasonForSend = 'total';
-        controllerForSend.abort();
-      }, TURN_TOTAL_TIMEOUT_MS);
-      sendingChatsForPanelRuntime.set(chatId, controllerForSend);
-      if (contentNamespaceForPanelRuntime.state) {
-        contentNamespaceForPanelRuntime.state.agentIsWorking = true;
-      }
-      setSendingUIStateForPanelRuntime();
-      syncMainChatListItemForPanelRuntime(chatId);
-
-      const MAX_TOOL_ITERS = 20;
-      const MAX_CONSECUTIVE_ALL_FAILURE_ITERS_FOR_SEND = 8;
-      const MAX_IDENTICAL_FAILING_ROUNDS_FOR_SEND = 3;
-      let iterCount = 0;
-      let consecutiveEmptyItersForSend = 0;
-      let identicalFailingRoundCountForSend = 0;
-      let lastFailingRoundSignatureForSend = null;
-      let sideCallCostForSend = 0;
-      let turnMainCostAccumForSend = 0;
-      let accumulatedSearchSourcesForSend = [];
-      const seenSearchUrlsForSend = new Set();
-      // Hook system state. turnContextForSend is shared across all hook dispatches
-      // for this send. pendingSystemNotesForSend buffers strings from hooks that
-      // returned continueWithSystemNote; they are injected as a single system
-      // message at the start of the next iteration.
-      const hooksForSend = ((globalThis.ABChatAgent || {}).hooks) || null;
-      const turnContextForSend = (hooksForSend && typeof hooksForSend.createTurnContext === 'function')
-        ? hooksForSend.createTurnContext({
-            chatId: chatId,
-            userText: getOriginatingUserTextForMemoryGuardForPanelRuntime(chatId, text)
-          })
-        : null;
-      let pendingSystemNotesForSend = [];
-      const turnHookFiringsByIterForSend = [];
-      async function dispatchHookForSend(eventNameForDispatch, payloadForDispatch) {
-        if (!hooksForSend || typeof hooksForSend.dispatch !== 'function' || !turnContextForSend) {
-          return { block: null, continueWithSystemNote: null, annotate: null, firings: [] };
-        }
-        const resultForDispatch = await hooksForSend.dispatch(eventNameForDispatch, payloadForDispatch, turnContextForSend);
-        if (resultForDispatch && Array.isArray(resultForDispatch.firings) && resultForDispatch.firings.length > 0) {
-          turnHookFiringsByIterForSend.push({ iter: turnContextForSend.iterIndex, event: eventNameForDispatch, firings: resultForDispatch.firings });
-        }
-        if (resultForDispatch && typeof resultForDispatch.continueWithSystemNote === 'string' && resultForDispatch.continueWithSystemNote) {
-          pendingSystemNotesForSend.push(resultForDispatch.continueWithSystemNote);
-        }
-        return resultForDispatch;
-      }
-
-      const logStartTimeForSend = Date.now();
-      let logFirstMessagesForSend = null;
-      let logApiParamsForSend = null;
-      const logAllToolCallsForSend = [];
-      const logTurnsForSend = [];
-      let logFinalResponseForSend = '';
-      let logUsageForSend = null;
-      let logResolvedModelForSend = null;
-      let logStatusForSend = 'success';
-      let logErrorMsgForSend = '';
-      let logStopReasonForSend = null;
-      let lastToolTimeoutMsForSend = ITER_TOOL_STD_TIMEOUT_MS;
-      let hasPersistedNonUserMessagesForSend = false;
-      // Set to true once any renderable assistant message (text, generated image, generated
-      // document, etc.) has been persisted this turn. The finally block uses it to decide
-      // whether to append the apologetic fallback: if the user can already see something from
-      // the assistant, the fallback is suppressed regardless of what failed afterwards.
-      let hasAppendedRenderableAssistantMessageForSend = false;
-      // Set true once at least one tool call this turn returned a non-error result (reads included).
-      // Only used to suppress the alarming "empty response" note: if any tool succeeded we do not
-      // claim the model returned nothing.
-      let hadSuccessfulToolCallForSend = false;
-      // Set true once at least one MUTATING tool call (a create/edit, generated artifact, or page
-      // mutation) succeeded this turn. Drives the empty-final-turn recovery: only when real action
-      // landed do we retry for a confirmation or show the neutral "I took some actions" completion;
-      // a turn where only reads succeeded, or where every mutation failed, gets the apologetic
-      // fallback instead so we never imply changes that did not happen.
-      let hadSuccessfulMutatingToolCallForSend = false;
-      let didRetryEmptyFinalTurnForSend = false;
-      // Baseline cost from messages persisted before this send; used in live counter updates to avoid
-      // double-counting costs that accumulate in turnMainCostAccumForSend during the current send.
-      const preSendCostForSend = sumPersistedChatCostForPanelRuntime(chatId);
-      // Tracks the cumulative main-LLM cost at the end of the previous iteration so we can compute
-      // the incremental cost for each turn and store it per-message.
-      let prevTurnMainCostForSend = 0;
-
-      // model and the logging/flag variables below are declared here rather than inside the try block
-      // because JS let/const are scoped to their block, so catch and finally cannot see them if they
-      // are declared inside try.
-      const model = (modelSelectForSend && modelSelectForSend.value) ? modelSelectForSend.value : DEFAULT_MODEL_FOR_PANEL_RUNTIME;
-      // The run-scoped CDP lease is released in the finally block, so its state must
-      // also live outside the try.
-      const agentNs = globalThis.ABChatAgent || {};
-      const cdpClientForSend = agentNs.cdpClient;
-      let cdpRunLeaseHeldForSend = false;
-      const visualPreflightSessionIdForSend = 'vp_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2);
-      function markRunStoppedForSend() {
-        if (logStopReasonForSend) return;
-        const agentRunStopForMarkStopped = (globalThis.ABChatShared || {}).agentRunStop;
-        logStopReasonForSend = agentRunStopForMarkStopped && typeof agentRunStopForMarkStopped.resolveStopReason === 'function'
-          ? agentRunStopForMarkStopped.resolveStopReason({
-              timeoutReason: timeoutReasonForSend,
-              userStopRequested: userStopRequestedChatsForPanelRuntime.has(chatId),
-              wasAborted: controllerForSend.signal.aborted
-            })
-          : (timeoutReasonForSend || 'cancelled');
-      }
-      try {
-      const imageModelForSend = await getImageModelForPanelRuntime();
-      const cachedForCostForSend = await getCachedModelsForPanelRuntime();
-      const cachedModelsForCostForSend = (cachedForCostForSend && cachedForCostForSend.chatModels) || [];
-      const modelObjForCostForSend = cachedModelsForCostForSend.find(function (m) { return m.id === model; }) || null;
-      const completionCostPerMillionForSend = modelObjForCostForSend ? (Number(modelObjForCostForSend.completionCostPerMillion) || 0) : 0;
-      const imageModelObjForCostForSend = loadedImageModelsForPanelRuntime.find(function (m) { return m.id === imageModelForSend; }) || null;
-      const imageGenCostForSend = imageModelObjForCostForSend ? (Number(imageModelObjForCostForSend.imageCost) || 0) : 0;
-      if (CHAT_STORE_FOR_PANEL_RUNTIME[chatId]) {
-        CHAT_STORE_FOR_PANEL_RUNTIME[chatId].lastModel = model;
+      // Hand the run to the offscreen document. Do the send-initiation DOM work (append +
+      // render the user message, clear the input, kick off title generation), persist the
+      // user message to the DB, then hand off and become a pure stream receiver. The run is
+      // hosted in the offscreen document, so it survives page navigation; every tab (this
+      // initiator included) renders the live turn from the broadcast stream events.
+      if (offscreenInitiatedChatsForPanelRuntime.has(chatId)) return;
+      const modelForOffscreen = (modelSelectForSend && modelSelectForSend.value) ? modelSelectForSend.value : DEFAULT_MODEL_FOR_PANEL_RUNTIME;
+      if (CHAT_STORE_FOR_PANEL_RUNTIME[chatId]) CHAT_STORE_FOR_PANEL_RUNTIME[chatId].lastModel = modelForOffscreen;
+      // Persist lastModel to the DB now, at handoff. Every tab (this initiator included)
+      // reconciles from the DB on stream_end, overwriting the in-memory lastModel. The
+      // offscreen loop's end-of-run lastModel write is skipped when a run errors or is
+      // refused, and a new chat is created with no model, so without this early write the
+      // stream_end refresh would wipe the model the user actually used.
+      const panelDataRepoForOffscreenModel = getPanelDataRepoForPanelRuntime();
+      if (panelDataRepoForOffscreenModel && typeof panelDataRepoForOffscreenModel.updateChat === 'function' && CHAT_STORE_FOR_PANEL_RUNTIME[chatId]) {
+        try { await panelDataRepoForOffscreenModel.updateChat(chatId, { lastModel: modelForOffscreen }); } catch (eOffscreenModelPersist) {}
       }
 
       if (!isResendForPanelRuntime) {
-        // Auto-attach generated image chips for every image produced since the last user message.
-        // Scans md (not content, which is always '' for generated image messages) for __blob:N__ refs.
-        // The context builder then loads the base64 for each chip and includes it in the API request,
-        // giving the agent visual context without the user needing to do anything manually.
-        const msgsForAutoChipScan = (CHAT_STORE_FOR_PANEL_RUNTIME[chatId] || {}).messages || [];
-        const blobIdPatternForAutoChip = /__blob:(\d+)__/;
-        let lastUserIndexForAutoChip = -1;
-        for (var aci = msgsForAutoChipScan.length - 1; aci >= 0; aci--) {
-          const msgForAutoChip = msgsForAutoChipScan[aci];
-          if (msgForAutoChip && msgForAutoChip.role === 'user') {
-            lastUserIndexForAutoChip = aci;
-            break;
-          }
+        const msgsForAutoChipScanOffscreen = (CHAT_STORE_FOR_PANEL_RUNTIME[chatId] || {}).messages || [];
+        const blobIdPatternForAutoChipOffscreen = /__blob:(\d+)__/;
+        let lastUserIndexForAutoChipOffscreen = -1;
+        for (var aciOffscreen = msgsForAutoChipScanOffscreen.length - 1; aciOffscreen >= 0; aciOffscreen--) {
+          const msgForAutoChipOffscreen = msgsForAutoChipScanOffscreen[aciOffscreen];
+          if (msgForAutoChipOffscreen && msgForAutoChipOffscreen.role === 'user') { lastUserIndexForAutoChipOffscreen = aciOffscreen; break; }
         }
-        for (var acj = lastUserIndexForAutoChip + 1; acj < msgsForAutoChipScan.length; acj++) {
-          const msgForAutoChipAssistant = msgsForAutoChipScan[acj];
-          if (!msgForAutoChipAssistant || msgForAutoChipAssistant.role !== 'assistant') continue;
-          const mdForAutoChip = String(msgForAutoChipAssistant.md || '');
-          const autoChipMatchForSend = blobIdPatternForAutoChip.exec(mdForAutoChip);
-          if (!autoChipMatchForSend) continue;
-          const autoChipBlobIdForSend = Number(autoChipMatchForSend[1]);
-          if (!Number.isFinite(autoChipBlobIdForSend)) continue;
-          addInputChipForPanelRuntime({
-            type: 'image',
-            label: 'Generated image',
-            mimeType: 'image/png',
-            refId: autoChipBlobIdForSend,
-            size: 0,
-            kind: 'generated_image'
-          });
+        for (var acjOffscreen = lastUserIndexForAutoChipOffscreen + 1; acjOffscreen < msgsForAutoChipScanOffscreen.length; acjOffscreen++) {
+          const msgForAutoChipAssistantOffscreen = msgsForAutoChipScanOffscreen[acjOffscreen];
+          if (!msgForAutoChipAssistantOffscreen || msgForAutoChipAssistantOffscreen.role !== 'assistant') continue;
+          const autoChipMatchOffscreen = blobIdPatternForAutoChipOffscreen.exec(String(msgForAutoChipAssistantOffscreen.md || ''));
+          if (!autoChipMatchOffscreen) continue;
+          const autoChipBlobIdOffscreen = Number(autoChipMatchOffscreen[1]);
+          if (!Number.isFinite(autoChipBlobIdOffscreen)) continue;
+          addInputChipForPanelRuntime({ type: 'image', label: 'Generated image', mimeType: 'image/png', refId: autoChipBlobIdOffscreen, size: 0, kind: 'generated_image' });
         }
         await stampInputChipSourceHashesForPanelRuntime();
-        const chipsForSend = collectInputChipsForPanelRuntime();
-        await appendMessageToChatForPanelRuntime(chatId, {
-          role: "user",
-          content: text,
-          md: text,
-          chips: chipsForSend,
-          _addedByThisTab: true
-        }, {
-          persistToDb: false
-        });
+        const chipsForOffscreen = collectInputChipsForPanelRuntime();
+        await appendMessageToChatForPanelRuntime(chatId, { role: "user", content: text, md: text, chips: chipsForOffscreen, _addedByThisTab: true }, { persistToDb: false });
         chatTaForSend.value = "";
         clearInputChipsForPanelRuntime();
         clearDraftForPanelRuntime();
         updateAutoExpandForTextareaForPanelRuntime(chatTaForSend);
         renderChatMessages();
         scrollChatToBottomForPanelRuntime();
-        const chatForFirstMsgCheck = CHAT_STORE_FOR_PANEL_RUNTIME[chatId];
-        if (chatForFirstMsgCheck && chatForFirstMsgCheck.messages.length === 1) {
-          const firstMessageSummaryForSend = getChatSummaryFromMessagesForPanelRuntime(chatForFirstMsgCheck.messages);
-          if (firstMessageSummaryForSend && chatForFirstMsgCheck.summary !== firstMessageSummaryForSend) {
-            chatForFirstMsgCheck.summary = firstMessageSummaryForSend;
+        const chatForFirstMsgCheckOffscreen = CHAT_STORE_FOR_PANEL_RUNTIME[chatId];
+        if (chatForFirstMsgCheckOffscreen && chatForFirstMsgCheckOffscreen.messages.length === 1) {
+          const firstMessageSummaryOffscreen = getChatSummaryFromMessagesForPanelRuntime(chatForFirstMsgCheckOffscreen.messages);
+          if (firstMessageSummaryOffscreen && chatForFirstMsgCheckOffscreen.summary !== firstMessageSummaryOffscreen) {
+            chatForFirstMsgCheckOffscreen.summary = firstMessageSummaryOffscreen;
             upsertChatUiForPanelRuntime(chatId, true);
           }
-          const panelDataRepoForFirstSummaryForSend = getPanelDataRepoForPanelRuntime();
-          if (firstMessageSummaryForSend && panelDataRepoForFirstSummaryForSend && typeof panelDataRepoForFirstSummaryForSend.updateChat === 'function') {
+          // Persist the first-message summary now, at send-initiation time. Without this
+          // the DB summary stays empty until the offscreen loop's end-of-run updateChat, so
+          // other tabs and fresh panel loads would show no summary for the whole run.
+          const panelDataRepoForFirstSummaryOffscreen = getPanelDataRepoForPanelRuntime();
+          if (firstMessageSummaryOffscreen && panelDataRepoForFirstSummaryOffscreen && typeof panelDataRepoForFirstSummaryOffscreen.updateChat === 'function') {
             try {
-              await panelDataRepoForFirstSummaryForSend.updateChat(chatId, {
-                summary: firstMessageSummaryForSend,
-                updatedAt: chatForFirstMsgCheck.updatedAt || new Date().toISOString()
+              await panelDataRepoForFirstSummaryOffscreen.updateChat(chatId, {
+                summary: firstMessageSummaryOffscreen,
+                updatedAt: chatForFirstMsgCheckOffscreen.updatedAt || new Date().toISOString()
               });
-            } catch (e) {}
+            } catch (eFirstSummaryOffscreen) {}
           }
         }
-        if (chatForFirstMsgCheck && chatForFirstMsgCheck.messages.length === 1 && !chatForFirstMsgCheck.hasCustomTitle) {
-          let titleContextForSend = text;
-          if (chipsForSend.length > 0) {
-            const chipContextPartsForSend = chipsForSend.map(function(chipForTitleContext) {
-              const snippetForTitle = chipForTitleContext.content ? chipForTitleContext.content.slice(0, 200) : '';
-              return chipForTitleContext.label + (snippetForTitle ? ': ' + snippetForTitle : '');
+        if (chatForFirstMsgCheckOffscreen && chatForFirstMsgCheckOffscreen.messages.length === 1 && !chatForFirstMsgCheckOffscreen.hasCustomTitle) {
+          let titleContextOffscreen = text;
+          if (chipsForOffscreen.length > 0) {
+            const chipContextPartsOffscreen = chipsForOffscreen.map(function (chipForTitleOffscreen) {
+              const snippetForTitleOffscreen = chipForTitleOffscreen.content ? chipForTitleOffscreen.content.slice(0, 200) : '';
+              return chipForTitleOffscreen.label + (snippetForTitleOffscreen ? ': ' + snippetForTitleOffscreen : '');
             });
-            titleContextForSend = (text ? text + '\n' : '') + chipContextPartsForSend.join('\n');
+            titleContextOffscreen = (text ? text + '\n' : '') + chipContextPartsOffscreen.join('\n');
           }
-          autoGenerateChatTitleForPanelRuntime(chatId, titleContextForSend, apiKey, model);
+          autoGenerateChatTitleForPanelRuntime(chatId, titleContextOffscreen, apiKey, modelForOffscreen);
         }
       }
 
-      const clientForSend = agentNs.client || {};
-      const contextBuilderForSend = agentNs.contextBuilder || {};
-      const compactorForSend = agentNs.compactor || null;
-      let automationEnabledForSend = false;
+      // Persist the user message to the DB so the offscreen loop's getChat sees it.
+      try { await persistPendingUserMessagesForChatForPanelRuntime(chatId, { touchChat: false }); } catch (ePersistOffscreen) {}
+
+      // Pricing for the offscreen loop's cost accounting.
+      const imageModelForOffscreen = await getImageModelForPanelRuntime();
+      const cachedForCostOffscreen = await getCachedModelsForPanelRuntime();
+      const cachedModelsForCostOffscreen = (cachedForCostOffscreen && cachedForCostOffscreen.chatModels) || [];
+      const modelObjForCostOffscreen = cachedModelsForCostOffscreen.find(function (m) { return m.id === modelForOffscreen; }) || null;
+      const completionCostPerMillionOffscreen = modelObjForCostOffscreen ? (Number(modelObjForCostOffscreen.completionCostPerMillion) || 0) : 0;
+      const imageModelObjForCostOffscreen = loadedImageModelsForPanelRuntime.find(function (m) { return m.id === imageModelForOffscreen; }) || null;
+      const imageGenCostOffscreen = imageModelObjForCostOffscreen ? (Number(imageModelObjForCostOffscreen.imageCost) || 0) : 0;
+
+      let automationEnabledOffscreen = false;
       try {
-        automationEnabledForSend = await new Promise(function (resolveAutomationEnabled) {
-          chrome.storage.local.get('abchatAutomationEnabled', function (itemsForAutomationEnabled) {
-            resolveAutomationEnabled(!!(itemsForAutomationEnabled && itemsForAutomationEnabled.abchatAutomationEnabled));
-          });
+        automationEnabledOffscreen = await new Promise(function (resAutoOffscreen) {
+          chrome.storage.local.get('abchatAutomationEnabled', function (itAutoOffscreen) { resAutoOffscreen(!!(itAutoOffscreen && itAutoOffscreen.abchatAutomationEnabled)); });
         });
-      } catch (eAutomationEnabledForSend) { automationEnabledForSend = false; }
-      // Every tool is advertised on every send. The trusted page tools (page_act, page_spreadsheet)
-      // are no longer hidden when advanced automation is off; the first trusted action prompts the
-      // user inline and continues once approved. The model's cost tier trims verbose tool
-      // descriptions (and the system prompt) for expensive/extreme models.
-      const costCategoryForSend = (contextBuilderForSend && typeof contextBuilderForSend.costCategoryFor === 'function')
-        ? contextBuilderForSend.costCategoryFor(completionCostPerMillionForSend)
-        : 'cheap';
-      const toolDefsForSend = (agentNs && typeof agentNs.resolveAgentConfig === 'function')
-        ? agentNs.resolveAgentConfig({ costCategory: costCategoryForSend, agentProfile: 'main' }).toolDefs
-        : (agentNs.toolDefs || []).slice();
-      const executeToolForSend = agentNs.executeTool;
+      } catch (eAutoOffscreen) { automationEnabledOffscreen = false; }
 
-      const chatRecordForCompactionForSend = CHAT_STORE_FOR_PANEL_RUNTIME[chatId] || null;
-      let compactionSummaryForSend = chatRecordForCompactionForSend && typeof chatRecordForCompactionForSend.compactionSummary === 'string'
-        ? chatRecordForCompactionForSend.compactionSummary
-        : '';
-      let compactedThroughMessageIdForSend = chatRecordForCompactionForSend && chatRecordForCompactionForSend.compactedThroughMessageId != null
-        ? chatRecordForCompactionForSend.compactedThroughMessageId
-        : null;
+      offscreenInitiatedChatsForPanelRuntime.add(chatId);
+      setSendingUIStateForPanelRuntime();
+      syncMainChatListItemForPanelRuntime(chatId);
 
-      if (compactorForSend && typeof compactorForSend.maybeCompact === 'function' && chatRecordForCompactionForSend) {
-        try {
-          showCompactingBubbleForPanelRuntime();
-          const compactionLogStartForSend = Date.now();
-          let systemOverheadTokensForSend = 10000;
-          if (typeof contextBuilderForSend.estimateSystemOverheadTokens === 'function') {
-            const systemOverheadEstimateForSend = contextBuilderForSend.estimateSystemOverheadTokens({
-              agentRules: currentAgentRulesForPanelRuntime || '',
-              automationEnabled: automationEnabledForSend,
-              pageNavigationAllowed: false,
-              costCategory: costCategoryForSend
-            }, toolDefsForSend);
-            systemOverheadTokensForSend = Math.max(10000, Number(systemOverheadEstimateForSend) || 0);
-          }
-          const compactionResultForSend = await compactorForSend.maybeCompact({
-            apiKey: apiKey,
-            model: model,
-            messages: chatRecordForCompactionForSend.messages,
-            existingSummary: compactionSummaryForSend,
-            compactedThroughMessageId: compactedThroughMessageIdForSend,
-            systemOverheadTokens: systemOverheadTokensForSend,
-            contextWindow: modelObjForCostForSend ? modelObjForCostForSend.contextLength : null,
-            signal: controllerForSend.signal
-          });
-          compactionSummaryForSend = compactionResultForSend && typeof compactionResultForSend.summaryText === 'string'
-            ? compactionResultForSend.summaryText
-            : compactionSummaryForSend;
-          compactedThroughMessageIdForSend = compactionResultForSend && compactionResultForSend.compactedThroughMessageId != null
-            ? compactionResultForSend.compactedThroughMessageId
-            : compactedThroughMessageIdForSend;
-          if (compactionResultForSend && compactionResultForSend.didCompact) {
-            const compactionUpdatedAtForSend = new Date().toISOString();
-            chatRecordForCompactionForSend.compactionSummary = compactionSummaryForSend;
-            chatRecordForCompactionForSend.compactedThroughMessageId = compactedThroughMessageIdForSend;
-            chatRecordForCompactionForSend.compactionUpdatedAt = compactionUpdatedAtForSend;
-            if (compactionResultForSend.summarizerUsage) {
-              const costFromUsageForCompaction = (globalThis.ABChatAgent || {}).costFromUsage;
-              sideCallCostForSend += typeof costFromUsageForCompaction === 'function'
-                ? costFromUsageForCompaction(compactionResultForSend.summarizerUsage)
-                : 0;
-            }
-            const panelDataRepoForCompactionForSend = getPanelDataRepoForPanelRuntime();
-            if (panelDataRepoForCompactionForSend && typeof panelDataRepoForCompactionForSend.updateChat === 'function') {
-              try {
-                await panelDataRepoForCompactionForSend.updateChat(chatId, {
-                  compactionSummary: compactionSummaryForSend,
-                  compactedThroughMessageId: compactedThroughMessageIdForSend,
-                  compactionUpdatedAt: compactionUpdatedAtForSend
-                });
-              } catch (compactionPersistErrorForSend) {
-                // Persistence is best effort; in-memory state still benefits this turn.
-              }
-            }
-            const compactionApiLoggerForSend = (globalThis.ABChatContent || {}).apiLogger;
-            if (compactionApiLoggerForSend && typeof compactionApiLoggerForSend.writeLog === 'function') {
-              compactionApiLoggerForSend.writeLog({
-                requestType: 'compaction',
-                timestamp: new Date(compactionLogStartForSend).toISOString(),
-                chatId: chatId,
-                model: compactionResultForSend.summarizerModel || null,
-                iterationCount: 1,
-                totalLatencyMs: Date.now() - compactionLogStartForSend,
-                status: 'success',
-                responseContent: compactionSummaryForSend || null,
-                usage: compactionResultForSend.summarizerUsage || null
-              }).catch(function () {});
-            }
-          }
-        } catch (compactionErrorForSend) {
-          // Compaction is best effort; fall back to existing summary state on failure.
-        } finally {
-          removeCompactingBubbleForPanelRuntime();
-        }
-      }
-
-      // Persist the user message(s) to the DB BEFORE creating the live bubble.
-      // The DB write fires dbDataChanged to other tabs, which schedule a chat
-      // store refresh on their side. By doing this before the stream_start
-      // broadcast, receivers see the user message arrive first and the live
-      // bubble appears below it (correct visual order). Without this hoist,
-      // the user message was only persisted right before the first asstRecord
-      // append, so receivers showed the loading bubble with no user message
-      // above it.
       try {
-        if (!hasPersistedNonUserMessagesForSend) {
-          await persistPendingUserMessagesForChatForPanelRuntime(chatId, { touchChat: false });
-        }
-      } catch (earlyPersistErrForSend) {
-        // Best-effort; the iteration loop will retry persistence below.
-      }
-
-      // UserPromptSubmit fires once per send, before the iteration loop. A hook
-      // returning block: { reason } skips the model call and surfaces a system
-      // message to the user (the user message is left persisted as a record).
-      let userPromptBlockedForSend = false;
-      if (hooksForSend && turnContextForSend) {
-        const userPromptResultForSend = await dispatchHookForSend('UserPromptSubmit', {
-          userText: turnContextForSend.userText,
-          chatId: chatId
-        });
-        if (userPromptResultForSend && userPromptResultForSend.block) {
-          userPromptBlockedForSend = true;
-          if (S.activeChatId === chatId) {
-            appendSystemMsgToContainerForPanelRuntime(userPromptResultForSend.block.reason);
-          }
-        }
-      }
-
-      createLiveTurnBubbleForPanelRuntime(chatId);
-      broadcastStreamEventForPanelRuntime("stream_start", chatId, null);
-        while (!userPromptBlockedForSend && iterCount < MAX_TOOL_ITERS) {
-          iterCount++;
-          const turnStartTimeForSend = Date.now();
-
-          const chatMsgs = (CHAT_STORE_FOR_PANEL_RUNTIME[chatId] || {}).messages || [];
-          const agentRulesForBuild = currentAgentRulesForPanelRuntime || '';
-          const memCtxForBuild = await loadAgentMemoryContextForPanelRuntime();
-          const apiMessages = contextBuilderForSend.build
-            ? await contextBuilderForSend.build(chatMsgs, {
-                agentRules: agentRulesForBuild,
-                agentMemory: memCtxForBuild.agentMemory,
-                agentMemoryId: memCtxForBuild.agentMemoryId,
-                agentSkills: memCtxForBuild.agentSkills,
-                compactionSummary: compactionSummaryForSend,
-                compactedThroughMessageId: compactedThroughMessageIdForSend,
-                automationEnabled: automationEnabledForSend,
-                pageNavigationAllowed: false,
-                costCategory: costCategoryForSend
-              })
-            : (function () {
-                const msgsForFallback = chatMsgs.map(function (messageForPanelRuntime) {
-                  if (!messageForPanelRuntime || messageForPanelRuntime.role === '_loading' || messageForPanelRuntime.role === '_hidden_pair_indicator') {
-                    return null;
-                  }
-                  if (messageForPanelRuntime.role === 'tool') {
-                    return {
-                      role: 'tool',
-                      tool_call_id: messageForPanelRuntime.tool_call_id,
-                      content: messageForPanelRuntime.content || ''
-                    };
-                  }
-                  return {
-                    role: messageForPanelRuntime.role === 'user' ? 'user' : 'assistant',
-                    content: messageForPanelRuntime.content || messageForPanelRuntime.md || ''
-                  };
-                }).filter(Boolean);
-                if (agentRulesForBuild) {
-                  msgsForFallback.unshift({ role: 'system', content: agentRulesForBuild });
-                }
-                return msgsForFallback;
-              }());
-
-          if (pendingSystemNotesForSend.length > 0) {
-            apiMessages.push({ role: 'system', content: pendingSystemNotesForSend.join('\n\n') });
-            pendingSystemNotesForSend = [];
-          }
-
-          if (turnContextForSend) {
-            turnContextForSend.iterIndex = iterCount - 1;
-          }
-
-          if (iterCount === 1) {
-            logFirstMessagesForSend = sanitizeMessagesForLogDisplay(apiMessages);
-            logApiParamsForSend = {
-              stream: true,
-              tool_choice: toolDefsForSend.length > 0 ? "auto" : undefined,
-              parallel_tool_calls: toolDefsForSend.length > 0 ? false : undefined,
-              provider: { sort: "throughput" },
-              tools: toolDefsForSend.map(function (t) { return t && t.function ? t.function.name : (t.type || t.name || ''); })
-            };
-          }
-
-          let accTextForLoop = "";
-          const lbsForWait = liveTurnBubblesForPanelRuntime.get(chatId);
-          if (lbsForWait && lbsForWait.toolsDoneAt > 0) {
-            const toolsElapsed = Date.now() - lbsForWait.toolsDoneAt;
-            const toolsRemaining = 3000 - toolsElapsed;
-            if (toolsRemaining > 0) {
-              await new Promise(function (resolve) {
-                const minDisplayTimer = setTimeout(resolve, toolsRemaining);
-                controllerForSend.signal.addEventListener('abort', function () {
-                  clearTimeout(minDisplayTimer);
-                  resolve();
-                }, { once: true });
-              });
-            }
-          }
-          // Idle timeout, not an absolute cap: re-armed on every stream delta so a
-          // slow-but-progressing response is never killed. Only a genuine stall
-          // (no data for ITER_STREAM_TIMEOUT_MS) aborts the stream.
-          let iterStreamTimeoutIdForSend = null;
-          const armStreamIdleTimeoutForSend = function () {
-            if (iterStreamTimeoutIdForSend) clearTimeout(iterStreamTimeoutIdForSend);
-            iterStreamTimeoutIdForSend = setTimeout(function () {
-              if (!timeoutReasonForSend) timeoutReasonForSend = 'stream';
-              controllerForSend.abort();
-            }, ITER_STREAM_TIMEOUT_MS);
-          };
-          armStreamIdleTimeoutForSend();
-          let streamRetryCountForLoop = 0;
-          const MAX_STREAM_RETRIES_FOR_LOOP = 3;
-          let resultForLoop;
-
-          do {
-            accTextForLoop = "";
-            const lbsForReset = liveTurnBubblesForPanelRuntime.get(chatId);
-            if (lbsForReset && lbsForReset.wrap) {
-              const ltSpinner = lbsForReset.wrap.querySelector('.abchat-lt-spinner');
-              const ltText    = lbsForReset.wrap.querySelector('.abchat-lt-text');
-              const ltTools   = lbsForReset.wrap.querySelector('.abchat-lt-tools');
-              if (ltSpinner) ltSpinner.style.display = '';
-              if (ltText)    ltText.style.display    = 'none';
-              if (ltTools)   ltTools.remove();
-              // Reset typing-animation state so each attempt starts from scratch
-              if (lbsForReset.renderRafId) {
-                cancelAnimationFrame(lbsForReset.renderRafId);
-                lbsForReset.renderRafId = null;
-              }
-              lbsForReset.bufferText = '';
-              lbsForReset.renderedLength = 0;
-            }
-
-            resultForLoop = await clientForSend.streamCompletion({
-              model: model,
-              apiKey: apiKey,
-              messages: apiMessages,
-              sessionId: 'abchat-' + chatId,
-              tools: toolDefsForSend.length > 0 ? toolDefsForSend : undefined,
-              signal: controllerForSend.signal,
-              onDelta: function (deltaForLoop) {
-                // Any activity (text, partial tool calls, retry notice) resets the idle timer.
-                armStreamIdleTimeoutForSend();
-                if (deltaForLoop.type === "text" && deltaForLoop.text) {
-                  accTextForLoop += deltaForLoop.text;
-                  updateLiveTurnTextForPanelRuntime(chatId, accTextForLoop);
-                  broadcastStreamTextDebouncedForPanelRuntime(chatId, accTextForLoop);
-                } else if (deltaForLoop.type === "retry_notice") {
-                  applyLiveTurnRetryNoticeForPanelRuntime(chatId, deltaForLoop.attempt, deltaForLoop.maxAttempts);
-                  broadcastStreamEventForPanelRuntime("stream_retry_notice", chatId, {
-                    attempt: deltaForLoop.attempt,
-                    maxAttempts: deltaForLoop.maxAttempts
-                  });
-                }
-              }
-            });
-            if (resultForLoop && typeof resultForLoop.resolvedModel === 'string' && resultForLoop.resolvedModel) {
-              logResolvedModelForSend = resultForLoop.resolvedModel;
-            }
-            // Wait for the typing animation to drain naturally so the user sees streaming
-            // even when the entire response arrived in one packet. Cancelled requests skip the wait.
-            await finalizeLiveTurnTextRenderForPanelRuntime(chatId, controllerForSend.signal);
-
-            if (resultForLoop && !resultForLoop.cancelled && resultForLoop.incompleteStream && streamRetryCountForLoop < MAX_STREAM_RETRIES_FOR_LOOP) {
-              streamRetryCountForLoop++;
-              applyLiveTurnRetryNoticeForPanelRuntime(chatId, streamRetryCountForLoop, MAX_STREAM_RETRIES_FOR_LOOP);
-              broadcastStreamEventForPanelRuntime("stream_retry_notice", chatId, {
-                attempt: streamRetryCountForLoop,
-                maxAttempts: MAX_STREAM_RETRIES_FOR_LOOP
-              });
-            } else {
-              break;
-            }
-          } while (true);
-          clearTimeout(iterStreamTimeoutIdForSend);
-
-          logTurnsForSend.push({
-            turnIndex: iterCount,
-            latencyMs: Date.now() - turnStartTimeForSend,
-            requestMessages: sanitizeMessagesForLogDisplay(apiMessages),
-            responseText: resultForLoop && resultForLoop.message ? (resultForLoop.message.content || '') : '',
-            responseToolCalls: resultForLoop && resultForLoop.message ? (resultForLoop.message.tool_calls || []) : [],
-            usage: resultForLoop ? (resultForLoop.usage || null) : null
-          });
-
-          if (!resultForLoop || resultForLoop.cancelled) {
-            markRunStoppedForSend();
-            // Salvage whatever text streamed in before the cancel/timeout so a
-            // stopped response stays visible and persisted instead of vanishing.
-            // Prefer the client's accumulated content, falling back to the local
-            // delta accumulator. Persisting it also flips hasPersistedNonUserMessages,
-            // which suppresses the user-message rollback in the finally block.
-            const salvagedPartialTextForSend = (resultForLoop && resultForLoop.message && typeof resultForLoop.message.content === 'string' && resultForLoop.message.content.trim())
-              ? resultForLoop.message.content
-              : ((accTextForLoop && accTextForLoop.trim()) ? accTextForLoop : '');
-            if (salvagedPartialTextForSend && salvagedPartialTextForSend.trim().length > 0) {
-              if (!hasPersistedNonUserMessagesForSend) {
-                await persistPendingUserMessagesForChatForPanelRuntime(chatId, { touchChat: false });
-              }
-              await appendMessageToChatForPanelRuntime(chatId, {
-                role: 'assistant',
-                content: salvagedPartialTextForSend,
-                md: salvagedPartialTextForSend,
-                incomplete: true
-              }, { skipChatUpdate: true });
-              hasPersistedNonUserMessagesForSend = true;
-              hasAppendedRenderableAssistantMessageForSend = true;
-              if (S.activeChatId === chatId) {
-                renderChatMessages();
-                scrollChatToBottomForPanelRuntime();
-              }
-            }
-            break;
-          }
-
-          if (resultForLoop.usage) {
-            logUsageForSend = resultForLoop.usage;
-            const actualMainCostForSend = Number(logUsageForSend.cost);
-            turnMainCostAccumForSend += Number.isFinite(actualMainCostForSend) && actualMainCostForSend > 0
-              ? actualMainCostForSend
-              : (Number(logUsageForSend.total_tokens) || 0) * completionCostPerMillionForSend / 1000000;
-            if (S.activeChatId === chatId) updateSessionTokenDisplayForPanelRuntime(logUsageForSend, preSendCostForSend + turnMainCostAccumForSend + sideCallCostForSend);
-          }
-
-          const assistantMsg = resultForLoop.message;
-          if (!assistantMsg) break;
-
-          const toolCallsForLoop = assistantMsg.tool_calls;
-          const hasContent = assistantMsg.content && assistantMsg.content.trim().length > 0;
-          const hasToolCalls = toolCallsForLoop && toolCallsForLoop.length > 0;
-
-          if (!hasContent && !hasToolCalls) {
-            // Some models (notably streamed Gemini) occasionally end a turn that followed
-            // successful mutating tool work with an empty completion: no text, no tool calls. The
-            // action landed but the model emitted no closing summary. Re-invoke once with a
-            // corrective note asking it to confirm, before giving up. Gated on the mutating flag so
-            // the note only asserts "you have already completed the requested actions" when a real
-            // action actually succeeded; a read-only or all-failed turn must not be told it finished.
-            if (hadSuccessfulMutatingToolCallForSend && !didRetryEmptyFinalTurnForSend) {
-              didRetryEmptyFinalTurnForSend = true;
-              pendingSystemNotesForSend.push('Your previous response was empty. You have already completed the requested actions. Briefly confirm to the user, in plain language, what you did.');
-              continue;
-            }
-            // Only surface the alarming "empty response" note when nothing useful happened; when
-            // tool work succeeded the finally block shows a neutral completion instead.
-            if (!hadSuccessfulToolCallForSend) {
-              appendSystemMsgToContainerForPanelRuntime('The model returned an empty response.');
-            }
-            break;
-          }
-
-          const thisLLMCostForRecord = turnMainCostAccumForSend - prevTurnMainCostForSend;
-          const asstRecord = {
-            role: "assistant",
-            content: assistantMsg.content || "",
-            md: assistantMsg.content || "",
-            tool_calls: assistantMsg.tool_calls,
-            usagePromptTokens: logUsageForSend ? (Number(logUsageForSend.prompt_tokens) || 0) : 0,
-            usageCompletionTokens: logUsageForSend ? (Number(logUsageForSend.completion_tokens) || 0) : 0,
-            usageTotalTokens: logUsageForSend ? (Number(logUsageForSend.total_tokens) || 0) : 0,
-            usageReasoningTokens: logUsageForSend && logUsageForSend.completion_tokens_details
-              ? (Number(logUsageForSend.completion_tokens_details.reasoning_tokens) || 0)
-              : 0,
-            usageCost: !hasToolCalls
-              ? (thisLLMCostForRecord + sideCallCostForSend)
-              : thisLLMCostForRecord,
-            searchSources: (!hasToolCalls && accumulatedSearchSourcesForSend.length > 0)
-              ? accumulatedSearchSourcesForSend.slice()
-              : []
-          };
-          if (!hasPersistedNonUserMessagesForSend) {
-            await persistPendingUserMessagesForChatForPanelRuntime(chatId, {
-              touchChat: false
-            });
-          }
-          await appendMessageToChatForPanelRuntime(chatId, asstRecord, { skipChatUpdate: true });
-          prevTurnMainCostForSend = turnMainCostAccumForSend;
-          hasPersistedNonUserMessagesForSend = true;
-          if (hasContent) hasAppendedRenderableAssistantMessageForSend = true;
-          if (S.activeChatId === chatId) {
-            renderChatMessages();
-            reattachLiveTurnBubbleForPanelRuntime(chatId);
-            scrollChatToBottomForPanelRuntime();
-          }
-          // Tell receivers to refresh: their chat store will pull the new
-          // assistant message from the DB and render it in place of the
-          // streaming bubble's text (which clears on the next iteration).
-          broadcastStreamEventForPanelRuntime("stream_message_persisted", chatId, null);
-
-          // At most one page_act / page_spreadsheet per assistant tool batch. Later page
-          // mutators get a synthetic skip result; reads and non-page mutators are unaffected.
-          const pageMutatorGateForSend = agentNs.pageMutatorBatchGate;
-          const skippedPageMutatorIndicesForLoop = (hasToolCalls
-              && pageMutatorGateForSend
-              && typeof pageMutatorGateForSend.getSkippedIndices === 'function')
-            ? pageMutatorGateForSend.getSkippedIndices(toolCallsForLoop)
-            : new Set();
-
-          // Make this iter's tool calls visible to Stop/PostModelResponse hooks
-          // (the memory-claim guard reads turnContext.toolCallsThisTurn to decide
-          // whether a memory/skill write happened anywhere in the send). Skipped
-          // page mutators are omitted so they do not count toward the lifetime cap.
-          if (turnContextForSend && hasToolCalls) {
-            for (var tcPushIdxForCtx = 0; tcPushIdxForCtx < toolCallsForLoop.length; tcPushIdxForCtx++) {
-              if (skippedPageMutatorIndicesForLoop.has(tcPushIdxForCtx)) continue;
-              turnContextForSend.toolCallsThisTurn.push(toolCallsForLoop[tcPushIdxForCtx]);
-            }
-          }
-
-          // PostModelResponse fires after every model response, whether it emitted
-          // tool calls or final text. Handlers can block (abort the turn) or, on
-          // final-reply iterations, return continueWithSystemNote to re-loop.
-          const postModelResponseResultForSend = await dispatchHookForSend('PostModelResponse', {
-            assistantMessage: assistantMsg,
-            toolCalls: toolCallsForLoop || [],
-            isFinalReply: !hasToolCalls,
-            chatId: chatId
-          });
-          if (postModelResponseResultForSend && postModelResponseResultForSend.block) {
-            if (S.activeChatId === chatId) {
-              appendSystemMsgToContainerForPanelRuntime(postModelResponseResultForSend.block.reason);
-            }
-            break;
-          }
-          if (postModelResponseResultForSend && postModelResponseResultForSend.continueWithSystemNote) {
-            // Note was pushed into pendingSystemNotesForSend by dispatchHookForSend.
-            // Re-enter the loop so the model sees the corrective note.
-            continue;
-          }
-
-          if (!hasToolCalls) {
-            // Stop fires only on the terminal turn (final text reply, no tool calls).
-            // A handler returning continueWithSystemNote re-enters the loop instead
-            // of breaking; a handler returning block aborts the turn.
-            const stopResultForSend = await dispatchHookForSend('Stop', {
-              assistantMessage: assistantMsg,
-              toolCalls: [],
-              isFinalReply: true,
-              chatId: chatId
-            });
-            if (stopResultForSend && stopResultForSend.block) {
-              if (S.activeChatId === chatId) {
-                appendSystemMsgToContainerForPanelRuntime(stopResultForSend.block.reason);
-              }
-              break;
-            }
-            if (stopResultForSend && stopResultForSend.continueWithSystemNote) {
-              continue;
-            }
-            if (assistantMsg.content) { logFinalResponseForSend = assistantMsg.content; }
-            break;
-          }
-
-          addLiveTurnToolStepsForPanelRuntime(chatId, toolCallsForLoop);
-          // Mirror the tool-step chips to receivers. toolCallsForLoop is the
-          // OpenAI tool_calls array ({id, type, function:{name, arguments}}).
-          broadcastStreamEventForPanelRuntime("stream_tool_steps", chatId, {
-            toolCalls: toolCallsForLoop
-          });
-
-          // Lifetime tool-call cap enforced by agent/hooks/builtin/toolCallCap.js
-          // (PostModelResponse handler), and per-send image-generation cap enforced
-          // by agent/hooks/builtin/imageGenerationCap.js (PreToolUse handler).
-
-          // Acquire the run-scoped CDP lease BEFORE executing page_act. Attaching shows
-          // Chrome's "debugging" infobar, which shrinks the viewport; resolving pointer
-          // targets against a stable viewport means attaching first (with a brief settle)
-          // so coordinates are computed after the resize, not shifted mid-run.
-          if (!cdpRunLeaseHeldForSend && automationEnabledForSend && cdpClientForSend && typeof cdpClientForSend.acquire === 'function'
-              && toolCallsForLoop.some(function (tcForLease, idxForLease) {
-                if (skippedPageMutatorIndicesForLoop.has(idxForLease)) return false;
-                const tcNameForLease = tcForLease.function && tcForLease.function.name;
-                return tcNameForLease === 'page_act' || tcNameForLease === 'page_spreadsheet';
-              })) {
-            try {
-              const runLeaseResForSend = await cdpClientForSend.acquire();
-              if (runLeaseResForSend && runLeaseResForSend.ok) {
-                cdpRunLeaseHeldForSend = true;
-                await new Promise(function (resolveForLeaseSettle) { setTimeout(resolveForLeaseSettle, 400); });
-              }
-            } catch (eRunLeaseForSend) {}
-          }
-
-          // Execute all tool calls in parallel, then append results in order
-          const wrapToolPromiseWithAbortForSend = function (toolPromiseForSend) {
-            return new Promise(function (resolveForToolAbort) {
-              if (controllerForSend.signal.aborted) {
-                resolveForToolAbort({ ok: false, cancelled: true, error: 'Cancelled' });
-                return;
-              }
-              let settledForToolAbort = false;
-              const onAbortForToolAbort = function () {
-                if (settledForToolAbort) return;
-                settledForToolAbort = true;
-                resolveForToolAbort({ ok: false, cancelled: true, error: 'Cancelled' });
-              };
-              controllerForSend.signal.addEventListener('abort', onAbortForToolAbort, { once: true });
-              Promise.resolve(toolPromiseForSend).then(function (resultForToolAbort) {
-                if (settledForToolAbort) return;
-                settledForToolAbort = true;
-                controllerForSend.signal.removeEventListener('abort', onAbortForToolAbort);
-                resolveForToolAbort(resultForToolAbort);
-              }).catch(function (errorForToolAbort) {
-                if (settledForToolAbort) return;
-                settledForToolAbort = true;
-                controllerForSend.signal.removeEventListener('abort', onAbortForToolAbort);
-                resolveForToolAbort({ error: errorForToolAbort && errorForToolAbort.message ? errorForToolAbort.message : "Tool execution failed." });
-              });
-            });
-          };
-          const toolExecPromisesForLoop = toolCallsForLoop.map(async function (tc, tcIdxForExec) {
-            const tcNameForExec = tc.function ? tc.function.name : '';
-            const rawToolArgsForExec = (tc.function && typeof tc.function.arguments === 'string') ? tc.function.arguments : '';
-            let toolArgs = {};
-            let toolArgsParseErrorForExec = null;
-            if (rawToolArgsForExec.trim() !== '') {
-              try { toolArgs = JSON.parse(rawToolArgsForExec); }
-              catch (parseErrForExec) { toolArgsParseErrorForExec = parseErrForExec; }
-            }
-            logAllToolCallsForSend.push({
-              name: tcNameForExec,
-              args: toolArgsParseErrorForExec ? { _rawArguments: rawToolArgsForExec } : toolArgs
-            });
-            if (skippedPageMutatorIndicesForLoop.has(tcIdxForExec)
-                && pageMutatorGateForSend
-                && typeof pageMutatorGateForSend.buildSkipResult === 'function') {
-              return pageMutatorGateForSend.buildSkipResult();
-            }
-            // Malformed argument JSON: report the parse error back to the model so it
-            // can re-issue the call with valid JSON, instead of silently passing {} to
-            // the tool and producing a misleading downstream error.
-            if (toolArgsParseErrorForExec) {
-              return {
-                ok: false,
-                error: 'Tool call arguments were not valid JSON and could not be parsed: ' +
-                  (toolArgsParseErrorForExec.message || String(toolArgsParseErrorForExec)) +
-                  '. The "arguments" field must be a single valid JSON object with every string value properly escaped (newlines as \\n, quotes as \\", backslashes as \\\\); do not split strings using + concatenation. Re-issue this tool call with corrected JSON.'
-              };
-            }
-            // PreToolUse: a hook returning block: { reason } skips execution and
-            // surfaces a synthetic error result to the model for this tool call.
-            const preToolUseResultForLoop = await dispatchHookForSend('PreToolUse', {
-              toolName: tcNameForExec,
-              args: toolArgs,
-              callId: tc.id,
-              chatId: chatId,
-              iterIndex: turnContextForSend ? turnContextForSend.iterIndex : 0
-            });
-            if (preToolUseResultForLoop && preToolUseResultForLoop.block) {
-              return { ok: false, error: preToolUseResultForLoop.block.reason };
-            }
-            if (typeof executeToolForSend === "function") {
-              return wrapToolPromiseWithAbortForSend(
-                executeToolForSend(tcNameForExec, toolArgs, {
-                  apiKey: apiKey,
-                  imageModel: imageModelForSend,
-                  messages: apiMessages,
-                  model: model,
-                  chatId: chatId,
-                  visualPreflightSessionId: visualPreflightSessionIdForSend,
-                  signal: controllerForSend.signal,
-                  captureScreenshot: captureScreenshotWithoutPanelUiForPanelRuntime
-                })
-              );
-            }
-            return { error: "Tool executor not available." };
-          });
-
-          const hasImageGenInBatchForTimeout = toolCallsForLoop.some(function (tcForTimeout) {
-            return tcForTimeout.function && tcForTimeout.function.name === 'generate_image';
-          });
-          const toolExecTimeoutMsForSend = hasImageGenInBatchForTimeout ? ITER_TOOL_IMAGE_TIMEOUT_MS : ITER_TOOL_STD_TIMEOUT_MS;
-          lastToolTimeoutMsForSend = toolExecTimeoutMsForSend;
-          const iterToolTimeoutIdForSend = setTimeout(function () {
-            if (!timeoutReasonForSend) timeoutReasonForSend = 'tool';
-            controllerForSend.abort();
-          }, toolExecTimeoutMsForSend);
-          const toolResultsForLoop = await Promise.all(toolExecPromisesForLoop);
-          clearTimeout(iterToolTimeoutIdForSend);
-          if (controllerForSend.signal.aborted) {
-            markRunStoppedForSend();
-            break;
-          }
-
-          // Persist all tool results. Strip dataUrl from generators so base64 never reaches the model.
-          for (var ti = 0; ti < toolCallsForLoop.length; ti++) {
-            if (controllerForSend.signal.aborted) {
-              markRunStoppedForSend();
-              break;
-            }
-            const tc = toolCallsForLoop[ti];
-            const tcNameForResult = tc.function && tc.function.name;
-            const toolResult = toolResultsForLoop[ti];
-            let toolResultForModel = toolResult;
-            if (tcNameForResult === 'generate_image' && toolResult && toolResult.ok && typeof toolResult.dataUrl === 'string') {
-              toolResultForModel = { ok: true, prompt: toolResult.prompt || '' };
-            } else if (tcNameForResult === 'create_document' && toolResult && toolResult.ok && typeof toolResult.dataUrl === 'string') {
-              toolResultForModel = {
-                ok: true,
-                format: toolResult.format || '',
-                filename: toolResult.filename || '',
-                mimeType: toolResult.mimeType || '',
-                size: Number(toolResult.size) || 0,
-                note: 'The generated document has been saved and displayed to the user.'
-              };
-            } else if (tcNameForResult === 'eval' && toolResult && toolResult.ok && toolResult._generatedDocument && typeof toolResult._generatedDocument.dataUrl === 'string') {
-              toolResultForModel = {
-                ok: true,
-                result: toolResult.result,
-                document: {
-                  format: toolResult._generatedDocument.format || '',
-                  filename: toolResult._generatedDocument.filename || '',
-                  mimeType: toolResult._generatedDocument.mimeType || '',
-                  size: Number(toolResult._generatedDocument.size) || 0,
-                  note: 'The generated document has been saved and displayed to the user.'
-                }
-              };
-            }
-            // Side-call cost from any secondary LLM usage on the tool result (usage.cost only).
-            // Read from toolResult (not toolResultForModel): generators replace the model-facing
-            // object and drop _usage. Then strip _usage before the model sees the result.
-            if (toolResult && typeof toolResult === 'object' && toolResult._usage) {
-              const costFromUsageForTool = (globalThis.ABChatAgent || {}).costFromUsage;
-              if (typeof costFromUsageForTool === 'function') {
-                sideCallCostForSend += costFromUsageForTool(toolResult._usage);
-              }
-            }
-            if (toolResultForModel && typeof toolResultForModel === 'object' && '_usage' in toolResultForModel) {
-              toolResultForModel = Object.assign({}, toolResultForModel);
-              delete toolResultForModel._usage;
-            }
-            // Accumulate web search sources for display
-            if (tcNameForResult === 'web_search' && toolResult && Array.isArray(toolResult.results)) {
-              toolResult.results.forEach(function(r) {
-                if (r && r.url && !seenSearchUrlsForSend.has(String(r.url))) {
-                  seenSearchUrlsForSend.add(String(r.url));
-                  accumulatedSearchSourcesForSend.push({ url: String(r.url), title: String(r.title || '') });
-                }
-              });
-            }
-            const toolResultStr = typeof toolResultForModel === 'string' ? toolResultForModel : JSON.stringify(toolResultForModel);
-            const isToolErrorForLoop = toolResult && typeof toolResult === 'object' && toolResult.error;
-            const isPageMutatorSkipForLoop = isToolErrorForLoop && toolResult.skipped === true;
-            const toolStepStatusForLoop = isToolErrorForLoop ? 'error' : 'success';
-            const toolStepStatusTextForLoop = isPageMutatorSkipForLoop
-              ? 'Skipped'
-              : (isToolErrorForLoop ? String(toolResult.error) : 'Done');
-            updateLiveTurnToolStepStatusForPanelRuntime(
-              chatId,
-              tc.id,
-              toolStepStatusForLoop,
-              toolStepStatusTextForLoop
-            );
-            broadcastStreamEventForPanelRuntime("stream_tool_step_status", chatId, {
-              toolCallId: tc.id,
-              status: toolStepStatusForLoop,
-              statusText: toolStepStatusTextForLoop
-            });
-            // Safety cap for all tool results sent to the model. The eval worker enforces its
-            // own tighter 200 KB cap; this 500 KB backstop catches any other tool that returns
-            // an unexpectedly large payload. We replace oversized content with an error message
-            // rather than truncating mid-stream, because a cut-off JSON string is unparseable
-            // and more confusing to the model than a clear "too large" signal.
-            const TOOL_RESULT_API_MAX_CHARS = 512000; // 500 KB
-            const toolResultStrForApi = toolResultStr.length > TOOL_RESULT_API_MAX_CHARS
-              ? JSON.stringify({ ok: false, error: 'Tool result too large to send (' + toolResultStr.length + ' bytes; max 500 KB). The tool produced too much output; try a more targeted request.' })
-              : toolResultStr;
-            const toolMsgPersistedForSend = await appendMessageToChatForPanelRuntime(chatId, {
-              role: 'tool',
-              tool_call_id: tc.id,
-              content: toolResultStrForApi,
-              md: ''
-            }, { skipChatUpdate: true });
-            // Stamp result_ref (= message id) so the model can pass it to eval vars_from
-            // instead of retyping the payload. Persist the stamp when the row is in IndexedDB.
-            if (toolMsgPersistedForSend && Number.isFinite(Number(toolMsgPersistedForSend.id))) {
-              const stampFnForSend = (globalThis.ABChatAgent || {}).stampToolResultRef;
-              if (typeof stampFnForSend === 'function') {
-                const stampedContentForSend = stampFnForSend(toolResultStrForApi, Number(toolMsgPersistedForSend.id));
-                if (stampedContentForSend && stampedContentForSend !== toolResultStrForApi) {
-                  toolMsgPersistedForSend.content = stampedContentForSend;
-                  if (toolMsgPersistedForSend._persistedToDb === true) {
-                    const repoForStampSend = getPanelDataRepoForPanelRuntime();
-                    if (repoForStampSend && typeof repoForStampSend.updateMessage === 'function') {
-                      try {
-                        await repoForStampSend.updateMessage(toolMsgPersistedForSend.id, { content: stampedContentForSend });
-                      } catch (stampUpdateErrForSend) { /* best-effort; in-memory stamp still helps this turn */ }
-                    }
-                  }
-                }
-              }
-            }
-            // PostToolUse: handlers may only annotate here (no block, no
-            // continueWithSystemNote). The tool already ran and its result is
-            // persisted; this event is for observers (logging, metrics, etc.).
-            let parsedToolArgsForPostHook = {};
-            try { parsedToolArgsForPostHook = JSON.parse(tc.function.arguments || '{}'); } catch (e) {}
-            await dispatchHookForSend('PostToolUse', {
-              toolName: tcNameForResult,
-              args: parsedToolArgsForPostHook,
-              result: toolResultForModel,
-              callId: tc.id,
-              chatId: chatId,
-              iterIndex: turnContextForSend ? turnContextForSend.iterIndex : 0,
-              ok: !(toolResult && typeof toolResult === 'object' && toolResult.error)
-            });
-          }
-          if (controllerForSend.signal.aborted) {
-            markRunStoppedForSend();
-            break;
-          }
-
-          // If an OpenAI aspect ratio error was returned and it was the sole tool call in the turn,
-          // inject a canned assistant message and stop the loop immediately so the agent never gets
-          // a chance to paraphrase or retry.
-          const openaiAspectRatioErrorForLoop = toolCallsForLoop.length === 1 ? toolResultsForLoop.find(function(r) {
-            return r && r.errorCode === 'OPENAI_ASPECT_RATIO_UNSUPPORTED';
-          }) : null;
-          if (openaiAspectRatioErrorForLoop) {
-            const cannedRatioForLoop = openaiAspectRatioErrorForLoop.aspectRatio || 'non-square';
-            const cannedMsgForLoop = 'Your current image model (OpenAI) doesn\'t support ' + cannedRatioForLoop + ' images — it can only generate square (1:1) images. To generate a ' + cannedRatioForLoop + ' image, go to **Settings** and switch your image model to a Gemini model, then try again.';
-            await appendMessageToChatForPanelRuntime(chatId, {
-              role: 'assistant',
-              content: cannedMsgForLoop,
-              md: cannedMsgForLoop
-            }, { skipChatUpdate: true });
-            // Prevents the finally block from appending a fallback "something went wrong" message.
-            hasAppendedRenderableAssistantMessageForSend = true;
-            if (S.activeChatId === chatId) {
-              renderChatMessages();
-              reattachLiveTurnBubbleForPanelRuntime(chatId);
-              scrollChatToBottomForPanelRuntime();
-            }
-            break;
-          }
-
-          // After all tool results, store generated blobs and inject display messages.
-          const panelDataRepoForImageInject = (globalThis.ABChatShared || {}).panelDataRepo;
-          for (var gi = 0; gi < toolCallsForLoop.length; gi++) {
-            if (controllerForSend.signal.aborted) {
-              markRunStoppedForSend();
-              break;
-            }
-            const tcNameForImage = toolCallsForLoop[gi].function && toolCallsForLoop[gi].function.name;
-            const toolResultForImage = toolResultsForLoop[gi];
-            if (tcNameForImage !== 'generate_image' || !toolResultForImage || !toolResultForImage.ok) continue;
-            if (typeof toolResultForImage.dataUrl !== 'string' || toolResultForImage.dataUrl.indexOf('data:image/') !== 0) continue;
-            if (!panelDataRepoForImageInject || typeof panelDataRepoForImageInject.createAttachmentBlob !== 'function') continue;
-            try {
-              const blobRecordForImage = await panelDataRepoForImageInject.createAttachmentBlob({
-                name: 'generated-image',
-                kind: 'generated_image',
-                mimeType: 'image/png',
-                dataUrl: toolResultForImage.dataUrl,
-                size: toolResultForImage.dataUrl.length
-              });
-              if (controllerForSend.signal.aborted) {
-                markRunStoppedForSend();
-                if (blobRecordForImage && blobRecordForImage.id != null && typeof panelDataRepoForImageInject.deleteAttachmentBlob === 'function') {
-                  try { await panelDataRepoForImageInject.deleteAttachmentBlob(Number(blobRecordForImage.id)); } catch (e) {}
-                }
-                break;
-              }
-              if (blobRecordForImage && blobRecordForImage.id != null) {
-                const blobIdForImage = Number(blobRecordForImage.id);
-                setImageBlobCacheForPanelRuntime(blobIdForImage, toolResultForImage.dataUrl);
-                // Prefer OpenRouter usage.cost (already added via _usage above). Fall back to
-                // catalog imageCost only when usage.cost was absent, to avoid double-counting.
-                const costFromUsageForImageBlob = (globalThis.ABChatAgent || {}).costFromUsage;
-                const countedImageUsageCostForSend = typeof costFromUsageForImageBlob === 'function'
-                  ? costFromUsageForImageBlob(toolResultForImage._usage)
-                  : 0;
-                if (countedImageUsageCostForSend <= 0 && imageGenCostForSend > 0) {
-                  sideCallCostForSend += imageGenCostForSend;
-                }
-                // content must stay '' so the chat renderer shows only the image (via md) and the
-                // context builder falls through to md, giving the agent the __blob:N__ ref it needs
-                // for source_blob_id without producing a visible extra text bubble.
-                await appendMessageToChatForPanelRuntime(chatId, {
-                  role: 'assistant',
-                  content: '',
-                  md: '![Generated image](__blob:' + blobIdForImage + '__)'
-                }, { skipChatUpdate: true });
-                hasAppendedRenderableAssistantMessageForSend = true;
-              }
-            } catch (e) {}
-          }
-          if (controllerForSend.signal.aborted) {
-            markRunStoppedForSend();
-            break;
-          }
-          for (var gdi = 0; gdi < toolCallsForLoop.length; gdi++) {
-            if (controllerForSend.signal.aborted) {
-              markRunStoppedForSend();
-              break;
-            }
-            const tcNameForDocument = toolCallsForLoop[gdi].function && toolCallsForLoop[gdi].function.name;
-            const toolResultForDocument = toolResultsForLoop[gdi];
-            if (!toolResultForDocument || !toolResultForDocument.ok) continue;
-            // create_document carries the file fields at the top level; eval nests the
-            // generated file under _generatedDocument. Both persist the same way below.
-            const docPayloadForDocument = tcNameForDocument === 'create_document'
-              ? toolResultForDocument
-              : (tcNameForDocument === 'eval' ? toolResultForDocument._generatedDocument : null);
-            if (!docPayloadForDocument || typeof docPayloadForDocument.dataUrl !== 'string' || docPayloadForDocument.dataUrl.indexOf('data:') !== 0) continue;
-            if (!panelDataRepoForImageInject || typeof panelDataRepoForImageInject.createAttachmentBlob !== 'function') continue;
-            try {
-              const filenameForDocument = String(docPayloadForDocument.filename || 'generated-document');
-              const blobRecordForDocument = await panelDataRepoForImageInject.createAttachmentBlob({
-                name: filenameForDocument,
-                kind: 'generated_document',
-                mimeType: String(docPayloadForDocument.mimeType || ''),
-                dataUrl: docPayloadForDocument.dataUrl,
-                size: Number(docPayloadForDocument.size) || docPayloadForDocument.dataUrl.length,
-                textContent: ''
-              });
-              if (controllerForSend.signal.aborted) {
-                markRunStoppedForSend();
-                if (blobRecordForDocument && blobRecordForDocument.id != null && typeof panelDataRepoForImageInject.deleteAttachmentBlob === 'function') {
-                  try { await panelDataRepoForImageInject.deleteAttachmentBlob(Number(blobRecordForDocument.id)); } catch (e) {}
-                }
-                break;
-              }
-              if (blobRecordForDocument && blobRecordForDocument.id != null) {
-                const blobIdForDocument = Number(blobRecordForDocument.id);
-                setDocumentBlobCacheForPanelRuntime(blobIdForDocument, blobRecordForDocument);
-                await appendMessageToChatForPanelRuntime(chatId, {
-                  role: 'assistant',
-                  content: '',
-                  md: '[' + filenameForDocument.replace(/[\[\]]/g, '') + '](#abchat-docblob-' + blobIdForDocument + ')'
-                }, { skipChatUpdate: true });
-                hasAppendedRenderableAssistantMessageForSend = true;
-              }
-            } catch (e) {}
-          }
-          if (controllerForSend.signal.aborted) {
-            markRunStoppedForSend();
-            break;
-          }
-          if (S.activeChatId === chatId) {
-            renderChatMessages();
-            reattachLiveTurnBubbleForPanelRuntime(chatId);
-            scrollChatToBottomForPanelRuntime();
-            updateSessionTokenDisplayForPanelRuntime(logUsageForSend, preSendCostForSend + turnMainCostAccumForSend + sideCallCostForSend);
-          }
-
-          // Consecutive all-error guard: stop after MAX_CONSECUTIVE_ALL_FAILURE_ITERS_FOR_SEND rounds where every tool failed
-          const allToolsFailedForIter = toolResultsForLoop.every(function (r) {
-            return !r || r.ok === false || (typeof r === 'object' && typeof r.error === 'string');
-          });
-          const roundSignatureForSend = computeToolRoundSignatureForPanelRuntime(toolCallsForLoop);
-          if (allToolsFailedForIter) {
-            consecutiveEmptyItersForSend++;
-            if (roundSignatureForSend && roundSignatureForSend === lastFailingRoundSignatureForSend) {
-              identicalFailingRoundCountForSend++;
-            } else {
-              identicalFailingRoundCountForSend = 1;
-              lastFailingRoundSignatureForSend = roundSignatureForSend;
-            }
-          } else {
-            consecutiveEmptyItersForSend = 0;
-            identicalFailingRoundCountForSend = 0;
-            lastFailingRoundSignatureForSend = null;
-            hadSuccessfulToolCallForSend = true;
-          }
-          if (!hadSuccessfulMutatingToolCallForSend) {
-            for (var muIdxForSend = 0; muIdxForSend < toolCallsForLoop.length; muIdxForSend++) {
-              var muResultForSend = toolResultsForLoop[muIdxForSend];
-              var muSucceededForSend = !(!muResultForSend || muResultForSend.ok === false || (typeof muResultForSend === 'object' && typeof muResultForSend.error === 'string'));
-              if (!muSucceededForSend) continue;
-              var muTcForSend = toolCallsForLoop[muIdxForSend];
-              var muNameForSend = muTcForSend && muTcForSend.function && muTcForSend.function.name ? muTcForSend.function.name : '';
-              var muParsedForSend = {};
-              var muRawForSend = muTcForSend && muTcForSend.function && typeof muTcForSend.function.arguments === 'string' ? muTcForSend.function.arguments : '';
-              if (muRawForSend.trim() !== '') { try { muParsedForSend = JSON.parse(muRawForSend); } catch (muParseErrForSend) { muParsedForSend = {}; } }
-              if (isMutatingToolCallForPanelRuntime(muNameForSend, muParsedForSend)) { hadSuccessfulMutatingToolCallForSend = true; break; }
-            }
-          }
-          if (identicalFailingRoundCountForSend >= MAX_IDENTICAL_FAILING_ROUNDS_FOR_SEND) {
-            if (S.activeChatId === chatId) {
-              appendSystemMsgToContainerForPanelRuntime(
-                'Agent stopped: the same tool call failed ' + identicalFailingRoundCountForSend + ' times in a row with identical arguments. Retrying without changing the call will not help; review the error above and try a different approach.'
-              );
-            }
-            break;
-          }
-          if (consecutiveEmptyItersForSend >= MAX_CONSECUTIVE_ALL_FAILURE_ITERS_FOR_SEND) {
-            if (S.activeChatId === chatId) {
-              appendSystemMsgToContainerForPanelRuntime(
-                'Agent stopped: ' + MAX_CONSECUTIVE_ALL_FAILURE_ITERS_FOR_SEND + ' consecutive rounds of tool calls all returned errors. Review the results above and try a different approach.'
-              );
-            }
-            break;
-          }
-
-          // Sync any notes/tasks/questions mutated by agent tool calls into the in-memory store and DOM
-          const mutatedNoteIdsForLoop = new Set();
-          const mutatedTaskIdsForLoop = new Set();
-          const mutatedQuestionIdsForLoop = new Set();
-          let questionsGeneratedForLoop = false;
-          for (var mi = 0; mi < toolCallsForLoop.length; mi++) {
-            const tcNameForSync = toolCallsForLoop[mi].function && toolCallsForLoop[mi].function.name;
-            const tcResultForSync = toolResultsForLoop[mi];
-            if (tcResultForSync && tcResultForSync.ok && tcResultForSync.id != null &&
-                (tcNameForSync === 'write' || tcNameForSync === 'edit')) {
-              if (tcResultForSync.type === 'note') mutatedNoteIdsForLoop.add(Number(tcResultForSync.id));
-              else if (tcResultForSync.type === 'task') mutatedTaskIdsForLoop.add(Number(tcResultForSync.id));
-              else if (tcResultForSync.type === 'question') mutatedQuestionIdsForLoop.add(Number(tcResultForSync.id));
-            }
-            // generate_questions returns { saved, titles } with no ids, so it can't
-            // feed mutatedQuestionIds; flag a full questions refresh instead.
-            if (tcNameForSync === 'generate_questions' && tcResultForSync && tcResultForSync.ok &&
-                Number(tcResultForSync.saved) > 0) {
-              questionsGeneratedForLoop = true;
-            }
-          }
-          if (mutatedNoteIdsForLoop.size > 0) scheduleStoreRefreshForPanelRuntime('notes');
-          if (mutatedTaskIdsForLoop.size > 0) scheduleStoreRefreshForPanelRuntime('tasks');
-          if (mutatedQuestionIdsForLoop.size > 0 || questionsGeneratedForLoop) scheduleStoreRefreshForPanelRuntime('questions');
-
-          if (S.activeChatId === chatId) scrollChatToBottomForPanelRuntime();
-          const lbsForToolsDone = liveTurnBubblesForPanelRuntime.get(chatId);
-          if (lbsForToolsDone) lbsForToolsDone.toolsDoneAt = Date.now();
-        }
-        const panelDataRepoForPanelRuntime = getPanelDataRepoForPanelRuntime();
-        if (panelDataRepoForPanelRuntime && typeof panelDataRepoForPanelRuntime.updateChat === 'function' && CHAT_STORE_FOR_PANEL_RUNTIME[chatId]) {
-          try {
-            const persistedChatForPanelRuntime = await panelDataRepoForPanelRuntime.updateChat(chatId, {
-              summary: getChatSummaryFromMessagesForPanelRuntime(CHAT_STORE_FOR_PANEL_RUNTIME[chatId].messages),
-              updatedAt: new Date().toISOString(),
-              lastModel: model
-            });
-            refreshChatStoreFromPersistedForPanelRuntime(persistedChatForPanelRuntime, { prepend: true });
-          } catch (chatSyncErrorForPanelRuntime) {
-            upsertChatUiForPanelRuntime(chatId, true);
-          }
-        }
-      } catch (sendErrForPanelRuntime) {
-        removeLiveTurnBubbleForPanelRuntime(chatId, true);
-        if (sendErrForPanelRuntime && sendErrForPanelRuntime.name === "AbortError") {
-          markRunStoppedForSend();
-        } else {
-          logStatusForSend = 'error';
-          logErrorMsgForSend = sendErrForPanelRuntime ? (sendErrForPanelRuntime.message || 'Unknown error') : 'Unknown error';
-          const rawErrMsgForSend = sendErrForPanelRuntime.message || "An error occurred.";
-          let friendlyErrMsgForSend;
-          if (sendErrForPanelRuntime.isCreditsError) {
-            friendlyErrMsgForSend = rawErrMsgForSend;
-          } else {
-            const rawErrLower = rawErrMsgForSend.toLowerCase();
-            const isNetworkErrForSend = rawErrLower.indexOf('failed to fetch') !== -1 ||
-              rawErrLower.indexOf('networkerror') !== -1 ||
-              rawErrLower.indexOf('network error') !== -1 ||
-              rawErrLower.indexOf('load failed') !== -1;
-            friendlyErrMsgForSend = isNetworkErrForSend
-              ? (navigator.onLine ? "Request failed. The server may be temporarily unreachable." : "No internet connection.")
-              : rawErrMsgForSend;
-          }
-          if (S.activeChatId === chatId) appendSystemMsgToContainerForPanelRuntime("Error: " + friendlyErrMsgForSend);
-        }
-      } finally {
-        // Release the run-scoped CDP lease with an immediate detach: the run is over,
-        // so the debugger infobar drops right away instead of waiting out the idle grace.
-        if (cdpRunLeaseHeldForSend && cdpClientForSend && typeof cdpClientForSend.release === 'function') {
-          try { cdpClientForSend.release(undefined, true); } catch (eRunLeaseReleaseForSend) {}
-          cdpRunLeaseHeldForSend = false;
-        }
-        if (controllerForSend.signal.aborted && !logStopReasonForSend) {
-          markRunStoppedForSend();
-        }
-        userStopRequestedChatsForPanelRuntime.delete(chatId);
-        const agentRunStopFinallyForSend = (globalThis.ABChatShared || {}).agentRunStop;
-        if (logStopReasonForSend && logStatusForSend !== 'error') {
-          logStatusForSend = agentRunStopFinallyForSend && typeof agentRunStopFinallyForSend.logStatusFromStopReason === 'function'
-            ? agentRunStopFinallyForSend.logStatusFromStopReason(logStopReasonForSend, logStatusForSend)
-            : 'cancelled';
-        }
-        if (logStopReasonForSend) {
-          try {
-            await persistAgentStopNoticeForPanelRuntime(chatId, logStopReasonForSend, lastToolTimeoutMsForSend);
-          } catch (eStopNoticeForSend) {}
-        }
-        const apiLoggerForSend = (globalThis.ABChatContent || {}).apiLogger;
-        if (apiLoggerForSend && typeof apiLoggerForSend.writeLog === 'function') {
-          apiLoggerForSend.writeLog({
-            requestType: 'chat',
-            timestamp: new Date(logStartTimeForSend).toISOString(),
+        chrome.runtime.sendMessage({
+          action: 'agentRunStart',
+          params: {
             chatId: chatId,
-            model: logResolvedModelForSend || model,
-            iterationCount: iterCount,
-            totalLatencyMs: Date.now() - logStartTimeForSend,
-            status: logStatusForSend,
-            stopReason: logStopReasonForSend || undefined,
-            toolTimeoutMs: logStopReasonForSend === 'tool' ? lastToolTimeoutMsForSend : undefined,
-            errorMessage: logErrorMsgForSend,
-            requestMessages: logFirstMessagesForSend,
-            apiParams: logApiParamsForSend,
-            responseContent: logFinalResponseForSend,
-            toolCalls: logAllToolCallsForSend,
-            turns: logTurnsForSend,
-            hookFirings: turnHookFiringsByIterForSend,
-            usage: logUsageForSend
-          }).catch(function () {});
-        }
-        if (logStopReasonForSend && !hasPersistedNonUserMessagesForSend) {
-          // Roll back any unpersisted user messages so the chat is clean for the next send.
-          const chatForRollback = CHAT_STORE_FOR_PANEL_RUNTIME[chatId];
-          if (chatForRollback && Array.isArray(chatForRollback.messages)) {
-            chatForRollback.messages = chatForRollback.messages.filter(function (mForRollback) {
-              return mForRollback && mForRollback._persistedToDb !== false;
-            });
-            if (S.activeChatId === chatId) {
-              renderChatMessages();
-              scrollChatToBottomForPanelRuntime();
+            model: modelForOffscreen,
+            apiKey: apiKey,
+            imageModel: imageModelForOffscreen,
+            automationEnabled: automationEnabledOffscreen,
+            agentRules: currentAgentRulesForPanelRuntime || '',
+            userText: getOriginatingUserTextForMemoryGuardForPanelRuntime(chatId, text),
+            visualPreflightSessionId: 'vp_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2),
+            isResend: isResendForPanelRuntime,
+            contextWindow: modelObjForCostOffscreen ? modelObjForCostOffscreen.contextLength : null,
+            pricing: {
+              completionCostPerMillion: completionCostPerMillionOffscreen,
+              imageGenCost: imageGenCostOffscreen
             }
           }
-        } else if (!hasAppendedRenderableAssistantMessageForSend && !logStopReasonForSend) {
-          // Turn ended (error or loop cap) without persisting any renderable assistant message
-          // (text, generated image, generated document, etc.) and without user cancellation.
-          // If anything renderable was already shown, the user has visible output and the
-          // apologetic fallback would only confuse them, so we suppress it in that case.
-          // When a real mutating action landed but the model never summarized (an empty final turn
-          // after actual work), the neutral completion is correct; the apologetic fallback is
-          // reserved for turns where nothing changed at all (only reads succeeded, every mutation
-          // failed, or no tool ran), so we never imply an action that did not happen.
-          const fallbackTextForSend = hadSuccessfulMutatingToolCallForSend
-            ? AGENT_NEUTRAL_COMPLETION_FOR_PANEL_RUNTIME
-            : AGENT_FALLBACK_RESPONSES_FOR_PANEL_RUNTIME[Math.floor(Math.random() * AGENT_FALLBACK_RESPONSES_FOR_PANEL_RUNTIME.length)];
-          try {
-            await persistPendingUserMessagesForChatForPanelRuntime(chatId, { touchChat: false });
-            await appendMessageToChatForPanelRuntime(chatId, {
-              role: 'assistant',
-              content: fallbackTextForSend,
-              md: fallbackTextForSend
-            });
-            if (S.activeChatId === chatId) {
-              renderChatMessages();
-              scrollChatToBottomForPanelRuntime();
-            }
-          } catch (fallbackErrForSend) {}
-        }
-        const lbsForFinally = liveTurnBubblesForPanelRuntime.get(chatId);
-        // Flush any pending debounced text so receivers see the final tokens
-        // before the end event, then signal end so they tear down the bubble
-        // and refresh from the DB to pick up the persisted final message.
-        flushStreamTextBroadcastForPanelRuntime(chatId);
-        broadcastStreamEventForPanelRuntime("stream_end", chatId, null);
-        removeLiveTurnBubbleForPanelRuntime(chatId, lbsForFinally ? lbsForFinally.hasText : true);
-        clearTimeout(turnTotalTimeoutIdForSend);
-        sendingChatsForPanelRuntime.delete(chatId);
-        if (contentNamespaceForPanelRuntime.state) {
-          contentNamespaceForPanelRuntime.state.agentIsWorking = sendingChatsForPanelRuntime.size > 0;
-        }
-        const chatRecordForSessionCost = CHAT_STORE_FOR_PANEL_RUNTIME[chatId];
-        if (chatRecordForSessionCost && (turnMainCostAccumForSend > 0 || sideCallCostForSend > 0)) {
-          chatRecordForSessionCost.sessionCost = (chatRecordForSessionCost.sessionCost || 0) + turnMainCostAccumForSend + sideCallCostForSend;
-        }
-        if (S.activeChatId === chatId) rebuildTokenCounterFromMessagesForPanelRuntime(chatId);
+        }, function () { void chrome.runtime.lastError; });
+      } catch (eAgentRunStart) {
+        offscreenInitiatedChatsForPanelRuntime.delete(chatId);
         setSendingUIStateForPanelRuntime();
-        syncMainChatListItemForPanelRuntime(chatId);
-        if (S.activeChatId === chatId) {
-          const chatTaForAutoFocus = root.querySelector('.chat-textarea');
-          if (chatTaForAutoFocus) chatTaForAutoFocus.focus();
-        }
+        appendSystemMsgToContainerForPanelRuntime('Could not start the agent run. Please try again.');
       }
     }
 
     function cancelSendForPanelRuntime() {
-      // Local stream: abort the AbortController directly. Only flag user-stop for a local
-      // run, whose finally consumes and clears the flag. Offscreen/remote runs track
-      // user-stop in the offscreen loop, so flagging here would leave a stale entry the
-      // local finally never runs to clear.
-      const ctrl = sendingChatsForPanelRuntime.get(S.activeChatId);
-      if (ctrl) {
-        const chatIdForCancelSend = Number(S.activeChatId);
-        if (Number.isFinite(chatIdForCancelSend)) {
-          userStopRequestedChatsForPanelRuntime.add(chatIdForCancelSend);
-        }
-        ctrl.abort();
-        return;
-      }
-      // Remote stream, or an offscreen-hosted run this tab just initiated (the run lives
-      // in the offscreen document, not here): ask the SW to abort. The SW fans the request
-      // out to every tab and also signals the offscreen loop; only the holder of the matching
-      // AbortController actually aborts. The offscreenInitiated check covers the window
-      // between handoff and the first stream event, before remoteStreaming is set.
+      // The run lives in the offscreen document, not here: ask the SW to abort. The SW
+      // signals the offscreen loop, which stops the run and tracks the user-stop. The
+      // offscreenInitiated check covers the window between handoff and the first stream
+      // event, before remoteStreaming is set.
       if (remoteStreamingChatsForPanelRuntime.has(S.activeChatId) ||
           offscreenInitiatedChatsForPanelRuntime.has(S.activeChatId)) {
         try {
@@ -14053,18 +12628,6 @@
             chatId: Number(S.activeChatId)
           }, function () { void chrome.runtime.lastError; });
         } catch (errorForRemoteCancel) {}
-      }
-    }
-
-    // SW-delivered cancel-from-receiver. Abort the local controller if this
-    // tab is the originator for the requested chat; otherwise ignore.
-    function handleRemoteCancelDeliverForPanelRuntime(chatIdForCancel) {
-      const numericChatIdForCancel = Number(chatIdForCancel);
-      if (!Number.isFinite(numericChatIdForCancel)) return;
-      const ctrlForCancel = sendingChatsForPanelRuntime.get(numericChatIdForCancel);
-      if (ctrlForCancel) {
-        userStopRequestedChatsForPanelRuntime.add(numericChatIdForCancel);
-        ctrlForCancel.abort();
       }
     }
 
@@ -14341,20 +12904,6 @@
           }
         });
       } catch (eAutomationLoadForBehaviour) {}
-      try {
-        chrome.storage.local.get('abchatOffscreenLoopEnabled', function (itemsForOffscreenToggle) {
-          const offscreenToggleForBehaviour = root.getElementById('settings-offscreen-loop-toggle');
-          if (offscreenToggleForBehaviour) {
-            offscreenToggleForBehaviour.checked = resolveOffscreenLoopEnabledForPanelRuntime(itemsForOffscreenToggle);
-          }
-        });
-      } catch (eOffscreenLoadForBehaviour) {}
-    }
-
-    function handleOffscreenLoopToggleForPanelRuntime(wantEnabledForOffscreen) {
-      try {
-        chrome.storage.local.set({ abchatOffscreenLoopEnabled: !!wantEnabledForOffscreen });
-      } catch (eOffscreenToggleSet) {}
     }
 
     function handleAutomationToggleForPanelRuntime(wantEnabledForAutomation) {
@@ -14407,10 +12956,6 @@
           if (changes.abchatAutomationEnabled) {
             const elForAutomationSync = root.getElementById('settings-automation-toggle');
             if (elForAutomationSync) elForAutomationSync.checked = !!changes.abchatAutomationEnabled.newValue;
-          }
-          if (changes.abchatOffscreenLoopEnabled) {
-            const elForOffscreenSync = root.getElementById('settings-offscreen-loop-toggle');
-            if (elForOffscreenSync) elForOffscreenSync.checked = resolveOffscreenLoopEnabledForPanelRuntime({ abchatOffscreenLoopEnabled: changes.abchatOffscreenLoopEnabled.newValue });
           }
         };
         chrome.storage.onChanged.addListener(automationStorageSyncListenerForPanelRuntime);
@@ -16879,7 +15424,6 @@
             case 'prune-orphaned-blobs':           pruneOrphanedBlobsFromSettingsForPanelRuntime(); break;
             case 'save-alert-sound':               saveAlertSoundForPanelRuntime(tgtForRuntime.checked); break;
             case 'toggle-automation':              handleAutomationToggleForPanelRuntime(tgtForRuntime.checked); break;
-            case 'toggle-offscreen-loop':          handleOffscreenLoopToggleForPanelRuntime(tgtForRuntime.checked); break;
             case 'save-reminder-lead-time':        saveReminderLeadTimeForPanelRuntime(tgtForRuntime.value); break;
             case 'tep-due-change': {
               if (!tgtForRuntime.value) break;
@@ -17825,7 +16369,6 @@
     _exposedSetPopoutPositionsForPanelRuntime = setPopoutPositionsForMirrorForPanelRuntime;
     _exposedReclampPanelPositionForPanelRuntime = reclampPanelPositionForPanelRuntime;
     _exposedHandleRemoteStreamEventForPanelRuntime = handleRemoteStreamEventForPanelRuntime;
-    _exposedHandleRemoteCancelDeliverForPanelRuntime = handleRemoteCancelDeliverForPanelRuntime;
     _exposedRunDelegatedPageToolForPanelRuntime = runDelegatedPageToolForPanelRuntime;
     _exposedSetReducedPaneForPanelRuntime = setReducedPaneForMirrorForPanelRuntime;
     _exposedSetChatSubTabForPanelRuntime = setChatSubTabForMirrorForPanelRuntime;
@@ -17943,11 +16486,6 @@
     handleRemoteStreamEvent: function handleRemoteStreamEventRelayForPanelRuntime(eventForRelay, chatIdForRelay, payloadForRelay) {
       if (_exposedHandleRemoteStreamEventForPanelRuntime) {
         _exposedHandleRemoteStreamEventForPanelRuntime(eventForRelay, chatIdForRelay, payloadForRelay);
-      }
-    },
-    handleRemoteCancelDeliver: function handleRemoteCancelDeliverRelayForPanelRuntime(chatIdForRelay) {
-      if (_exposedHandleRemoteCancelDeliverForPanelRuntime) {
-        _exposedHandleRemoteCancelDeliverForPanelRuntime(chatIdForRelay);
       }
     },
     runDelegatedPageTool: function runDelegatedPageToolRelayForPanelRuntime(toolForRelay, argsForRelay) {

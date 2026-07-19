@@ -2806,20 +2806,9 @@ chrome.tabs.onUpdated.addListener((tabIdForServiceWorker, changeInfoForServiceWo
   if (changeInfoForServiceWorker.status === "complete") {
     enforceStoredPanelVisibilityForServiceWorker();
   }
-  // Orphan detection on navigation: the originator's content script
-  // dies on page navigation without ever firing AbortController.abort, so the
-  // streaming fetch silently terminates and no stream_end is broadcast.
-  // Detect via the status==='loading' transition and synthesize stream_end
-  // so receivers don't sit forever with a loading bubble.
-  if (changeInfoForServiceWorker.status === "loading") {
-    handleStreamOriginatorGoneForServiceWorker(tabIdForServiceWorker);
-  }
 });
 
-// Orphan detection on tab close: same idea as navigation, for the
-// case where the user closes the originator tab while it's mid-stream.
 chrome.tabs.onRemoved.addListener(function (tabIdForStreamCleanup /*, removeInfo */) {
-  handleStreamOriginatorGoneForServiceWorker(tabIdForStreamCleanup);
   pruneAgentCreatedTabOnRemovedForServiceWorker(tabIdForStreamCleanup);
   enforceStoredPanelVisibilityForServiceWorker();
   if (tabIdForStreamCleanup === currentActiveTabIdForServiceWorker) {
@@ -2829,48 +2818,6 @@ chrome.tabs.onRemoved.addListener(function (tabIdForStreamCleanup /*, removeInfo
     initActiveTabTrackingForServiceWorker();
   }
 });
-
-function handleStreamOriginatorGoneForServiceWorker(tabIdForCleanup) {
-  if (typeof tabIdForCleanup !== "number") return;
-  if (!streamSnapshotsForServiceWorker || streamSnapshotsForServiceWorker.size === 0) return;
-  const orphanedChatIdsForCleanup = [];
-  streamSnapshotsForServiceWorker.forEach(function (snapshotForCleanup, chatIdForCleanup) {
-    // Offscreen-hosted runs survive a page reload by design: the loop lives in the
-    // offscreen document, not this tab, so do NOT synthesize stream_end for them. The
-    // reloaded panel re-subscribes via the snapshot request and the run continues.
-    if (snapshotForCleanup && snapshotForCleanup.hostedOffscreen) return;
-    if (snapshotForCleanup && snapshotForCleanup.originatorTabId === tabIdForCleanup) {
-      orphanedChatIdsForCleanup.push(chatIdForCleanup);
-    }
-  });
-  if (orphanedChatIdsForCleanup.length === 0) return;
-
-  const deliverActionForOrphan = actionsForServiceWorker.streamReceiverDeliver || "streamReceiverDeliver";
-  chrome.tabs.query({}, function (tabsForOrphanBroadcast) {
-    if (!Array.isArray(tabsForOrphanBroadcast)) return;
-    orphanedChatIdsForCleanup.forEach(function (orphanedChatIdForBroadcast) {
-      streamSnapshotsForServiceWorker.delete(orphanedChatIdForBroadcast);
-      for (var iForOrphan = 0; iForOrphan < tabsForOrphanBroadcast.length; iForOrphan++) {
-        var tabForOrphan = tabsForOrphanBroadcast[iForOrphan];
-        if (!tabForOrphan || typeof tabForOrphan.id !== "number") continue;
-        if (tabForOrphan.id === tabIdForCleanup) continue;
-        try {
-          chrome.tabs.sendMessage(
-            tabForOrphan.id,
-            {
-              action: deliverActionForOrphan,
-              event: "stream_end",
-              chatId: orphanedChatIdForBroadcast,
-              originatorTabId: tabIdForCleanup,
-              payload: { orphaned: true }
-            },
-            function () { void chrome.runtime.lastError; }
-          );
-        } catch (errorForOrphan) {}
-      }
-    });
-  });
-}
 
 chrome.contextMenus.onClicked.addListener((infoForServiceWorker, tabForServiceWorker) => {
   const actionForServiceWorker = contextMenusForServiceWorker.getActionByMenuId(infoForServiceWorker.menuItemId);
@@ -3030,12 +2977,6 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
     return false;
   }
 
-  // Cross-tab live chat streaming relay. The originator tab emits
-  // streamOriginatorBroadcast on every text delta and on stream start/end.
-  // The SW fans the event out to every other tab so receivers can render a
-  // live bubble that mirrors the originator's. Fire-and-forget; no response
-  // is expected — sender.tab.id is excluded so the originator does not echo
-  // its own event back into its own state machine.
   // Snapshot request: receiver tab asks for the current state of a chat that
   // may be mid-stream. Responds synchronously with the snapshot or null.
   if (messageForServiceWorker.action === (actionsForServiceWorker.streamSnapshotRequest || "streamSnapshotRequest")) {
@@ -3049,78 +2990,14 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
     return false;
   }
 
-  // Cancel request from any receiver tab. Fan out to all tabs; only the tab
-  // whose sendingChatsForPanelRuntime holds an AbortController for this chatId
-  // will actually abort. Includes the sender so a receiver that just became
-  // the originator (race) still cancels itself if applicable.
+  // Cancel request from any receiver tab. The run is hosted in the offscreen
+  // document, so signal its loop to abort (it is not a tab, so tabs.sendMessage
+  // would miss it).
   if (messageForServiceWorker.action === (actionsForServiceWorker.streamCancelRequest || "streamCancelRequest")) {
-    const cancelDeliverActionForServiceWorker = actionsForServiceWorker.streamCancelDeliver || "streamCancelDeliver";
     const requestedChatIdForCancel = messageForServiceWorker.chatId;
-    // Also reach the offscreen-hosted loop (not a tab, so tabs.sendMessage misses it).
     try {
       chrome.runtime.sendMessage({ action: "offscreenCancelRequest", chatId: requestedChatIdForCancel }, function () { void chrome.runtime.lastError; });
     } catch (errForOffscreenCancel) {}
-    chrome.tabs.query({}, function (tabsForCancelBroadcast) {
-      if (!Array.isArray(tabsForCancelBroadcast)) return;
-      for (var iForCancelBroadcast = 0; iForCancelBroadcast < tabsForCancelBroadcast.length; iForCancelBroadcast++) {
-        var tabForCancelBroadcast = tabsForCancelBroadcast[iForCancelBroadcast];
-        if (!tabForCancelBroadcast || typeof tabForCancelBroadcast.id !== "number") continue;
-        try {
-          chrome.tabs.sendMessage(
-            tabForCancelBroadcast.id,
-            {
-              action: cancelDeliverActionForServiceWorker,
-              chatId: requestedChatIdForCancel
-            },
-            function () { void chrome.runtime.lastError; }
-          );
-        } catch (errorForCancelBroadcast) {}
-      }
-    });
-    return false;
-  }
-
-  if (messageForServiceWorker.action === (actionsForServiceWorker.streamOriginatorBroadcast || "streamOriginatorBroadcast")) {
-    const senderTabIdForStreamBroadcast = senderForServiceWorker && senderForServiceWorker.tab && typeof senderForServiceWorker.tab.id === "number"
-      ? senderForServiceWorker.tab.id
-      : null;
-    // Keep an in-memory snapshot of every active stream so newly-subscribed
-    // tabs can catch up on what they missed. Cleared on stream_end. If the
-    // SW is terminated mid-stream, the next event from the originator simply
-    // re-populates the snapshot (lossy by definition, but the originator is
-    // the source of truth).
-    updateStreamSnapshotForServiceWorker(
-      messageForServiceWorker.event,
-      messageForServiceWorker.chatId,
-      messageForServiceWorker.payload,
-      senderTabIdForStreamBroadcast
-    );
-    const deliverActionForStreamBroadcast = actionsForServiceWorker.streamReceiverDeliver || "streamReceiverDeliver";
-    chrome.tabs.query({}, function (tabsForStreamBroadcast) {
-      if (!Array.isArray(tabsForStreamBroadcast)) return;
-      for (var iForStreamBroadcast = 0; iForStreamBroadcast < tabsForStreamBroadcast.length; iForStreamBroadcast++) {
-        var tabForStreamBroadcast = tabsForStreamBroadcast[iForStreamBroadcast];
-        if (!tabForStreamBroadcast || typeof tabForStreamBroadcast.id !== "number") continue;
-        if (tabForStreamBroadcast.id === senderTabIdForStreamBroadcast) continue;
-        try {
-          chrome.tabs.sendMessage(
-            tabForStreamBroadcast.id,
-            {
-              action: deliverActionForStreamBroadcast,
-              event: messageForServiceWorker.event,
-              chatId: messageForServiceWorker.chatId,
-              originatorTabId: senderTabIdForStreamBroadcast,
-              payload: messageForServiceWorker.payload || null
-            },
-            function () {
-              // Ignore lastError; tabs without an active content script will
-              // just fail to receive, which is harmless.
-              void chrome.runtime.lastError;
-            }
-          );
-        } catch (errorForStreamBroadcast) {}
-      }
-    });
     return false;
   }
 
@@ -3152,11 +3029,10 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
     return false;
   }
 
-  // Stream events emitted by the offscreen-hosted loop. Mirrors streamOriginatorBroadcast,
-  // but the source is the offscreen document (no sender.tab), so the target tab is resolved
-  // from the run map and used as the snapshot's originatorTabId, and the event is fanned out
-  // to ALL tabs (there is no originating tab to exclude). On stream_end the run mapping is
-  // cleared and the offscreen keepalive ref is released.
+  // Stream events emitted by the offscreen-hosted loop. The source is the offscreen document
+  // (no sender.tab), so the target tab is resolved from the run map and used as the snapshot's
+  // originatorTabId, and the event is fanned out to ALL tabs (there is no originating tab to
+  // exclude). On stream_end the run mapping is cleared and the offscreen keepalive ref is released.
   if (messageForServiceWorker.action === "offscreenStreamBroadcast") {
     const chatIdForOsb = Number(messageForServiceWorker.chatId);
     const targetTabIdForOsb = offscreenRunTargetTabsForServiceWorker.has(chatIdForOsb)
@@ -3176,7 +3052,6 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
     );
     const snapForOsb = streamSnapshotsForServiceWorker.get(chatIdForOsb);
     if (snapForOsb) {
-      snapForOsb.hostedOffscreen = true;
       snapForOsb.targetTabId = targetTabIdForOsb;
     }
     const deliverActionForOsb = actionsForServiceWorker.streamReceiverDeliver || "streamReceiverDeliver";
@@ -3242,8 +3117,8 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
     // the model re-reads the new page instead of assuming the click failed. A same-document
     // (pushState) soft-nav does not load a document, so the content script survives and returns
     // its own result normally; only status==="loading" triggers this. Applies to the trusted page
-    // tools (page_act, page_spreadsheet); a page_act click is the one an offscreen run is allowed to
-    // let navigate (an in-panel run refuses page-leaving clicks before they reach here).
+    // tools (page_act, page_spreadsheet); a page_act click that navigates away is allowed, and this
+    // watch turns the resulting page load into an honest "navigated" result.
     const watchNavigationForDelegate = messageForServiceWorker.tool === "page_act"
       || messageForServiceWorker.tool === "page_spreadsheet";
     const actionLabelForDelegate = String((messageForServiceWorker.args && messageForServiceWorker.args.action) || "action");

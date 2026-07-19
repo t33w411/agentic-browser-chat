@@ -41,14 +41,12 @@
     addImageToChat: "addImageToChat",
     addSelectionToChat: "addSelectionToChat",
     // Cross-tab live chat streaming relay.
-    //   originatorBroadcast: content → SW. SW relays to all other tabs.
-    //   receiverDeliver:     SW → content. Receivers process and render.
-    streamOriginatorBroadcast: "streamOriginatorBroadcast",
+    //   receiverDeliver: SW → content. Receivers process and render the stream
+    //                    events the offscreen loop emits (see offscreenStreamBroadcast).
     streamReceiverDeliver: "streamReceiverDeliver",
-    // Cancel routing: receiver requests cancel, SW broadcasts; only the tab
-    // that holds the local AbortController for this chatId actually aborts.
+    // Cancel routing: a tab requests cancel; the SW signals the offscreen loop
+    // hosting the run to abort it.
     streamCancelRequest: "streamCancelRequest",
-    streamCancelDeliver: "streamCancelDeliver",
     // Catch-up: a receiver tab asks the SW for the current snapshot of a chat
     // that may be mid-stream on another tab. SW responds synchronously with
     // the cumulative text, tool steps + statuses, and retry notice.
@@ -82,9 +80,9 @@
     // dies on navigation, the offscreen document does not).
     //   agentRunStart:           content → SW. SW ensures the offscreen doc and
     //                            forwards the run params; SW maps chatId → targetTabId.
-    //   offscreenStreamBroadcast: offscreen → SW. Like streamOriginatorBroadcast but
-    //                            sourced from the offscreen doc (which has no sender.tab);
-    //                            SW fans out streamReceiverDeliver to ALL tabs.
+    //   offscreenStreamBroadcast: offscreen → SW. The stream is sourced from the offscreen
+    //                            doc (which has no sender.tab); SW fans out
+    //                            streamReceiverDeliver to ALL tabs.
     //   offscreenCancelRequest:  SW → offscreen. Aborts the run's controller.
     //   delegatePageTool:        offscreen → SW. SW relays a page-DOM-bound tool call
     //                            to the target tab's content script.

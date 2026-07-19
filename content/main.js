@@ -502,14 +502,6 @@
       return true;
     }
 
-    if (messageForContentMain.action === (actionsForContentMain.streamCancelDeliver || "streamCancelDeliver")) {
-      var panelRuntimeNsForCancelDeliver = contentNamespaceForContentMain.ui && contentNamespaceForContentMain.ui.panelRuntime;
-      if (panelRuntimeNsForCancelDeliver && typeof panelRuntimeNsForCancelDeliver.handleRemoteCancelDeliver === 'function') {
-        panelRuntimeNsForCancelDeliver.handleRemoteCancelDeliver(messageForContentMain.chatId);
-      }
-      return false;
-    }
-
     if (messageForContentMain.action === (actionsForContentMain.streamReceiverDeliver || "streamReceiverDeliver")) {
       var panelRuntimeNsForStreamReceive = contentNamespaceForContentMain.ui && contentNamespaceForContentMain.ui.panelRuntime;
       if (panelRuntimeNsForStreamReceive && typeof panelRuntimeNsForStreamReceive.handleRemoteStreamEvent === 'function') {
@@ -557,17 +549,14 @@
           return true;
         }
         // The page tools run here (not in the offscreen doc) so their document references are the
-        // live page. Every delegated call carries offscreenRun:true, since delegation only happens
-        // for the offscreen-hosted run loop, which survives page navigation: the navigation gate in
-        // the page_act click path reads this to allow page-leaving clicks. No tabId is passed, so
-        // the unbound CDP client lets the service worker resolve the target tab from sender.tab
-        // (this tab). The trusted page tools (page_act, page_spreadsheet) also need the chat id so
-        // their session-scoped state shares a key with the screenshot capture; the read-only tools
-        // (page_observe, page_read) do not.
+        // live page. No tabId is passed, so the unbound CDP client lets the service worker resolve
+        // the target tab from sender.tab (this tab). The trusted page tools (page_act,
+        // page_spreadsheet) also need the chat id so their session-scoped state shares a key with
+        // the screenshot capture; the read-only tools (page_observe, page_read) do not.
         var chatScopedDelegateTools = { page_act: 1, page_spreadsheet: 1 };
         var delegateCtxForContentMain = chatScopedDelegateTools[delegatedToolForContentMain]
-          ? { chatId: messageForContentMain.chatId, offscreenRun: true }
-          : { offscreenRun: true };
+          ? { chatId: messageForContentMain.chatId }
+          : {};
         Promise.resolve(agentNsForDelegate.executeTool(delegatedToolForContentMain, delegatedArgsForContentMain, delegateCtxForContentMain))
           .then(function (resultForDelegate) { sendResponseForContentMain(resultForDelegate); })
           .catch(function (errForDelegate) {

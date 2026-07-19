@@ -140,9 +140,9 @@
   }
 
   function dialogAcceptPolicyForCdp(dialogTypeForPolicy) {
-    // Accept info alerts and beforeunload (so the navigation the agent intended proceeds, which also
-    // clears the agent leave-warning prompt); dismiss confirm/prompt by default so automation never
-    // auto-confirms a potentially destructive action.
+    // Accept info alerts and beforeunload (so the navigation the agent intended proceeds);
+    // dismiss confirm/prompt by default so automation never auto-confirms a potentially
+    // destructive action.
     return dialogTypeForPolicy === "alert" || dialogTypeForPolicy === "beforeunload";
   }
 

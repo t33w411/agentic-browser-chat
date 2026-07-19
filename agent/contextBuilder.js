@@ -51,12 +51,9 @@
       "(3) Spreadsheets (Google Sheets and similar canvas grids). A spreadsheet's cell grid is painted to a canvas and has NO clickable cells, so never try to click a cell with page_act and never expect page_observe to list cell values. Use page_spreadsheet, which hides the Name-Box keyboard choreography behind three intents: set_cell (write one cell: pass cell like 'B2' and value), set_range (fill a block: pass anchor like 'A2' and values, a non-empty array of rows), and read_range (read values: pass range like 'A1:C3' or a single cell). It navigates through the Name Box, verifies each write against the formula bar, and returns what it read or wrote. This is the correct, and only, way to read or write spreadsheet cells."
     ].join('\n');
 
-  // Appended to the system prompt to state this run's page-leaving navigation policy. Which one
-  // is used depends on whether the run survives a page load (offscreen-hosted) or dies on it
-  // (in-panel). The matching click gate is enforced in code; this only tells the model the policy.
-  const NAVIGATION_BLOCKED_GUIDANCE_FOR_CONTEXT_BUILDER =
-    "Page-leaving navigation is NOT available in this run. A page_act click whose target (or an anchor ancestor) is an <a>/<area> with an href that would unload the current document is refused before it fires. Same-page hash links (href=\"#...\") and target=_blank links (which open a new tab) do not count as leaving the page and are allowed. Do not try to navigate the current tab by clicking links; find a non-navigating alternative (a button or in-page control), or answer without navigating.";
-
+  // Appended to the system prompt to state this run's page-leaving navigation policy. Agent
+  // runs are offscreen-hosted and survive a page load, so navigation is allowed; the matching
+  // click gate is enforced in code, this only tells the model the policy.
   const NAVIGATION_ALLOWED_GUIDANCE_FOR_CONTEXT_BUILDER =
     "Page-leaving navigation IS available in this run: a page_act click MAY follow an <a>/<area> link that unloads the current document, and the run continues across the page load. When you intend to navigate, expect the click result to report navigated: true with a new URL instead of the usual page snapshot; that is success, not a failure. After any navigation, the previous page's refs no longer apply, so re-read the new page (page_observe or page_read) before your next action.";
 
@@ -548,13 +545,11 @@
     // The page tools are always advertised, so their usage guidance is always included.
     systemText += "\n\n" + PAGE_ACTION_GUIDANCE_FOR_CONTEXT_BUILDER;
 
-    // Only stated for the agent run loop, which passes an explicit boolean (true when the run is
-    // offscreen-hosted and survives navigation, false for the in-panel loop). Callers that omit it
-    // (e.g. the single-shot inline quick-question, which has no page-acting tools) get no line.
+    // Only stated for the agent run loop, which passes pageNavigationAllowed: true (the run is
+    // offscreen-hosted and survives navigation). Callers that omit it (e.g. the single-shot
+    // inline quick-question, which has no page-acting tools) get no line.
     if (optsForSystem.pageNavigationAllowed === true) {
       systemText += "\n\n" + NAVIGATION_ALLOWED_GUIDANCE_FOR_CONTEXT_BUILDER;
-    } else if (optsForSystem.pageNavigationAllowed === false) {
-      systemText += "\n\n" + NAVIGATION_BLOCKED_GUIDANCE_FOR_CONTEXT_BUILDER;
     }
 
     if (optsForSystem.agentRules && typeof optsForSystem.agentRules === "string") {

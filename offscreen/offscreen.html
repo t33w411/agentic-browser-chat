@@ -7,8 +7,9 @@
   <!-- Agent run loop host. The orchestration loop runs here (not in the page content
        script) so an in-flight run survives a page reload. Scripts are loaded in the
        same dependency order the manifest uses for the content script. Page-DOM-bound
-       tools (page_query, page_fill_form, take_screenshot capture) are delegated back to
-       the target tab's content script; everything else runs here. -->
+       tools (page_observe, page_act, page_read, page_spreadsheet, take_screenshot
+       capture) are delegated back to the target tab's content script; everything else
+       runs here. -->
   <script src="../shared/messages.js"></script>
   <script src="../shared/agentRunStop.js"></script>
   <script src="../shared/toolRegistry.js"></script>

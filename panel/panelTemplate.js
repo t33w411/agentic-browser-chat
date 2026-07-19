@@ -520,17 +520,6 @@
           </div>
 
           <div class="stg-section">
-            <div class="stg-section-title">Experimental</div>
-            <div class="stg-row">
-              <div class="stg-label">
-                <strong>Keep runs alive across page reloads</strong>
-                <span>Run the assistant in the background so an in-progress task keeps going even when the page navigates or reloads (for example, after it submits a form). If you notice any issues, turn this off to use the in-page mode.</span>
-              </div>
-              <label class="ts"><input type="checkbox" id="settings-offscreen-loop-toggle" data-action="toggle-offscreen-loop"><span class="ts-slider"></span></label>
-            </div>
-          </div>
-
-          <div class="stg-section">
             <div class="stg-section-title">Data</div>
             <div class="stg-row">
               <div class="stg-label">
