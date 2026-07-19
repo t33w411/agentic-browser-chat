@@ -160,7 +160,7 @@
       type: 'function',
       function: {
         name: 'page_act',
-        description: 'Act on a page control by its integer ref from the latest page_observe (or a page_read find_text hit): no selectors, no fingerprints. Only use a ref that was actually returned to you in the most recent page_observe or page_read find_text result (including a match\'s controls list); never guess, offset, or reuse a ref from an older result. A ref that was not in the latest result is rejected with a fresh snapshot to pick from, because refs are renumbered on every snapshot and an unshown number may resolve to a different element. Pass action plus ref. Actions: "click" (click the control; a synthetic click is tried first and auto-escalates to trusted input when it has no effect and the target looks like a custom widget; pass button:"right" for a right-click); "type" (enter text into the control; synthetic value-set is tried first and auto-escalates to trusted typing when the field rejects it); "select" (choose a dropdown option by its visible label via option; synthetic open/pick is tried first and auto-escalates to trusted input when the widget ignores it; native <select> and custom comboboxes); "hover"; "press" (send a key or chord via keys, e.g. "Enter", "Escape", "ArrowDown", "Ctrl+A"; ref optional, defaults to the focused element); "scroll" (scroll ref into view, OR omit ref and pass direction up/down/left/right, optionally amount in pixels); "drag" (from ref to to_ref). If a ref is stale because the page changed, the call does NOT fail: it returns a FRESH snapshot so you pick the new ref and retry. After every action it returns the rebuilt snapshot items with changed rows tagged changed:true and newly appeared rows tagged new:true, so you never diff two lists yourself; check effect and those flags to confirm what happened before acting again. This post-action snapshot is CENTERED on the control you just acted on (plus the controls that changed as a result, such as a toolbar that appears on selection), so the acted control and its new state are included even when it sits far down a long list: read it to verify the result inline rather than calling page_observe again just to check. If an action needs advanced automation and it is off, a permission prompt opens and the SAME action continues automatically once you approve, so do not abandon the step. A click whose target label reads destructive (delete, remove, revoke, deactivate, ...) is refused unless you pass confirm: true. Result: { ok, action, effect, snapshotId, page, counts, items }.',
+        description: 'Act on a page control by its integer ref from the latest page_observe (or a page_read find_text hit): no selectors, no fingerprints. Only use a ref that was actually returned to you in the most recent page_observe or page_read find_text result (including a match\'s controls list); never guess, offset, or reuse a ref from an older result. A ref that was not in the latest result is rejected with a fresh snapshot to pick from, because refs are renumbered on every snapshot and an unshown number may resolve to a different element. Pass action plus ref. Actions: "click" (click the control; a synthetic click is tried first and auto-escalates to trusted input when it has no effect and the target looks like a custom widget; pass button:"right" for a right-click); "type" (enter text into the control; synthetic value-set is tried first and auto-escalates to trusted typing when the field rejects it); "select" (choose a dropdown option by its visible label via option; synthetic open/pick is tried first and auto-escalates to trusted input when the widget ignores it; native <select> and custom comboboxes); "hover"; "press" (send a key or chord via keys, e.g. "Enter", "Escape", "ArrowDown", "Ctrl+A"; ref optional, defaults to the focused element); "scroll" (scroll ref into view, OR omit ref and pass direction up/down/left/right, optionally amount in pixels); "drag" (from ref to to_ref). If a ref is stale because the page changed, the call does NOT fail: it returns a FRESH snapshot so you pick the new ref and retry. After every action it returns the rebuilt snapshot items with changed rows tagged changed:true and newly appeared rows tagged new:true, so you never diff two lists yourself; check effect and those flags to confirm what happened before acting again. This post-action snapshot is CENTERED on the control you just acted on (plus the controls that changed as a result, such as a toolbar that appears on selection), so the acted control and its new state are included even when it sits far down a long list: read it to verify the result inline rather than calling page_observe again just to check. If an action needs advanced automation and it is off, a permission prompt opens and the SAME action continues automatically once you approve, so do not abandon the step. A click whose target label reads destructive (delete, remove, revoke, deactivate, ...) is refused unless you pass confirm: true. Result: { ok, action, effect, snapshotId, page, counts, items }. If the action navigated the page (e.g. a form submit or link), the result instead has navigated:true, the new url, and landed_page: a fresh page_observe of the page you landed on (its items/refs are the current ones to act on next). Treat navigated:true as success, not failure: read landed_page to confirm the outcome before your next action, and do not repeat the action or go looking on another tab.',
         parameters: {
           type: 'object',
           properties: {
@@ -286,7 +286,7 @@
       type: 'function',
       function: {
         name: 'list_tabs',
-        description: 'List the browser tabs the user currently has open across all windows. Returns { ok, count, tabs } where each tab is { id, title, url, active, windowId, isCurrentWindow, discarded, accessible }. Use this to see what the user is looking at or to find a tab to read with read_tab. The id is what you pass to read_tab; ids are only valid for the current run (they change between sessions and when tabs close), so call list_tabs again rather than reusing an old id. accessible is false for pages extensions cannot read (browser system pages such as Settings, the New Tab page, and the Chrome Web Store); read_tab will fail on those. discarded:true means Chrome suspended the tab to save memory; reading it will reload the page. This is a read-only tool with no side effects: it does not switch, focus, open, or close any tab.',
+        description: 'List the browser tabs the user currently has open across all windows. Returns { ok, count, tabs } where each tab is { id, title, url, active, windowId, isCurrentWindow, isCurrentTab, discarded, accessible }. Use this to see what the user is looking at or to find a tab to read with read_tab or act on with switch_tab. The id is what you pass to read_tab/switch_tab; ids are only valid for the current run (they change between sessions and when tabs close), so call list_tabs again rather than reusing an old id. isCurrentTab is true for the ONE tab this chat is currently acting on (where switch_tab last pointed, or the tab the chat started on) — that is your "you are here"; your page tools already operate on it, so you do NOT need to switch to it. Do not confuse this with active, which is merely the focused tab within each window and is therefore true for several tabs at once. accessible is false for pages extensions cannot read (browser system pages such as Settings, the New Tab page, and the Chrome Web Store); read_tab and switch_tab will fail on those. discarded:true means Chrome suspended the tab to save memory; reading it will reload the page. This is a read-only tool with no side effects: it does not switch, focus, open, or close any tab.',
         parameters: {
           type: 'object',
           properties: {},
@@ -305,6 +305,52 @@
           properties: {
             tab_id: { type: 'integer', description: 'The id of the tab to read, taken from a list_tabs result. Ids are only valid within the current run.' },
             prompt: { type: 'string', description: 'A specific question or instruction about the tab content; the secondary model returns only the relevant answer. Omit to get the tab\'s full flattened page text as-is (no summarization).' }
+          },
+          required: ['tab_id']
+        }
+      }
+    },
+
+    {
+      type: 'function',
+      function: {
+        name: 'switch_tab',
+        description: "Switch this chat's active target tab to another open tab (identified by tab_id from list_tabs) and bring it to the foreground. After this succeeds, every page action tool (page_observe, page_act, page_read, page_spreadsheet, take_screenshot, eval) operates on the newly targeted tab instead of the one the chat started on. Use this when you need to look at or act on a tab OTHER than the current one: call list_tabs first to find the tab_id. The tab is activated (focused) so the user can see what you are doing. Only accessible tabs can be targeted; switching to a browser system page (accessible:false in list_tabs, e.g. Settings, the New Tab page, the Chrome Web Store) fails. After switching, call page_observe to read the new page before acting on it. Fails with a clear error if the tab id is unknown or the tab cannot be targeted.",
+        parameters: {
+          type: 'object',
+          properties: {
+            tab_id: { type: 'integer', description: 'The id of the tab to switch to, taken from a list_tabs result. Ids are only valid within the current run.' }
+          },
+          required: ['tab_id']
+        }
+      }
+    },
+
+    {
+      type: 'function',
+      function: {
+        name: 'create_tab',
+        description: "Open a new browser tab and make it this chat's active target tab. Returns { ok, tab } where tab is { id, title, url }. Pass a url to load a specific page (must include the scheme, e.g. https://example.com); omit url to open a blank tab you will then drive. By default the new tab is activated (brought to the foreground) and becomes the target of all subsequent page action tools (page_observe, page_act, etc.); pass active:false to open it in the background WITHOUT switching to it (the current target tab is unchanged). A tab you create here can later be closed with close_tab; tabs the user opened cannot. After creating a tab with a url, call page_observe before acting on it, as the page may still be loading. The tab id is only valid within the current run.",
+        parameters: {
+          type: 'object',
+          properties: {
+            url: { type: 'string', description: 'The URL to open, including scheme (e.g. https://example.com). Omit to open a blank tab.' },
+            active: { type: 'boolean', description: 'Whether to activate the new tab and make it the target for subsequent page actions. Defaults to true. Set false to open in the background without switching the target.' }
+          },
+          required: []
+        }
+      }
+    },
+
+    {
+      type: 'function',
+      function: {
+        name: 'close_tab',
+        description: "Close a browser tab. You can ONLY close a tab that YOU created earlier in this chat with create_tab; attempting to close any other tab (one the user opened, including the tab this chat started on) fails with an error. Use this to clean up tabs you opened for a task once you are done with them. If you close the tab that is currently the active target, the target automatically reverts to the tab this chat started on. Fails with a clear error if the tab id is unknown or was not created by you in this chat.",
+        parameters: {
+          type: 'object',
+          properties: {
+            tab_id: { type: 'integer', description: 'The id of the tab to close. Must be a tab you created with create_tab in this chat.' }
           },
           required: ['tab_id']
         }

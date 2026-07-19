@@ -386,6 +386,19 @@ const streamSnapshotsForServiceWorker = new Map();
 // when that tab navigates/reloads. Cleared on stream_end.
 const offscreenRunTargetTabsForServiceWorker = new Map();
 
+// chatId -> initiatorTabId: the tab whose panel started the run. Unlike the target map above,
+// this is fixed at run start and never changes when the agent switches tabs mid-run. It is
+// used to stamp the stream's originatorTabId (so the live turn always renders in the panel
+// that started it, not wherever the agent happens to be acting) and as the fallback target
+// when the agent closes the tab it is currently acting on. Cleared on stream_end.
+const offscreenRunInitiatorTabsForServiceWorker = new Map();
+
+// chatId -> Set of tab ids the agent created via create_tab during this chat. This is the
+// authorization boundary for close_tab: the agent may only close a tab it opened itself.
+// Persisted in chrome.storage.session (survives an MV3 service-worker recycle, auto-clears on
+// browser restart when tab ids are meaningless anyway); this in-memory copy is a fast cache.
+const AGENT_CREATED_TABS_SESSION_PREFIX_FOR_SERVICE_WORKER = "abchatCreatedTabs:";
+
 // Tell the CDP layer to keep the debugger attached across a navigation on any tab that is
 // the target of an active offscreen run. Without this, the navigation force-detach (added to
 // drop a stranded infobar when the LEGACY content-script loop dies on navigation) would also
@@ -756,6 +769,230 @@ async function queryTabsForServiceWorker(queryInfoForServiceWorker) {
       resolveForServiceWorker(Array.isArray(tabsForServiceWorker) ? tabsForServiceWorker : []);
     });
   });
+}
+
+// ---- Agent-created tab tracking (close_tab authorization boundary) ----
+// The set of tab ids the agent opened via create_tab is kept per-chat in chrome.storage.session
+// so it survives an MV3 service-worker recycle and spans multiple turns of the same chat, while
+// auto-clearing on browser restart (when the ids are meaningless anyway).
+
+function createdTabsSessionKeyForServiceWorker(chatIdForKey) {
+  return AGENT_CREATED_TABS_SESSION_PREFIX_FOR_SERVICE_WORKER + String(chatIdForKey);
+}
+
+function getAgentCreatedTabsForServiceWorker(chatIdForGet) {
+  return new Promise(function (resolveForGet) {
+    const keyForGet = createdTabsSessionKeyForServiceWorker(chatIdForGet);
+    try {
+      chrome.storage.session.get(keyForGet, function (storedForGet) {
+        if (chrome.runtime.lastError) { resolveForGet([]); return; }
+        const arrForGet = storedForGet && Array.isArray(storedForGet[keyForGet]) ? storedForGet[keyForGet] : [];
+        resolveForGet(arrForGet.filter(function (idForGet) { return typeof idForGet === "number"; }));
+      });
+    } catch (eForGet) { resolveForGet([]); }
+  });
+}
+
+function setAgentCreatedTabsForServiceWorker(chatIdForSet, tabIdsForSet) {
+  return new Promise(function (resolveForSet) {
+    const keyForSet = createdTabsSessionKeyForServiceWorker(chatIdForSet);
+    const payloadForSet = {};
+    payloadForSet[keyForSet] = tabIdsForSet;
+    try {
+      chrome.storage.session.set(payloadForSet, function () { void chrome.runtime.lastError; resolveForSet(); });
+    } catch (eForSet) { resolveForSet(); }
+  });
+}
+
+async function addAgentCreatedTabForServiceWorker(chatIdForAdd, tabIdForAdd) {
+  const existingForAdd = await getAgentCreatedTabsForServiceWorker(chatIdForAdd);
+  if (existingForAdd.indexOf(tabIdForAdd) === -1) {
+    existingForAdd.push(tabIdForAdd);
+    await setAgentCreatedTabsForServiceWorker(chatIdForAdd, existingForAdd);
+  }
+}
+
+async function removeAgentCreatedTabForServiceWorker(chatIdForRemove, tabIdForRemove) {
+  const existingForRemove = await getAgentCreatedTabsForServiceWorker(chatIdForRemove);
+  const filteredForRemove = existingForRemove.filter(function (idForRemove) { return idForRemove !== tabIdForRemove; });
+  if (filteredForRemove.length !== existingForRemove.length) {
+    await setAgentCreatedTabsForServiceWorker(chatIdForRemove, filteredForRemove);
+  }
+}
+
+// How long switch_tab / create_tab waits for the target tab's panel to confirm it is showing the
+// run before returning. The panel may still be initializing right after injection, so this must
+// cover a boot window; on timeout the tool returns panel_showing_chat:false and proceeds.
+const PANEL_FOLLOW_CONFIRM_TIMEOUT_MS_FOR_SERVICE_WORKER = 3000;
+
+// After the agent foregrounds a tab (switch_tab / create_tab active), force that tab's panel open
+// and drive it to the ongoing run so the user sees the agent working there instead of a blank/
+// new-chat panel. Resolves with { showing } once the panel confirms it is displaying that chat
+// (or on timeout), so the calling tool can gate the next action on the run being visible. The
+// panel buffers the request if it arrives before its runtime finished initializing.
+function followRunInTabForServiceWorker(tabIdForFollow, chatIdForFollow) {
+  return new Promise(function (resolveFollow) {
+    if (typeof tabIdForFollow !== "number" || !Number.isFinite(Number(chatIdForFollow))) {
+      resolveFollow({ showing: false });
+      return;
+    }
+    var settledFollow = false;
+    var timerFollow = setTimeout(function () {
+      if (settledFollow) return;
+      settledFollow = true;
+      resolveFollow({ showing: false, timedOut: true });
+    }, PANEL_FOLLOW_CONFIRM_TIMEOUT_MS_FOR_SERVICE_WORKER);
+    (async function () {
+      try {
+        if (tabMessagingForServiceWorker && typeof tabMessagingForServiceWorker.ensureContentInjected === "function") {
+          await tabMessagingForServiceWorker.ensureContentInjected(tabIdForFollow);
+        }
+      } catch (eInjectForFollow) { /* best effort: still try to message an already-injected tab */ }
+      try {
+        chrome.tabs.sendMessage(
+          tabIdForFollow,
+          { action: "abchatFollowRunInPanel", chatId: Number(chatIdForFollow), forceOpen: true },
+          function (respForFollow) {
+            void chrome.runtime.lastError;
+            if (settledFollow) return;
+            settledFollow = true;
+            clearTimeout(timerFollow);
+            resolveFollow({ showing: !!(respForFollow && respForFollow.showing) });
+          }
+        );
+      } catch (eSendForFollow) {
+        if (settledFollow) return;
+        settledFollow = true;
+        clearTimeout(timerFollow);
+        resolveFollow({ showing: false });
+      }
+    })();
+  });
+}
+
+// A click/press can spawn an async navigation that begins just AFTER the synthetic action
+// returns its snapshot; hold the page_act result this long to catch it before finishing. Most
+// navigations (native submit, plain links) fire quickly, so a short window suffices...
+const POST_ACTION_NAV_GRACE_MS_FOR_SERVICE_WORKER = 400;
+// ...but a submit-like click (auth/checkout button, a link, an Enter-press) can trigger a
+// JS-driven redirect that fires well after the action returns (e.g. a form with action="" that
+// navigates from a click handler, or a "Signing in…" delay), so those get a much longer window.
+// The cost is only paid when such a click does NOT navigate; a real navigation resolves as soon
+// as it starts.
+const POST_ACTION_NAV_GRACE_SUBMIT_MS_FOR_SERVICE_WORKER = 3000;
+// Cap on waiting for a navigated page to reach "complete" before observing the landed page.
+const LANDED_PAGE_SETTLE_TIMEOUT_MS_FOR_SERVICE_WORKER = 6000;
+
+// Labels that read like a form submission or navigation, used to decide whether a click warrants
+// the longer post-action navigation grace window.
+const NAV_INTENT_NAME_RE_FOR_SERVICE_WORKER = /(sign[\s-]?in|log[\s-]?in|log[\s-]?on|login|sign[\s-]?up|sign[\s-]?out|log[\s-]?out|submit|continue|proceed|check[\s-]?out|place[\s-]?order|\bpay\b|\bnext\b|\bgo\b)/i;
+
+// How long to hold a page_act click/press result waiting for a possible navigation. Returns 0
+// for actions that never navigate. Extends the window for links, Enter-presses, and buttons whose
+// label reads like a submission, where a JS-driven redirect can land after the action returns.
+function computeNavGraceMsForServiceWorker(toolForGrace, argsForGrace, respForGrace) {
+  if (toolForGrace !== "page_act") return 0;
+  const actionForGrace = String((argsForGrace && argsForGrace.action) || "");
+  if (actionForGrace !== "click" && actionForGrace !== "press") return 0;
+  if (actionForGrace === "press") {
+    const keysForGrace = String((argsForGrace && argsForGrace.keys) || "");
+    return /enter/i.test(keysForGrace)
+      ? POST_ACTION_NAV_GRACE_SUBMIT_MS_FOR_SERVICE_WORKER
+      : POST_ACTION_NAV_GRACE_MS_FOR_SERVICE_WORKER;
+  }
+  const refForGrace = Number(argsForGrace && argsForGrace.ref);
+  const itemsForGrace = (respForGrace && Array.isArray(respForGrace.items)) ? respForGrace.items : [];
+  let actedItemForGrace = null;
+  for (let iGrace = 0; iGrace < itemsForGrace.length; iGrace++) {
+    if (itemsForGrace[iGrace] && Number(itemsForGrace[iGrace].ref) === refForGrace) { actedItemForGrace = itemsForGrace[iGrace]; break; }
+  }
+  if (actedItemForGrace) {
+    if (String(actedItemForGrace.role || "") === "link") return POST_ACTION_NAV_GRACE_SUBMIT_MS_FOR_SERVICE_WORKER;
+    if (NAV_INTENT_NAME_RE_FOR_SERVICE_WORKER.test(String(actedItemForGrace.name || ""))) return POST_ACTION_NAV_GRACE_SUBMIT_MS_FOR_SERVICE_WORKER;
+  }
+  return POST_ACTION_NAV_GRACE_MS_FOR_SERVICE_WORKER;
+}
+
+// After a page_act navigates the tab, wait for the landed page to finish loading and run a fresh
+// page_observe on it, so the model sees the outcome of its action directly instead of a
+// pre-navigation snapshot (or having to re-read a possibly still-loading page itself). Bounded
+// by LANDED_PAGE_SETTLE_TIMEOUT; resolves with a page_act-shaped result carrying the landed
+// observation (or a null landed_page + a note to observe manually if it could not be captured).
+function settleAndObserveLandedPageForServiceWorker(tabIdForSettle, chatIdForSettle, actionLabelForSettle, newUrlForSettle) {
+  return new Promise(function (resolveForSettle) {
+    var settleDoneForSettle = false;
+    var settleTimerForSettle = null;
+    var loadWatcherForSettle = null;
+    var cleanupSettleForSettle = function () {
+      if (settleTimerForSettle) { clearTimeout(settleTimerForSettle); settleTimerForSettle = null; }
+      if (loadWatcherForSettle) {
+        try { chrome.tabs.onUpdated.removeListener(loadWatcherForSettle); } catch (eRemoveLoadForSettle) { /* ignore */ }
+        loadWatcherForSettle = null;
+      }
+    };
+    var observeLandedForSettle = function () {
+      if (settleDoneForSettle) return;
+      settleDoneForSettle = true;
+      cleanupSettleForSettle();
+      (async function () {
+        var landedUrlForSettle = newUrlForSettle || "";
+        try {
+          var tabNowForSettle = await getTabByIdForServiceWorker(tabIdForSettle);
+          if (tabNowForSettle && tabNowForSettle.url) landedUrlForSettle = tabNowForSettle.url;
+          if (tabMessagingForServiceWorker && typeof tabMessagingForServiceWorker.ensureContentInjected === "function") {
+            await tabMessagingForServiceWorker.ensureContentInjected(tabIdForSettle);
+          }
+        } catch (eInjectForSettle) { /* best effort */ }
+        chrome.tabs.sendMessage(
+          tabIdForSettle,
+          { action: "runDelegatedPageTool", tool: "page_observe", args: {}, chatId: chatIdForSettle },
+          function (observeRespForSettle) {
+            var landedObserveForSettle = (!chrome.runtime.lastError && observeRespForSettle && observeRespForSettle.ok === true)
+              ? observeRespForSettle
+              : null;
+            resolveForSettle({
+              ok: true,
+              action: actionLabelForSettle,
+              navigated: true,
+              url: landedUrlForSettle,
+              navigated_note: "The " + actionLabelForSettle + " navigated the page to " + (landedUrlForSettle ? '"' + landedUrlForSettle + '"' : "a new URL") + ". This is NOT a failure. " + (landedObserveForSettle
+                ? "A fresh observation of the landed page is in landed_page below; use it to confirm the outcome before your next action."
+                : "The landed page could not be auto-observed; call page_observe or page_read yourself to confirm the outcome."),
+              landed_page: landedObserveForSettle
+            });
+          }
+        );
+      })();
+    };
+    getTabByIdForServiceWorker(tabIdForSettle).then(function (tabForSettleCheck) {
+      if (!tabForSettleCheck || tabForSettleCheck.status === "complete") { observeLandedForSettle(); return; }
+      loadWatcherForSettle = function (updatedTabIdForSettle, changeInfoForSettle) {
+        if (updatedTabIdForSettle !== tabIdForSettle) return;
+        if (changeInfoForSettle && changeInfoForSettle.status === "complete") observeLandedForSettle();
+      };
+      chrome.tabs.onUpdated.addListener(loadWatcherForSettle);
+      settleTimerForSettle = setTimeout(observeLandedForSettle, LANDED_PAGE_SETTLE_TIMEOUT_MS_FOR_SERVICE_WORKER);
+    });
+  });
+}
+
+// A user (or the agent) closing a tab must drop that id from every chat's created-set so a
+// future tab that reuses the id is not mistaken for an agent-created tab.
+function pruneAgentCreatedTabOnRemovedForServiceWorker(removedTabIdForPrune) {
+  try {
+    chrome.storage.session.get(null, function (allForPrune) {
+      if (chrome.runtime.lastError || !allForPrune) return;
+      Object.keys(allForPrune).forEach(function (keyForPrune) {
+        if (keyForPrune.indexOf(AGENT_CREATED_TABS_SESSION_PREFIX_FOR_SERVICE_WORKER) !== 0) return;
+        const arrForPrune = Array.isArray(allForPrune[keyForPrune]) ? allForPrune[keyForPrune] : [];
+        if (arrForPrune.indexOf(removedTabIdForPrune) === -1) return;
+        const nextForPrune = arrForPrune.filter(function (idForPrune) { return idForPrune !== removedTabIdForPrune; });
+        const payloadForPrune = {};
+        payloadForPrune[keyForPrune] = nextForPrune;
+        chrome.storage.session.set(payloadForPrune, function () { void chrome.runtime.lastError; });
+      });
+    });
+  } catch (eForPrune) {}
 }
 
 async function broadcastDbChangeForServiceWorker(storeForBroadcast, excludeTabIdForBroadcast) {
@@ -2583,6 +2820,7 @@ chrome.tabs.onUpdated.addListener((tabIdForServiceWorker, changeInfoForServiceWo
 // case where the user closes the originator tab while it's mid-stream.
 chrome.tabs.onRemoved.addListener(function (tabIdForStreamCleanup /*, removeInfo */) {
   handleStreamOriginatorGoneForServiceWorker(tabIdForStreamCleanup);
+  pruneAgentCreatedTabOnRemovedForServiceWorker(tabIdForStreamCleanup);
   enforceStoredPanelVisibilityForServiceWorker();
   if (tabIdForStreamCleanup === currentActiveTabIdForServiceWorker) {
     // The previously active tab is gone. Re-resolve from the currently focused
@@ -2899,8 +3137,9 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
     const chatIdForRunStart = Number(paramsForRunStart.chatId);
     if (Number.isFinite(chatIdForRunStart) && senderTabIdForRunStart != null) {
       offscreenRunTargetTabsForServiceWorker.set(chatIdForRunStart, senderTabIdForRunStart);
+      offscreenRunInitiatorTabsForServiceWorker.set(chatIdForRunStart, senderTabIdForRunStart);
     }
-    const forwardedParamsForRunStart = Object.assign({}, paramsForRunStart, { targetTabId: senderTabIdForRunStart });
+    const forwardedParamsForRunStart = Object.assign({}, paramsForRunStart, { targetTabId: senderTabIdForRunStart, initiatorTabId: senderTabIdForRunStart });
     acquireOffscreenKeepAliveForServiceWorker();
     ensureOffscreenDocumentForServiceWorker().then(function (ensuredForRunStart) {
       if (!ensuredForRunStart) {
@@ -2923,11 +3162,17 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
     const targetTabIdForOsb = offscreenRunTargetTabsForServiceWorker.has(chatIdForOsb)
       ? offscreenRunTargetTabsForServiceWorker.get(chatIdForOsb)
       : null;
+    // The stream belongs to the panel that started the run, not to whatever tab the agent is
+    // currently acting on, so ownership uses the fixed initiator tab (falling back to the
+    // target when no initiator was recorded, e.g. a run seeded before this map existed).
+    const originatorTabIdForOsb = offscreenRunInitiatorTabsForServiceWorker.has(chatIdForOsb)
+      ? offscreenRunInitiatorTabsForServiceWorker.get(chatIdForOsb)
+      : targetTabIdForOsb;
     updateStreamSnapshotForServiceWorker(
       messageForServiceWorker.event,
       messageForServiceWorker.chatId,
       messageForServiceWorker.payload,
-      targetTabIdForOsb
+      originatorTabIdForOsb
     );
     const snapForOsb = streamSnapshotsForServiceWorker.get(chatIdForOsb);
     if (snapForOsb) {
@@ -2947,7 +3192,7 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
               action: deliverActionForOsb,
               event: messageForServiceWorker.event,
               chatId: messageForServiceWorker.chatId,
-              originatorTabId: targetTabIdForOsb,
+              originatorTabId: originatorTabIdForOsb,
               payload: messageForServiceWorker.payload || null
             },
             function () { void chrome.runtime.lastError; }
@@ -2957,6 +3202,7 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
     });
     if (messageForServiceWorker.event === "stream_end") {
       offscreenRunTargetTabsForServiceWorker.delete(chatIdForOsb);
+      offscreenRunInitiatorTabsForServiceWorker.delete(chatIdForOsb);
       releaseOffscreenKeepAliveForServiceWorker();
     }
     return false;
@@ -3000,6 +3246,12 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
     // let navigate (an in-panel run refuses page-leaving clicks before they reach here).
     const watchNavigationForDelegate = messageForServiceWorker.tool === "page_act"
       || messageForServiceWorker.tool === "page_spreadsheet";
+    const actionLabelForDelegate = String((messageForServiceWorker.args && messageForServiceWorker.args.action) || "action");
+    // A click or Enter-press can trigger an async navigation that begins slightly AFTER the
+    // synthetic action returns its snapshot, so for those we also watch for a brief grace window
+    // after the tool responds (other actions finish immediately).
+    const navCapableActionForDelegate = messageForServiceWorker.tool === "page_act"
+      && (actionLabelForDelegate === "click" || actionLabelForDelegate === "press");
     (async function () {
       try {
         if (tabMessagingForServiceWorker && typeof tabMessagingForServiceWorker.ensureContentInjected === "function") {
@@ -3007,6 +3259,7 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
         }
         let settledForDelegate = false;
         let navWatcherForDelegate = null;
+        let graceTimerForDelegate = null;
         const beforeTabForDelegate = await getTabByIdForServiceWorker(targetTabIdForDelegate);
         const beforeUrlForDelegate = (beforeTabForDelegate && beforeTabForDelegate.url) || "";
         const cleanupForDelegate = function () {
@@ -3014,6 +3267,7 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
             try { chrome.tabs.onUpdated.removeListener(navWatcherForDelegate); } catch (eRemoveNavForDelegate) { /* ignore */ }
             navWatcherForDelegate = null;
           }
+          if (graceTimerForDelegate) { clearTimeout(graceTimerForDelegate); graceTimerForDelegate = null; }
         };
         const finishOkForDelegate = function (resultForDelegate) {
           if (settledForDelegate) return;
@@ -3027,23 +3281,24 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
           cleanupForDelegate();
           sendResponseForServiceWorker({ ok: false, error: errorMsgForDelegate });
         };
-        const resolveNavigatedForDelegate = function (newUrlForDelegate) {
-          const actionForDelegate = String((messageForServiceWorker.args && messageForServiceWorker.args.action) || "action");
-          finishOkForDelegate({
-            ok: true,
-            result: {
-              action: actionForDelegate,
-              navigated: true,
-              url: newUrlForDelegate || "",
-              navigated_note: "The " + actionForDelegate + " triggered a page navigation, so the post-action page read could not complete. The page is now loading " + (newUrlForDelegate ? '"' + newUrlForDelegate + '"' : "a new URL") + ". This is NOT a failure; re-read the page (page_observe or page_read) before the next action."
-            }
-          });
+        // A detected navigation (during the action, in the grace window after it, or inferred
+        // from a closed port): wait for the landed page to finish loading, observe it, and return
+        // that so the model can confirm the outcome directly instead of re-reading a
+        // pre-navigation snapshot itself.
+        const handleNavDetectedForDelegate = function (newUrlForDelegate) {
+          if (settledForDelegate) return;
+          settledForDelegate = true;
+          cleanupForDelegate();
+          settleAndObserveLandedPageForServiceWorker(targetTabIdForDelegate, chatIdForDelegate, actionLabelForDelegate, newUrlForDelegate)
+            .then(function (landedResultForDelegate) {
+              sendResponseForServiceWorker({ ok: true, result: landedResultForDelegate });
+            });
         };
         if (watchNavigationForDelegate) {
           navWatcherForDelegate = function (updatedTabIdForDelegate, changeInfoForDelegate) {
             if (updatedTabIdForDelegate !== targetTabIdForDelegate) return;
             if (changeInfoForDelegate && changeInfoForDelegate.status === "loading") {
-              resolveNavigatedForDelegate(changeInfoForDelegate.url || "");
+              handleNavDetectedForDelegate(changeInfoForDelegate.url || "");
             }
           };
           chrome.tabs.onUpdated.addListener(navWatcherForDelegate);
@@ -3059,7 +3314,7 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
                 return;
               }
               // The port may have closed because the click navigated the page. Re-check the
-              // tab: if it is loading or its URL changed, report a navigation; otherwise the
+              // tab: if it is loading or its URL changed, treat it as a navigation; otherwise the
               // tab is genuinely unreachable.
               chrome.tabs.get(targetTabIdForDelegate, function (tabAfterForDelegate) {
                 if (chrome.runtime.lastError || !tabAfterForDelegate) {
@@ -3067,12 +3322,26 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
                   return;
                 }
                 if (tabAfterForDelegate.status === "loading" || (tabAfterForDelegate.url && tabAfterForDelegate.url !== beforeUrlForDelegate)) {
-                  resolveNavigatedForDelegate(tabAfterForDelegate.url || "");
+                  handleNavDetectedForDelegate(tabAfterForDelegate.url || "");
                 } else {
                   finishErrForDelegate("The target tab could not be reached: " + portErrMsgForDelegate);
                 }
               });
               return;
+            }
+            if (settledForDelegate) return;
+            // The action returned a normal snapshot. For a click/press that may still spawn an
+            // async navigation, hold: if the tab starts loading within the grace window,
+            // navWatcherForDelegate resolves with the landed page; otherwise return this snapshot.
+            // The window is longer for submit-like clicks whose JS-driven redirect can lag.
+            if (navCapableActionForDelegate) {
+              const graceMsForDelegate = computeNavGraceMsForServiceWorker(messageForServiceWorker.tool, messageForServiceWorker.args || {}, respForDelegate);
+              if (graceMsForDelegate > 0) {
+                graceTimerForDelegate = setTimeout(function () {
+                  finishOkForDelegate(respForDelegate);
+                }, graceMsForDelegate);
+                return;
+              }
             }
             finishOkForDelegate(respForDelegate);
           }
@@ -3128,6 +3397,14 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
     var currentWindowIdForTabs = senderForServiceWorker && senderForServiceWorker.tab
       ? senderForServiceWorker.tab.windowId
       : undefined;
+    // The tab this chat's page actions currently target (switch_tab last pointed here, or the
+    // tab the chat started on). Marked so the model has one unambiguous "you are here" anchor;
+    // per-window `active` is true for one tab in every window, so it cannot serve that role.
+    var chatIdForOpenTabs = Number(messageForServiceWorker.chatId);
+    var currentTargetTabIdForOpenTabs = (Number.isFinite(chatIdForOpenTabs)
+      && offscreenRunTargetTabsForServiceWorker.has(chatIdForOpenTabs))
+      ? offscreenRunTargetTabsForServiceWorker.get(chatIdForOpenTabs)
+      : null;
     queryTabsForServiceWorker({})
       .then((tabsForServiceWorker) => {
         var serializedTabsForServiceWorker = tabsForServiceWorker
@@ -3139,6 +3416,7 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
               id: Number(tabForServiceWorker.id),
               windowId: Number(tabForServiceWorker.windowId),
               isCurrentWindow: tabForServiceWorker.windowId === currentWindowIdForTabs,
+              isCurrentTab: currentTargetTabIdForOpenTabs != null && Number(tabForServiceWorker.id) === currentTargetTabIdForOpenTabs,
               title: String(tabForServiceWorker.title || tabForServiceWorker.url || "Untitled tab"),
               url: String(tabForServiceWorker.url || ""),
               favIconUrl: String(tabForServiceWorker.favIconUrl || ""),
@@ -3205,6 +3483,140 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
             : "Could not read tab content."
         });
       });
+    return true;
+  }
+
+  // ---- Cross-tab actions: switch / create / close (offscreen-hosted runs) ----
+  // These own every chrome.tabs.* mutation (offscreen documents cannot call chrome.tabs) and
+  // the close_tab authorization boundary. The offscreen loop performs the matching run-state
+  // rebind + CDP-lease move after these succeed.
+  if (messageForServiceWorker.action === "abchatSwitchTab") {
+    const chatIdForSwitch = Number(messageForServiceWorker.chatId);
+    const tabIdForSwitch = Number(messageForServiceWorker.tabId);
+    (async function () {
+      if (!Number.isFinite(tabIdForSwitch)) {
+        sendResponseForServiceWorker({ ok: false, error: "A valid tab_id is required." });
+        return;
+      }
+      const tabForSwitch = await getTabByIdForServiceWorker(tabIdForSwitch);
+      if (!tabForSwitch) {
+        sendResponseForServiceWorker({ ok: false, error: "Tab " + tabIdForSwitch + " could not be found. It may have been closed; call list_tabs again to get current tab ids." });
+        return;
+      }
+      if (!tabMessagingForServiceWorker.isSupportedUrl(tabForSwitch.url || "")) {
+        sendResponseForServiceWorker({ ok: false, error: "Tab " + tabIdForSwitch + " is a browser page the extension cannot act on (" + (tabForSwitch.url || "") + "). Switch to a normal web page instead." });
+        return;
+      }
+      // Force the panel open before activating the tab, so the activation's own visibility
+      // enforcement (onActivated) opens it on the target rather than racing the content-side
+      // force-open and possibly hiding it when the user had the panel closed.
+      if (Number.isFinite(chatIdForSwitch)) desiredPanelOpenForServiceWorker = true;
+      chrome.tabs.update(tabIdForSwitch, { active: true }, function () {
+        if (chrome.runtime.lastError) {
+          sendResponseForServiceWorker({ ok: false, error: "Could not switch to tab " + tabIdForSwitch + ": " + (chrome.runtime.lastError.message || "unknown error") });
+          return;
+        }
+        if (typeof tabForSwitch.windowId === "number") {
+          try { chrome.windows.update(tabForSwitch.windowId, { focused: true }, function () { void chrome.runtime.lastError; }); } catch (eWinForSwitch) { /* ignore */ }
+        }
+        if (Number.isFinite(chatIdForSwitch)) {
+          offscreenRunTargetTabsForServiceWorker.set(chatIdForSwitch, tabIdForSwitch);
+          followRunInTabForServiceWorker(tabIdForSwitch, chatIdForSwitch).then(function (followResForSwitch) {
+            sendResponseForServiceWorker({
+              ok: true,
+              tab: { id: tabIdForSwitch, title: String(tabForSwitch.title || ""), url: String(tabForSwitch.url || "") },
+              panel_showing_chat: !!(followResForSwitch && followResForSwitch.showing)
+            });
+          });
+          return;
+        }
+        sendResponseForServiceWorker({ ok: true, tab: { id: tabIdForSwitch, title: String(tabForSwitch.title || ""), url: String(tabForSwitch.url || "") } });
+      });
+    })();
+    return true;
+  }
+
+  if (messageForServiceWorker.action === "abchatCreateTab") {
+    const chatIdForCreate = Number(messageForServiceWorker.chatId);
+    const rawUrlForCreate = typeof messageForServiceWorker.url === "string" ? messageForServiceWorker.url.trim() : "";
+    const activeForCreate = messageForServiceWorker.active !== false;
+    const createOptionsForCreate = { active: activeForCreate };
+    if (rawUrlForCreate) createOptionsForCreate.url = rawUrlForCreate;
+    // Force the panel open ahead of the new active tab's activation enforcement (see switch_tab).
+    if (activeForCreate && Number.isFinite(chatIdForCreate)) desiredPanelOpenForServiceWorker = true;
+    chrome.tabs.create(createOptionsForCreate, function (createdTabForCreate) {
+      if (chrome.runtime.lastError || !createdTabForCreate || typeof createdTabForCreate.id !== "number") {
+        sendResponseForServiceWorker({ ok: false, error: "Could not create the tab" + (rawUrlForCreate ? " for " + rawUrlForCreate : "") + ": " + ((chrome.runtime.lastError && chrome.runtime.lastError.message) || "unknown error") + (rawUrlForCreate ? ". If you passed a url, make sure it includes the scheme (e.g. https://)." : "") });
+        return;
+      }
+      const newTabIdForCreate = createdTabForCreate.id;
+      (async function () {
+        let panelShowingForCreate = false;
+        if (Number.isFinite(chatIdForCreate)) {
+          await addAgentCreatedTabForServiceWorker(chatIdForCreate, newTabIdForCreate);
+          if (activeForCreate) {
+            offscreenRunTargetTabsForServiceWorker.set(chatIdForCreate, newTabIdForCreate);
+          }
+        }
+        if (activeForCreate && typeof createdTabForCreate.windowId === "number") {
+          try { chrome.windows.update(createdTabForCreate.windowId, { focused: true }, function () { void chrome.runtime.lastError; }); } catch (eWinForCreate) { /* ignore */ }
+        }
+        if (activeForCreate && Number.isFinite(chatIdForCreate)) {
+          const followResForCreate = await followRunInTabForServiceWorker(newTabIdForCreate, chatIdForCreate);
+          panelShowingForCreate = !!(followResForCreate && followResForCreate.showing);
+        }
+        sendResponseForServiceWorker({
+          ok: true,
+          active: activeForCreate,
+          panel_showing_chat: panelShowingForCreate,
+          tab: { id: newTabIdForCreate, title: String(createdTabForCreate.title || ""), url: String(createdTabForCreate.url || rawUrlForCreate || "") }
+        });
+      })();
+    });
+    return true;
+  }
+
+  if (messageForServiceWorker.action === "abchatCloseTab") {
+    const chatIdForClose = Number(messageForServiceWorker.chatId);
+    const tabIdForClose = Number(messageForServiceWorker.tabId);
+    (async function () {
+      if (!Number.isFinite(tabIdForClose)) {
+        sendResponseForServiceWorker({ ok: false, error: "A valid tab_id is required." });
+        return;
+      }
+      if (!Number.isFinite(chatIdForClose)) {
+        sendResponseForServiceWorker({ ok: false, error: "This run has no chat context, so close_tab is unavailable." });
+        return;
+      }
+      const createdTabsForClose = await getAgentCreatedTabsForServiceWorker(chatIdForClose);
+      if (createdTabsForClose.indexOf(tabIdForClose) === -1) {
+        sendResponseForServiceWorker({ ok: false, error: "Tab " + tabIdForClose + " was not created by you in this chat, so it cannot be closed. You can only close tabs you opened with create_tab." });
+        return;
+      }
+      chrome.tabs.remove(tabIdForClose, function () {
+        const removeErrForClose = chrome.runtime.lastError;
+        // Drop it from the created-set whether or not remove reported an error (it may already
+        // be gone). If it was the active target, revert the target to the run's initiator tab.
+        removeAgentCreatedTabForServiceWorker(chatIdForClose, tabIdForClose);
+        let revertedTargetToForClose = null;
+        if (offscreenRunTargetTabsForServiceWorker.get(chatIdForClose) === tabIdForClose) {
+          const initiatorForClose = offscreenRunInitiatorTabsForServiceWorker.has(chatIdForClose)
+            ? offscreenRunInitiatorTabsForServiceWorker.get(chatIdForClose)
+            : null;
+          if (initiatorForClose != null) {
+            offscreenRunTargetTabsForServiceWorker.set(chatIdForClose, initiatorForClose);
+            revertedTargetToForClose = initiatorForClose;
+          } else {
+            offscreenRunTargetTabsForServiceWorker.delete(chatIdForClose);
+          }
+        }
+        if (removeErrForClose) {
+          sendResponseForServiceWorker({ ok: false, error: "Could not close tab " + tabIdForClose + ": " + (removeErrForClose.message || "unknown error") });
+          return;
+        }
+        sendResponseForServiceWorker({ ok: true, closed: tabIdForClose, reverted_target_to: revertedTargetToForClose });
+      });
+    })();
     return true;
   }
 

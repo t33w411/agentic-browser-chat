@@ -298,6 +298,13 @@
     if (!apiKeyForCompactor || !modelForCompactor) return noOpResultForCompactor;
     if (messagesForCompactor.length === 0) return noOpResultForCompactor;
 
+    // Never compact against an unknown context window. Without a real window the budget helper falls
+    // back to a default, which could fold history prematurely (or not at all) based on a guessed size.
+    var numericContextWindowForCompactor = Number(contextWindowForCompactor);
+    if (!Number.isFinite(numericContextWindowForCompactor) || numericContextWindowForCompactor <= 0) {
+      return noOpResultForCompactor;
+    }
+
     var currentStartIndexForCompactor = alreadyFoldedThroughIndexForCompactor + 1;
 
     var summaryTokensForCompactor = estimateTokensFromTextForCompactor(existingSummaryForCompactor);

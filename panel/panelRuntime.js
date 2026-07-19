@@ -12,6 +12,12 @@
   // The set is drained at the end of initialize, so no cross-tab signal is lost
   // during the reload/boot window.
   var _pendingRefreshStoresForPanelRuntime = new Set();
+  // Follow-run relay: the SW asks this tab's panel to display an ongoing agent run after
+  // switch_tab / create_tab foregrounds the tab, so the user sees what the agent is doing here
+  // instead of a blank/new-chat panel. Buffered like refreshStore because the message can land
+  // (right after content injection) before panelRuntime.initialize has wired up the relay.
+  var _exposedFollowRunForPanelRuntime = null;
+  var _pendingFollowRunChatIdForPanelRuntime = null;
   var _exposedAddImageChipFromContextMenuForPanelRuntime = null;
   var _exposedAddTextChipFromContextMenuForPanelRuntime = null;
   // Relays for cross-tab UI mirroring via panelStateSync.
@@ -4473,17 +4479,25 @@
       }
     }
 
-    function formatModelCostTooltipForPanelRuntime(modelForCostTooltip) {
-      const costForCostTooltip = Number(modelForCostTooltip && modelForCostTooltip.completionCostPerMillion);
+    function formatCostPerMillionForPanelRuntime(costForCostTooltip) {
       if (!Number.isFinite(costForCostTooltip) || costForCostTooltip <= 0) return '';
       const decimalsForCostTooltip = costForCostTooltip < 1 ? 3 : 2;
-      return '$' + costForCostTooltip.toFixed(decimalsForCostTooltip) + ' / 1M output tokens';
+      return '$' + costForCostTooltip.toFixed(decimalsForCostTooltip) + ' / 1M tokens';
+    }
+
+    function formatModelCostTooltipForPanelRuntime(modelForCostTooltip) {
+      const linesForCostTooltip = [];
+      const inCostForCostTooltip = formatCostPerMillionForPanelRuntime(Number(modelForCostTooltip && modelForCostTooltip.promptCostPerMillion));
+      if (inCostForCostTooltip) linesForCostTooltip.push('Input: ' + inCostForCostTooltip);
+      const outCostForCostTooltip = formatCostPerMillionForPanelRuntime(Number(modelForCostTooltip && modelForCostTooltip.completionCostPerMillion));
+      if (outCostForCostTooltip) linesForCostTooltip.push('Output: ' + outCostForCostTooltip);
+      return linesForCostTooltip;
     }
 
     function formatModelHoverTooltipForPanelRuntime(modelForHoverTooltip) {
       const linesForHoverTooltip = [];
-      const costLineForHoverTooltip = formatModelCostTooltipForPanelRuntime(modelForHoverTooltip);
-      if (costLineForHoverTooltip) linesForHoverTooltip.push(costLineForHoverTooltip);
+      const costLinesForHoverTooltip = formatModelCostTooltipForPanelRuntime(modelForHoverTooltip);
+      costLinesForHoverTooltip.forEach(function (lineForHoverTooltip) { linesForHoverTooltip.push(lineForHoverTooltip); });
       const contextLenForHoverTooltip = Number(modelForHoverTooltip && modelForHoverTooltip.contextLength);
       if (Number.isFinite(contextLenForHoverTooltip) && contextLenForHoverTooltip > 0) {
         linesForHoverTooltip.push('Context: ' + formatTokenAmountForPanelRuntime(contextLenForHoverTooltip, false));
@@ -9866,7 +9880,7 @@
     var loadedGlobalDefaultModelForPanelRuntime = '';
     var loadedImageModelsForPanelRuntime = [];
     var loadedChatModelsForPanelRuntime = [];
-    const MODEL_CACHE_KEY_FOR_PANEL_RUNTIME = 'abchat_model_cache_v10';
+    const MODEL_CACHE_KEY_FOR_PANEL_RUNTIME = 'abchat_model_cache_v11';
     const ROUTER_EXCEPTION_MODEL_IDS_FOR_PANEL_RUNTIME = ['openrouter/auto', 'openrouter/free'];
     const THEME_KEY_FOR_PANEL_RUNTIME = 'abchat_theme';
     const TRANSPARENCY_KEY_FOR_PANEL_RUNTIME = 'abchat_panel_transparency';
@@ -9924,6 +9938,8 @@
         const pricing = m.pricing || {};
         const costRaw = Number(pricing.completion);
         const costPerMillion = Number.isFinite(costRaw) ? (costRaw * 1000000) : null;
+        const promptCostRaw = Number(pricing.prompt);
+        const promptCostPerMillion = Number.isFinite(promptCostRaw) ? (promptCostRaw * 1000000) : null;
         const contextLengthRaw = Number(m.context_length || (m.top_provider && m.top_provider.context_length));
         const contextLength = Number.isFinite(contextLengthRaw) && contextLengthRaw > 0 ? contextLengthRaw : null;
         const reasoningInfo = m.reasoning || null;
@@ -9932,7 +9948,7 @@
         const reasoningMandatory = !!(reasoningInfo && reasoningInfo.mandatory === true);
         const reasoningDefaultOn = !!(reasoningInfo && (reasoningInfo.mandatory === true || reasoningInfo.default_enabled === true));
         const reasoningDefaultEffort = (reasoningInfo && typeof reasoningInfo.default_effort === 'string') ? reasoningInfo.default_effort : '';
-        return { id: m.id, name: m.name || m.id, completionCostPerMillion: costPerMillion, contextLength: contextLength, canReason: canReason, reasoningMandatory: reasoningMandatory, reasoningDefaultOn: reasoningDefaultOn, reasoningDefaultEffort: reasoningDefaultEffort, created: m.created || 0 };
+        return { id: m.id, name: m.name || m.id, completionCostPerMillion: costPerMillion, promptCostPerMillion: promptCostPerMillion, contextLength: contextLength, canReason: canReason, reasoningMandatory: reasoningMandatory, reasoningDefaultOn: reasoningDefaultOn, reasoningDefaultEffort: reasoningDefaultEffort, created: m.created || 0 };
       }).filter(function (m) {
         if (ROUTER_EXCEPTION_MODEL_IDS_FOR_PANEL_RUNTIME.includes(m.id)) return true;
         return m.completionCostPerMillion !== null && m.completionCostPerMillion >= 1;
@@ -10752,8 +10768,16 @@
       let contextColorForDisplay = 'var(--text-muted,#888)';
       if (compactorForCounter && typeof compactorForCounter.getTokenBudget === 'function' && modelForCounter) {
         const modelObjForCounter = loadedChatModelsForPanelRuntime.find(function (m) { return m.id === modelForCounter; }) || null;
-        const contextWindowForCounter = modelObjForCounter ? modelObjForCounter.contextLength : null;
-        const estimatedBudgetForCounter = compactorForCounter.getTokenBudget(contextWindowForCounter);
+        // Only show the context-fill portion when the model's real window is known. When it is not
+        // (model list still loading, or a fallback entry with no contextLength), the budget helper would
+        // substitute a default and render a misleading denominator/percent; suppress the fragment instead.
+        const rawContextWindowForCounter = modelObjForCounter ? Number(modelObjForCounter.contextLength) : NaN;
+        const contextWindowForCounter = (Number.isFinite(rawContextWindowForCounter) && rawContextWindowForCounter > 0)
+          ? rawContextWindowForCounter
+          : null;
+        const estimatedBudgetForCounter = contextWindowForCounter
+          ? compactorForCounter.getTokenBudget(contextWindowForCounter)
+          : 0;
         if (estimatedBudgetForCounter > 0) {
           // Exceeding the estimate proves the real window is larger, so round the
           // displayed denominator up to the next tier. Display-only; compaction unaffected.
@@ -17443,6 +17467,52 @@
       if (!CHAT_STORE_FOR_PANEL_RUNTIME[numericIdForMirror]) return;
       selectChat(numericIdForMirror);
     }
+    // Bring the ongoing agent run for chatIdForFollow into view on this tab. Called when the
+    // agent switches/creates a tab and foregrounds it: the user is now looking at this tab and
+    // must see the live run instead of whatever chat (often a fresh new chat) the panel was on.
+    // Reuses selectChat, which runs the stream-snapshot catch-up so the in-progress turn renders.
+    async function followRunForPanelRuntime(chatIdForFollow, forceOpenForFollow) {
+      var numericIdForFollow = Number(chatIdForFollow);
+      if (!Number.isFinite(numericIdForFollow)) return false;
+      if (forceOpenForFollow) {
+        // Open the panel even if the user had it closed, so the run is visible on the tab the
+        // agent switched to. setVisible without skipSync persists isOpen (mirrors to the SW and
+        // other tabs), so the SW's visibility enforcement agrees and does not re-hide it.
+        try {
+          var panelCtrlForFollow = ((globalThis.ABChatContent || {}).ui || {}).panel || null;
+          if (panelCtrlForFollow && typeof panelCtrlForFollow.ensureReady === 'function') panelCtrlForFollow.ensureReady();
+          if (panelCtrlForFollow && typeof panelCtrlForFollow.setVisible === 'function') panelCtrlForFollow.setVisible(true);
+        } catch (eOpenForFollow) { /* best effort */ }
+      }
+      // On a freshly-injected panel (the agent switched to a tab that never had the panel open)
+      // the chats store is still hydrating asynchronously after init, so the run's chat may not
+      // be in memory yet and the guard below would bail with the panel showing its default view.
+      // Hydrate the one chat straight from the DB so we can show it now instead of losing the race
+      // to the background refresh. The full list catches up on the next refresh.
+      if (!CHAT_STORE_FOR_PANEL_RUNTIME[numericIdForFollow]) {
+        try {
+          var repoForFollow = getPanelDataRepoForPanelRuntime();
+          if (repoForFollow && typeof repoForFollow.getChatMeta === 'function') {
+            var fetchedMetaForFollow = await repoForFollow.getChatMeta(numericIdForFollow);
+            if (fetchedMetaForFollow && !CHAT_STORE_FOR_PANEL_RUNTIME[numericIdForFollow]) {
+              CHAT_STORE_FOR_PANEL_RUNTIME[numericIdForFollow] = cloneChatRecordForPanelRuntime(fetchedMetaForFollow);
+              if (CHAT_ORDER_FOR_PANEL_RUNTIME.indexOf(numericIdForFollow) < 0) {
+                CHAT_ORDER_FOR_PANEL_RUNTIME.unshift(numericIdForFollow);
+              }
+            }
+          }
+        } catch (eFetchForFollow) { /* fall through: guard below reports not-showing */ }
+      }
+      if (!CHAT_STORE_FOR_PANEL_RUNTIME[numericIdForFollow]) return false;
+      setTab('chats');
+      if (S.activeChatId !== numericIdForFollow) {
+        selectChat(numericIdForFollow);
+      } else {
+        showChatMessages(true);
+        requestAndApplyStreamSnapshotForPanelRuntime(numericIdForFollow);
+      }
+      return S.activeChatId === numericIdForFollow;
+    }
     function setActiveNoteForMirrorForPanelRuntime(noteIdForMirror) {
       const numericIdForMirror = noteIdForMirror == null ? null : Number(noteIdForMirror);
       if (numericIdForMirror == null) {
@@ -17731,6 +17801,17 @@
     _exposedSetSidebarCollapsedForPanelRuntime = setSidebarCollapsedForMirrorForPanelRuntime;
     _exposedSetNotesSidebarCollapsedForPanelRuntime = setNotesSidebarCollapsedForMirrorForPanelRuntime;
     _exposedSetActiveChatForPanelRuntime = setActiveChatForMirrorForPanelRuntime;
+    _exposedFollowRunForPanelRuntime = followRunForPanelRuntime;
+    if (_pendingFollowRunChatIdForPanelRuntime != null) {
+      var pendingFollowForFlush = _pendingFollowRunChatIdForPanelRuntime;
+      _pendingFollowRunChatIdForPanelRuntime = null;
+      Promise.resolve(followRunForPanelRuntime(pendingFollowForFlush.chatId, pendingFollowForFlush.forceOpen))
+        .then(function (showingForFlush) {
+          if (typeof pendingFollowForFlush.done === 'function') {
+            try { pendingFollowForFlush.done(!!showingForFlush); } catch (eFollowFlushDone) { /* ignore */ }
+          }
+        });
+    }
     _exposedSetActiveNoteForPanelRuntime = setActiveNoteForMirrorForPanelRuntime;
     _exposedSetPickerOpenForPanelRuntime = setPickerOpenForMirrorForPanelRuntime;
     _exposedCloseAttachPreviewForPanelRuntime = closeAttachPreviewForMirrorForPanelRuntime;
@@ -17796,6 +17877,29 @@
     },
     setActiveChat: function setActiveChatRelayForPanelRuntime(chatIdForRelay) {
       if (_exposedSetActiveChatForPanelRuntime) _exposedSetActiveChatForPanelRuntime(chatIdForRelay);
+    },
+    followRun: function followRunRelayForPanelRuntime(chatIdForRelay, optionsForRelay, doneForRelay) {
+      var forceOpenForRelay = !!(optionsForRelay && optionsForRelay.forceOpen);
+      if (_exposedFollowRunForPanelRuntime) {
+        Promise.resolve(_exposedFollowRunForPanelRuntime(chatIdForRelay, forceOpenForRelay))
+          .then(function (showingForRelay) {
+            if (typeof doneForRelay === 'function') { try { doneForRelay(!!showingForRelay); } catch (eFollowDoneForRelay) { /* ignore */ } }
+          });
+        return;
+      }
+      // Runtime not ready yet (message landed during the boot/injection window); buffer it
+      // and let initialize flush it (and fire the done callback) once selectChat and the chat
+      // store are available.
+      var numericPendingFollowForRelay = Number(chatIdForRelay);
+      if (Number.isFinite(numericPendingFollowForRelay)) {
+        _pendingFollowRunChatIdForPanelRuntime = {
+          chatId: numericPendingFollowForRelay,
+          forceOpen: forceOpenForRelay,
+          done: (typeof doneForRelay === 'function' ? doneForRelay : null)
+        };
+      } else if (typeof doneForRelay === 'function') {
+        try { doneForRelay(false); } catch (eFollowDoneImmediateForRelay) { /* ignore */ }
+      }
     },
     setActiveNote: function setActiveNoteRelayForPanelRuntime(noteIdForRelay) {
       if (_exposedSetActiveNoteForPanelRuntime) _exposedSetActiveNoteForPanelRuntime(noteIdForRelay);

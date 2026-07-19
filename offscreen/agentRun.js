@@ -200,15 +200,53 @@
     return parts.join('\x01');
   }
 
-  function executeToolForAgentRun(nameForExec, argsForExec, contextForExec) {
+  // Rebind the run's active target tab to newTargetTabId, releasing any CDP lease held on the
+  // previous target so the next trusted page_act re-acquires it on the new tab. Called after a
+  // successful switch_tab / create_tab(active) / close_tab(of the current target).
+  function applyTabRebindForAgentRun(runStateForRebind, newTargetTabId) {
+    if (!runStateForRebind) return;
+    if (typeof newTargetTabId !== 'number' || !isFinite(newTargetTabId)) return;
+    if (runStateForRebind.targetTabId === newTargetTabId) return;
+    if (runStateForRebind.cdpLeaseHeld && runStateForRebind.cdpClient && typeof runStateForRebind.cdpClient.release === 'function') {
+      try { runStateForRebind.cdpClient.release(runStateForRebind.targetTabId, true); } catch (eRelForRebind) { /* old tab may be gone */ }
+      runStateForRebind.cdpLeaseHeld = false;
+    }
+    runStateForRebind.targetTabId = newTargetTabId;
+  }
+
+  async function executeToolForAgentRun(nameForExec, argsForExec, contextForExec) {
     if (PAGE_DELEGATED_TOOLS_FOR_AGENT_RUN[nameForExec]) {
       return delegatePageToolForAgentRun(nameForExec, argsForExec, contextForExec.chatId);
     }
     var executeToolLocalForAgentRun = getAgentNsForAgentRun().executeTool;
     if (typeof executeToolLocalForAgentRun !== 'function') {
-      return Promise.resolve({ ok: false, error: 'Tool executor not available.' });
+      return { ok: false, error: 'Tool executor not available.' };
     }
-    return executeToolLocalForAgentRun(nameForExec, argsForExec, contextForExec);
+    var resultForExec = await executeToolLocalForAgentRun(nameForExec, argsForExec, contextForExec);
+
+    // Cross-tab tools change the run's active target tab. The chrome.tabs.* mutation already
+    // happened in the SW (via toolExec); mirror it onto the run state + CDP lease so the page
+    // tools and lease follow the new tab. Only on success.
+    if (resultForExec && resultForExec.ok === true
+        && (nameForExec === 'switch_tab' || nameForExec === 'create_tab' || nameForExec === 'close_tab')) {
+      var runStateForRebind = runsForAgentRun.get(Number(contextForExec && contextForExec.chatId)) || null;
+      if (runStateForRebind) {
+        if (nameForExec === 'switch_tab') {
+          applyTabRebindForAgentRun(runStateForRebind, Number(argsForExec && argsForExec.tab_id));
+        } else if (nameForExec === 'create_tab') {
+          if (resultForExec.active !== false && resultForExec.tab && typeof resultForExec.tab.id === 'number') {
+            applyTabRebindForAgentRun(runStateForRebind, resultForExec.tab.id);
+          }
+        } else if (nameForExec === 'close_tab') {
+          // Closing the tab we are currently acting on reverts the target to the initiator.
+          if (Number(argsForExec && argsForExec.tab_id) === runStateForRebind.targetTabId
+              && typeof runStateForRebind.initiatorTabId === 'number') {
+            applyTabRebindForAgentRun(runStateForRebind, runStateForRebind.initiatorTabId);
+          }
+        }
+      }
+    }
+    return resultForExec;
   }
 
   // ---- helpers ----
@@ -330,6 +368,7 @@
     var automationEnabledForRun = Boolean(paramsForRun.automationEnabled);
     var agentRulesForRun = String(paramsForRun.agentRules || '');
     var targetTabIdForRun = (typeof paramsForRun.targetTabId === 'number') ? paramsForRun.targetTabId : null;
+    var initiatorTabIdForRun = (typeof paramsForRun.initiatorTabId === 'number') ? paramsForRun.initiatorTabId : targetTabIdForRun;
     var visualPreflightSessionIdForRun = String(paramsForRun.visualPreflightSessionId || ('vp_' + Date.now().toString(36)));
     var userTextForRun = String(paramsForRun.userText || '');
     var contextWindowForRun = Number(paramsForRun.contextWindow) || null;
@@ -351,7 +390,12 @@
     if (typeof clientForRun.streamCompletion !== 'function') { refuseRunForOffscreen('Could not start the agent run: the agent is not ready. Please try again.'); return; }
 
     var controllerForRun = new AbortController();
-    var runStateForRun = { controller: controllerForRun, toolsDoneAt: 0, textDebounceTimer: null, userStopRequested: false, pendingText: null, targetTabId: targetTabIdForRun };
+    // targetTabId is mutable: switch_tab / create_tab / close_tab rebind it mid-run (see
+    // applyTabRebindForAgentRun). initiatorTabId is fixed (the panel that started the run) and
+    // is the fallback target when the agent closes the tab it is currently acting on. The CDP
+    // lease is tracked here (not as a closure local) so the rebind can release it on the old
+    // tab; the next trusted page_act re-acquires it on the new target.
+    var runStateForRun = { controller: controllerForRun, toolsDoneAt: 0, textDebounceTimer: null, userStopRequested: false, pendingText: null, targetTabId: targetTabIdForRun, initiatorTabId: initiatorTabIdForRun, cdpClient: cdpClientForRun, cdpLeaseHeld: false };
     runsForAgentRun.set(chatId, runStateForRun);
 
     var timeoutReasonForRun = null;
@@ -400,7 +444,6 @@
     }
     var accumulatedSearchSourcesForRun = [];
     var seenSearchUrlsForRun = new Set();
-    var cdpRunLeaseHeldForRun = false;
 
     var hooksForRun = agentNsForRun.hooks || null;
     var turnContextForRun = (hooksForRun && typeof hooksForRun.createTurnContext === 'function')
@@ -763,16 +806,18 @@
         emitForAgentRun('stream_tool_steps', chatId, { toolCalls: toolCallsForLoop });
 
         // Acquire the run-scoped CDP lease before the trusted page tools (page_act, page_spreadsheet).
-        if (!cdpRunLeaseHeldForRun && automationEnabledForRun && cdpClientForRun && typeof cdpClientForRun.acquire === 'function'
+        // The lease is acquired on the CURRENT target tab (which a mid-run switch_tab/create_tab
+        // may have changed); the rebind released any lease on the previous tab, so this re-acquires.
+        if (!runStateForRun.cdpLeaseHeld && automationEnabledForRun && cdpClientForRun && typeof cdpClientForRun.acquire === 'function'
             && toolCallsForLoop.some(function (tcForLease, idxForLease) {
               if (skippedPageMutatorIndicesForRun.has(idxForLease)) return false;
               var tcNameForLease = tcForLease.function && tcForLease.function.name;
               return tcNameForLease === 'page_act' || tcNameForLease === 'page_spreadsheet';
             })) {
           try {
-            var runLeaseResForRun = await cdpClientForRun.acquire(targetTabIdForRun);
+            var runLeaseResForRun = await cdpClientForRun.acquire(runStateForRun.targetTabId);
             if (runLeaseResForRun && runLeaseResForRun.ok) {
-              cdpRunLeaseHeldForRun = true;
+              runStateForRun.cdpLeaseHeld = true;
               await delayForAgentRun(400, controllerForRun.signal);
             }
           } catch (eRunLeaseForRun) {}
@@ -834,7 +879,7 @@
               messages: apiMessages,
               model: model,
               chatId: chatId,
-              tabId: targetTabIdForRun,
+              tabId: runStateForRun.targetTabId,
               visualPreflightSessionId: visualPreflightSessionIdForRun,
               signal: controllerForRun.signal,
               captureScreenshot: captureScreenshotForRun
@@ -1098,9 +1143,9 @@
         emitForAgentRun('stream_system_notice', chatId, { text: 'Error: ' + friendlyErrForRun });
       }
     } finally {
-      if (cdpRunLeaseHeldForRun && cdpClientForRun && typeof cdpClientForRun.release === 'function') {
-        try { cdpClientForRun.release(targetTabIdForRun, true); } catch (eRelForRun) {}
-        cdpRunLeaseHeldForRun = false;
+      if (runStateForRun.cdpLeaseHeld && cdpClientForRun && typeof cdpClientForRun.release === 'function') {
+        try { cdpClientForRun.release(runStateForRun.targetTabId, true); } catch (eRelForRun) {}
+        runStateForRun.cdpLeaseHeld = false;
       }
       if (controllerForRun.signal.aborted && !logStopReasonForRun) {
         markRunStoppedForRun();

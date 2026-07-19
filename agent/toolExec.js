@@ -4230,6 +4230,22 @@
         try { regexForRead = new RegExp(patternForRead.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flagsForRead); }
         catch (eRegexRead) { return { ok: false, error: 'Invalid query.' }; }
 
+        // Capture the elements the model could already act on (shown by the preceding
+        // observe/find) BEFORE the rebuild wipes the registry, so we can keep them actionable
+        // afterwards: otherwise a find_text with few/zero matches would silently strip every ref
+        // the model just got from page_observe (they'd become not_shown), forcing a wasted
+        // re-observe. Keyed by live element node, which is stable across the rescan.
+        var prevShownElsForRead = new Set();
+        try {
+          var prevShownRefsForRead = observeRegistryForToolExec.shownRefs;
+          if (prevShownRefsForRead && typeof prevShownRefsForRead.forEach === 'function') {
+            prevShownRefsForRead.forEach(function (prevRefForRead) {
+              var prevDescForRead = observeRegistryForToolExec.refs[String(prevRefForRead)];
+              if (prevDescForRead && prevDescForRead.el) prevShownElsForRead.add(prevDescForRead.el);
+            });
+          }
+        } catch (ePrevShownForRead) { /* best effort */ }
+
         // Fresh snapshot so matched interactive elements carry a usable ref; include_offscreen so a
         // match anywhere on the page (not only the viewport) can still be acted on by ref. This
         // renumbers refs (a new snapshotId); the "latest snapshot wins" rule applies as elsewhere.
@@ -4299,6 +4315,19 @@
               shownRefsForRead.add(Number(matchForShown.controls[cForShown].ref));
             }
           }
+        }
+        // Re-show any control that was already shown to the model before this find_text and is
+        // still present, so refs from the preceding page_observe survive a find_text that matched
+        // little or nothing. Controls this find_text registered but that were never surfaced stay
+        // not_shown, preserving the guard against acting on unshown refs.
+        if (prevShownElsForRead.size) {
+          var newRefsForRead = observeRegistryForToolExec.refs;
+          Object.keys(newRefsForRead).forEach(function (newRefKeyForRead) {
+            var newDescForRead = newRefsForRead[newRefKeyForRead];
+            if (newDescForRead && newDescForRead.el && prevShownElsForRead.has(newDescForRead.el)) {
+              shownRefsForRead.add(Number(newRefKeyForRead));
+            }
+          });
         }
         observeRegistryForToolExec.shownRefs = shownRefsForRead;
 
@@ -8139,7 +8168,8 @@ self.onmessage = function (e) {
     if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
 
     var bgResultForListTabs = await sendCancellableRuntimeMessageForToolExec({
-      action: 'abchatGetOpenTabs'
+      action: 'abchatGetOpenTabs',
+      chatId: context && context.chatId
     }, signal);
 
     if (bgResultForListTabs && bgResultForListTabs.cancelled) return cancelledResultForToolExec();
@@ -8156,6 +8186,7 @@ self.onmessage = function (e) {
         active: Boolean(tabForListTabs.active),
         windowId: Number(tabForListTabs.windowId),
         isCurrentWindow: Boolean(tabForListTabs.isCurrentWindow),
+        isCurrentTab: Boolean(tabForListTabs.isCurrentTab),
         discarded: Boolean(tabForListTabs.discarded),
         accessible: tabForListTabs.accessible !== false
       };
@@ -8223,6 +8254,86 @@ self.onmessage = function (e) {
       content: wrappedContentForReadTab,
       _usage: summaryResultForReadTab.usage || null
     };
+  }
+
+  // ---- Tools: switch_tab / create_tab / close_tab ----
+  // These issue the chrome.tabs.* mutation via the service worker (the only context that can
+  // call chrome.tabs). The offscreen agent loop performs the matching run-target rebind + CDP
+  // lease move after a successful result, since the run state lives there, not here.
+
+  async function switchTabToolForToolExec(args, context) {
+    var signal = getAbortSignalForToolExec(context);
+    if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
+    var tabIdForSwitch = Number(args.tab_id);
+    if (!Number.isFinite(tabIdForSwitch)) {
+      return { ok: false, error: 'tab_id is required and must be a tab id from list_tabs.' };
+    }
+    var bgResultForSwitch = await sendCancellableRuntimeMessageForToolExec({
+      action: 'abchatSwitchTab',
+      chatId: context && context.chatId,
+      tabId: tabIdForSwitch
+    }, signal);
+    if (bgResultForSwitch && bgResultForSwitch.cancelled) return cancelledResultForToolExec();
+    if (!bgResultForSwitch || !bgResultForSwitch.ok) {
+      return { ok: false, error: (bgResultForSwitch && bgResultForSwitch.error) || 'Could not switch to that tab.' };
+    }
+    return {
+      ok: true,
+      tab: bgResultForSwitch.tab || { id: tabIdForSwitch },
+      panel_showing_chat: bgResultForSwitch.panel_showing_chat === true,
+      note: 'Switched the active target tab and brought it to the foreground.'
+        + (bgResultForSwitch.panel_showing_chat === true
+          ? ' This chat is now visible in the panel on that tab.'
+          : ' (The panel could not be confirmed showing this chat on that tab, but it is now the active target.)')
+        + ' Subsequent page actions operate on this tab; call page_observe before acting on it.'
+    };
+  }
+
+  async function createTabToolForToolExec(args, context) {
+    var signal = getAbortSignalForToolExec(context);
+    if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
+    var urlForCreate = typeof args.url === 'string' ? args.url.trim() : '';
+    var activeForCreate = args.active !== false;
+    var bgResultForCreate = await sendCancellableRuntimeMessageForToolExec({
+      action: 'abchatCreateTab',
+      chatId: context && context.chatId,
+      url: urlForCreate,
+      active: activeForCreate
+    }, signal);
+    if (bgResultForCreate && bgResultForCreate.cancelled) return cancelledResultForToolExec();
+    if (!bgResultForCreate || !bgResultForCreate.ok) {
+      return { ok: false, error: (bgResultForCreate && bgResultForCreate.error) || 'Could not create the tab.' };
+    }
+    return {
+      ok: true,
+      active: bgResultForCreate.active !== false,
+      panel_showing_chat: bgResultForCreate.panel_showing_chat === true,
+      tab: bgResultForCreate.tab || null,
+      note: (bgResultForCreate.active !== false)
+        ? ('Opened a new tab and made it the active target.'
+          + (bgResultForCreate.panel_showing_chat === true ? ' This chat is now visible in the panel on it.' : '')
+          + ' Call page_observe before acting on it, as the page may still be loading.')
+        : 'Opened a new tab in the background; the active target tab is unchanged. Use switch_tab to act on it.'
+    };
+  }
+
+  async function closeTabToolForToolExec(args, context) {
+    var signal = getAbortSignalForToolExec(context);
+    if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
+    var tabIdForClose = Number(args.tab_id);
+    if (!Number.isFinite(tabIdForClose)) {
+      return { ok: false, error: 'tab_id is required and must be a tab id you created with create_tab.' };
+    }
+    var bgResultForClose = await sendCancellableRuntimeMessageForToolExec({
+      action: 'abchatCloseTab',
+      chatId: context && context.chatId,
+      tabId: tabIdForClose
+    }, signal);
+    if (bgResultForClose && bgResultForClose.cancelled) return cancelledResultForToolExec();
+    if (!bgResultForClose || !bgResultForClose.ok) {
+      return { ok: false, error: (bgResultForClose && bgResultForClose.error) || 'Could not close that tab.' };
+    }
+    return { ok: true, closed: tabIdForClose };
   }
 
   // ---- Document generation ----
@@ -9831,7 +9942,7 @@ self.onmessage = function (e) {
   // the extension's own hosts. Read-only apart from scrolling, which is restored before returning.
   // Never throws; on any failure the caller keeps the original single-read result.
   async function gatherScrolledContentForToolExec(flattenNsForGather, initialTextForGather) {
-    var MAX_STEPS_FOR_GATHER = 6;
+    var MAX_STEPS_FOR_GATHER = 3;
     var MAX_MS_FOR_GATHER = 4500;
     var SETTLE_QUIET_MS_FOR_GATHER = 350;
     var SETTLE_CAP_MS_FOR_GATHER = 1200;
@@ -10491,6 +10602,11 @@ self.onmessage = function (e) {
       case 'web_fetch':             return webFetchToolForToolExec(args, context);
       case 'list_tabs':             return listTabsToolForToolExec(args, context);
       case 'read_tab':              return readTabToolForToolExec(args, context);
+      // switch_tab/create_tab/close_tab are wired for the offscreen loop only (the legacy
+      // in-panel loop is deprecated). The run-target rebind after these lives in agentRun.js.
+      case 'switch_tab':            return switchTabToolForToolExec(args, context);
+      case 'create_tab':            return createTabToolForToolExec(args, context);
+      case 'close_tab':             return closeTabToolForToolExec(args, context);
       case 'create_document':       return createDocumentToolForToolExec(args, context);
       case 'read_document_structure': return readDocumentStructureToolForToolExec(args);
       case 'generate_image':        return generateImageToolForToolExec(args, context);

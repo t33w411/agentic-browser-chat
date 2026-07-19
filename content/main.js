@@ -522,6 +522,24 @@
       return false;
     }
 
+    // The agent switched/created this tab and foregrounded it; show the ongoing run here so the
+    // user sees what the agent is doing on this tab instead of a blank/new-chat panel. Responds
+    // once the panel is confirmed showing that chat (forceOpen opens it even if it was closed),
+    // so the switch_tab / create_tab tool can gate the next action on the run being visible.
+    if (messageForContentMain.action === "abchatFollowRunInPanel") {
+      var panelRuntimeNsForFollowRun = contentNamespaceForContentMain.ui && contentNamespaceForContentMain.ui.panelRuntime;
+      if (panelRuntimeNsForFollowRun && typeof panelRuntimeNsForFollowRun.followRun === 'function') {
+        panelRuntimeNsForFollowRun.followRun(
+          messageForContentMain.chatId,
+          { forceOpen: messageForContentMain.forceOpen === true },
+          function (showingForFollow) { sendResponseForContentMain({ ok: true, showing: !!showingForFollow }); }
+        );
+        return true;
+      }
+      sendResponseForContentMain({ ok: false, showing: false });
+      return false;
+    }
+
     // Page-DOM-bound tool delegated by the offscreen-hosted agent loop (which cannot
     // touch the page). Runs against this tab's live document and responds with the tool
     // result. The read-only page tools (page_observe, page_read) go straight to the tool
