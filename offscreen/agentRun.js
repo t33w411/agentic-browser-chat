@@ -123,7 +123,7 @@
 
   // ---- page-DOM tool delegation (offscreen -> SW -> target tab content script) ----
 
-  function delegatePageToolForAgentRun(toolForDelegate, argsForDelegate, chatIdForDelegate) {
+  function delegatePageToolForAgentRun(toolForDelegate, argsForDelegate, chatIdForDelegate, identityForDelegate) {
     return new Promise(function (resolveForDelegate) {
       try {
         // The SW resolves the target tab from an in-memory map that an MV3 recycle can wipe
@@ -133,12 +133,19 @@
         var targetTabIdForDelegate = runForDelegate && typeof runForDelegate.targetTabId === 'number'
           ? runForDelegate.targetTabId
           : null;
+        // Run/tool-call identity for page-action telemetry, carried to the content script that
+        // executes the tool so its record joins back to the LLM turn. Absent for the screenshot
+        // capture delegation, which is not a logged page mutator.
+        var idForDelegate = identityForDelegate || {};
         chrome.runtime.sendMessage({
           action: 'delegatePageTool',
           tool: toolForDelegate,
           args: argsForDelegate || {},
           chatId: Number(chatIdForDelegate),
-          targetTabId: targetTabIdForDelegate
+          targetTabId: targetTabIdForDelegate,
+          runId: idForDelegate.runId != null ? idForDelegate.runId : (runForDelegate && runForDelegate.runId) || null,
+          toolCallId: idForDelegate.toolCallId != null ? idForDelegate.toolCallId : null,
+          iteration: idForDelegate.iteration != null ? idForDelegate.iteration : null
         }, function (responseForDelegate) {
           if (chrome.runtime.lastError) {
             resolveForDelegate({ ok: false, error: 'The page could not be reached to run this action (' + (chrome.runtime.lastError.message || 'no response') + '). The tab may have been closed or be mid-navigation.' });
@@ -216,7 +223,11 @@
 
   async function executeToolForAgentRun(nameForExec, argsForExec, contextForExec) {
     if (PAGE_DELEGATED_TOOLS_FOR_AGENT_RUN[nameForExec]) {
-      return delegatePageToolForAgentRun(nameForExec, argsForExec, contextForExec.chatId);
+      return delegatePageToolForAgentRun(nameForExec, argsForExec, contextForExec.chatId, {
+        runId: contextForExec.runId,
+        toolCallId: contextForExec.toolCallId,
+        iteration: contextForExec.iteration
+      });
     }
     var executeToolLocalForAgentRun = getAgentNsForAgentRun().executeTool;
     if (typeof executeToolLocalForAgentRun !== 'function') {
@@ -395,7 +406,12 @@
     // is the fallback target when the agent closes the tab it is currently acting on. The CDP
     // lease is tracked here (not as a closure local) so the rebind can release it on the old
     // tab; the next trusted page_act re-acquires it on the new target.
-    var runStateForRun = { controller: controllerForRun, toolsDoneAt: 0, textDebounceTimer: null, userStopRequested: false, pendingText: null, targetTabId: targetTabIdForRun, initiatorTabId: initiatorTabIdForRun, cdpClient: cdpClientForRun, cdpLeaseHeld: false };
+    // Stable per-run identifier. Threaded to the content script on every delegated page tool so a
+    // page-action telemetry record can be joined back to the LLM turn that caused it (chatId alone
+    // cannot disambiguate parallel tool calls or a retried action). Also stamped on API log records
+    // so the two stores share a join key.
+    var runIdForRun = chatId + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+    var runStateForRun = { runId: runIdForRun, controller: controllerForRun, toolsDoneAt: 0, textDebounceTimer: null, userStopRequested: false, pendingText: null, targetTabId: targetTabIdForRun, initiatorTabId: initiatorTabIdForRun, cdpClient: cdpClientForRun, cdpLeaseHeld: false };
     runsForAgentRun.set(chatId, runStateForRun);
 
     var timeoutReasonForRun = null;
@@ -878,6 +894,9 @@
               messages: apiMessages,
               model: model,
               chatId: chatId,
+              runId: runIdForRun,
+              toolCallId: tc.id,
+              iteration: iterCount,
               tabId: runStateForRun.targetTabId,
               visualPreflightSessionId: visualPreflightSessionIdForRun,
               signal: controllerForRun.signal,
@@ -1175,6 +1194,7 @@
           requestType: 'chat',
           timestamp: new Date(logStartTimeForRun).toISOString(),
           chatId: chatId,
+          runId: runIdForRun,
           model: logResolvedModelForRun || model,
           iterationCount: iterCount,
           totalLatencyMs: Date.now() - logStartTimeForRun,

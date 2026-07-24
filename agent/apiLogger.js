@@ -28,6 +28,7 @@
     writeLog:    function (record)         { return sendApiLogOpForApiLogger('writeLog',    [record]); },
     getLogs:     function (limit, offset)  { return sendApiLogOpForApiLogger('getLogs',     [limit, offset]); },
     getLogCount: function ()               { return sendApiLogOpForApiLogger('getLogCount', []); },
+    deleteLogs:  function (ids)            { return sendApiLogOpForApiLogger('deleteLogs',  [ids]); },
     clearLogs:   function ()               { return sendApiLogOpForApiLogger('clearLogs',   []); }
   };
 

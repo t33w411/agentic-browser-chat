@@ -47,6 +47,7 @@
     "panel/panelTemplate.js",
     "panel/panelData.js",
     "agent/apiLogger.js",
+    "agent/pageActionLogger.js",
     "agent/tools.js",
     "agent/documentGeneration.js",
     "agent/cdpClient.js",

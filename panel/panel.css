@@ -2318,11 +2318,11 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 /* ============================================================
    API LOGS VIEW
 ============================================================ */
-#view-logs {
+#view-logs, #view-page-action-logs {
   display: flex; flex-direction: column; height: 100%;
   position: relative; overflow: hidden;
 }
-#view-logs.hidden { display: none; }
+#view-logs.hidden, #view-page-action-logs.hidden { display: none; }
 
 .logs-topbar {
   display: flex; align-items: center; gap: 8px;
@@ -2443,6 +2443,47 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 .log-status-badge.log-status-cancelled-user { background: #e2e8f0; color: #475569; }
 .log-status-badge.log-status-timeout { background: #fef3c7; color: #b45309; }
 .log-mono { font-family: "SF Mono","Fira Code",monospace; font-size: 12px; }
+
+/* Log multi-select (bulk delete) */
+.log-select-cb { flex-shrink: 0; margin: 0 2px 0 0; cursor: pointer; }
+.logs-select-all {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12px; color: var(--abchat-text-muted); cursor: pointer; user-select: none;
+}
+.logs-select-all input { cursor: pointer; }
+
+/* Page action telemetry detail view */
+.log-detail-section {
+  border: 1px solid var(--abchat-border); border-radius: var(--abchat-r-md);
+  padding: 8px 11px; display: flex; flex-direction: column; gap: 4px;
+}
+.log-tool-result-label {
+  font-size: 12px; font-weight: 700; color: var(--abchat-text-secondary);
+  text-transform: uppercase; letter-spacing: 0.06em; margin: 6px 0 2px;
+}
+.log-meta-row {
+  display: flex; align-items: baseline; gap: 10px; font-size: 13px;
+}
+.log-meta-label {
+  font-size: 12px; font-weight: 600; color: var(--abchat-text-muted);
+  min-width: 92px; flex-shrink: 0;
+}
+.log-meta-value { word-break: break-word; overflow-wrap: anywhere; }
+.pa-notshown-list {
+  display: flex; flex-direction: column; gap: 2px;
+  max-height: 320px; overflow-y: auto;
+  border: 1px solid var(--abchat-border); border-radius: var(--abchat-r-md);
+  padding: 6px 8px;
+}
+.pa-notshown-row {
+  display: flex; align-items: baseline; gap: 8px; font-size: 12px;
+}
+.pa-notshown-reason {
+  font-family: "SF Mono","Fira Code",monospace; font-size: 11px;
+  color: var(--abchat-text-muted); min-width: 96px; flex-shrink: 0;
+}
+.pa-notshown-role { color: var(--abchat-text-secondary); min-width: 64px; flex-shrink: 0; }
+.pa-notshown-name { word-break: break-word; overflow-wrap: anywhere; }
 
 .log-sources-list {
   list-style: decimal;

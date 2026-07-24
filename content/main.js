@@ -555,7 +555,12 @@
         // the screenshot capture; the read-only tools (page_observe, page_read) do not.
         var chatScopedDelegateTools = { page_act: 1, page_spreadsheet: 1 };
         var delegateCtxForContentMain = chatScopedDelegateTools[delegatedToolForContentMain]
-          ? { chatId: messageForContentMain.chatId }
+          ? {
+              chatId: messageForContentMain.chatId,
+              runId: messageForContentMain.runId != null ? messageForContentMain.runId : null,
+              toolCallId: messageForContentMain.toolCallId != null ? messageForContentMain.toolCallId : null,
+              iteration: messageForContentMain.iteration != null ? messageForContentMain.iteration : null
+            }
           : {};
         Promise.resolve(agentNsForDelegate.executeTool(delegatedToolForContentMain, delegatedArgsForContentMain, delegateCtxForContentMain))
           .then(function (resultForDelegate) { sendResponseForContentMain(resultForDelegate); })

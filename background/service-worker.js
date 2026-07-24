@@ -3,6 +3,7 @@ importScripts(
   "../shared/db.js",
   "./panelDataRepoImpl.js",
   "./apiLoggerImpl.js",
+  "./pageActionLoggerImpl.js",
   "../shared/messages.js",
   "../agent/fileParsing.js",
   "../shared/toolRegistry.js",
@@ -882,6 +883,17 @@ const POST_ACTION_NAV_GRACE_MS_FOR_SERVICE_WORKER = 400;
 const POST_ACTION_NAV_GRACE_SUBMIT_MS_FOR_SERVICE_WORKER = 3000;
 // Cap on waiting for a navigated page to reach "complete" before observing the landed page.
 const LANDED_PAGE_SETTLE_TIMEOUT_MS_FOR_SERVICE_WORKER = 6000;
+// When the action opened a dialog but the first landed observation caught too few of its controls
+// (a modal still mid-render: its fields are in the DOM but not yet visible, so only the wrapper is
+// returned), wait and observe again so the modal's fields land in the same result instead of
+// forcing the model to re-observe. Retries are bounded in count and delay, break early once the
+// modal has populated, and never downgrade a richer snapshot to a poorer one.
+const LANDED_DIALOG_RETRY_DELAY_MS_FOR_SERVICE_WORKER = 350;
+const LANDED_DIALOG_MAX_RETRIES_FOR_SERVICE_WORKER = 2;
+// A populated interactive modal returns its wrapper plus its fields/buttons; catching fewer than
+// this many controls inside the open dialog means it is still rendering, so re-observe. A modal
+// genuinely smaller than this costs at most the bounded extra waits and then proceeds.
+const LANDED_DIALOG_MIN_CONTROLS_FOR_SERVICE_WORKER = 3;
 
 // Labels that read like a form submission or navigation, used to decide whether a click warrants
 // the longer post-action navigation grace window.
@@ -918,7 +930,29 @@ function computeNavGraceMsForServiceWorker(toolForGrace, argsForGrace, respForGr
 // pre-navigation snapshot (or having to re-read a possibly still-loading page itself). Bounded
 // by LANDED_PAGE_SETTLE_TIMEOUT; resolves with a page_act-shaped result carrying the landed
 // observation (or a null landed_page + a note to observe manually if it could not be captured).
-function settleAndObserveLandedPageForServiceWorker(tabIdForSettle, chatIdForSettle, actionLabelForSettle, newUrlForSettle) {
+var PRE_NAV_REPLY_WAIT_MS_FOR_SERVICE_WORKER = 500;
+var PRE_NAV_REPLY_POLL_MS_FOR_SERVICE_WORKER = 25;
+
+// The in-page action's reply normally lands while the landed page is still being observed, but on
+// a fast SPA route change the observe can win the race and the commit evidence would be dropped.
+// Wait briefly for it. Costs nothing in the two common cases: the reply already arrived, or the
+// port closed (a real document teardown), where no reply can ever come.
+function waitForPreNavReplyForServiceWorker(holderForWait) {
+  return new Promise(function (resolveForWait) {
+    if (!holderForWait || holderForWait.resp || holderForWait.replyImpossible) { resolveForWait(); return; }
+    var startedForWait = Date.now();
+    (function pollForWait() {
+      if (holderForWait.resp || holderForWait.replyImpossible) { resolveForWait(); return; }
+      if (Date.now() - startedForWait >= PRE_NAV_REPLY_WAIT_MS_FOR_SERVICE_WORKER) { resolveForWait(); return; }
+      setTimeout(pollForWait, PRE_NAV_REPLY_POLL_MS_FOR_SERVICE_WORKER);
+    })();
+  });
+}
+
+// preNavHolderForSettle is a mutable { resp } holder, not a value: the in-page action usually
+// has not replied yet when a navigation is detected, so .resp is read at result-build time
+// (after this function's own load wait and observe round-trip) to give that reply time to land.
+function settleAndObserveLandedPageForServiceWorker(tabIdForSettle, chatIdForSettle, actionLabelForSettle, newUrlForSettle, preNavHolderForSettle) {
   return new Promise(function (resolveForSettle) {
     var settleDoneForSettle = false;
     var settleTimerForSettle = null;
@@ -943,14 +977,52 @@ function settleAndObserveLandedPageForServiceWorker(tabIdForSettle, chatIdForSet
             await tabMessagingForServiceWorker.ensureContentInjected(tabIdForSettle);
           }
         } catch (eInjectForSettle) { /* best effort */ }
-        chrome.tabs.sendMessage(
-          tabIdForSettle,
-          { action: "runDelegatedPageTool", tool: "page_observe", args: {}, chatId: chatIdForSettle },
-          function (observeRespForSettle) {
-            var landedObserveForSettle = (!chrome.runtime.lastError && observeRespForSettle && observeRespForSettle.ok === true)
-              ? observeRespForSettle
-              : null;
-            resolveForSettle({
+        var observeOnceForSettle = function () {
+          return new Promise(function (resolveObserveForSettle) {
+            chrome.tabs.sendMessage(
+              tabIdForSettle,
+              { action: "runDelegatedPageTool", tool: "page_observe", args: {}, chatId: chatIdForSettle },
+              function (observeRespForSettle) {
+                resolveObserveForSettle((!chrome.runtime.lastError && observeRespForSettle && observeRespForSettle.ok === true)
+                  ? observeRespForSettle
+                  : null);
+              }
+            );
+          });
+        };
+        (async function () {
+            var landedObserveForSettle = await observeOnceForSettle();
+            await waitForPreNavReplyForServiceWorker(preNavHolderForSettle);
+            // A modal that opened during this action is often still rendering when the first
+            // observation runs: its fields exist in the DOM but are not yet visible, so the snapshot
+            // catches only the dialog wrapper (a tiny open_dialog_controls). When the action itself
+            // reported a dialog opened, re-observe until the modal's controls have populated, keeping
+            // the richest snapshot so the model gets the fields in this same result rather than
+            // re-observing itself. Bounded in attempts and delay; a normally populated modal (or a
+            // genuinely tiny one) breaks out immediately or after one short wait.
+            var preNavForDialogCheck = preNavHolderForSettle ? preNavHolderForSettle.resp : null;
+            var actionOpenedDialogForSettle = !!(preNavForDialogCheck && preNavForDialogCheck.dialogs &&
+              preNavForDialogCheck.dialogs.opened && preNavForDialogCheck.dialogs.opened.length);
+            var dialogControlsCountForSettle = function (obsForCount) {
+              return (obsForCount && obsForCount.open_dialog === true && typeof obsForCount.open_dialog_controls === "number")
+                ? obsForCount.open_dialog_controls : 0;
+            };
+            if (actionOpenedDialogForSettle) {
+              var dialogRetriesForSettle = 0;
+              while (dialogRetriesForSettle < LANDED_DIALOG_MAX_RETRIES_FOR_SERVICE_WORKER &&
+                     dialogControlsCountForSettle(landedObserveForSettle) < LANDED_DIALOG_MIN_CONTROLS_FOR_SERVICE_WORKER) {
+                dialogRetriesForSettle++;
+                await new Promise(function (rDelayForSettle) { setTimeout(rDelayForSettle, LANDED_DIALOG_RETRY_DELAY_MS_FOR_SERVICE_WORKER); });
+                var retryObserveForSettle = await observeOnceForSettle();
+                // Never downgrade: keep whichever snapshot captured the most modal controls, and a
+                // valid snapshot over a null one.
+                if (retryObserveForSettle && (!landedObserveForSettle ||
+                    dialogControlsCountForSettle(retryObserveForSettle) > dialogControlsCountForSettle(landedObserveForSettle))) {
+                  landedObserveForSettle = retryObserveForSettle;
+                }
+              }
+            }
+            var navResultForSettle = {
               ok: true,
               action: actionLabelForSettle,
               navigated: true,
@@ -959,9 +1031,62 @@ function settleAndObserveLandedPageForServiceWorker(tabIdForSettle, chatIdForSet
                 ? "A fresh observation of the landed page is in landed_page below; use it to confirm the outcome before your next action."
                 : "The landed page could not be auto-observed; call page_observe or page_read yourself to confirm the outcome."),
               landed_page: landedObserveForSettle
-            });
-          }
-        );
+            };
+            // When the action completed in the page before the navigation was detected (an SPA
+            // route change, or a redirect inside the grace window), its result already answered
+            // "did this commit?" and we would otherwise throw that away and replace it with a
+            // landed observation taken mid-teardown. Carry over only the fields that still
+            // describe the ACTION: dialogs closed/opened, and what became of the acted control.
+            // Deliberately NOT items/counts/returned/truncated, which describe the pre-navigation
+            // snapshot the model no longer sees and must not reason about.
+            var preNavResultForSettle = preNavHolderForSettle ? preNavHolderForSettle.resp : null;
+            if (preNavResultForSettle) {
+              if (preNavResultForSettle.acted) navResultForSettle.acted = preNavResultForSettle.acted;
+              if (preNavResultForSettle.effect) navResultForSettle.effect = preNavResultForSettle.effect;
+              var preDialogsForSettle = preNavResultForSettle.dialogs;
+              if (preDialogsForSettle) {
+                // The action's dialog read happened BEFORE this navigation completed, so the two
+                // halves of it are not equally trustworthy. "closed" and "opened" are positive
+                // observations: a dialog really was gone, or really did appear. "still_open" is
+                // not: a modal being dismissed is routinely still in the DOM at read time (X's
+                // Edit profile modal is still half-present even in the landed observation below),
+                // so reporting it would tell the model the form rejected its input when the
+                // commit actually succeeded. Keep the positive halves, drop the claim we cannot
+                // support, and say the final state is unknown.
+                var navDialogsForSettle = { before: preDialogsForSettle.before };
+                if (preDialogsForSettle.closed && preDialogsForSettle.closed.length) {
+                  navDialogsForSettle.closed = preDialogsForSettle.closed;
+                }
+                if (preDialogsForSettle.opened && preDialogsForSettle.opened.length) {
+                  navDialogsForSettle.opened = preDialogsForSettle.opened;
+                }
+                var unresolvedForSettle = preDialogsForSettle.still_open && preDialogsForSettle.still_open.length;
+                if (unresolvedForSettle) navDialogsForSettle.final_state_unknown = true;
+                navResultForSettle.dialogs = navDialogsForSettle;
+
+                if (navDialogsForSettle.closed) {
+                  navResultForSettle.navigated_note += " Before navigating, the action closed "
+                    + navDialogsForSettle.closed.length + " dialog" + (navDialogsForSettle.closed.length === 1 ? "" : "s")
+                    + " (" + navDialogsForSettle.closed.map(function (dForSettle) { return '"' + (dForSettle.label || dForSettle.role) + '"'; }).join(", ")
+                    + "): this is the commit you intended landing, so treat the save as SUCCESSFUL and the task as done."
+                    + " The field values you set were preserved in the modal and are shown in landed_page above; if you"
+                    + " need to confirm, read the field value there. Do NOT re-verify by page_read find_text for the value"
+                    + " you typed: a saved value is routinely displayed reformatted (a URL shown scheme-stripped, truncated,"
+                    + " masked), so a text search for what you typed will miss it even though the save worked.";
+                } else if (unresolvedForSettle) {
+                  navResultForSettle.navigated_note += " A dialog was open when the action ran and had not finished"
+                    + " closing when the page navigated, so its final state could not be observed"
+                    + " (dialogs.final_state_unknown). Do NOT read that as the dialog still being open or as a"
+                    + " rejected commit: a modal being dismissed often lingers in the DOM. Judge the outcome from"
+                    + " the navigation and from landed_page; if you still need to confirm, re-read the edited"
+                    + " field's value with page_observe (name_filter on the field), NOT page_read find_text for"
+                    + " the value you typed, since a stored value is often displayed reformatted (scheme-stripped"
+                    + " URL, truncated, masked) and will not match a literal text search.";
+                }
+              }
+            }
+            resolveForSettle(navResultForSettle);
+        })();
       })();
     };
     getTabByIdForServiceWorker(tabIdForSettle).then(function (tabForSettleCheck) {
@@ -3160,11 +3285,21 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
         // from a closed port): wait for the landed page to finish loading, observe it, and return
         // that so the model can confirm the outcome directly instead of re-reading a
         // pre-navigation snapshot itself.
+        // Holds the in-page action's own result so its commit signals can be carried onto a
+        // navigated result instead of discarded. This is a mutable holder rather than a plain
+        // value because the navigation is almost always detected BEFORE the action replies: the
+        // tab reports loading the moment the click routes, while the content script is still in
+        // its post-action settle. Passing the value here would freeze in a null that the later
+        // reply can no longer fill, which is exactly what made the carry-over dead code. The
+        // landed-page settle reads .resp when it builds the result, by which point the reply has
+        // usually arrived. Stays null when the navigation tore the document down mid-action and
+        // there is genuinely no in-page result to carry.
+        const preNavHolderForDelegate = { resp: null, replyImpossible: false };
         const handleNavDetectedForDelegate = function (newUrlForDelegate) {
           if (settledForDelegate) return;
           settledForDelegate = true;
           cleanupForDelegate();
-          settleAndObserveLandedPageForServiceWorker(targetTabIdForDelegate, chatIdForDelegate, actionLabelForDelegate, newUrlForDelegate)
+          settleAndObserveLandedPageForServiceWorker(targetTabIdForDelegate, chatIdForDelegate, actionLabelForDelegate, newUrlForDelegate, preNavHolderForDelegate)
             .then(function (landedResultForDelegate) {
               sendResponseForServiceWorker({ ok: true, result: landedResultForDelegate });
             });
@@ -3180,9 +3315,12 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
         }
         chrome.tabs.sendMessage(
           targetTabIdForDelegate,
-          { action: "runDelegatedPageTool", tool: messageForServiceWorker.tool, args: messageForServiceWorker.args || {}, chatId: chatIdForDelegate },
+          { action: "runDelegatedPageTool", tool: messageForServiceWorker.tool, args: messageForServiceWorker.args || {}, chatId: chatIdForDelegate, runId: messageForServiceWorker.runId != null ? messageForServiceWorker.runId : null, toolCallId: messageForServiceWorker.toolCallId != null ? messageForServiceWorker.toolCallId : null, iteration: messageForServiceWorker.iteration != null ? messageForServiceWorker.iteration : null },
           function (respForDelegate) {
             if (chrome.runtime.lastError) {
+              // The port closed, so no in-page result is ever coming. Say so, otherwise the
+              // landed-page settle would sit and wait for a reply that cannot arrive.
+              preNavHolderForDelegate.replyImpossible = true;
               const portErrMsgForDelegate = chrome.runtime.lastError.message || "no response";
               if (!watchNavigationForDelegate) {
                 finishErrForDelegate("The target tab could not be reached: " + portErrMsgForDelegate);
@@ -3204,6 +3342,11 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
               });
               return;
             }
+            // Record the action's own commit signals BEFORE the settled check. When a navigation
+            // was already detected, this call is "late" only for deciding what to send back; the
+            // evidence it carries is still the best answer to "did this commit?" and the landed
+            // observation running concurrently is about to read it out of the holder.
+            preNavHolderForDelegate.resp = respForDelegate || null;
             if (settledForDelegate) return;
             // The action returned a normal snapshot. For a click/press that may still spawn an
             // async navigation, hold: if the tab starts loading within the grace window,
@@ -3807,6 +3950,11 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
 
   if (messageForServiceWorker.action === 'apiLogOp') {
     dbHandlerForServiceWorker.handleApiLogOp(messageForServiceWorker, sendResponseForServiceWorker);
+    return true;
+  }
+
+  if (messageForServiceWorker.action === 'pageActionLogOp') {
+    dbHandlerForServiceWorker.handlePageActionLogOp(messageForServiceWorker, sendResponseForServiceWorker);
     return true;
   }
 

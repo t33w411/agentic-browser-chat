@@ -489,6 +489,14 @@
               return chipForPanelRuntime.type && chipForPanelRuntime.label;
             })
           : [],
+        pageContext: (safeMessageForPanelRuntime.pageContext
+          && typeof safeMessageForPanelRuntime.pageContext === 'object'
+          && safeMessageForPanelRuntime.pageContext.url)
+          ? {
+              url: String(safeMessageForPanelRuntime.pageContext.url || ''),
+              title: String(safeMessageForPanelRuntime.pageContext.title || '')
+            }
+          : null,
         tool_calls: Array.isArray(safeMessageForPanelRuntime.tool_calls) ? safeMessageForPanelRuntime.tool_calls : undefined,
         tool_call_id: safeMessageForPanelRuntime.tool_call_id != null ? String(safeMessageForPanelRuntime.tool_call_id) : undefined,
         isHidden: Boolean(safeMessageForPanelRuntime.isHidden),
@@ -1236,6 +1244,17 @@
     let activeLogViewRawForPanelRuntime = false;
     let activeLogViewWrapForPanelRuntime = false;
     let rawChatViewWrapForPanelRuntime = false;
+
+    let paLogsPageForPanelRuntime = 0;
+    let paLogsCacheForPanelRuntime = [];
+    let activePaLogDetailForPanelRuntime = null;
+    let activePaLogViewRawForPanelRuntime = false;
+    let activePaLogViewWrapForPanelRuntime = false;
+
+    // Checkbox-selected log ids for bulk delete, per viewer. Reset whenever the list reloads
+    // (ids from a prior page are not on screen to unselect).
+    const apiSelectedLogIdsForPanelRuntime = new Set();
+    const paSelectedLogIdsForPanelRuntime = new Set();
 
     const host = root.getElementById('panel-host');
     const overlay = root.getElementById('inline-overlay');
@@ -3085,6 +3104,8 @@
       editedMessageForPanelRuntime.role = 'user';
       editedMessageForPanelRuntime.content = nextMessageValueForPanelRuntime;
       editedMessageForPanelRuntime.md = nextMessageValueForPanelRuntime;
+      // Re-snapshot to wherever the user is now, since the edit is happening at the current page.
+      editedMessageForPanelRuntime.pageContext = getCurrentPageContextForPanelRuntime();
 
       const panelDataRepoForPanelRuntime = getPanelDataRepoForPanelRuntime();
       if (panelDataRepoForPanelRuntime && typeof panelDataRepoForPanelRuntime.bulkReplaceMessagesFromIndex === 'function') {
@@ -9818,6 +9839,9 @@
     var currentAgentRulesForPanelRuntime = '';
     var currentAgentRulesUpdatedAtForPanelRuntime = 0;
     var currentReminderLeadTimeForPanelRuntime = 15;
+    // Defaults on: the current page's title/url is snapshotted onto each user message so the model
+    // can resolve references like "this page"/"this domain". Overwritten from stored settings on load.
+    var sendPageContextEnabledForPanelRuntime = true;
     var noteDraftSyncSourceIdForPanelRuntime = '';
     var noteDraftApplyingForPanelRuntime = false;
     var noteDraftStorageSyncListenerForPanelRuntime = null;
@@ -11303,6 +11327,30 @@
       chipsRowForPanelRuntime.innerHTML = '';
     }
 
+    // Snapshot the current page's title/url for attaching to a user message. Returns null when the
+    // feature is off or the page is one we should not disclose (browser-internal, extension, file,
+    // data/blob, the Web Store). The snapshot is captured at send time and re-captured on edit, so it
+    // always reflects wherever the user was when they sent that message.
+    function getCurrentPageContextForPanelRuntime() {
+      if (!sendPageContextEnabledForPanelRuntime) return null;
+      try {
+        var rawUrlForPageContext = String(location.href || '').trim();
+        if (!rawUrlForPageContext) return null;
+        var parsedForPageContext = new URL(rawUrlForPageContext);
+        var protoForPageContext = String(parsedForPageContext.protocol || '').toLowerCase();
+        var blockedProtocolsForPageContext = ['chrome:', 'chrome-extension:', 'moz-extension:', 'edge:', 'brave:', 'about:', 'devtools:', 'view-source:', 'file:', 'data:', 'blob:'];
+        if (blockedProtocolsForPageContext.indexOf(protoForPageContext) !== -1) return null;
+        var hostForPageContext = String(parsedForPageContext.hostname || '').toLowerCase();
+        var pathForPageContext = String(parsedForPageContext.pathname || '');
+        if (hostForPageContext === 'chromewebstore.google.com') return null;
+        if (hostForPageContext === 'chrome.google.com' && pathForPageContext.indexOf('/webstore') === 0) return null;
+        var titleForPageContext = String(document.title || '').trim().slice(0, 512);
+        return { url: rawUrlForPageContext.slice(0, 2048), title: titleForPageContext };
+      } catch (eForPageContext) {
+        return null;
+      }
+    }
+
     async function appendMessageToChatForPanelRuntime(chatIdForPanelRuntime, msgObjForPanelRuntime, optionsForPanelRuntime) {
       const chatForPanelRuntime = CHAT_STORE_FOR_PANEL_RUNTIME[chatIdForPanelRuntime];
       if (!chatForPanelRuntime) return null;
@@ -11471,8 +11519,10 @@
       const reqTypeLabels = { chat: 'Chat', 'inline-chat': 'Inline', title: 'Title', compaction: 'Compact', web_search: 'Search', generate_image: 'Image', 'web-fetch-vision': 'Vision', 'web-fetch-summary': 'Summarize', 'tab-read': 'Tab', 'screenshot-vision': 'Vision', 'image-vision': 'Vision', 'quiz-generate': 'Quiz', 'quiz-fix': 'Quiz Fix', 'quiz-review': 'Quiz Review' };
       const reqTypeLabel = reqTypeLabels[reqType] || escapeHtmlForPanelRuntime(reqType);
       const reqTypeBadge = reqType ? `<span class="log-request-type-badge">${reqTypeLabel}</span>` : '';
+      const selectedForLogRow = apiSelectedLogIdsForPanelRuntime.has(log.id) ? ' checked' : '';
       return `<div class="log-row" data-action="view-log-detail" data-log-id="${log.id}">` +
         `<div class="log-row-header">` +
+        `<input type="checkbox" class="log-select-cb" data-action="toggle-api-log-select" data-log-id="${log.id}"${selectedForLogRow}>` +
         `<span class="log-status-dot ${statusMetaForLogRow.cssClass}"></span>` +
         `<span class="log-ts">${escapeHtmlForPanelRuntime(ts)}</span>` +
         reqTypeBadge +
@@ -11773,6 +11823,8 @@
       const total = await apiLogger.getLogCount();
       const logs = await apiLogger.getLogs(API_LOGS_PAGE_SIZE_FOR_PANEL_RUNTIME, apiLogsPageForPanelRuntime * API_LOGS_PAGE_SIZE_FOR_PANEL_RUNTIME);
       apiLogsCacheForPanelRuntime = logs;
+      apiSelectedLogIdsForPanelRuntime.clear();
+      updateApiLogSelectionControlsForPanelRuntime();
 
       if (logs.length === 0) {
         listEl.innerHTML = '<div class="logs-empty">No API logs recorded yet.</div>';
@@ -11947,6 +11999,72 @@
       }
     }
 
+    function updateApiLogSelectionControlsForPanelRuntime() {
+      const delBtnForSel = root.getElementById('api-logs-delete-selected-btn');
+      const selAllForSel = root.getElementById('api-logs-select-all');
+      const countForSel = apiSelectedLogIdsForPanelRuntime.size;
+      if (delBtnForSel) {
+        delBtnForSel.classList.toggle('hidden', countForSel === 0);
+        delBtnForSel.textContent = 'Delete selected (' + countForSel + ')';
+      }
+      if (selAllForSel) {
+        const cacheLenForSel = apiLogsCacheForPanelRuntime.length;
+        selAllForSel.checked = cacheLenForSel > 0 && countForSel >= cacheLenForSel;
+      }
+    }
+
+    function toggleApiLogSelectForPanelRuntime(cbEl) {
+      if (!cbEl) return;
+      const idForSel = Number(cbEl.dataset.logId);
+      if (cbEl.checked) apiSelectedLogIdsForPanelRuntime.add(idForSel);
+      else apiSelectedLogIdsForPanelRuntime.delete(idForSel);
+      updateApiLogSelectionControlsForPanelRuntime();
+    }
+
+    function toggleSelectAllApiLogsForPanelRuntime(cbEl) {
+      const listElForSel = root.getElementById('logs-list-container');
+      if (cbEl && cbEl.checked) {
+        apiLogsCacheForPanelRuntime.forEach(function (lForSel) { apiSelectedLogIdsForPanelRuntime.add(lForSel.id); });
+      } else {
+        apiSelectedLogIdsForPanelRuntime.clear();
+      }
+      if (listElForSel && apiLogsCacheForPanelRuntime.length) {
+        listElForSel.innerHTML = apiLogsCacheForPanelRuntime.map(renderLogRowForPanelRuntime).join('');
+      }
+      updateApiLogSelectionControlsForPanelRuntime();
+    }
+
+    function confirmDeleteSelectedApiLogsForPanelRuntime() {
+      if (apiSelectedLogIdsForPanelRuntime.size === 0) return;
+      const listElForSel = root.getElementById('logs-list-container');
+      if (!listElForSel) return;
+      showConfirmPromptForPanelRuntime(listElForSel, 'Delete ' + apiSelectedLogIdsForPanelRuntime.size + ' selected log(s)? This cannot be undone.', 'Delete', function () {
+        deleteSelectedApiLogsForPanelRuntime();
+      });
+    }
+
+    async function deleteSelectedApiLogsForPanelRuntime() {
+      const apiLogger = (globalThis.ABChatContent || {}).apiLogger;
+      if (!apiLogger || apiSelectedLogIdsForPanelRuntime.size === 0) return;
+      const idsForSel = Array.from(apiSelectedLogIdsForPanelRuntime);
+      await apiLogger.deleteLogs(idsForSel);
+      apiSelectedLogIdsForPanelRuntime.clear();
+      const totalAfterForSel = await apiLogger.getLogCount();
+      const totalPagesAfterForSel = Math.ceil(totalAfterForSel / API_LOGS_PAGE_SIZE_FOR_PANEL_RUNTIME);
+      if (apiLogsPageForPanelRuntime > 0 && apiLogsPageForPanelRuntime >= totalPagesAfterForSel) {
+        apiLogsPageForPanelRuntime = Math.max(0, totalPagesAfterForSel - 1);
+      }
+      await loadApiLogsViewForPanelRuntime();
+    }
+
+    function confirmClearApiLogsForPanelRuntime() {
+      const listElForConfirm = root.getElementById('logs-list-container');
+      if (!listElForConfirm) return;
+      showConfirmPromptForPanelRuntime(listElForConfirm, 'Clear all API logs? This cannot be undone.', 'Clear all', function () {
+        clearApiLogsForPanelRuntime();
+      });
+    }
+
     async function clearApiLogsForPanelRuntime() {
       const apiLogger = (globalThis.ABChatContent || {}).apiLogger;
       if (!apiLogger) return;
@@ -11954,6 +12072,341 @@
       apiLogsPageForPanelRuntime = 0;
       apiLogsCacheForPanelRuntime = [];
       await loadApiLogsViewForPanelRuntime();
+    }
+
+    /* ============================================================
+      PAGE ACTION DOM TELEMETRY LOGS (settings sub-view)
+    ============================================================ */
+    const PAGE_ACTION_LOGS_PAGE_SIZE_FOR_PANEL_RUNTIME = 25;
+
+    function paLogStatusMetaForPanelRuntime(logForPaMeta) {
+      const resultForPaMeta = logForPaMeta && logForPaMeta.result;
+      const okForPaMeta = !(resultForPaMeta && resultForPaMeta.ok === false);
+      if (!okForPaMeta) {
+        const errForPaMeta = (resultForPaMeta && (resultForPaMeta.error || (resultForPaMeta.stale_ref ? 'Stale ref' : 'Failed'))) || 'Failed';
+        return { label: 'Error', cssClass: 'log-status-error', preview: errForPaMeta };
+      }
+      const effectForPaMeta = (resultForPaMeta && resultForPaMeta.effect) || '';
+      return { label: 'OK', cssClass: 'log-status-success', preview: effectForPaMeta };
+    }
+
+    function paLogL2ForPanelRuntime(logForPaL2) {
+      return logForPaL2 && logForPaL2.samples && logForPaL2.samples.t1 && logForPaL2.samples.t1.l2
+        ? logForPaL2.samples.t1.l2
+        : null;
+    }
+
+    function renderPaLogRowForPanelRuntime(logForPaRow) {
+      const statusMetaForPaRow = paLogStatusMetaForPanelRuntime(logForPaRow);
+      const tsForPaRow = formatLogTimestampForPanelRuntime(logForPaRow.timestamp);
+      const actionForPaRow = (logForPaRow.args && logForPaRow.args.action) || (logForPaRow.args && logForPaRow.args.intent) || '';
+      const badgeTextForPaRow = escapeHtmlForPanelRuntime((logForPaRow.tool || '') + (actionForPaRow ? ' · ' + actionForPaRow : ''));
+      const latencyForPaRow = logForPaRow.totalLatencyMs ? (logForPaRow.totalLatencyMs / 1000).toFixed(2) + 's' : '';
+      const l2ForPaRow = paLogL2ForPanelRuntime(logForPaRow);
+      const shownInfoForPaRow = l2ForPaRow ? ('shown ' + l2ForPaRow.shown_to_model + '/' + l2ForPaRow.total) : '';
+      const l3BadgeForPaRow = logForPaRow.l3 ? '<span class="log-request-type-badge">L3</span>' : '';
+      const selectedForPaRow = paSelectedLogIdsForPanelRuntime.has(logForPaRow.id) ? ' checked' : '';
+      return `<div class="log-row" data-action="view-pa-log-detail" data-log-id="${logForPaRow.id}">` +
+        `<div class="log-row-header">` +
+        `<input type="checkbox" class="log-select-cb" data-action="toggle-pa-log-select" data-log-id="${logForPaRow.id}"${selectedForPaRow}>` +
+        `<span class="log-status-dot ${statusMetaForPaRow.cssClass}"></span>` +
+        `<span class="log-ts">${escapeHtmlForPanelRuntime(tsForPaRow)}</span>` +
+        `<span class="log-request-type-badge">${badgeTextForPaRow}</span>` +
+        l3BadgeForPaRow +
+        `<span class="log-model">${escapeHtmlForPanelRuntime(shownInfoForPaRow)}</span>` +
+        `<span class="log-latency">${escapeHtmlForPanelRuntime(latencyForPaRow)}</span>` +
+        `</div>` +
+        `<div class="log-preview">${escapeHtmlForPanelRuntime(String(statusMetaForPaRow.preview).slice(0, 90))}</div>` +
+        `</div>`;
+    }
+
+    async function loadPageActionLogsViewForPanelRuntime() {
+      const paLogger = (globalThis.ABChatContent || {}).pageActionLogger;
+      const listElForPa = root.getElementById('pa-logs-list-container');
+      const paginationElForPa = root.getElementById('pa-logs-pagination-bar');
+      if (!listElForPa) return;
+      if (!paLogger) {
+        listElForPa.innerHTML = '<div class="logs-empty">Logger not available.</div>';
+        return;
+      }
+      const totalForPa = await paLogger.getLogCount();
+      const logsForPa = await paLogger.getLogs(PAGE_ACTION_LOGS_PAGE_SIZE_FOR_PANEL_RUNTIME, paLogsPageForPanelRuntime * PAGE_ACTION_LOGS_PAGE_SIZE_FOR_PANEL_RUNTIME);
+      paLogsCacheForPanelRuntime = logsForPa;
+      paSelectedLogIdsForPanelRuntime.clear();
+      updatePaLogSelectionControlsForPanelRuntime();
+      if (logsForPa.length === 0) {
+        listElForPa.innerHTML = '<div class="logs-empty">No page action logs recorded yet.</div>';
+      } else {
+        listElForPa.innerHTML = logsForPa.map(renderPaLogRowForPanelRuntime).join('');
+      }
+      if (paginationElForPa) {
+        const totalPagesForPa = Math.ceil(totalForPa / PAGE_ACTION_LOGS_PAGE_SIZE_FOR_PANEL_RUNTIME);
+        if (totalPagesForPa <= 1) {
+          paginationElForPa.innerHTML = '';
+        } else {
+          paginationElForPa.innerHTML =
+            `<button class="btn-ghost btn-sm" data-action="pa-logs-prev-page"${paLogsPageForPanelRuntime === 0 ? ' disabled' : ''}>← Prev</button>` +
+            `<span class="logs-page-info">${paLogsPageForPanelRuntime + 1} / ${totalPagesForPa}</span>` +
+            `<button class="btn-ghost btn-sm" data-action="pa-logs-next-page"${paLogsPageForPanelRuntime >= totalPagesForPa - 1 ? ' disabled' : ''}>Next →</button>`;
+        }
+      }
+    }
+
+    function paKvRowForPanelRuntime(labelForKv, valueForKv) {
+      if (valueForKv == null || valueForKv === '') return '';
+      return `<div class="log-meta-row"><span class="log-meta-label">${escapeHtmlForPanelRuntime(labelForKv)}</span>` +
+        `<span class="log-meta-value">${escapeHtmlForPanelRuntime(String(valueForKv))}</span></div>`;
+    }
+
+    function renderPaLogDetailForPanelRuntime(logForPaDetail) {
+      const resultForPaDetail = logForPaDetail.result || {};
+      const argsForPaDetail = logForPaDetail.args || {};
+      const l2ForPaDetail = paLogL2ForPanelRuntime(logForPaDetail);
+      let htmlForPaDetail = '<div class="log-detail-section">';
+      htmlForPaDetail += paKvRowForPanelRuntime('Tool', logForPaDetail.tool);
+      htmlForPaDetail += paKvRowForPanelRuntime('Action', argsForPaDetail.action || argsForPaDetail.intent);
+      htmlForPaDetail += paKvRowForPanelRuntime('Time', formatLogTimestampForPanelRuntime(logForPaDetail.timestamp));
+      htmlForPaDetail += paKvRowForPanelRuntime('Latency', logForPaDetail.totalLatencyMs != null ? logForPaDetail.totalLatencyMs + ' ms' : '');
+      htmlForPaDetail += paKvRowForPanelRuntime('Resolve', logForPaDetail.resolve_outcome);
+      htmlForPaDetail += paKvRowForPanelRuntime('Run', logForPaDetail.runId);
+      htmlForPaDetail += paKvRowForPanelRuntime('Tool call', logForPaDetail.toolCallId);
+      htmlForPaDetail += paKvRowForPanelRuntime('Iteration', logForPaDetail.iteration);
+      htmlForPaDetail += '</div>';
+
+      htmlForPaDetail += '<div class="log-detail-section"><div class="log-tool-result-label">Outcome</div>';
+      htmlForPaDetail += paKvRowForPanelRuntime('ok', String(resultForPaDetail.ok !== false));
+      htmlForPaDetail += paKvRowForPanelRuntime('effect', resultForPaDetail.effect);
+      if (resultForPaDetail.stale_ref) htmlForPaDetail += paKvRowForPanelRuntime('stale_ref', 'true');
+      if (resultForPaDetail.truncated) htmlForPaDetail += paKvRowForPanelRuntime('truncated', 'true');
+      if (resultForPaDetail.acted) htmlForPaDetail += paKvRowForPanelRuntime('acted', 'ref ' + resultForPaDetail.acted.ref + ', still_connected ' + resultForPaDetail.acted.still_connected);
+      if (resultForPaDetail.error) htmlForPaDetail += paKvRowForPanelRuntime('error', resultForPaDetail.error);
+      if (resultForPaDetail.dialogs) htmlForPaDetail += `<pre class="log-code">${escapeHtmlForPanelRuntime(JSON.stringify(resultForPaDetail.dialogs, null, 2))}</pre>`;
+      htmlForPaDetail += '</div>';
+
+      if (l2ForPaDetail) {
+        htmlForPaDetail += '<div class="log-detail-section"><div class="log-tool-result-label">L2 census (t1)</div>';
+        htmlForPaDetail += paKvRowForPanelRuntime('shown / total', l2ForPaDetail.shown_to_model + ' / ' + l2ForPaDetail.total);
+        htmlForPaDetail += paKvRowForPanelRuntime('visible', l2ForPaDetail.visible);
+        htmlForPaDetail += paKvRowForPanelRuntime('in viewport', l2ForPaDetail.in_viewport);
+        htmlForPaDetail += paKvRowForPanelRuntime('covered', l2ForPaDetail.covered);
+        htmlForPaDetail += paKvRowForPanelRuntime('capture cost', (l2ForPaDetail.capture_ms != null ? l2ForPaDetail.capture_ms + ' ms' : ''));
+        const notShownForPaDetail = (l2ForPaDetail.elements || []).filter(function (elRowForPa) { return elRowForPa && !elRowForPa.shown_to_model; });
+        if (notShownForPaDetail.length) {
+          htmlForPaDetail += `<div class="log-tool-result-label">Not shown to model (${notShownForPaDetail.length})</div>`;
+          const rowsForNotShown = notShownForPaDetail.slice(0, 150).map(function (elRowForPa) {
+            const nameForNotShown = elRowForPa.name || elRowForPa.value || '(no name)';
+            return `<div class="pa-notshown-row"><span class="pa-notshown-reason">${escapeHtmlForPanelRuntime(elRowForPa.not_shown_reason || '')}</span>` +
+              `<span class="pa-notshown-role">${escapeHtmlForPanelRuntime(elRowForPa.role || '')}</span>` +
+              `<span class="pa-notshown-name">${escapeHtmlForPanelRuntime(String(nameForNotShown).slice(0, 80))}</span></div>`;
+          }).join('');
+          htmlForPaDetail += `<div class="pa-notshown-list">${rowsForNotShown}</div>`;
+          if (notShownForPaDetail.length > 150) htmlForPaDetail += `<div class="log-preview">… ${notShownForPaDetail.length - 150} more (see JSON)</div>`;
+        }
+        htmlForPaDetail += '</div>';
+      }
+
+      if (logForPaDetail.l3) {
+        const l3ForPaDetail = logForPaDetail.l3;
+        const dialogCountForL3 = Array.isArray(l3ForPaDetail.dialogs) ? l3ForPaDetail.dialogs.length : 0;
+        const ancCountForL3 = Array.isArray(l3ForPaDetail.ancestors) ? l3ForPaDetail.ancestors.length : 0;
+        htmlForPaDetail += '<div class="log-detail-section"><div class="log-tool-result-label">L3 fragments (suspicious action)</div>';
+        htmlForPaDetail += paKvRowForPanelRuntime('acted', l3ForPaDetail.acted ? (l3ForPaDetail.acted.html.length + ' chars' + (l3ForPaDetail.acted.truncated ? ' (truncated)' : '')) : 'none');
+        htmlForPaDetail += paKvRowForPanelRuntime('ancestors', ancCountForL3);
+        htmlForPaDetail += paKvRowForPanelRuntime('dialogs', dialogCountForL3);
+        htmlForPaDetail += '</div>';
+      }
+
+      return htmlForPaDetail;
+    }
+
+    function showPaLogDetailForPanelRuntime(logId) {
+      const numIdForPa = Number(logId);
+      const logForPa = paLogsCacheForPanelRuntime.find(function (lForPa) { return lForPa.id === numIdForPa; });
+      if (!logForPa) return;
+      const overlayForPa = root.getElementById('pa-logs-detail-overlay');
+      const bodyForPa = root.getElementById('pa-logs-detail-body');
+      if (!overlayForPa || !bodyForPa) return;
+      activePaLogDetailForPanelRuntime = logForPa;
+      activePaLogViewRawForPanelRuntime = false;
+      activePaLogViewWrapForPanelRuntime = false;
+      bodyForPa.innerHTML = renderPaLogDetailForPanelRuntime(logForPa);
+      const viewBtnForPa = root.getElementById('pa-log-view-toggle-btn');
+      if (viewBtnForPa) { viewBtnForPa.textContent = 'JSON'; viewBtnForPa.classList.remove('log-view-raw'); }
+      const wrapBtnForPa = root.getElementById('pa-log-wrap-toggle-btn');
+      if (wrapBtnForPa) { wrapBtnForPa.classList.add('hidden'); wrapBtnForPa.setAttribute('aria-pressed', 'false'); }
+      overlayForPa.classList.remove('hidden');
+    }
+
+    function closePaLogDetailForPanelRuntime() {
+      const overlayForPa = root.getElementById('pa-logs-detail-overlay');
+      if (overlayForPa) overlayForPa.classList.add('hidden');
+      activePaLogDetailForPanelRuntime = null;
+      activePaLogViewRawForPanelRuntime = false;
+      activePaLogViewWrapForPanelRuntime = false;
+    }
+
+    function togglePaLogViewForPanelRuntime() {
+      if (!activePaLogDetailForPanelRuntime) return;
+      activePaLogViewRawForPanelRuntime = !activePaLogViewRawForPanelRuntime;
+      const bodyForPa = root.getElementById('pa-logs-detail-body');
+      const btnForPa = root.getElementById('pa-log-view-toggle-btn');
+      if (!bodyForPa || !btnForPa) return;
+      const wrapBtnForPa = root.getElementById('pa-log-wrap-toggle-btn');
+      if (activePaLogViewRawForPanelRuntime) {
+        const wrapClassForPa = activePaLogViewWrapForPanelRuntime ? ' log-json-wrap' : '';
+        bodyForPa.innerHTML = '<pre class="log-code log-json-pre' + wrapClassForPa + '">' + escapeHtmlForPanelRuntime(JSON.stringify(activePaLogDetailForPanelRuntime, null, 2)) + '</pre>';
+        btnForPa.textContent = 'Formatted';
+        btnForPa.classList.add('log-view-raw');
+        if (wrapBtnForPa) { wrapBtnForPa.classList.remove('hidden'); wrapBtnForPa.setAttribute('aria-pressed', activePaLogViewWrapForPanelRuntime ? 'true' : 'false'); }
+      } else {
+        bodyForPa.innerHTML = renderPaLogDetailForPanelRuntime(activePaLogDetailForPanelRuntime);
+        btnForPa.textContent = 'JSON';
+        btnForPa.classList.remove('log-view-raw');
+        if (wrapBtnForPa) wrapBtnForPa.classList.add('hidden');
+      }
+    }
+
+    function togglePaLogWrapForPanelRuntime() {
+      if (!activePaLogViewRawForPanelRuntime) return;
+      activePaLogViewWrapForPanelRuntime = !activePaLogViewWrapForPanelRuntime;
+      const preForPa = root.querySelector('#pa-logs-detail-body .log-json-pre');
+      if (preForPa) preForPa.classList.toggle('log-json-wrap', activePaLogViewWrapForPanelRuntime);
+      const wrapBtnForPa = root.getElementById('pa-log-wrap-toggle-btn');
+      if (wrapBtnForPa) wrapBtnForPa.setAttribute('aria-pressed', activePaLogViewWrapForPanelRuntime ? 'true' : 'false');
+    }
+
+    function copyPaLogDetailForPanelRuntime(btn) {
+      if (!activePaLogDetailForPanelRuntime) return;
+      const textForPaCopy = JSON.stringify(activePaLogDetailForPanelRuntime, null, 2);
+      navigator.clipboard.writeText(textForPaCopy).then(function () {
+        if (btn) {
+          const prevForPaCopy = btn.textContent;
+          btn.textContent = 'Copied!';
+          setTimeout(function () { btn.textContent = prevForPaCopy; }, 1500);
+        }
+      }).catch(function () {});
+    }
+
+    // Blob download from the content-script context (page document), same approach as the
+    // mermaid/gen-image exports. The temporary anchor lives in the page body, not the shadow root.
+    function downloadJsonForPanelRuntime(filenameForDownload, dataForDownload) {
+      try {
+        const blobForDownload = new Blob([JSON.stringify(dataForDownload, null, 2)], { type: 'application/json' });
+        const urlForDownload = URL.createObjectURL(blobForDownload);
+        const aForDownload = document.createElement('a');
+        aForDownload.href = urlForDownload;
+        aForDownload.download = filenameForDownload;
+        document.body.appendChild(aForDownload);
+        aForDownload.click();
+        document.body.removeChild(aForDownload);
+        setTimeout(function () { URL.revokeObjectURL(urlForDownload); }, 10000);
+      } catch (eForDownload) { /* download best-effort */ }
+    }
+
+    async function exportPaLogRunForPanelRuntime() {
+      const paLogger = (globalThis.ABChatContent || {}).pageActionLogger;
+      if (!paLogger || !activePaLogDetailForPanelRuntime) return;
+      const runIdForExport = activePaLogDetailForPanelRuntime.runId;
+      let recordsForExport;
+      if (runIdForExport && typeof paLogger.getLogsByRun === 'function') {
+        recordsForExport = await paLogger.getLogsByRun(runIdForExport);
+      } else {
+        recordsForExport = [activePaLogDetailForPanelRuntime];
+      }
+      downloadJsonForPanelRuntime('abchat-page-actions-run-' + (runIdForExport || 'unknown') + '.json', {
+        exportedAt: new Date().toISOString(),
+        runId: runIdForExport || null,
+        count: recordsForExport.length,
+        records: recordsForExport
+      });
+    }
+
+    async function exportAllPageActionLogsForPanelRuntime() {
+      const paLogger = (globalThis.ABChatContent || {}).pageActionLogger;
+      if (!paLogger) return;
+      const totalForExport = await paLogger.getLogCount();
+      const recordsForExport = totalForExport > 0 ? await paLogger.getLogs(totalForExport, 0) : [];
+      downloadJsonForPanelRuntime('abchat-page-actions-all.json', {
+        exportedAt: new Date().toISOString(),
+        count: recordsForExport.length,
+        records: recordsForExport
+      });
+    }
+
+    function updatePaLogSelectionControlsForPanelRuntime() {
+      const delBtnForSel = root.getElementById('pa-logs-delete-selected-btn');
+      const selAllForSel = root.getElementById('pa-logs-select-all');
+      const countForSel = paSelectedLogIdsForPanelRuntime.size;
+      if (delBtnForSel) {
+        delBtnForSel.classList.toggle('hidden', countForSel === 0);
+        delBtnForSel.textContent = 'Delete selected (' + countForSel + ')';
+      }
+      if (selAllForSel) {
+        const cacheLenForSel = paLogsCacheForPanelRuntime.length;
+        selAllForSel.checked = cacheLenForSel > 0 && countForSel >= cacheLenForSel;
+      }
+    }
+
+    function togglePaLogSelectForPanelRuntime(cbEl) {
+      if (!cbEl) return;
+      const idForSel = Number(cbEl.dataset.logId);
+      if (cbEl.checked) paSelectedLogIdsForPanelRuntime.add(idForSel);
+      else paSelectedLogIdsForPanelRuntime.delete(idForSel);
+      updatePaLogSelectionControlsForPanelRuntime();
+    }
+
+    function toggleSelectAllPaLogsForPanelRuntime(cbEl) {
+      const listElForSel = root.getElementById('pa-logs-list-container');
+      if (cbEl && cbEl.checked) {
+        paLogsCacheForPanelRuntime.forEach(function (lForSel) { paSelectedLogIdsForPanelRuntime.add(lForSel.id); });
+      } else {
+        paSelectedLogIdsForPanelRuntime.clear();
+      }
+      if (listElForSel && paLogsCacheForPanelRuntime.length) {
+        listElForSel.innerHTML = paLogsCacheForPanelRuntime.map(renderPaLogRowForPanelRuntime).join('');
+      }
+      updatePaLogSelectionControlsForPanelRuntime();
+    }
+
+    function confirmDeleteSelectedPaLogsForPanelRuntime() {
+      if (paSelectedLogIdsForPanelRuntime.size === 0) return;
+      const listElForSel = root.getElementById('pa-logs-list-container');
+      if (!listElForSel) return;
+      showConfirmPromptForPanelRuntime(listElForSel, 'Delete ' + paSelectedLogIdsForPanelRuntime.size + ' selected log(s)? This cannot be undone.', 'Delete', function () {
+        deleteSelectedPaLogsForPanelRuntime();
+      });
+    }
+
+    async function deleteSelectedPaLogsForPanelRuntime() {
+      const paLogger = (globalThis.ABChatContent || {}).pageActionLogger;
+      if (!paLogger || paSelectedLogIdsForPanelRuntime.size === 0) return;
+      const idsForSel = Array.from(paSelectedLogIdsForPanelRuntime);
+      await paLogger.deleteLogs(idsForSel);
+      paSelectedLogIdsForPanelRuntime.clear();
+      const totalAfterForSel = await paLogger.getLogCount();
+      const totalPagesAfterForSel = Math.ceil(totalAfterForSel / PAGE_ACTION_LOGS_PAGE_SIZE_FOR_PANEL_RUNTIME);
+      if (paLogsPageForPanelRuntime > 0 && paLogsPageForPanelRuntime >= totalPagesAfterForSel) {
+        paLogsPageForPanelRuntime = Math.max(0, totalPagesAfterForSel - 1);
+      }
+      await loadPageActionLogsViewForPanelRuntime();
+    }
+
+    function confirmClearPageActionLogsForPanelRuntime() {
+      const listElForConfirm = root.getElementById('pa-logs-list-container');
+      if (!listElForConfirm) return;
+      showConfirmPromptForPanelRuntime(listElForConfirm, 'Clear all page action logs? This cannot be undone.', 'Clear all', function () {
+        clearPageActionLogsForPanelRuntime();
+      });
+    }
+
+    async function clearPageActionLogsForPanelRuntime() {
+      const paLogger = (globalThis.ABChatContent || {}).pageActionLogger;
+      if (!paLogger) return;
+      await paLogger.clearLogs();
+      paLogsPageForPanelRuntime = 0;
+      paLogsCacheForPanelRuntime = [];
+      closePaLogDetailForPanelRuntime();
+      await loadPageActionLogsViewForPanelRuntime();
     }
 
     /* ============================================================
@@ -12525,7 +12978,7 @@
         }
         await stampInputChipSourceHashesForPanelRuntime();
         const chipsForOffscreen = collectInputChipsForPanelRuntime();
-        await appendMessageToChatForPanelRuntime(chatId, { role: "user", content: text, md: text, chips: chipsForOffscreen, _addedByThisTab: true }, { persistToDb: false });
+        await appendMessageToChatForPanelRuntime(chatId, { role: "user", content: text, md: text, chips: chipsForOffscreen, pageContext: getCurrentPageContextForPanelRuntime(), _addedByThisTab: true }, { persistToDb: false });
         chatTaForSend.value = "";
         clearInputChipsForPanelRuntime();
         clearDraftForPanelRuntime();
@@ -12896,6 +13349,9 @@
       if (alertToggleForBehaviour) alertToggleForBehaviour.checked = settingsForBehaviour.alertSound !== false;
       const leadTimeInputForBehaviour = root.getElementById('settings-reminder-lead-time');
       if (leadTimeInputForBehaviour) leadTimeInputForBehaviour.value = currentReminderLeadTimeForPanelRuntime;
+      sendPageContextEnabledForPanelRuntime = settingsForBehaviour.sendPageContext !== false;
+      const pageContextToggleForBehaviour = root.getElementById('settings-page-context-toggle');
+      if (pageContextToggleForBehaviour) pageContextToggleForBehaviour.checked = sendPageContextEnabledForPanelRuntime;
       try {
         chrome.storage.local.get('abchatAutomationEnabled', function (itemsForAutomationToggle) {
           const automationToggleForBehaviour = root.getElementById('settings-automation-toggle');
@@ -12962,6 +13418,13 @@
       } catch (eAutomationSyncBind) {}
     }
 
+    async function savePageContextEnabledForPanelRuntime(checked) {
+      sendPageContextEnabledForPanelRuntime = Boolean(checked);
+      const storageManagerForPageContext = (globalThis.ABChatShared || {}).storageManager;
+      if (!storageManagerForPageContext) return;
+      await storageManagerForPageContext.saveSettings({ sendPageContext: Boolean(checked) });
+    }
+
     async function saveAlertSoundForPanelRuntime(checked) {
       const storageManagerForAlert = (globalThis.ABChatShared || {}).storageManager;
       if (!storageManagerForAlert) return;
@@ -13003,6 +13466,31 @@
         typeof mergedForSave.agentRulesUpdatedAt === 'number' ? mergedForSave.agentRulesUpdatedAt : 0;
       el.dataset.agentRulesBaseUpdatedAt = String(currentAgentRulesUpdatedAtForPanelRuntime);
       showAgentRulesNoticeForPanelRuntime('Saved', false);
+    }
+
+    var pageContextStorageSyncListenerForPanelRuntime = null;
+    function bindPageContextStorageSyncForPanelRuntime() {
+      try {
+        if (pageContextStorageSyncListenerForPanelRuntime) {
+          chrome.storage.onChanged.removeListener(pageContextStorageSyncListenerForPanelRuntime);
+          pageContextStorageSyncListenerForPanelRuntime = null;
+        }
+        var capturedGenForPageContextSync = window.abchatListenerGeneration || 0;
+        pageContextStorageSyncListenerForPanelRuntime = function pageContextStorageSyncHandlerForPanelRuntime(changes, area) {
+          if ((window.abchatListenerGeneration || 0) !== capturedGenForPageContextSync) {
+            chrome.storage.onChanged.removeListener(pageContextStorageSyncListenerForPanelRuntime);
+            pageContextStorageSyncListenerForPanelRuntime = null;
+            return;
+          }
+          if (area !== 'sync' || !changes.abchatSettings) return;
+          const newSettingsForPageContextSync = changes.abchatSettings.newValue;
+          if (!newSettingsForPageContextSync || typeof newSettingsForPageContextSync !== 'object') return;
+          sendPageContextEnabledForPanelRuntime = newSettingsForPageContextSync.sendPageContext !== false;
+          const elForPageContextSync = root.getElementById('settings-page-context-toggle');
+          if (elForPageContextSync) elForPageContextSync.checked = sendPageContextEnabledForPanelRuntime;
+        };
+        chrome.storage.onChanged.addListener(pageContextStorageSyncListenerForPanelRuntime);
+      } catch (ePageContextSyncBind) {}
     }
 
     var agentRulesStorageSyncListenerForPanelRuntime = null;
@@ -15014,7 +15502,7 @@
           if (!tgtForRuntime) return;
           const action = tgtForRuntime.dataset.action;
           switch (action) {
-            case 'set-tab':              setTab(tgtForRuntime.dataset.tab); if (tgtForRuntime.dataset.tab === 'logs') { apiLogsPageForPanelRuntime = 0; loadApiLogsViewForPanelRuntime(); } break;
+            case 'set-tab':              setTab(tgtForRuntime.dataset.tab); if (tgtForRuntime.dataset.tab === 'logs') { apiLogsPageForPanelRuntime = 0; loadApiLogsViewForPanelRuntime(); } else if (tgtForRuntime.dataset.tab === 'page-action-logs') { paLogsPageForPanelRuntime = 0; loadPageActionLogsViewForPanelRuntime(); } break;
             case 'save-api-key-onboarding': saveApiKeyFromOnboardingForPanelRuntime(); break;
             case 'tour-next': {
               currentTourSlideForPanelRuntime = Math.min(currentTourSlideForPanelRuntime + 1, TOUR_SLIDES_FOR_PANEL_RUNTIME.length - 1);
@@ -15377,9 +15865,25 @@
             case 'toggle-log-view':      toggleLogViewForPanelRuntime(); break;
             case 'toggle-log-wrap':      toggleLogWrapForPanelRuntime(); break;
             case 'copy-log-detail':      copyLogDetailForPanelRuntime(tgtForRuntime); break;
-            case 'clear-api-logs':       clearApiLogsForPanelRuntime(); break;
+            case 'clear-api-logs':       confirmClearApiLogsForPanelRuntime(); break;
+            case 'toggle-api-log-select':   toggleApiLogSelectForPanelRuntime(tgtForRuntime); break;
+            case 'toggle-select-all-api-logs': toggleSelectAllApiLogsForPanelRuntime(tgtForRuntime); break;
+            case 'delete-selected-api-logs': confirmDeleteSelectedApiLogsForPanelRuntime(); break;
             case 'logs-prev-page':       if (apiLogsPageForPanelRuntime > 0) { apiLogsPageForPanelRuntime--; loadApiLogsViewForPanelRuntime(); } break;
             case 'logs-next-page':       apiLogsPageForPanelRuntime++; loadApiLogsViewForPanelRuntime(); break;
+            case 'view-pa-log-detail':   showPaLogDetailForPanelRuntime(tgtForRuntime.dataset.logId); break;
+            case 'close-pa-log-detail':  closePaLogDetailForPanelRuntime(); break;
+            case 'toggle-pa-log-view':   togglePaLogViewForPanelRuntime(); break;
+            case 'toggle-pa-log-wrap':   togglePaLogWrapForPanelRuntime(); break;
+            case 'copy-pa-log-detail':   copyPaLogDetailForPanelRuntime(tgtForRuntime); break;
+            case 'export-pa-log-run':    exportPaLogRunForPanelRuntime(); break;
+            case 'export-all-pa-logs':   exportAllPageActionLogsForPanelRuntime(); break;
+            case 'clear-page-action-logs': confirmClearPageActionLogsForPanelRuntime(); break;
+            case 'toggle-pa-log-select':    togglePaLogSelectForPanelRuntime(tgtForRuntime); break;
+            case 'toggle-select-all-pa-logs': toggleSelectAllPaLogsForPanelRuntime(tgtForRuntime); break;
+            case 'delete-selected-pa-logs': confirmDeleteSelectedPaLogsForPanelRuntime(); break;
+            case 'pa-logs-prev-page':    if (paLogsPageForPanelRuntime > 0) { paLogsPageForPanelRuntime--; loadPageActionLogsViewForPanelRuntime(); } break;
+            case 'pa-logs-next-page':    paLogsPageForPanelRuntime++; loadPageActionLogsViewForPanelRuntime(); break;
             case 'skill-new':            openSkillEditorForPanelRuntime(null); break;
             case 'skill-edit':           openSkillEditorForPanelRuntime(Number(tgtForRuntime.dataset.skillId)); break;
             case 'skill-delete':         confirmDeleteSkillForPanelRuntime(Number(tgtForRuntime.dataset.skillId)); break;
@@ -15423,6 +15927,7 @@
             case 'save-delete-chats-older-than':   saveDeleteChatsOlderThanForPanelRuntime(tgtForRuntime.value); break;
             case 'prune-orphaned-blobs':           pruneOrphanedBlobsFromSettingsForPanelRuntime(); break;
             case 'save-alert-sound':               saveAlertSoundForPanelRuntime(tgtForRuntime.checked); break;
+            case 'toggle-page-context':            savePageContextEnabledForPanelRuntime(tgtForRuntime.checked); break;
             case 'toggle-automation':              handleAutomationToggleForPanelRuntime(tgtForRuntime.checked); break;
             case 'save-reminder-lead-time':        saveReminderLeadTimeForPanelRuntime(tgtForRuntime.value); break;
             case 'tep-due-change': {
@@ -15688,6 +16193,7 @@
       bindAutomationStorageSyncForPanelRuntime();
       maybeShowAutomationIntroForPanelRuntime();
       bindAgentRulesStorageSyncForPanelRuntime();
+      bindPageContextStorageSyncForPanelRuntime();
       initModelSelectsForPanelRuntime();
       autoDeleteOldChatsForPanelRuntime();
       restoreDraftForPanelRuntime();

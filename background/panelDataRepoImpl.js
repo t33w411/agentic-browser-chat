@@ -213,6 +213,14 @@
     };
   }
 
+  function normalizePageContextForPanelDataRepo(pageContextInputForPanelDataRepo) {
+    if (!pageContextInputForPanelDataRepo || typeof pageContextInputForPanelDataRepo !== 'object') return null;
+    var urlForPageContext = String(pageContextInputForPanelDataRepo.url || '').trim().slice(0, 2048);
+    if (!urlForPageContext) return null;
+    var titleForPageContext = String(pageContextInputForPanelDataRepo.title || '').trim().slice(0, 512);
+    return { url: urlForPageContext, title: titleForPageContext };
+  }
+
   function normalizeMessageRecordForPanelDataRepo(chatIdForPanelDataRepo, messageInputForPanelDataRepo, fallbackTimestampForPanelDataRepo) {
     var inputForPanelDataRepo = messageInputForPanelDataRepo || {};
     var normalizedRoleForPanelDataRepo = normalizeMessageRoleForPanelDataRepo(inputForPanelDataRepo.role);
@@ -227,6 +235,7 @@
       content: normalizedContentForPanelDataRepo,
       md: normalizedMdForPanelDataRepo,
       chips: normalizeMessageChipsForPanelDataRepo(inputForPanelDataRepo.chips),
+      pageContext: normalizePageContextForPanelDataRepo(inputForPanelDataRepo.pageContext),
       tool_calls: Array.isArray(inputForPanelDataRepo.tool_calls) ? inputForPanelDataRepo.tool_calls : undefined,
       tool_call_id: inputForPanelDataRepo.tool_call_id != null ? String(inputForPanelDataRepo.tool_call_id) : undefined,
       isHidden: Boolean(inputForPanelDataRepo.isHidden),

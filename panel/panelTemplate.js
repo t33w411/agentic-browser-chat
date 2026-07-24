@@ -520,6 +520,17 @@
           </div>
 
           <div class="stg-section">
+            <div class="stg-section-title">Privacy</div>
+            <div class="stg-row">
+              <div class="stg-label">
+                <strong>Share current page with each message</strong>
+                <span>Attaches the current tab's title and URL to every message so the assistant knows what "this page", "this site", or "this domain" refers to. Turn off to keep your current page private unless you attach it yourself.</span>
+              </div>
+              <label class="ts"><input type="checkbox" id="settings-page-context-toggle" data-action="toggle-page-context"><span class="ts-slider"></span></label>
+            </div>
+          </div>
+
+          <div class="stg-section">
             <div class="stg-section-title">Data</div>
             <div class="stg-row">
               <div class="stg-label">
@@ -551,6 +562,7 @@
             <div class="stg-section-title">Logs</div>
             <div class="stg-data-row">
               <button class="btn-ghost btn-sm" data-action="set-tab" data-tab="logs">View API logs</button>
+              <button class="btn-ghost btn-sm" data-action="set-tab" data-tab="page-action-logs">View page action logs</button>
             </div>
           </div>
 
@@ -564,6 +576,8 @@
         <div class="logs-topbar">
           <button class="logs-back-btn" data-action="set-tab" data-tab="settings">&#8592; Settings</button>
           <span class="logs-topbar-title">API Logs</span>
+          <label class="logs-select-all"><input type="checkbox" data-action="toggle-select-all-api-logs" id="api-logs-select-all"> Select all</label>
+          <button class="btn-ghost btn-sm hidden" data-action="delete-selected-api-logs" id="api-logs-delete-selected-btn">Delete selected</button>
           <button class="btn-ghost btn-sm" data-action="clear-api-logs">Clear all</button>
         </div>
         <div class="logs-list-container" id="logs-list-container">
@@ -581,6 +595,35 @@
           <div class="logs-detail-body" id="logs-detail-body"></div>
         </div>
       </div><!-- /view-logs -->
+
+      <!-- ===================================================
+           PAGE ACTION LOGS VIEW
+      =================================================== -->
+      <div class="view hidden" id="view-page-action-logs">
+        <div class="logs-topbar">
+          <button class="logs-back-btn" data-action="set-tab" data-tab="settings">&#8592; Settings</button>
+          <span class="logs-topbar-title">Page Action Logs</span>
+          <label class="logs-select-all"><input type="checkbox" data-action="toggle-select-all-pa-logs" id="pa-logs-select-all"> Select all</label>
+          <button class="btn-ghost btn-sm hidden" data-action="delete-selected-pa-logs" id="pa-logs-delete-selected-btn">Delete selected</button>
+          <button class="btn-ghost btn-sm" data-action="export-all-pa-logs">Export all</button>
+          <button class="btn-ghost btn-sm" data-action="clear-page-action-logs">Clear all</button>
+        </div>
+        <div class="logs-list-container" id="pa-logs-list-container">
+          <div class="logs-empty" id="pa-logs-empty-state">No page action logs recorded yet.</div>
+        </div>
+        <div class="logs-pagination-bar" id="pa-logs-pagination-bar"></div>
+        <div class="logs-detail hidden" id="pa-logs-detail-overlay">
+          <div class="logs-topbar">
+            <button class="logs-back-btn" data-action="close-pa-log-detail">&#8592; Back</button>
+            <span class="logs-topbar-title">Page Action Detail</span>
+            <button class="btn-ghost btn-sm hidden" data-action="toggle-pa-log-wrap" id="pa-log-wrap-toggle-btn" aria-pressed="false">Wrap</button>
+            <button class="btn-ghost btn-sm" data-action="toggle-pa-log-view" id="pa-log-view-toggle-btn">JSON</button>
+            <button class="btn-ghost btn-sm" data-action="export-pa-log-run" id="pa-log-export-run-btn">Export run</button>
+            <button class="btn-ghost btn-sm" data-action="copy-pa-log-detail">Copy</button>
+          </div>
+          <div class="logs-detail-body" id="pa-logs-detail-body"></div>
+        </div>
+      </div><!-- /view-page-action-logs -->
 
       <!-- ===================================================
            SKILLS VIEW

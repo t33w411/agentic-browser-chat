@@ -20,7 +20,8 @@
       toastDurationMs: 1700,
       deleteChatsOlderThanDays: null,
       alertSound: true,
-      reminderLeadTime: 15
+      reminderLeadTime: 15,
+      sendPageContext: true
     };
   }
 
@@ -122,7 +123,11 @@
       reminderLeadTime:
         typeof safePatchSettingsForStorage.reminderLeadTime === "number"
           ? safePatchSettingsForStorage.reminderLeadTime
-          : safeBaseSettingsForStorage.reminderLeadTime
+          : safeBaseSettingsForStorage.reminderLeadTime,
+      sendPageContext:
+        typeof safePatchSettingsForStorage.sendPageContext === "boolean"
+          ? safePatchSettingsForStorage.sendPageContext
+          : safeBaseSettingsForStorage.sendPageContext
     };
   }
 

@@ -1835,6 +1835,28 @@
   // Scans for currently-open modal dialogs and menus so an action result can
   // flag lingering overlay state (e.g. a folder-picker dialog left open after a
   // click). Returns visible matches with their accessible name, capped.
+  // Name for a dialog that carries no accessible name of its own. Prefers a nested labelled
+  // dialog or a heading, because falling straight through to the container's innerText yields
+  // the entire modal body as a "label" (every field, button, and helper sentence).
+  function dialogLabelFromDescendantForPageQuery(elForDlgLabel) {
+    var nodesForDlgLabel;
+    try {
+      nodesForDlgLabel = elForDlgLabel.querySelectorAll(
+        '[role="dialog"][aria-label],[role="alertdialog"][aria-label],[aria-modal="true"][aria-label],h1,h2,h3,[role="heading"]');
+    } catch (eDlgLabelQuery) { return ''; }
+    for (var iForDlgLabel = 0; iForDlgLabel < nodesForDlgLabel.length && iForDlgLabel < 5; iForDlgLabel++) {
+      var candForDlgLabel = nodesForDlgLabel[iForDlgLabel];
+      var textForDlgLabel = '';
+      try {
+        textForDlgLabel = (candForDlgLabel.getAttribute && candForDlgLabel.getAttribute('aria-label')) ||
+          (typeof candForDlgLabel.innerText === 'string' ? candForDlgLabel.innerText : candForDlgLabel.textContent) || '';
+      } catch (eDlgLabelText) { textForDlgLabel = ''; }
+      textForDlgLabel = String(textForDlgLabel).replace(/\s+/g, ' ').trim();
+      if (textForDlgLabel && textForDlgLabel.length <= 120) return textForDlgLabel;
+    }
+    return '';
+  }
+
   function snapshotOpenDialogsForPageQuery() {
     var dialogsForSnap = [];
     var nodesForDialogSnap;
@@ -1843,22 +1865,159 @@
     } catch (eForDialogSnap) {
       return dialogsForSnap;
     }
+    var visibleForDialogSnap = [];
     for (var iForDialogSnap = 0; iForDialogSnap < nodesForDialogSnap.length; iForDialogSnap++) {
-      var nForDialogSnap = nodesForDialogSnap[iForDialogSnap];
-      if (!isElementVisibleForPageQuery(nForDialogSnap)) continue;
+      if (isElementVisibleForPageQuery(nodesForDialogSnap[iForDialogSnap])) {
+        visibleForDialogSnap.push(nodesForDialogSnap[iForDialogSnap]);
+      }
+    }
+
+    // One modal is routinely built from nested dialog nodes (an [aria-modal] wrapper around a
+    // [role="dialog"], or a labelled inner panel). Counting each of them made a single open modal
+    // report before:2 / after:2, and a Save that tore down one nesting level but not the other
+    // would have read as a half-close. Keep only the outermost of any nested run.
+    var outermostForDialogSnap = [];
+    for (var oIdxForDialogSnap = 0; oIdxForDialogSnap < visibleForDialogSnap.length; oIdxForDialogSnap++) {
+      var candidateForDialogSnap = visibleForDialogSnap[oIdxForDialogSnap];
+      var nestedForDialogSnap = false;
+      for (var pIdxForDialogSnap = 0; pIdxForDialogSnap < visibleForDialogSnap.length; pIdxForDialogSnap++) {
+        if (pIdxForDialogSnap === oIdxForDialogSnap) continue;
+        var otherForDialogSnap = visibleForDialogSnap[pIdxForDialogSnap];
+        if (otherForDialogSnap.contains && otherForDialogSnap.contains(candidateForDialogSnap)) {
+          nestedForDialogSnap = true;
+          break;
+        }
+      }
+      if (!nestedForDialogSnap) outermostForDialogSnap.push(candidateForDialogSnap);
+    }
+
+    for (var eIdxForDialogSnap = 0; eIdxForDialogSnap < outermostForDialogSnap.length; eIdxForDialogSnap++) {
+      var nForDialogSnap = outermostForDialogSnap[eIdxForDialogSnap];
       var roleAttrForDialogSnap = nForDialogSnap.getAttribute && nForDialogSnap.getAttribute('role');
-      var roleForDialogSnap = roleAttrForDialogSnap || ((nForDialogSnap.getAttribute && nForDialogSnap.getAttribute('aria-modal') === 'true') ? 'dialog' : 'dialog');
+      var roleForDialogSnap = roleAttrForDialogSnap || 'dialog';
       var labelForDialogSnap = resolveLabelForPageQuery(nForDialogSnap);
+      if (!labelForDialogSnap) labelForDialogSnap = dialogLabelFromDescendantForPageQuery(nForDialogSnap);
       if (!labelForDialogSnap) {
         try { labelForDialogSnap = (typeof nForDialogSnap.innerText === 'string' ? nForDialogSnap.innerText : '').replace(/\s+/g, ' ').trim(); } catch (eLabelDialogSnap) { labelForDialogSnap = ''; }
       }
-      if (labelForDialogSnap) labelForDialogSnap = clipWithMarkerForToolExec(labelForDialogSnap, 160);
+      if (labelForDialogSnap) labelForDialogSnap = clipWithMarkerForToolExec(labelForDialogSnap, 80);
       var entryForDialogSnap = { role: roleForDialogSnap };
       if (labelForDialogSnap) entryForDialogSnap.label = labelForDialogSnap;
       dialogsForSnap.push(entryForDialogSnap);
       if (dialogsForSnap.length >= 10) break;
     }
     return dialogsForSnap;
+  }
+
+  var DIALOG_DIFF_LIST_CAP_FOR_TOOL_EXEC = 5;
+
+  // Labels that read like "commit this form" or "dismiss this dialog". Used only to decide
+  // whether a click is worth waiting on for a dialog to close, never to block an action.
+  var COMMIT_LABEL_RE_FOR_TOOL_EXEC = /\b(save|done|apply|submit|confirm|ok|okay|update|send|post|publish|continue|next|finish|close|cancel|dismiss|discard|yes)\b/i;
+  // Generous, because it is only ever paid in full when the dialog genuinely stays open (a
+  // validation failure). A successful commit exits the moment the count drops, so raising this
+  // buys headroom for a slow server round trip at no cost to the common path.
+  var DIALOG_SETTLE_CAP_MS_FOR_TOOL_EXEC = 2000;
+
+  // Post-click settle: resolve once the DOM has been quiet for QUIET ms, or at the CAP.
+  // A commit gets a longer quiet window and cap because its outcome arrives with the server
+  // response, well after the DOM goes quiet: at 300ms we snapshot a page that has dispatched the
+  // request and nothing more, so the result reflects the click rather than what it committed.
+  // Scaled by intent rather than globally: raising the ordinary window would tax every click and
+  // type on every site, and on a page with any background churn (a live feed, ticking timestamps,
+  // autoplaying video) a long quiet window is never satisfied at all, so every action would pay
+  // the full cap instead of the ~300ms it costs now. The dialog poll above covers commits inside
+  // a modal; this covers the rest, e.g. an inline form with no dialog to watch.
+  var CLICK_QUIET_MS_FOR_TOOL_EXEC = 300;
+  var CLICK_QUIET_COMMIT_MS_FOR_TOOL_EXEC = 800;
+  var CLICK_SETTLE_CAP_MS_FOR_TOOL_EXEC = 3000;
+  var CLICK_SETTLE_CAP_COMMIT_MS_FOR_TOOL_EXEC = 5000;
+  var DIALOG_SETTLE_POLL_MS_FOR_TOOL_EXEC = 100;
+
+  // A commit inside a modal usually only closes it once the server round trip returns, which is
+  // well after the ~300ms mutation-quiet settle: the DOM goes quiet while the request is still in
+  // flight. Reading dialog state then reports the modal as still open, and "still_open" is the
+  // signal that means the form REJECTED the input, so a successful save reads as a validation
+  // failure. Poll for the count to drop before snapshotting. Only for commit-like clicks that had
+  // a dialog open, so ordinary in-modal clicks (focusing a field) pay nothing; hard-capped so a
+  // dialog that legitimately stays open costs a bounded wait, not a stall.
+  function waitForDialogCloseForToolExec(beforeCountForWait, startUrlForWait) {
+    return new Promise(function (resolveForWait) {
+      var startedForWait = Date.now();
+      var timerForWait = setInterval(function () {
+        var doneForWait = false;
+        try {
+          // A navigation supersedes dialog state entirely; stop waiting and let the caller report.
+          if (typeof location !== 'undefined' && location.href !== startUrlForWait) doneForWait = true;
+          else if (snapshotOpenDialogsForPageQuery().length < beforeCountForWait) doneForWait = true;
+        } catch (eWaitPoll) { doneForWait = true; }
+        if (!doneForWait && (Date.now() - startedForWait) >= DIALOG_SETTLE_CAP_MS_FOR_TOOL_EXEC) doneForWait = true;
+        if (doneForWait) {
+          clearInterval(timerForWait);
+          resolveForWait();
+        }
+      }, DIALOG_SETTLE_POLL_MS_FOR_TOOL_EXEC);
+    });
+  }
+
+  function looksLikeCommitClickForToolExec(actionForCommit, descriptorForCommit, elForCommit) {
+    if (actionForCommit !== 'click') return false;
+    var labelForCommit = (descriptorForCommit && descriptorForCommit.label) || '';
+    if (!labelForCommit && elForCommit) {
+      try { labelForCommit = resolveClickableLabelForPageQuery(elForCommit, 80) || ''; } catch (eCommitLabel) { labelForCommit = ''; }
+    }
+    if (!labelForCommit) return false;
+    return COMMIT_LABEL_RE_FOR_TOOL_EXEC.test(String(labelForCommit));
+  }
+
+  function dialogKeyForToolExec(entryForKey) {
+    return (entryForKey.role || 'dialog') + '\u0000' + (entryForKey.label || '');
+  }
+
+  // Diffs two snapshotOpenDialogsForPageQuery() results so a page_act result can state
+  // plainly whether the thing it clicked dismissed a dialog, left one up, or raised a new
+  // one. "Page reacted" cannot distinguish those, and a committed modal Save is otherwise
+  // only inferable from a named field going missing from a capped, occlusion-filtered
+  // snapshot, which is not evidence. Matching is a multiset on role+label so two dialogs
+  // with the same name are not collapsed into one.
+  function diffOpenDialogsForToolExec(beforeForDiff, afterForDiff) {
+    beforeForDiff = Array.isArray(beforeForDiff) ? beforeForDiff : [];
+    afterForDiff = Array.isArray(afterForDiff) ? afterForDiff : [];
+    if (!beforeForDiff.length && !afterForDiff.length) return null;
+
+    var remainingForDiff = Object.create(null);
+    for (var iBeforeForDiff = 0; iBeforeForDiff < beforeForDiff.length; iBeforeForDiff++) {
+      var keyBeforeForDiff = dialogKeyForToolExec(beforeForDiff[iBeforeForDiff]);
+      remainingForDiff[keyBeforeForDiff] = (remainingForDiff[keyBeforeForDiff] || 0) + 1;
+    }
+
+    var stillOpenForDiff = [], openedForDiff = [];
+    for (var iAfterForDiff = 0; iAfterForDiff < afterForDiff.length; iAfterForDiff++) {
+      var entryAfterForDiff = afterForDiff[iAfterForDiff];
+      var keyAfterForDiff = dialogKeyForToolExec(entryAfterForDiff);
+      if (remainingForDiff[keyAfterForDiff] > 0) {
+        remainingForDiff[keyAfterForDiff]--;
+        if (stillOpenForDiff.length < DIALOG_DIFF_LIST_CAP_FOR_TOOL_EXEC) stillOpenForDiff.push(entryAfterForDiff);
+      } else if (openedForDiff.length < DIALOG_DIFF_LIST_CAP_FOR_TOOL_EXEC) {
+        openedForDiff.push(entryAfterForDiff);
+      }
+    }
+
+    var closedForDiff = [];
+    for (var iClosedForDiff = 0; iClosedForDiff < beforeForDiff.length; iClosedForDiff++) {
+      var entryClosedForDiff = beforeForDiff[iClosedForDiff];
+      var keyClosedForDiff = dialogKeyForToolExec(entryClosedForDiff);
+      if (remainingForDiff[keyClosedForDiff] > 0) {
+        remainingForDiff[keyClosedForDiff]--;
+        if (closedForDiff.length < DIALOG_DIFF_LIST_CAP_FOR_TOOL_EXEC) closedForDiff.push(entryClosedForDiff);
+      }
+    }
+
+    var resultForDiff = { before: beforeForDiff.length, after: afterForDiff.length };
+    if (closedForDiff.length) resultForDiff.closed = closedForDiff;
+    if (stillOpenForDiff.length) resultForDiff.still_open = stillOpenForDiff;
+    if (openedForDiff.length) resultForDiff.opened = openedForDiff;
+    return resultForDiff;
   }
 
   function summarizeElementForClickDiff(el) {
@@ -2348,28 +2507,82 @@
 
   // Occlusion hit-test at snapshot-build time. An element is "covered" when the topmost
   // element at its box center is neither it nor a descendant (a modal, cookie banner, or
-  // overlay sits on top). Mirrors the elementFromPoint probe page_act runs at dispatch,
-  // moved earlier so a covered control is never offered as actionable. Our own panel/toast
-  // shadow hosts are ignored: page_act toggles them click-through, so they never block.
+  // overlay sits on top). Default observe omits covered controls; targeted name_filter /
+  // find_text include them with state.covered so synthetic page_act can still try. Trusted
+  // CDP escalation re-probes after scrollIntoView. Our own panel/toast shadow hosts are
+  // ignored: page_act toggles them click-through, so they never block.
+  // Single-point probe. Returns true when the element is reachable at (x, y), false when
+  // something unrelated is on top, and null when the point yields nothing usable (outside
+  // the viewport, or no hit) so the caller can fall back rather than treat it as blocked.
+  function hitTestReachableForObserve(elForHit, xForHit, yForHit) {
+    var vpWForHit = (typeof window !== 'undefined' && window.innerWidth) || 0;
+    var vpHForHit = (typeof window !== 'undefined' && window.innerHeight) || 0;
+    if (xForHit < 0 || yForHit < 0 || xForHit > vpWForHit || yForHit > vpHForHit) return null;
+    var topForHit = null;
+    try { topForHit = document.elementFromPoint(xForHit, yForHit); } catch (eHit) { return null; }
+    if (!topForHit) return null;
+    if (topForHit === elForHit) return true;
+    if (elForHit.contains && elForHit.contains(topForHit)) return true;   // hit a descendant: reachable
+    if (topForHit.contains && topForHit.contains(elForHit)) return true;  // hit an ancestor wrapper: reachable
+    if (topForHit.id && topForHit.id.indexOf('abchat-') === 0) return true; // our own panel/toast UI
+    return false;
+  }
+
   function isElementCoveredForObserve(elForCover) {
     if (!elForCover || typeof document === 'undefined' || typeof document.elementFromPoint !== 'function') return false;
     var rectForCover = elForCover.getBoundingClientRect ? elForCover.getBoundingClientRect() : null;
     if (!rectForCover || rectForCover.width <= 0 || rectForCover.height <= 0) return false;
     var cxForCover = rectForCover.left + rectForCover.width / 2;
     var cyForCover = rectForCover.top + rectForCover.height / 2;
-    var vpWForCover = (typeof window !== 'undefined' && window.innerWidth) || 0;
-    var vpHForCover = (typeof window !== 'undefined' && window.innerHeight) || 0;
     // A center outside the viewport gives elementFromPoint nothing useful; do not claim
     // covered in that case (the visibility/viewport filters already handled off-screen).
-    if (cxForCover < 0 || cyForCover < 0 || cxForCover > vpWForCover || cyForCover > vpHForCover) return false;
-    var topForCover = null;
-    try { topForCover = document.elementFromPoint(cxForCover, cyForCover); } catch (eCover) { return false; }
-    if (!topForCover) return false;
-    if (topForCover === elForCover) return false;
-    if (elForCover.contains && elForCover.contains(topForCover)) return false; // hit a descendant: reachable
-    if (topForCover.contains && topForCover.contains(elForCover)) return false; // hit an ancestor wrapper: reachable
-    if (topForCover.id && topForCover.id.indexOf('abchat-') === 0) return false; // our own panel/toast UI
+    var centerVerdictForCover = hitTestReachableForObserve(elForCover, cxForCover, cyForCover);
+    if (centerVerdictForCover !== false) return false;
+
+    // The midpoint alone is a poor proxy for a wide or tall control: a 550x20 text input whose
+    // middle is clipped by a sticky bar or scroll shadow stays clickable across most of its width.
+    // Judging it solely by its center hides it from the snapshot entirely, and with a name_filter
+    // that reads to the model as "this control does not exist". Probe inset points before
+    // declaring it unreachable. Only runs when the center is already blocked, so the extra
+    // hit-tests cost nothing for the common case.
+    var insetPointsForCover = [
+      [rectForCover.left + rectForCover.width * 0.15, cyForCover],
+      [rectForCover.left + rectForCover.width * 0.85, cyForCover],
+      [cxForCover, rectForCover.top + rectForCover.height * 0.15],
+      [cxForCover, rectForCover.top + rectForCover.height * 0.85]
+    ];
+    for (var pIdxForCover = 0; pIdxForCover < insetPointsForCover.length; pIdxForCover++) {
+      if (hitTestReachableForObserve(elForCover, insetPointsForCover[pIdxForCover][0], insetPointsForCover[pIdxForCover][1]) === true) {
+        return false;
+      }
+    }
     return true;
+  }
+
+  // Visible open dialog/modal elements (outermost of any nested run), returned as elements rather
+  // than the labels snapshotOpenDialogsForPageQuery yields. Used to keep an open modal's own
+  // controls in the default observe even when the transient occlusion hit-test marks them covered.
+  function openDialogElementsForObserve() {
+    var nodesForOpenDlg;
+    try {
+      nodesForOpenDlg = document.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"], [role="menu"]');
+    } catch (eOpenDlg) { return []; }
+    var visibleForOpenDlg = [];
+    for (var iForOpenDlg = 0; iForOpenDlg < nodesForOpenDlg.length; iForOpenDlg++) {
+      if (isElementVisibleForPageQuery(nodesForOpenDlg[iForOpenDlg])) visibleForOpenDlg.push(nodesForOpenDlg[iForOpenDlg]);
+    }
+    var outermostForOpenDlg = [];
+    for (var oForOpenDlg = 0; oForOpenDlg < visibleForOpenDlg.length; oForOpenDlg++) {
+      var candForOpenDlg = visibleForOpenDlg[oForOpenDlg];
+      var nestedForOpenDlg = false;
+      for (var pForOpenDlg = 0; pForOpenDlg < visibleForOpenDlg.length; pForOpenDlg++) {
+        if (pForOpenDlg === oForOpenDlg) continue;
+        var otherForOpenDlg = visibleForOpenDlg[pForOpenDlg];
+        if (otherForOpenDlg.contains && otherForOpenDlg.contains(candForOpenDlg)) { nestedForOpenDlg = true; break; }
+      }
+      if (!nestedForOpenDlg) outermostForOpenDlg.push(candForOpenDlg);
+    }
+    return outermostForOpenDlg;
   }
 
   // Native tags already covered by category collectors; heuristic card/pointer scans skip them.
@@ -2794,10 +3007,15 @@
   // Assign a stable ref, register the element for page_act resolution, mark it shown, and push its
   // model-facing item onto itemsArr. Shared by the default, name_filter, and centered snapshot paths
   // so the registry shape and shownRefs bookkeeping stay identical across them. Returns the item so
-  // the caller can tag it (new/changed).
-  function registerObserveItemForToolExec(elForRegister, categoryForRegister, inVpForRegister, itemsArrForRegister) {
+  // the caller can tag it (new/changed). coveredForRegister tags state.covered when the control is
+  // occluded at snapshot time but still offered for synthetic page_act (targeted discovery).
+  function registerObserveItemForToolExec(elForRegister, categoryForRegister, inVpForRegister, itemsArrForRegister, coveredForRegister) {
     var refForRegister = stableRefForElementToolExec(elForRegister);
     var itemForRegister = buildObserveItemForToolExec(elForRegister, categoryForRegister, refForRegister, inVpForRegister);
+    if (coveredForRegister) {
+      itemForRegister.state = itemForRegister.state || {};
+      itemForRegister.state.covered = true;
+    }
     observeRegistryForToolExec.refs[refForRegister] = {
       el: elForRegister,
       selector: itemForRegister._selector,
@@ -2911,6 +3129,35 @@
     };
   }
 
+  // Category + pointer + focusable candidates, in document order, deduped, landmarks dropped.
+  // The shared source of "every interactive element the observe surface considers", used by the
+  // snapshot builder and by the page-action telemetry L2 enumeration so both see the identical
+  // population (the telemetry's shown_to_model reasons are only ground truth if it starts from the
+  // same candidate set the builder did).
+  function gatherObserveCandidatesForToolExec() {
+    var candidatesForGather = collectInteractiveCandidatesForPageQuery().filter(function (candForFilter) {
+      return candForFilter.category !== 'landmarks';
+    });
+    var seenForGather = new Set();
+    for (var sIdxForGather = 0; sIdxForGather < candidatesForGather.length; sIdxForGather++) {
+      seenForGather.add(candidatesForGather[sIdxForGather].el);
+    }
+    var pointerCandidatesForGather = collectPointerCandidatesForObserve(seenForGather);
+    for (var ptrIdxForGather = 0; ptrIdxForGather < pointerCandidatesForGather.length; ptrIdxForGather++) {
+      candidatesForGather.push(pointerCandidatesForGather[ptrIdxForGather]);
+    }
+    var focusableCandidatesForGather = collectFocusableCardCandidatesForObserve(seenForGather);
+    for (var focIdxForGather = 0; focIdxForGather < focusableCandidatesForGather.length; focIdxForGather++) {
+      candidatesForGather.push(focusableCandidatesForGather[focIdxForGather]);
+    }
+    candidatesForGather.sort(function (aForGather, bForGather) {
+      if (aForGather.el === bForGather.el) return 0;
+      var posForGather = aForGather.el.compareDocumentPosition(bForGather.el);
+      return (posForGather & Node.DOCUMENT_POSITION_PRECEDING) ? 1 : -1;
+    });
+    return dedupeObserveCandidatesForObserve(candidatesForGather);
+  }
+
   // Core builder: gather category + pointer candidates, dedup, filter to visible and
   // (by default) in-viewport and non-covered, cap, assign sequential refs, store the
   // resolution registry, and emit items. Call finalizeObserveSnapshotForToolExec before
@@ -2921,37 +3168,52 @@
     var maxItemsForObserve = (typeof argsForObserve.max_items === 'number' && argsForObserve.max_items > 0)
       ? Math.min(200, Math.floor(argsForObserve.max_items)) : 80;
     var includeOffscreenForObserve = argsForObserve.include_offscreen === true;
-    var nameFilterForObserve = (typeof argsForObserve.name_filter === 'string')
-      ? argsForObserve.name_filter.trim().toLowerCase() : '';
+    // include_covered: register occluded controls (tagged state.covered) instead of dropping them.
+    // Used by find_text so a hit can resolve to the real textbox/button under a sticky bar or
+    // modal clip. Default observe stays occlusion-filtered to avoid flooding with backdrop noise.
+    var includeCoveredForObserve = argsForObserve.include_covered === true;
+    var nameFilterRawForObserve = (typeof argsForObserve.name_filter === 'string')
+      ? argsForObserve.name_filter.trim() : '';
+    // Display string for notes (original casing/spacing). Matching uses lowercase alternatives;
+    // "|" separates alternatives the same way page_read find_text does (model often passes both).
+    var nameFilterForObserve = nameFilterRawForObserve ? nameFilterRawForObserve.toLowerCase() : '';
+    var nameFilterAltsForObserve = null;
+    if (nameFilterForObserve) {
+      nameFilterAltsForObserve = [];
+      var rawPartsForNameFilter = nameFilterRawForObserve.split('|');
+      if (rawPartsForNameFilter.length > 1) {
+        for (var altIdxForObserve = 0; altIdxForObserve < rawPartsForNameFilter.length; altIdxForObserve++) {
+          var altPartForObserve = rawPartsForNameFilter[altIdxForObserve].trim().toLowerCase();
+          if (altPartForObserve) nameFilterAltsForObserve.push(altPartForObserve);
+        }
+      }
+      if (!nameFilterAltsForObserve.length) nameFilterAltsForObserve = [nameFilterForObserve];
+    }
     // A name_filter is a targeted search for a specific control, so it implies scanning the whole
     // page, not just the viewport: otherwise a matching row far past the item cap would stay
     // invisible (the case that made a 754-item Gmail trash list unreachable through observe).
+    // Targeted filters also surface covered matches: synthetic page_act can still act on them.
     if (nameFilterForObserve) includeOffscreenForObserve = true;
 
-    // Landmarks (region/nav/main/...) are structural containers, not action targets: you cannot
-    // meaningfully click a region, and their concatenated innerText names are noise that invites a
-    // weak model to mis-pick. They belong to the read surface, not the observe/act surface.
-    var candidatesForObserve = collectInteractiveCandidatesForPageQuery().filter(function (candForFilter) {
-      return candForFilter.category !== 'landmarks';
-    });
-    var seenForObserve = new Set();
-    for (var sIdxForObserve = 0; sIdxForObserve < candidatesForObserve.length; sIdxForObserve++) {
-      seenForObserve.add(candidatesForObserve[sIdxForObserve].el);
+    // When a dialog/modal is open, its own controls are the surface the model is working on, so
+    // do not drop them from the default snapshot just because the occlusion hit-test marks them
+    // covered. A just-opened modal routinely reads as covered for a beat (this is how an Edit
+    // profile modal's Website field went missing from a landed observation, forcing extra probes).
+    // Background covered controls stay suppressed; name_filter / include_covered already surface
+    // covered controls, so this scoping only affects the default path.
+    var scopeDialogElsForObserve = (!includeCoveredForObserve && !nameFilterForObserve)
+      ? openDialogElementsForObserve() : null;
+    var hasOpenDialogForObserve = !!(scopeDialogElsForObserve && scopeDialogElsForObserve.length);
+    function isWithinOpenDialogForObserve(elForWithin) {
+      if (!hasOpenDialogForObserve) return false;
+      for (var dIdxForWithin = 0; dIdxForWithin < scopeDialogElsForObserve.length; dIdxForWithin++) {
+        var dlgForWithin = scopeDialogElsForObserve[dIdxForWithin];
+        if (dlgForWithin && dlgForWithin.contains && dlgForWithin.contains(elForWithin)) return true;
+      }
+      return false;
     }
-    var pointerCandidatesForObserve = collectPointerCandidatesForObserve(seenForObserve);
-    for (var ptrIdxForObserve = 0; ptrIdxForObserve < pointerCandidatesForObserve.length; ptrIdxForObserve++) {
-      candidatesForObserve.push(pointerCandidatesForObserve[ptrIdxForObserve]);
-    }
-    var focusableCandidatesForObserve = collectFocusableCardCandidatesForObserve(seenForObserve);
-    for (var focIdxForObserve = 0; focIdxForObserve < focusableCandidatesForObserve.length; focIdxForObserve++) {
-      candidatesForObserve.push(focusableCandidatesForObserve[focIdxForObserve]);
-    }
-    candidatesForObserve.sort(function (aForObserve, bForObserve) {
-      if (aForObserve.el === bForObserve.el) return 0;
-      var posForObserve = aForObserve.el.compareDocumentPosition(bForObserve.el);
-      return (posForObserve & Node.DOCUMENT_POSITION_PRECEDING) ? 1 : -1;
-    });
-    candidatesForObserve = dedupeObserveCandidatesForObserve(candidatesForObserve);
+
+    var candidatesForObserve = gatherObserveCandidatesForToolExec();
 
     var totalCandForObserve = candidatesForObserve.length;
     var visibleCountForObserve = 0;
@@ -2959,6 +3221,11 @@
     var coveredCountForObserve = 0;
     var eligibleForObserve = 0;
     var itemsForObserve = [];
+    var coveredReturnedForObserve = 0;
+    // How many returned controls live inside an open dialog. A landed observation taken while a
+    // just-opened modal is still rendering captures the dialog wrapper but zero of its controls;
+    // the service worker reads this to decide whether to re-observe once the modal has settled.
+    var dialogControlsReturnedForObserve = 0;
 
     var snapshotIdForObserve = resetObserveRegistryForToolExec();
 
@@ -2976,16 +3243,27 @@
       var inVpForObserve = isElementInViewportForPageQuery(elForObserve);
       if (inVpForObserve) inViewportCountForObserve++;
       if (!includeOffscreenForObserve && !inVpForObserve) continue;
-      if (isElementCoveredForObserve(elForObserve)) { coveredCountForObserve++; continue; }
+      var isCoveredForObserve = isElementCoveredForObserve(elForObserve);
+      if (isCoveredForObserve) coveredCountForObserve++;
 
       // With a name_filter, test the element's label before it consumes a slot, so the returned set
       // is only the matching controls even when they sit far past the item cap. Probe with a throwaway
-      // ref so a non-matching element never claims a stable ref number.
-      if (nameFilterForObserve) {
+      // ref so a non-matching element never claims a stable ref number. Matching covered controls are
+      // returned with state.covered:true so the model can try synthetic page_act without a scroll ritual.
+      if (nameFilterAltsForObserve) {
         var probeItemForObserve = buildObserveItemForToolExec(elForObserve, candForObserve.category, 0, inVpForObserve);
         var haystackForObserve = ((probeItemForObserve.name || '') + ' ' + (probeItemForObserve.value || '') + ' ' +
           (probeItemForObserve.placeholder || '') + ' ' + (probeItemForObserve.text || '')).toLowerCase();
-        if (haystackForObserve.indexOf(nameFilterForObserve) === -1) continue;
+        var matchedAltForObserve = false;
+        for (var aIdxForObserve = 0; aIdxForObserve < nameFilterAltsForObserve.length; aIdxForObserve++) {
+          if (haystackForObserve.indexOf(nameFilterAltsForObserve[aIdxForObserve]) !== -1) {
+            matchedAltForObserve = true;
+            break;
+          }
+        }
+        if (!matchedAltForObserve) continue;
+      } else if (isCoveredForObserve && !includeCoveredForObserve && !isWithinOpenDialogForObserve(elForObserve)) {
+        continue;
       }
       eligibleForObserve++;
       if (itemsForObserve.length >= maxItemsForObserve) continue;
@@ -2993,10 +3271,13 @@
       // Snapshot items are returned verbatim by page_observe and by page_act's post-action
       // snapshot, so every registered ref here is one the model sees. find_text suppresses most
       // items and narrows shownRefs afterward to only the refs it actually returns.
-      registerObserveItemForToolExec(elForObserve, candForObserve.category, inVpForObserve, itemsForObserve);
+      registerObserveItemForToolExec(
+        elForObserve, candForObserve.category, inVpForObserve, itemsForObserve, isCoveredForObserve);
+      if (isCoveredForObserve) coveredReturnedForObserve++;
+      if (hasOpenDialogForObserve && isWithinOpenDialogForObserve(elForObserve)) dialogControlsReturnedForObserve++;
     }
 
-    return {
+    var resultForObserve = {
       ok: true,
       snapshotId: snapshotIdForObserve,
       page: { title: document.title, url: window.location.href },
@@ -3010,6 +3291,34 @@
       },
       items: itemsForObserve
     };
+
+    // Surface the open-modal capture state so a landed observation can be retried when it caught
+    // the dialog wrapper but none of its controls (a modal still mid-render). Only set on the
+    // default path, where the dialog scope is computed.
+    if (hasOpenDialogForObserve) {
+      resultForObserve.open_dialog = true;
+      resultForObserve.open_dialog_controls = dialogControlsReturnedForObserve;
+    }
+
+    // An empty filtered result is the one case where silence is actively misleading: it looks
+    // identical whether the control is absent or named differently. Say which.
+    if (nameFilterForObserve && itemsForObserve.length === 0) {
+      resultForObserve.note = 'No control matched "' + nameFilterRawForObserve + '". The filter is a substring test over each ' +
+        'control\'s name, value, and placeholder ("|" separates alternatives, same as find_text), so try a shorter or more ' +
+        'distinctive fragment, or use page_read find_text to locate the surrounding text. ' + totalCandForObserve +
+        ' interactive controls were scanned, so the page is not empty.';
+    } else if (nameFilterForObserve && itemsForObserve.length > 0 && coveredReturnedForObserve === itemsForObserve.length) {
+      resultForObserve.note = 'Every matching control is listed with state.covered:true (something is stacked over its hit ' +
+        'target at the current scroll position). Synthetic page_act (click/type) usually still works on these refs; do NOT ' +
+        'close the dialog or modal you are working in to "clear" that. Trusted input is only used if synthetic fails and ' +
+        'the control is reachable after scrollIntoView.';
+    } else if (!nameFilterForObserve && hasOpenDialogForObserve && coveredReturnedForObserve > 0) {
+      resultForObserve.note = 'A dialog/modal is open, so its own controls are included here even where they read as ' +
+        'state.covered:true (a just-opened modal is briefly hit-tested as covered). Synthetic page_act (click/type) works ' +
+        'on these refs; do NOT dismiss the dialog to "clear" the covered flag.';
+    }
+
+    return resultForObserve;
   }
 
   async function pageObserveToolForToolExec(argsForObserveTool) {
@@ -3192,7 +3501,7 @@
 
   // Category-agnostic synthetic click with the same quiet-window diff the findPageElements
   // click uses, so it works on pointer-detected <div>s that fit no findPageElements category.
-  async function dispatchSyntheticClickForRefToolExec(elForClick, wantRightForClick) {
+  async function dispatchSyntheticClickForRefToolExec(elForClick, wantRightForClick, isCommitForClick) {
     var blockerForClick = checkClickableBlockerForPageQuery(elForClick);
     if (blockerForClick) return { ok: false, blocked: true, error: 'Cannot click: ' + blockerForClick };
     try { elForClick.scrollIntoView({ block: 'center', inline: 'center' }); } catch (eScrollClick) { /* ignore */ }
@@ -3224,12 +3533,20 @@
     var startForClick = Date.now();
     var lastCountForClick = mutationsForClick.length;
     var lastChangeForClick = Date.now();
+    var quietMsForClick = isCommitForClick ? CLICK_QUIET_COMMIT_MS_FOR_TOOL_EXEC : CLICK_QUIET_MS_FOR_TOOL_EXEC;
+    var capMsForClick = isCommitForClick ? CLICK_SETTLE_CAP_COMMIT_MS_FOR_TOOL_EXEC : CLICK_SETTLE_CAP_MS_FOR_TOOL_EXEC;
     await new Promise(function (resolveForClick) {
       (function tickForClick() {
         var nowForClick = Date.now();
         if (mutationsForClick.length !== lastCountForClick) { lastCountForClick = mutationsForClick.length; lastChangeForClick = nowForClick; }
-        if (nowForClick - startForClick >= 3000) return resolveForClick();
-        if (nowForClick - lastChangeForClick >= 300) return resolveForClick();
+        // The click navigated. Keep waiting for mutation quiet and we would be measuring the
+        // wrong document: an SPA route change churns continuously, so the quiet window is never
+        // satisfied and this runs to the hard cap. Meanwhile the service worker has already seen
+        // the navigation and is waiting on this reply to carry the commit evidence onto the
+        // navigated result, so a late reply is a dropped observation, not just a slow one.
+        if (window.location.href !== beforeSnapForClick.url) return resolveForClick();
+        if (nowForClick - startForClick >= capMsForClick) return resolveForClick();
+        if (nowForClick - lastChangeForClick >= quietMsForClick) return resolveForClick();
         setTimeout(tickForClick, 50);
       })();
     });
@@ -3261,17 +3578,56 @@
     return { ok: !dispatchErrForClick, changed: changedForClick, dispatch_error: dispatchErrForClick };
   }
 
+  // Before trusted/CDP escalation: scrollIntoView, then re-run the occlusion hit-test. Coordinate
+  // clicks hit whatever is topmost; skip trusted when something else still covers the target and
+  // say so explicitly (do not key this off a stale observe-time covered flag).
+  function describeCoveringSurfaceLabelForToolExec(elForCoverLabel) {
+    if (!elForCoverLabel || typeof document === 'undefined' || typeof document.elementFromPoint !== 'function') return '';
+    var rectForCoverLabel = elForCoverLabel.getBoundingClientRect ? elForCoverLabel.getBoundingClientRect() : null;
+    if (!rectForCoverLabel || rectForCoverLabel.width <= 0 || rectForCoverLabel.height <= 0) return '';
+    var cxForCoverLabel = rectForCoverLabel.left + rectForCoverLabel.width / 2;
+    var cyForCoverLabel = rectForCoverLabel.top + rectForCoverLabel.height / 2;
+    var topForCoverLabel = null;
+    try { topForCoverLabel = document.elementFromPoint(cxForCoverLabel, cyForCoverLabel); } catch (eCoverLabel) { return ''; }
+    if (!topForCoverLabel || topForCoverLabel === elForCoverLabel) return '';
+    if (elForCoverLabel.contains && elForCoverLabel.contains(topForCoverLabel)) return '';
+    if (topForCoverLabel.contains && topForCoverLabel.contains(elForCoverLabel)) return '';
+    var descForCoverLabel = describeElementForPageActForToolExec(topForCoverLabel);
+    if (!descForCoverLabel) return '';
+    return descForCoverLabel.aria_label || descForCoverLabel.text || descForCoverLabel.role || descForCoverLabel.tag || '';
+  }
+
+  function ensureTrustedTargetReachableForToolExec(elForReach) {
+    if (!elForReach) return { ok: true };
+    try { elForReach.scrollIntoView({ block: 'center', inline: 'center' }); } catch (eReachScroll) { /* ignore */ }
+    if (!isElementCoveredForObserve(elForReach)) return { ok: true };
+    var coverLabelForReach = describeCoveringSurfaceLabelForToolExec(elForReach);
+    return {
+      ok: false,
+      error: 'Trusted input was not attempted because after scrolling into view the control is still covered'
+        + (coverLabelForReach ? ' (topmost: "' + coverLabelForReach + '")' : '')
+        + '. Synthetic DOM actions may still work; if you need trusted input, dismiss the covering overlay or bring the control into the visible area of its dialog, then retry.'
+    };
+  }
+
   async function performRefClickForToolExec(elForClick, descriptorForClick, argsForClick, contextForClick) {
     var destructiveForClick = describesDestructiveTargetForToolExec(describeElementForPageActForToolExec(elForClick));
     if (destructiveForClick && argsForClick.confirm !== true) {
       return { ok: false, error: 'Refusing to click "' + destructiveForClick + '": it reads as a destructive action, and nothing was dispatched. If the user asked to do exactly this, re-issue with confirm: true.' };
     }
     var wantRightForClick = argsForClick.button === 'right';
-    var synthForClick = await dispatchSyntheticClickForRefToolExec(elForClick, wantRightForClick);
+    // A right-click opens a context menu; it never commits, so it keeps the ordinary settle.
+    var isCommitClickForClick = !wantRightForClick &&
+      looksLikeCommitClickForToolExec('click', descriptorForClick, elForClick);
+    var synthForClick = await dispatchSyntheticClickForRefToolExec(elForClick, wantRightForClick, isCommitClickForClick);
     if (synthForClick.blocked) return { ok: false, error: synthForClick.error };
     if (synthForClick.changed) return { ok: true, summary: 'clicked (synthetic); page reacted' };
     if (!elLooksClickableWidgetForToolExec(elForClick, descriptorForClick)) {
       return { ok: true, summary: 'clicked (synthetic); no observable change' };
+    }
+    var reachForClick = ensureTrustedTargetReachableForToolExec(elForClick);
+    if (!reachForClick.ok) {
+      return { ok: false, error: 'Synthetic click produced no observable change. ' + reachForClick.error };
     }
     var prepForClick = await prepareTrustedDelegationForToolExec(contextForClick);
     if (!prepForClick.ok) return { ok: false, consent_required: true, error: prepForClick.error };
@@ -3282,7 +3638,11 @@
       confirm_destructive: argsForClick.confirm === true
     }, contextForClick);
     if (trustedForClick && trustedForClick.ok) return { ok: true, summary: 'clicked (trusted, escalated after synthetic no-op)' };
-    return { ok: false, error: (trustedForClick && trustedForClick.error) ? trustedForClick.error : 'Click failed.' };
+    return {
+      ok: false,
+      error: 'Synthetic click produced no observable change. Trusted click failed: '
+        + ((trustedForClick && trustedForClick.error) ? trustedForClick.error : 'Click failed.')
+    };
   }
 
   // Synthetic fill failures that CDP keystrokes cannot fix (wrong tool, blocked, or
@@ -3334,6 +3694,10 @@
     if (!shouldEscalateTypeToTrustedForToolExec(fillResForType)) {
       return { ok: false, error: reasonForType };
     }
+    var reachForType = ensureTrustedTargetReachableForToolExec(elForType);
+    if (!reachForType.ok) {
+      return { ok: false, error: 'Synthetic fill failed (' + reasonForType + '). ' + reachForType.error };
+    }
     var prepForType = await prepareTrustedDelegationForToolExec(contextForType);
     if (!prepForType.ok) return { ok: false, consent_required: true, error: prepForType.error };
     var focusForType = await pageActToolForToolExec({
@@ -3344,7 +3708,7 @@
     if (!focusForType || !focusForType.ok) {
       return {
         ok: false,
-        error: 'Synthetic fill failed (' + reasonForType + '), and trusted focus click also failed: '
+        error: 'Synthetic fill failed (' + reasonForType + '). Trusted focus click failed: '
           + ((focusForType && focusForType.error) ? focusForType.error : 'click failed')
       };
     }
@@ -3375,9 +3739,8 @@
     if (!trustedForType || !trustedForType.ok) {
       return {
         ok: false,
-        error: 'Trusted typing failed after synthetic fill no-op: '
+        error: 'Synthetic fill failed (' + reasonForType + '). Trusted typing failed: '
           + ((trustedForType && trustedForType.error) ? trustedForType.error : 'type failed')
-          + ' (synthetic: ' + reasonForType + ')'
       };
     }
     // Verify against what the trusted path actually typed: the type action normalizes
@@ -3529,12 +3892,17 @@
     if (selResForSelect && selResForSelect.ok && selResForSelect.committed !== false) {
       return { ok: true, summary: 'selected "' + argsForSelect.option + '"' };
     }
+    var synthSelectReasonForSelect = (selResForSelect && selResForSelect.error)
+      ? selResForSelect.error
+      : 'Could not select that option.';
     if (!shouldEscalateSelectToTrustedForToolExec(selResForSelect)) {
+      return { ok: false, error: synthSelectReasonForSelect };
+    }
+    var reachForSelect = ensureTrustedTargetReachableForToolExec(elForSelect);
+    if (!reachForSelect.ok) {
       return {
         ok: false,
-        error: (selResForSelect && selResForSelect.error)
-          ? selResForSelect.error
-          : 'Could not select that option.'
+        error: 'Synthetic select failed (' + synthSelectReasonForSelect + '). ' + reachForSelect.error
       };
     }
     var prepForSelect = await prepareTrustedDelegationForToolExec(contextForSelect);
@@ -3549,9 +3917,8 @@
     if (!openForSelect || !openForSelect.ok) {
       return {
         ok: false,
-        error: 'Could not open the dropdown with trusted input: '
+        error: 'Synthetic select failed (' + synthSelectReasonForSelect + '). Trusted open failed: '
           + ((openForSelect && openForSelect.error) ? openForSelect.error : 'click failed')
-          + ((selResForSelect && selResForSelect.error) ? ' (synthetic: ' + selResForSelect.error + ')' : '')
       };
     }
 
@@ -3583,9 +3950,10 @@
     }
     return {
       ok: false,
-      error: (retryForSelect && retryForSelect.error)
-        ? retryForSelect.error
-        : ((selResForSelect && selResForSelect.error) ? selResForSelect.error : 'Could not select that option.')
+      error: 'Synthetic select failed (' + synthSelectReasonForSelect + '). Trusted select failed: '
+        + ((retryForSelect && retryForSelect.error)
+          ? retryForSelect.error
+          : 'Could not select that option.')
     };
   }
 
@@ -3651,31 +4019,305 @@
     return { ok: false, error: (resForDrag && resForDrag.error) ? resForDrag.error : 'Drag failed.' };
   }
 
+  // ================= page-action DOM telemetry (L2 + L3) =================
+  //
+  // Always-on capture around page_act so a failed or surprising action can be reconstructed from
+  // stored records (and reviewed by an LLM) without reproducing it. L1 (identity + args + the exact
+  // result the model saw) is the envelope; L2 is an uncapped, unfiltered enumeration of every
+  // interactive element tagged with whether the model actually saw it and, if not, why; L3 is scoped
+  // outerHTML captured only when the action looks suspicious. Values are masked (the acted element is
+  // exempt); accessible names are kept in full by design. Every write is fire-and-forget and wrapped:
+  // telemetry must never throw into or slow the act path (the deferred t2 sample runs out of band).
+
+  var T2_VITALS_DELAY_MS_FOR_TELEMETRY = 1000;
+  var L3_FRAGMENT_CAP_FOR_TELEMETRY = 32 * 1024;
+  var ACTED_VALUE_CAP_FOR_TELEMETRY = 200;
+  // autocomplete tokens whose values are financial; never recorded, even masked-shape.
+  var PAYMENT_AUTOCOMPLETE_TOKENS_FOR_TELEMETRY = {
+    'cc-number': 1, 'cc-exp': 1, 'cc-exp-month': 1, 'cc-exp-year': 1,
+    'cc-csc': 1, 'cc-name': 1, 'cc-given-name': 1, 'cc-family-name': 1, 'cc-type': 1
+  };
+
+  // Length + coarse character class of a field value, so "did this field have content and roughly
+  // what kind" survives without retaining the content itself.
+  function maskShapeForPageActionTelemetry(valForShape) {
+    var sForShape = String(valForShape);
+    var clsForShape = 'text';
+    if (/^\d+$/.test(sForShape)) clsForShape = 'digits';
+    else if (/^[A-Za-z0-9]+$/.test(sForShape)) clsForShape = 'alnum';
+    else if (/\s/.test(sForShape)) clsForShape = 'mixed';
+    return '<masked len=' + sForShape.length + ' ' + clsForShape + '>';
+  }
+
+  // Value treatment per the privacy posture: passwords omitted entirely; payment fields omitted;
+  // the acted element keeps its real (bounded) value because "did the typed value stick" is the
+  // whole diagnostic question; everything else is masked to shape. Returns null when there is no
+  // value worth recording (non-input controls).
+  function maskFieldValueForPageActionTelemetry(elForMask, isActedForMask) {
+    var rawValForMask = (elForMask && typeof elForMask.value === 'string') ? elForMask.value : '';
+    if (rawValForMask === '' || rawValForMask == null) return null;
+    var tagForMask = elForMask.tagName;
+    var typeAttrForMask = (elForMask.getAttribute && (elForMask.getAttribute('type') || '')).toLowerCase();
+    if (tagForMask === 'INPUT' && typeAttrForMask === 'password') return '<password omitted>';
+    var autocForMask = (elForMask.getAttribute && (elForMask.getAttribute('autocomplete') || '')).toLowerCase().trim();
+    if (autocForMask && PAYMENT_AUTOCOMPLETE_TOKENS_FOR_TELEMETRY[autocForMask]) return '<payment field omitted>';
+    if (isActedForMask) return String(rawValForMask).slice(0, ACTED_VALUE_CAP_FOR_TELEMETRY);
+    return maskShapeForPageActionTelemetry(rawValForMask);
+  }
+
+  // Cheap page vitals for the t0 / t2 samples: URL, title, open dialogs, acted-element connectivity,
+  // and the raw interactive-candidate count. Deliberately avoids the per-element visibility/coverage
+  // hit-testing that the full L2 sample does, so it can be taken twice more without tripling layout.
+  function buildVitalsStripForPageActionTelemetry(actedElForVitals) {
+    var dialogsForVitals = [];
+    try { dialogsForVitals = snapshotOpenDialogsForPageQuery(); } catch (eDialogsForVitals) { dialogsForVitals = []; }
+    var candCountForVitals = 0;
+    try { candCountForVitals = collectInteractiveCandidatesForPageQuery().length; } catch (eCandForVitals) { candCountForVitals = 0; }
+    return {
+      url: (typeof location !== 'undefined') ? location.href : '',
+      title: (typeof document !== 'undefined') ? document.title : '',
+      open_dialog_count: dialogsForVitals.length,
+      open_dialogs: dialogsForVitals.slice(0, 5),
+      acted_connected: !!(actedElForVitals && actedElForVitals.isConnected),
+      interactive_total: candCountForVitals
+    };
+  }
+
+  // Why an element that the builder considered did not reach the model-facing list. Mirrors the four
+  // hypotheses the incident could not distinguish: not rendered, occluded, scrolled away, or eligible
+  // but dropped by the cap / centered band.
+  function classifyNotShownReasonForPageActionTelemetry(visibleForReason, inViewportForReason, coveredForReason) {
+    if (!visibleForReason) return 'not_visible';
+    if (coveredForReason) return 'covered';
+    if (!inViewportForReason) return 'offscreen';
+    return 'outside_window';
+  }
+
+  // The L2 sample: enumerate every interactive candidate (the same population the snapshot builder
+  // uses) and, for each, record what the builder decided about it. "shown_to_model" is ground truth
+  // read from the live observe registry the model was just handed (a ref present in shownRefs), not a
+  // re-derivation. Runs at t1, the moment the model's own snapshot was built, so registry and page agree.
+  function buildL2SnapshotForPageActionTelemetry(actedElForL2) {
+    var startedAtForL2 = Date.now();
+    var refMapForL2 = buildRegistryElementRefMapForToolExec();
+    var shownSetForL2 = observeRegistryForToolExec.shownRefs || new Set();
+    var candidatesForL2 = gatherObserveCandidatesForToolExec();
+    var rowsForL2 = [];
+    var visibleForL2 = 0, inVpForL2 = 0, coveredForL2 = 0, shownForL2 = 0;
+    for (var iForL2 = 0; iForL2 < candidatesForL2.length; iForL2++) {
+      var elForL2 = candidatesForL2[iForL2].el;
+      var categoryForL2 = candidatesForL2[iForL2].category;
+      var visForL2 = isElementVisibleForPageQuery(elForL2);
+      var vpForL2 = visForL2 && isElementInViewportForPageQuery(elForL2);
+      var covForL2 = visForL2 && isElementCoveredForObserve(elForL2);
+      if (visForL2) visibleForL2++;
+      if (vpForL2) inVpForL2++;
+      if (covForL2) coveredForL2++;
+      var refForL2 = refMapForL2.has(elForL2) ? refMapForL2.get(elForL2) : null;
+      var shownForRowL2 = refForL2 != null && shownSetForL2.has(refForL2);
+      if (shownForRowL2) shownForL2++;
+      var itemForL2 = null;
+      try { itemForL2 = buildObserveItemForToolExec(elForL2, categoryForL2, refForL2 == null ? 0 : refForL2, vpForL2); } catch (eItemForL2) { itemForL2 = null; }
+      var rowForL2 = {
+        ref: refForL2,
+        role: itemForL2 ? (itemForL2.role || '') : '',
+        name: itemForL2 ? (itemForL2.name || itemForL2.text || '') : '',
+        category: categoryForL2,
+        visible: visForL2,
+        in_viewport: vpForL2,
+        covered: covForL2,
+        shown_to_model: shownForRowL2
+      };
+      if (itemForL2 && itemForL2._selector) rowForL2.selector = itemForL2._selector;
+      var maskedValForL2 = maskFieldValueForPageActionTelemetry(elForL2, elForL2 === actedElForL2);
+      if (maskedValForL2 != null) rowForL2.value = maskedValForL2;
+      if (!shownForRowL2) rowForL2.not_shown_reason = classifyNotShownReasonForPageActionTelemetry(visForL2, vpForL2, covForL2);
+      rowsForL2.push(rowForL2);
+    }
+    return {
+      capture_ms: Date.now() - startedAtForL2,
+      total: rowsForL2.length,
+      visible: visibleForL2,
+      in_viewport: inVpForL2,
+      covered: coveredForL2,
+      shown_to_model: shownForL2,
+      elements: rowsForL2
+    };
+  }
+
+  // outerHTML of one element, capped with an explicit truncation marker so a single pathological
+  // dialog cannot blow the record.
+  function captureHtmlFragmentForPageActionTelemetry(elForFrag) {
+    if (!elForFrag || typeof elForFrag.outerHTML !== 'string') return null;
+    var htmlForFrag = '';
+    try { htmlForFrag = String(elForFrag.outerHTML); } catch (eFrag) { return null; }
+    var truncatedForFrag = false;
+    if (htmlForFrag.length > L3_FRAGMENT_CAP_FOR_TELEMETRY) {
+      htmlForFrag = htmlForFrag.slice(0, L3_FRAGMENT_CAP_FOR_TELEMETRY);
+      truncatedForFrag = true;
+    }
+    return { html: htmlForFrag, truncated: truncatedForFrag };
+  }
+
+  // Outermost visible dialog/menu elements, mirroring snapshotOpenDialogsForPageQuery's node
+  // selection, so L3 can capture their markup (that helper returns descriptors, not elements).
+  function collectOpenDialogElementsForPageActionTelemetry() {
+    var elementsForDlg = [];
+    var nodesForDlg;
+    try { nodesForDlg = document.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"], [role="menu"]'); }
+    catch (eNodesForDlg) { return elementsForDlg; }
+    var visibleForDlg = [];
+    for (var iForDlg = 0; iForDlg < nodesForDlg.length; iForDlg++) {
+      if (isElementVisibleForPageQuery(nodesForDlg[iForDlg])) visibleForDlg.push(nodesForDlg[iForDlg]);
+    }
+    for (var oForDlg = 0; oForDlg < visibleForDlg.length; oForDlg++) {
+      var nestedForDlg = false;
+      for (var pForDlg = 0; pForDlg < visibleForDlg.length; pForDlg++) {
+        if (pForDlg === oForDlg) continue;
+        if (visibleForDlg[pForDlg].contains && visibleForDlg[pForDlg].contains(visibleForDlg[oForDlg])) { nestedForDlg = true; break; }
+      }
+      if (!nestedForDlg) elementsForDlg.push(visibleForDlg[oForDlg]);
+      if (elementsForDlg.length >= 5) break;
+    }
+    return elementsForDlg;
+  }
+
+  // Scoped raw HTML for a suspicious action: the acted element, up to three ancestors (widening
+  // context; each capped independently so the acted markup survives even when an ancestor truncates),
+  // and every open dialog.
+  function buildL3FragmentsForPageActionTelemetry(actedElForL3) {
+    var fragsForL3 = { acted: null, ancestors: [], dialogs: [] };
+    if (actedElForL3) {
+      fragsForL3.acted = captureHtmlFragmentForPageActionTelemetry(actedElForL3);
+      var ancForL3 = actedElForL3.parentElement;
+      var hopsForL3 = 0;
+      while (ancForL3 && hopsForL3 < 3) {
+        var ancFragForL3 = captureHtmlFragmentForPageActionTelemetry(ancForL3);
+        if (ancFragForL3) fragsForL3.ancestors.push(ancFragForL3);
+        ancForL3 = ancForL3.parentElement;
+        hopsForL3++;
+      }
+    }
+    var dialogElsForL3 = collectOpenDialogElementsForPageActionTelemetry();
+    for (var dForL3 = 0; dForL3 < dialogElsForL3.length; dForL3++) {
+      var dlgFragForL3 = captureHtmlFragmentForPageActionTelemetry(dialogElsForL3[dForL3]);
+      if (dlgFragForL3) fragsForL3.dialogs.push(dlgFragForL3);
+    }
+    return fragsForL3;
+  }
+
+  // A page_act outcome worth the extra L3 capture: any failure/stale, a partial (truncated) window,
+  // an acted node that vanished, or a commit-like click that left the dialog state unchanged. These
+  // are exactly the conditions under which the post-act snapshot is ambiguous.
+  function isSuspiciousActForPageActionTelemetry(resultForSus, telemetryForSus) {
+    if (!resultForSus) return true;
+    if (resultForSus.ok === false) return true;
+    if (resultForSus.stale_ref) return true;
+    if (resultForSus.truncated === true) return true;
+    if (resultForSus.acted && resultForSus.acted.still_connected === false) return true;
+    if (telemetryForSus && telemetryForSus.commitLikeNoDialogChange) return true;
+    return false;
+  }
+
+  function createPageActionTelemetryCollectorForToolExec(toolNameForColl, argsForColl, contextForColl) {
+    return {
+      tool: toolNameForColl,
+      args: argsForColl || {},
+      context: contextForColl || {},
+      startedAt: Date.now(),
+      startedAtIso: new Date().toISOString(),
+      actedEl: null,
+      resolveOutcome: null,
+      commitLikeNoDialogChange: false,
+      t0: null,
+      t1: null
+    };
+  }
+
+  // Assemble and write the page-action record. When a post-action snapshot was taken (t1 present),
+  // the t2 vitals are captured one second later, out of band, so the model is never made to wait on
+  // telemetry; otherwise (early returns) the record is written immediately. L3 is attached here,
+  // once the result is known, so suspicion can be judged from the actual outcome.
+  function finishPageActionTelemetryForToolExec(telemetryForFinish, resultForFinish) {
+    try {
+      var loggerForFinish = (globalThis.ABChatContent || {}).pageActionLogger;
+      if (!loggerForFinish || typeof loggerForFinish.writeLog !== 'function') return;
+      var ctxForFinish = telemetryForFinish.context || {};
+      var actedElForFinish = telemetryForFinish.actedEl;
+      var l3ForFinish = null;
+      if (isSuspiciousActForPageActionTelemetry(resultForFinish, telemetryForFinish)) {
+        try { l3ForFinish = buildL3FragmentsForPageActionTelemetry(actedElForFinish); } catch (eL3ForFinish) { l3ForFinish = null; }
+      }
+      var writeWithT2ForFinish = function (t2ForWrite) {
+        try {
+          var recordForFinish = {
+            schema: 2,
+            tool: telemetryForFinish.tool,
+            runId: ctxForFinish.runId != null ? ctxForFinish.runId : null,
+            chatId: ctxForFinish.chatId != null ? Number(ctxForFinish.chatId) : null,
+            toolCallId: ctxForFinish.toolCallId != null ? ctxForFinish.toolCallId : null,
+            iteration: ctxForFinish.iteration != null ? ctxForFinish.iteration : null,
+            timestamp: telemetryForFinish.startedAtIso,
+            totalLatencyMs: Date.now() - telemetryForFinish.startedAt,
+            resolve_outcome: telemetryForFinish.resolveOutcome,
+            args: telemetryForFinish.args || {},
+            result: resultForFinish || null,
+            samples: { t0: telemetryForFinish.t0, t1: telemetryForFinish.t1, t2: t2ForWrite || null },
+            l3: l3ForFinish
+          };
+          loggerForFinish.writeLog(recordForFinish).catch(function () {});
+        } catch (eWriteForFinish) { /* never throw */ }
+      };
+      if (telemetryForFinish.t1 && actedElForFinish) {
+        setTimeout(function () {
+          var t2ForDefer = null;
+          try { t2ForDefer = buildVitalsStripForPageActionTelemetry(actedElForFinish); } catch (eT2ForDefer) { t2ForDefer = null; }
+          writeWithT2ForFinish(t2ForDefer);
+        }, T2_VITALS_DELAY_MS_FOR_TELEMETRY);
+      } else {
+        writeWithT2ForFinish(null);
+      }
+    } catch (eFinishOuter) { /* telemetry must never throw into the tool path */ }
+  }
+
   async function pageActRefToolForToolExec(argsForAct, contextForAct) {
+    var telemetryForAct = createPageActionTelemetryCollectorForToolExec('page_act', argsForAct || {}, contextForAct);
+    function returnActForToolExec(resultForReturn) {
+      finishPageActionTelemetryForToolExec(telemetryForAct, resultForReturn);
+      return resultForReturn;
+    }
     argsForAct = argsForAct || {};
     var actionForAct = (typeof argsForAct.action === 'string') ? argsForAct.action.trim().toLowerCase() : '';
     var VALID_ACTIONS_FOR_ACT = { click: 1, type: 1, select: 1, hover: 1, scroll: 1, press: 1, drag: 1 };
     if (!VALID_ACTIONS_FOR_ACT[actionForAct]) {
-      return { ok: false, error: 'page_act: unknown action "' + actionForAct + '". Use one of: click, type, select, hover, scroll, press, drag.' };
+      return returnActForToolExec({ ok: false, error: 'page_act: unknown action "' + actionForAct + '". Use one of: click, type, select, hover, scroll, press, drag.' });
     }
-    if (typeof document === 'undefined' || !document.body) return { ok: false, error: 'No document body available.' };
+    if (typeof document === 'undefined' || !document.body) return returnActForToolExec({ ok: false, error: 'No document body available.' });
 
     // press acts on whatever holds focus; scroll may be a page scroll; both can omit a ref.
+    // Models often pass ref:0 to mean "no ref" for page scroll; treat 0 like omit for scroll only.
     // drag resolves its own two refs. Every other action targets a single ref.
-    var refOptionalForAct = (actionForAct === 'press') || (actionForAct === 'scroll' && argsForAct.ref == null) || (actionForAct === 'drag');
+    var effectiveRefForAct = argsForAct.ref;
+    if (actionForAct === 'scroll' && (effectiveRefForAct === 0 || effectiveRefForAct === '0')) {
+      effectiveRefForAct = null;
+    }
+    var refOptionalForAct = (actionForAct === 'press') || (actionForAct === 'scroll' && effectiveRefForAct == null) || (actionForAct === 'drag');
     var resolvedForAct = null;
     if (!refOptionalForAct) {
-      if (argsForAct.ref == null) {
-        return { ok: false, error: 'page_act ' + actionForAct + ' requires a ref from the latest page_observe. Call page_observe first, then act on a ref number.' };
+      if (effectiveRefForAct == null) {
+        return returnActForToolExec({ ok: false, error: 'page_act ' + actionForAct + ' requires a ref from the latest page_observe. Call page_observe first, then act on a ref number.' });
       }
-      resolvedForAct = resolveObserveRefForToolExec(argsForAct.ref);
+      resolvedForAct = resolveObserveRefForToolExec(effectiveRefForAct);
+      telemetryForAct.resolveOutcome = resolvedForAct.ok
+        ? 'ok'
+        : (resolvedForAct.not_shown ? 'not_shown' : (resolvedForAct.unknown ? 'unknown' : 'stale'));
       if (!resolvedForAct.ok) {
         var freshForStale = finalizeObserveSnapshotForToolExec(buildObserveSnapshotForToolExec({}));
         var reasonForStale = resolvedForAct.not_shown
-          ? 'Ref ' + argsForAct.ref + ' was not one of the refs returned to you in the latest page_observe or page_read find_text result, so it cannot be acted on. Do not guess or offset a ref: act only on a ref that appeared in the most recent result.'
+          ? 'Ref ' + effectiveRefForAct + ' was not one of the refs returned to you in the latest page_observe or page_read find_text result, so it cannot be acted on. Do not guess or offset a ref: act only on a ref that appeared in the most recent result.'
           : resolvedForAct.unknown
-            ? 'Ref ' + argsForAct.ref + ' is not in the current snapshot.'
-            : 'Ref ' + argsForAct.ref + ' is no longer on the page (it changed or was removed).';
+            ? 'Ref ' + effectiveRefForAct + ' is not in the current snapshot.'
+            : 'Ref ' + effectiveRefForAct + ' is no longer on the page (it changed or was removed).';
         var staleResultForAct = {
           ok: false, stale_ref: true,
           error: reasonForStale + ' Here is the current page; pick a ref from it.',
@@ -3684,13 +4326,17 @@
         };
         if (freshForStale.items) staleResultForAct.items = freshForStale.items;
         if (freshForStale.text != null) staleResultForAct.text = freshForStale.text;
-        return staleResultForAct;
+        return returnActForToolExec(staleResultForAct);
       }
     }
 
     var preSigForAct = capturePreActSignatureForToolExec();
+    var preDialogsForAct = [];
+    try { preDialogsForAct = snapshotOpenDialogsForPageQuery(); } catch (ePreDialogsForAct) { preDialogsForAct = []; }
+    var preUrlForAct = (typeof location !== 'undefined') ? location.href : '';
     var elForAct = resolvedForAct ? resolvedForAct.el : null;
     var descriptorForAct = resolvedForAct ? resolvedForAct.descriptor : null;
+    telemetryForAct.actedEl = elForAct;
     var effectForAct = null;
 
     try {
@@ -3719,9 +4365,31 @@
       };
     }
 
+    // t0: page vitals immediately after dispatch, before the commit settle. Shows the direction of
+    // travel (e.g. dialog still up right after the click) against the t1 sample taken after settle.
+    try { telemetryForAct.t0 = buildVitalsStripForPageActionTelemetry(elForAct); } catch (eT0ForAct) { telemetryForAct.t0 = null; }
+
     if (effectForAct && effectForAct.consent_required) {
-      return { ok: false, consent_required: true, error: effectForAct.error || 'This action needs advanced automation; a permission prompt was opened. Approve it, then retry.' };
+      return returnActForToolExec({ ok: false, consent_required: true, error: effectForAct.error || 'This action needs advanced automation; a permission prompt was opened. Approve it, then retry.' });
     }
+
+    // Extra settle for a commit-like click that had a dialog open: the action's own quiet window
+    // ends while the commit's request is still in flight, so without this the modal always reads
+    // as still open. Exits as soon as the count drops (or the page navigates), so the cap is only
+    // paid when the dialog genuinely stays put.
+    if (preDialogsForAct.length && looksLikeCommitClickForToolExec(actionForAct, descriptorForAct, elForAct)) {
+      try { await waitForDialogCloseForToolExec(preDialogsForAct.length, preUrlForAct); } catch (eDialogSettleForAct) { /* best effort */ }
+    }
+
+    // Both post-act reads happen after the action's settle window, so the dialog state and the
+    // snapshot describe the same moment.
+    var postDialogsForAct = [];
+    try { postDialogsForAct = snapshotOpenDialogsForPageQuery(); } catch (ePostDialogsForAct) { postDialogsForAct = []; }
+    var actedStillConnectedForAct = !!(elForAct && elForAct.isConnected);
+    // A commit-like click that left the dialog state unchanged is a prime "did it actually commit?"
+    // ambiguity; flag it so the finisher captures L3 for review.
+    telemetryForAct.commitLikeNoDialogChange = looksLikeCommitClickForToolExec(actionForAct, descriptorForAct, elForAct)
+      && preDialogsForAct.length > 0 && postDialogsForAct.length >= preDialogsForAct.length;
 
     var postSnapForAct = null;
     try {
@@ -3729,7 +4397,7 @@
       // checkbox now checked far down a list) is visible inline. The centered builder tags new/changed
       // itself, so markSnapshotDelta is only needed on the non-centered fallback (press/scroll without
       // a ref, drag, or an acted element that was removed/navigated by the action).
-      var canCenterForAct = !!(elForAct && elForAct.isConnected);
+      var canCenterForAct = actedStillConnectedForAct;
       if (canCenterForAct) {
         postSnapForAct = buildObserveSnapshotForToolExec({ center_el: elForAct, pre_sig_map: preSigForAct });
       } else {
@@ -3741,6 +4409,15 @@
       postSnapForAct = { snapshotId: observeRegistryForToolExec.snapshotId || 0, page: { title: (typeof document !== 'undefined' ? document.title : ''), url: (typeof location !== 'undefined' ? location.href : '') }, counts: {}, items: [] };
     }
 
+    // t1: the full L2 sample, taken now (right after finalize) so it reads the exact registry the
+    // model was just handed — "shown_to_model" is then literally the set of refs the model can act on.
+    try {
+      telemetryForAct.t1 = {
+        vitals: buildVitalsStripForPageActionTelemetry(elForAct),
+        l2: buildL2SnapshotForPageActionTelemetry(elForAct)
+      };
+    } catch (eT1ForAct) { telemetryForAct.t1 = null; }
+
     var okForAct = effectForAct ? (effectForAct.ok !== false) : true;
     var resultForAct = {
       ok: okForAct,
@@ -3750,10 +4427,24 @@
       page: postSnapForAct.page,
       counts: postSnapForAct.counts
     };
+    // Window honesty: the builders already know whether the returned list is partial, but the act
+    // result used to drop it, so a field missing from a capped window read as "gone from the page".
+    if (typeof postSnapForAct.returned === 'number') resultForAct.returned = postSnapForAct.returned;
+    if (postSnapForAct.truncated != null) resultForAct.truncated = !!postSnapForAct.truncated;
+
+    // What happened to the control we acted on. A commit button that is gone from the DOM is a
+    // far stronger signal than anything in the item list.
+    if (resolvedForAct) {
+      resultForAct.acted = { ref: Number(argsForAct.ref), still_connected: actedStillConnectedForAct };
+    }
+
+    var dialogsForAct = diffOpenDialogsForToolExec(preDialogsForAct, postDialogsForAct);
+    if (dialogsForAct) resultForAct.dialogs = dialogsForAct;
+
     if (postSnapForAct.items) resultForAct.items = postSnapForAct.items;
     if (postSnapForAct.text != null) resultForAct.text = postSnapForAct.text;
     if (!okForAct && effectForAct && effectForAct.error) resultForAct.error = effectForAct.error;
-    return resultForAct;
+    return returnActForToolExec(resultForAct);
   }
 
   // Class-name regex for the inferred-widget heuristic. Matches the keyword as a
@@ -3978,7 +4669,7 @@
   // Roles worth handing back as a directly actionable control inside a container row.
   var FIND_TEXT_CONTROL_ROLES_FOR_TOOL_EXEC = {
     checkbox: 1, button: 1, switch: 1, link: 1, menuitem: 1, menuitemcheckbox: 1, menuitemradio: 1,
-    tab: 1, radio: 1, textbox: 1
+    tab: 1, radio: 1, textbox: 1, searchbox: 1, combobox: 1, select: 1, spinbutton: 1
   };
 
   // Resolve a control element to a ref, promoting it into the live registry when it is not already
@@ -3989,12 +4680,24 @@
     if (refMapForEnsure.has(ctrlElForEnsure)) return refMapForEnsure.get(ctrlElForEnsure);
     var nextRefForEnsure = stableRefForElementToolExec(ctrlElForEnsure);
     var inVpForEnsure = isElementInViewportForPageQuery(ctrlElForEnsure);
-    var itemForEnsure = buildObserveItemForToolExec(ctrlElForEnsure, 'custom_elements', nextRefForEnsure, inVpForEnsure);
+    // Form fields need the form_fields label path (associated <label> / aria-labelledby); treating
+    // them as custom_elements made Website/Name promote with empty or chrome-concatenated names.
+    var tagForEnsure = (ctrlElForEnsure.tagName || '').toLowerCase();
+    var roleAttrForEnsure = '';
+    try { roleAttrForEnsure = String((ctrlElForEnsure.getAttribute && ctrlElForEnsure.getAttribute('role')) || '').toLowerCase(); }
+    catch (eEnsureRole) { roleAttrForEnsure = ''; }
+    var categoryForEnsure = 'custom_elements';
+    if (tagForEnsure === 'input' || tagForEnsure === 'textarea' || tagForEnsure === 'select' ||
+        roleAttrForEnsure === 'textbox' || roleAttrForEnsure === 'searchbox' ||
+        roleAttrForEnsure === 'combobox' || roleAttrForEnsure === 'spinbutton') {
+      categoryForEnsure = 'form_fields';
+    }
+    var itemForEnsure = buildObserveItemForToolExec(ctrlElForEnsure, categoryForEnsure, nextRefForEnsure, inVpForEnsure);
     observeRegistryForToolExec.refs[nextRefForEnsure] = {
       el: ctrlElForEnsure,
       selector: itemForEnsure._selector,
       fingerprint: itemForEnsure._fingerprint,
-      category: 'custom_elements',
+      category: categoryForEnsure,
       role: itemForEnsure.role || '',
       label: itemForEnsure.name || itemForEnsure.value || itemForEnsure.text || ''
     };
@@ -4002,8 +4705,9 @@
     return nextRefForEnsure;
   }
 
-  // Rough action priority from the raw element (before it has a resolved ref), so selection controls
-  // (the checkbox you tick) sort ahead of buttons and links. 0 = select, 1 = activate, 2 = navigate.
+  // Rough action priority from the raw element (before it has a resolved ref). Form fields sort
+  // ahead of chrome buttons so a dialog's Website/Name textboxes are not crowded out of the
+  // controls cap by Close/Save/photo buttons. 0 = select, 1 = fill, 2 = activate, 3 = navigate.
   function controlSortKeyForFindTextToolExec(elForSortKey) {
     var roleForSortKey = '';
     try { roleForSortKey = String((elForSortKey.getAttribute && elForSortKey.getAttribute('role')) || '').toLowerCase(); }
@@ -4013,18 +4717,23 @@
       if (tagForSortKey === 'input') {
         var typeForSortKey = String((elForSortKey.getAttribute && elForSortKey.getAttribute('type')) || '').toLowerCase();
         roleForSortKey = (typeForSortKey === 'checkbox' || typeForSortKey === 'radio') ? 'checkbox' : 'textbox';
-      } else if (tagForSortKey === 'button') roleForSortKey = 'button';
+      } else if (tagForSortKey === 'textarea') roleForSortKey = 'textbox';
+      else if (tagForSortKey === 'select') roleForSortKey = 'select';
+      else if (tagForSortKey === 'button') roleForSortKey = 'button';
       else if (tagForSortKey === 'a') roleForSortKey = 'link';
     }
     if (roleForSortKey === 'checkbox' || roleForSortKey === 'radio' || roleForSortKey === 'switch' ||
       roleForSortKey === 'menuitemcheckbox' || roleForSortKey === 'menuitemradio') return 0;
-    if (roleForSortKey === 'link') return 2;
-    return 1;
+    if (roleForSortKey === 'textbox' || roleForSortKey === 'searchbox' || roleForSortKey === 'combobox' ||
+      roleForSortKey === 'spinbutton' || roleForSortKey === 'select') return 1;
+    if (roleForSortKey === 'link') return 3;
+    return 2;
   }
 
   // Given the row element a find_text hit resolved to, list its interactive descendants (checkbox to
-  // tick, buttons, switch, ...) so the model can act on the right control directly instead of clicking
-  // the row. Controls not yet in the snapshot are promoted so each returned ref is actionable.
+  // tick, form fields, buttons, ...) so the model can act on the right control directly instead of
+  // clicking the row. Controls not yet in the snapshot are promoted so each returned ref is actionable.
+  // Includes covered-but-visible fields (occlusion does not drop them): synthetic page_act can still act.
   function collectRowControlsForFindTextToolExec(rowElForControls, refMapForControls) {
     var controlsForRow = [];
     if (!rowElForControls || typeof rowElForControls.querySelectorAll !== 'function') return controlsForRow;
@@ -4032,7 +4741,9 @@
     try {
       nodesForControls = rowElForControls.querySelectorAll(
         '[role="checkbox"],[role="radio"],[role="switch"],[role="menuitemcheckbox"],[role="menuitemradio"],' +
-        '[role="button"],[role="tab"],[role="menuitem"],[role="link"],input,button,a[href]');
+        '[role="textbox"],[role="searchbox"],[role="combobox"],[role="spinbutton"],' +
+        '[role="button"],[role="tab"],[role="menuitem"],[role="link"],' +
+        'input,textarea,select,button,a[href]');
     } catch (eControls) { return controlsForRow; }
     var visibleForControls = [];
     for (var iForControls = 0; iForControls < nodesForControls.length; iForControls++) {
@@ -4043,19 +4754,75 @@
     visibleForControls.sort(function (aForControls, bForControls) { return aForControls.key - bForControls.key; });
 
     var seenRefsForControls = {};
-    for (var jForControls = 0; jForControls < visibleForControls.length && controlsForRow.length < 8; jForControls++) {
+    var FIND_TEXT_CONTROLS_CAP_FOR_TOOL_EXEC = 16;
+    for (var jForControls = 0; jForControls < visibleForControls.length && controlsForRow.length < FIND_TEXT_CONTROLS_CAP_FOR_TOOL_EXEC; jForControls++) {
       var elForControls = visibleForControls[jForControls].el;
       var refForControls = ensureRefForControlElementToolExec(elForControls, refMapForControls);
       if (seenRefsForControls[refForControls]) continue;
       seenRefsForControls[refForControls] = true;
       var regEntryForControls = observeRegistryForToolExec.refs[refForControls];
       var descRoleForControls = (regEntryForControls && regEntryForControls.role) || '';
-      if (descRoleForControls && !FIND_TEXT_CONTROL_ROLES_FOR_TOOL_EXEC[descRoleForControls]) continue;
+      if (descRoleForControls && !FIND_TEXT_CONTROL_ROLES_FOR_TOOL_EXEC[descRoleForControls] &&
+          descRoleForControls !== 'combobox' && descRoleForControls !== 'select' &&
+          descRoleForControls !== 'searchbox' && descRoleForControls !== 'spinbutton') continue;
       var ctrlForControls = { ref: refForControls, role: descRoleForControls || 'clickable' };
       if (regEntryForControls && regEntryForControls.label) ctrlForControls.name = regEntryForControls.label;
       controlsForRow.push(ctrlForControls);
     }
     return controlsForRow;
+  }
+
+  // When a find_text hit lands on a container (dialog group / article) but a descendant form field
+  // is named like the matched text (e.g. label "Website" → textbox "Website"), prefer that field's
+  // ref as the match target so the model does not click the group chrome.
+  function preferMatchingControlForFindTextToolExec(containerElForPrefer, matchStrForPrefer, refMapForPrefer) {
+    var needleForPrefer = String(matchStrForPrefer || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    if (!needleForPrefer || !containerElForPrefer || typeof containerElForPrefer.querySelectorAll !== 'function') {
+      return null;
+    }
+    var nodesForPrefer;
+    try {
+      nodesForPrefer = containerElForPrefer.querySelectorAll(
+        'input,textarea,select,[role="textbox"],[role="searchbox"],[role="combobox"],[role="spinbutton"]');
+    } catch (ePreferNodes) { return null; }
+    var bestForPrefer = null;
+    var bestLabelForPrefer = '';
+    var bestScoreForPrefer = 999;
+    for (var iForPrefer = 0; iForPrefer < nodesForPrefer.length; iForPrefer++) {
+      var elForPrefer = nodesForPrefer[iForPrefer];
+      if (!isElementVisibleForPageQuery(elForPrefer)) continue;
+      var typeForPrefer = String((elForPrefer.getAttribute && elForPrefer.getAttribute('type')) || '').toLowerCase();
+      if (typeForPrefer === 'hidden' || typeForPrefer === 'submit' || typeForPrefer === 'button' ||
+          typeForPrefer === 'reset' || typeForPrefer === 'image' || typeForPrefer === 'file') continue;
+      var labelForPrefer = '';
+      try {
+        labelForPrefer = resolveFormFieldLabelForPageQuery(elForPrefer) ||
+          resolveLabelForPageQuery(elForPrefer) || '';
+      } catch (ePreferLabel) { labelForPrefer = ''; }
+      if (!labelForPrefer && typeof elForPrefer.getAttribute === 'function') {
+        labelForPrefer = elForPrefer.getAttribute('aria-label') || elForPrefer.getAttribute('placeholder') ||
+          elForPrefer.getAttribute('name') || '';
+      }
+      var normLabelForPrefer = String(labelForPrefer).replace(/\s+/g, ' ').trim().toLowerCase();
+      if (!normLabelForPrefer) continue;
+      var scoreForPrefer = 999;
+      if (normLabelForPrefer === needleForPrefer) scoreForPrefer = 0;
+      else if (normLabelForPrefer.indexOf(needleForPrefer) === 0) scoreForPrefer = 1;
+      else if (needleForPrefer.length >= 3 && normLabelForPrefer.indexOf(needleForPrefer) !== -1) scoreForPrefer = 2;
+      if (scoreForPrefer >= bestScoreForPrefer) continue;
+      bestScoreForPrefer = scoreForPrefer;
+      bestForPrefer = elForPrefer;
+      bestLabelForPrefer = String(labelForPrefer).replace(/\s+/g, ' ').trim();
+      if (scoreForPrefer === 0) break;
+    }
+    if (!bestForPrefer) return null;
+    var refForPrefer = ensureRefForControlElementToolExec(bestForPrefer, refMapForPrefer);
+    var regForPrefer = observeRegistryForToolExec.refs[refForPrefer];
+    return {
+      ref: refForPrefer,
+      role: (regForPrefer && regForPrefer.role) || 'textbox',
+      name: (regForPrefer && regForPrefer.label) || bestLabelForPrefer || ''
+    };
   }
 
   // Compact visible-heading outline for mode "context": page structure at a glance (level + text)
@@ -4173,10 +4940,61 @@
         if (!patternForRead) return { ok: false, error: 'find_text requires a query string.' };
         var limitForRead = (typeof argsForRead.limit === 'number' && argsForRead.limit > 0) ? Math.min(50, Math.floor(argsForRead.limit)) : 20;
         var flagsForRead = argsForRead.case_sensitive === true ? '' : 'i';
-        // Literal substring search: escape the query so a weak model's plain text is matched as-is,
-        // not interpreted as a regex.
+        // Literal substring search, with exactly one exception: "|" separates alternatives, so
+        // "website|homepage|url" matches any of the three. Every other regex metacharacter stays
+        // escaped, so a query like "C++" or "3.5" still matches as typed rather than erroring or
+        // matching something surprising. The alternation case is not optional: the system prompt
+        // instructs the model to pass a list of likely variants this way, and escaping "|" made
+        // every such query match the literal pipe-joined string, i.e. nothing, ever.
+        function escapeLiteralForRead(textForEscape) {
+          return textForEscape.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        }
+        // A URL query should also match how the page renders that URL. Sites routinely display a
+        // link scheme-stripped ("https://github.com/you" shown as "github.com/you"), and find_text
+        // walks visible text (not href attributes), so a literal search for the typed URL misses
+        // the bare-domain display. For any URL-like term, also match its scheme/www/trailing-slash
+        // stripped form. This is what lets "verify the saved URL" succeed on a profile that shows
+        // only the bare domain, instead of returning a misleading zero-match.
+        function urlVariantsForRead(termForVariants) {
+          var variantsForTerm = [termForVariants];
+          var strippedMatchForTerm = /^\s*https?:\/\/(?:www\.)?(.+?)\/?\s*$/i.exec(termForVariants);
+          if (strippedMatchForTerm && strippedMatchForTerm[1] && variantsForTerm.indexOf(strippedMatchForTerm[1]) === -1) {
+            variantsForTerm.push(strippedMatchForTerm[1]);
+          }
+          return variantsForTerm;
+        }
+        function pushEscapedVariantsForRead(termForPush, sinkForPush) {
+          var variantsForPush = urlVariantsForRead(termForPush);
+          for (var vIdxForPush = 0; vIdxForPush < variantsForPush.length; vIdxForPush++) {
+            sinkForPush.push(escapeLiteralForRead(variantsForPush[vIdxForPush]));
+          }
+        }
+        var rawPartsForRead = patternForRead.split('|');
+        var altPartsForRead = [];
+        if (rawPartsForRead.length > 1) {
+          for (var pIdxForRead = 0; pIdxForRead < rawPartsForRead.length; pIdxForRead++) {
+            var partForRead = rawPartsForRead[pIdxForRead].trim();
+            if (partForRead) pushEscapedVariantsForRead(partForRead, altPartsForRead);
+          }
+        }
+        // A single non-URL term is escaped whole, byte-identical to the previous behaviour
+        // (including any leading/trailing spaces the caller meant to match); a single URL term
+        // additionally contributes its scheme-stripped variant.
+        var singleVariantsForRead = altPartsForRead.length ? null : urlVariantsForRead(patternForRead);
+        var regexSourceForRead;
+        if (altPartsForRead.length) {
+          regexSourceForRead = altPartsForRead.join('|');
+        } else if (singleVariantsForRead && singleVariantsForRead.length > 1) {
+          var singleEscForRead = [];
+          for (var sIdxForRead = 0; sIdxForRead < singleVariantsForRead.length; sIdxForRead++) {
+            singleEscForRead.push(escapeLiteralForRead(singleVariantsForRead[sIdxForRead]));
+          }
+          regexSourceForRead = singleEscForRead.join('|');
+        } else {
+          regexSourceForRead = escapeLiteralForRead(patternForRead);
+        }
         var regexForRead;
-        try { regexForRead = new RegExp(patternForRead.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flagsForRead); }
+        try { regexForRead = new RegExp(regexSourceForRead, flagsForRead); }
         catch (eRegexRead) { return { ok: false, error: 'Invalid query.' }; }
 
         // Capture the elements the model could already act on (shown by the preceding
@@ -4196,9 +5014,13 @@
         } catch (ePrevShownForRead) { /* best effort */ }
 
         // Fresh snapshot so matched interactive elements carry a usable ref; include_offscreen so a
-        // match anywhere on the page (not only the viewport) can still be acted on by ref. This
-        // renumbers refs (a new snapshotId); the "latest snapshot wins" rule applies as elsewhere.
-        var snapForRead = buildObserveSnapshotForToolExec({ include_offscreen: true, max_items: 200 });
+        // match anywhere on the page (not only the viewport) can still be acted on by ref.
+        // include_covered so a hit under a sticky bar / modal clip resolves to the real textbox
+        // (tagged state.covered) instead of only the surrounding dialog group. This renumbers refs
+        // (a new snapshotId); the "latest snapshot wins" rule applies as elsewhere.
+        var snapForRead = buildObserveSnapshotForToolExec({
+          include_offscreen: true, include_covered: true, max_items: 200
+        });
         var refMapForRead = buildRegistryElementRefMapForToolExec();
 
         var walkerForRead = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
@@ -4238,11 +5060,27 @@
             if (regEntryForRead) {
               if (regEntryForRead.role) entryForRead.role = regEntryForRead.role;
               if (regEntryForRead.label) entryForRead.name = regEntryForRead.label;
-              // When the hit resolves to a container row, hand back its interactive controls too, so a
-              // "tick"/"select"/"delete this item" intent has a real handle instead of the bare row.
+              // When the hit resolves to a container row, prefer a descendant form field whose
+              // accessible name matches the hit text (label "Website" → Website textbox), then hand
+              // back sibling interactive controls so tick/select/delete intents still have handles.
               if (FIND_TEXT_CONTAINER_ROLES_FOR_TOOL_EXEC[regEntryForRead.role] && regEntryForRead.el) {
+                var preferredForRead = preferMatchingControlForFindTextToolExec(
+                  regEntryForRead.el, matchStrForRead, refMapForRead);
+                if (preferredForRead && preferredForRead.ref != null) {
+                  entryForRead.ref = preferredForRead.ref;
+                  if (preferredForRead.role) entryForRead.role = preferredForRead.role;
+                  if (preferredForRead.name) entryForRead.name = preferredForRead.name;
+                }
                 var controlsForMatch = collectRowControlsForFindTextToolExec(regEntryForRead.el, refMapForRead);
-                if (controlsForMatch.length) entryForRead.controls = controlsForMatch;
+                if (controlsForMatch.length) {
+                  var preferredRefForControls = entryForRead.ref;
+                  var filteredControlsForRead = [];
+                  for (var fcIdxForRead = 0; fcIdxForRead < controlsForMatch.length; fcIdxForRead++) {
+                    if (Number(controlsForMatch[fcIdxForRead].ref) === Number(preferredRefForControls)) continue;
+                    filteredControlsForRead.push(controlsForMatch[fcIdxForRead]);
+                  }
+                  if (filteredControlsForRead.length) entryForRead.controls = filteredControlsForRead;
+                }
               }
             }
           }
@@ -9879,14 +10717,21 @@ self.onmessage = function (e) {
   // still has room below) in steps, waits for lazy content to settle, re-flattens each step and
   // keeps the longest snapshot, and unions any rendered text the single snapshot missed:
   // virtualized rows that recycle out of the DOM, or rows the >50-child flatten omission dropped.
-  // Text lines are collected from live innerText (which reflects only rendered text), excluding
-  // the extension's own hosts. Read-only apart from scrolling, which is restored before returning.
-  // Never throws; on any failure the caller keeps the original single-read result.
+  // Text lines are collected from live innerText of rendered body children, excluding the
+  // extension's own hosts and non-content tags (script/style/noscript/...), so source dumps
+  // never leak into the page content result. Read-only apart from scrolling, which is restored
+  // before returning. Never throws; on any failure the caller keeps the original single-read result.
   async function gatherScrolledContentForToolExec(flattenNsForGather, initialTextForGather) {
     var MAX_STEPS_FOR_GATHER = 3;
     var MAX_MS_FOR_GATHER = 4500;
     var SETTLE_QUIET_MS_FOR_GATHER = 350;
     var SETTLE_CAP_MS_FOR_GATHER = 1200;
+    // Match the flattener's strip list. Calling .innerText directly on these tags returns their
+    // source (JS/CSS/noscript HTML), which would then be appended as "additional" text because
+    // the flatten already removed them.
+    var NON_CONTENT_TAGS_FOR_GATHER = {
+      script: 1, style: 1, noscript: 1, template: 1, meta: 1, link: 1, canvas: 1
+    };
 
     function captureFlattenForGather() {
       try {
@@ -9896,7 +10741,7 @@ self.onmessage = function (e) {
       return '';
     }
     // Rendered text lines from top-level body children, skipping the extension's own shadow hosts
-    // (ids prefixed 'abchat-') so panel/toast text never leaks into the page content result.
+    // (ids prefixed 'abchat-') and non-content tags so panel/toast/source text never leaks in.
     function captureTextLinesForGather() {
       var linesForGather = [];
       try {
@@ -9907,6 +10752,8 @@ self.onmessage = function (e) {
           if (!kidForGather) continue;
           var idForGather = kidForGather.id || '';
           if (idForGather.indexOf('abchat-') === 0) continue;
+          var tagForGather = String(kidForGather.tagName || '').toLowerCase();
+          if (NON_CONTENT_TAGS_FOR_GATHER[tagForGather]) continue;
           var textForGather = String(kidForGather.innerText || '');
           if (textForGather) partsForGather.push(textForGather);
         }
@@ -10512,6 +11359,47 @@ self.onmessage = function (e) {
     return { ok: false, error: 'No selector or backend_node_id was provided to resolve the pointer target.' };
   }
 
+  // Page-action telemetry L1 write. Fire-and-forget and fully wrapped: telemetry must never throw
+  // into the tool path. Records the identity threaded from the run (join key back to the API log)
+  // plus the raw args and the exact result the model received. This is the same exposure class as
+  // the existing API logs (args the model sent, result the model saw); the privacy-sensitive
+  // capture (uncapped page snapshot, raw HTML) lands with masking in a later step, not here.
+  function writePageActionL1LogForToolExec(toolNameForLog, argsForLog, contextForLog, resultForLog, startTimeForLog) {
+    try {
+      var loggerForLog = (globalThis.ABChatContent || {}).pageActionLogger;
+      if (!loggerForLog || typeof loggerForLog.writeLog !== 'function') return;
+      var ctxForLog = contextForLog || {};
+      var recordForLog = {
+        schema: 1,
+        tool: toolNameForLog,
+        runId: ctxForLog.runId != null ? ctxForLog.runId : null,
+        chatId: ctxForLog.chatId != null ? Number(ctxForLog.chatId) : null,
+        toolCallId: ctxForLog.toolCallId != null ? ctxForLog.toolCallId : null,
+        iteration: ctxForLog.iteration != null ? ctxForLog.iteration : null,
+        timestamp: new Date(startTimeForLog).toISOString(),
+        totalLatencyMs: Date.now() - startTimeForLog,
+        args: argsForLog || {},
+        result: resultForLog || null
+      };
+      loggerForLog.writeLog(recordForLog).catch(function () {});
+    } catch (eWriteForLog) { /* telemetry must never throw into the tool path */ }
+  }
+
+  // Runs a page-mutating tool and writes its L1 telemetry record on every outcome (success, error
+  // result, or thrown). The thrown branch re-throws so upstream error handling is unchanged.
+  async function runLoggedPageMutatorForToolExec(toolNameForLog, argsForLog, contextForLog, implFnForLog) {
+    var startTimeForLog = Date.now();
+    var resultForLog;
+    try {
+      resultForLog = await implFnForLog(argsForLog, contextForLog);
+    } catch (eImplForLog) {
+      writePageActionL1LogForToolExec(toolNameForLog, argsForLog, contextForLog, { ok: false, error: (eImplForLog && eImplForLog.message) || String(eImplForLog) }, startTimeForLog);
+      throw eImplForLog;
+    }
+    writePageActionL1LogForToolExec(toolNameForLog, argsForLog, contextForLog, resultForLog, startTimeForLog);
+    return resultForLog;
+  }
+
   async function executeToolForToolExec(name, args, context) {
     args = args || {};
     switch (name) {
@@ -10525,7 +11413,7 @@ self.onmessage = function (e) {
       case 'page_observe':          return pageObserveToolForToolExec(args);
       case 'page_act':              return pageActRefToolForToolExec(args, context);
       case 'page_read':             return pageReadToolForToolExec(args);
-      case 'page_spreadsheet':      return pageSpreadsheetToolForToolExec(args, context);
+      case 'page_spreadsheet':      return runLoggedPageMutatorForToolExec('page_spreadsheet', args, context, pageSpreadsheetToolForToolExec);
       case 'take_screenshot':       return screenshotToolForToolExec(args, context);
       case 'eval':                  return evalToolForToolExec(args, context);
       case 'web_search':            return webSearchToolForToolExec(args, context);

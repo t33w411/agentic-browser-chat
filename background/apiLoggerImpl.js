@@ -104,6 +104,22 @@
     } catch (e) { return 0; }
   }
 
+  async function deleteLogsForApiLogger(ids) {
+    if (!Array.isArray(ids) || ids.length === 0) return;
+    try {
+      const db = await openDbForApiLogger();
+      await new Promise(function (resolve, reject) {
+        const tx = db.transaction(STORE_NAME_FOR_API_LOGGER, 'readwrite');
+        const store = tx.objectStore(STORE_NAME_FOR_API_LOGGER);
+        for (var i = 0; i < ids.length; i++) {
+          try { store.delete(Number(ids[i])); } catch (eDel) { /* skip bad id */ }
+        }
+        tx.oncomplete = resolve;
+        tx.onerror = function (e) { reject(e.target.error); };
+      });
+    } catch (e) { /* silent */ }
+  }
+
   async function clearLogsForApiLogger() {
     try {
       const db = await openDbForApiLogger();
@@ -121,6 +137,7 @@
     writeLog:    writeLogForApiLogger,
     getLogs:     getLogsForApiLogger,
     getLogCount: getLogCountForApiLogger,
+    deleteLogs:  deleteLogsForApiLogger,
     clearLogs:   clearLogsForApiLogger
   };
 

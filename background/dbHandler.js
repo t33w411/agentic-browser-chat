@@ -10,6 +10,10 @@
     return (globalScopeForDbHandler.ABChatContent || {}).apiLogger || null;
   }
 
+  function getPageActionLoggerForDbHandler() {
+    return (globalScopeForDbHandler.ABChatContent || {}).pageActionLogger || null;
+  }
+
   async function seedIfEmptyForDbHandler(data) {
     var db = (globalScopeForDbHandler.ABChatShared || {}).db;
     if (!db) throw new Error('Database not ready');
@@ -99,9 +103,27 @@
     }
   }
 
+  async function handlePageActionLogOpForDbHandler(msg, sendResponse) {
+    var fn   = msg && typeof msg.fn === 'string' ? msg.fn : '';
+    var args = Array.isArray(msg && msg.args)    ? msg.args : [];
+
+    var logger = getPageActionLoggerForDbHandler();
+    if (!logger || typeof logger[fn] !== 'function') {
+      sendResponse({ ok: false, error: 'Unknown pageActionLogger function: ' + fn });
+      return;
+    }
+    try {
+      var result = await logger[fn].apply(logger, args);
+      sendResponse({ ok: true, result: result });
+    } catch (errForPageActionLogOp) {
+      sendResponse({ ok: false, error: errForPageActionLogOp && errForPageActionLogOp.message ? errForPageActionLogOp.message : String(errForPageActionLogOp) });
+    }
+  }
+
   nsForDbHandler.dbHandler = {
     handleDbOp:    handleDbOpForDbHandler,
-    handleApiLogOp: handleApiLogOpForDbHandler
+    handleApiLogOp: handleApiLogOpForDbHandler,
+    handlePageActionLogOp: handlePageActionLogOpForDbHandler
   };
 
   globalScopeForDbHandler.ABChatBackground = nsForDbHandler;
