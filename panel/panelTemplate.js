@@ -713,11 +713,20 @@
                 Start session
                 <span class="due-count-badge" id="session-due-count">0</span>
               </button>
+              <button class="session-btn" id="quiz-select-mode-btn" data-action="toggle-quiz-select-mode" title="Select multiple questions" aria-pressed="false">
+                ${icForPanelTemplate.check12}
+                Select
+              </button>
             </div>
             <div class="quiz-filter-tabs">
               <button class="qftab active" data-qfilter="all" data-action="set-quiz-filter" data-filter="all">All</button>
               <button class="qftab" data-qfilter="due" data-action="set-quiz-filter" data-filter="due">Due <span class="due-count-badge" id="filter-due-count">0</span></button>
               <button class="qftab" data-qfilter="paused" data-action="set-quiz-filter" data-filter="paused">Paused</button>
+            </div>
+            <div class="quiz-bulk-bar hidden" id="quiz-bulk-bar">
+              <label class="quiz-select-all-label"><input type="checkbox" data-action="toggle-select-all-questions" id="quiz-select-all"> Select all</label>
+              <button class="btn-ghost btn-sm hidden" data-action="delete-selected-questions" id="quiz-delete-selected-btn">Delete selected</button>
+              <button class="btn-ghost btn-sm" data-action="exit-quiz-select-mode">Done</button>
             </div>
           </div>
           <div class="questions-list" id="questions-list">

@@ -408,6 +408,11 @@
     var renderedNoteCountForPanelRuntime = 0;
     var renderedTaskCountForPanelRuntime = 0;
     var renderedQuizCountForPanelRuntime = 0;
+    // Quiz multi-select (bulk delete). The mode flag gates the checkbox column in
+    // syncMainQuizListItem; the Set is the source of truth for checked state, so
+    // an in-place item re-render (edit, review, cross-tab sync) keeps the ticks.
+    var quizSelectModeForPanelRuntime = false;
+    var quizSelectedIdsForPanelRuntime = new Set();
     // Picker windowing state. Reset each time renderPickerList is called.
     var pickerRenderedCountForPanelRuntime = 0;
     var pickerCurrentItemsForPanelRuntime = [];
@@ -6198,6 +6203,7 @@
 
     async function applyQuestionsOpsIncrementalForPanelRuntime(opsForApply, repoForApply) {
       var rebuildOrderForApply = false;
+      var deletedQuizIdsForApply = new Set();
       for (var iForApply = 0; iForApply < opsForApply.length; iForApply++) {
         var opForApply = opsForApply[iForApply];
         var idForApply = opForApply.id;
@@ -6215,6 +6221,8 @@
           }
           removeMainQuizListItemForPanelRuntime(idForApply);
           syncSearchIndexForPanelRuntime('questions', 'remove', idForApply);
+          quizSelectedIdsForPanelRuntime.delete(Number(idForApply));
+          deletedQuizIdsForApply.add(Number(idForApply));
           rebuildOrderForApply = true;
           continue;
         }
@@ -6235,6 +6243,8 @@
           }
           removeMainQuizListItemForPanelRuntime(idForApply);
           syncSearchIndexForPanelRuntime('questions', 'remove', idForApply);
+          quizSelectedIdsForPanelRuntime.delete(Number(idForApply));
+          deletedQuizIdsForApply.add(Number(idForApply));
           rebuildOrderForApply = true;
           continue;
         }
@@ -6259,6 +6269,10 @@
           QUIZ_STORE_FOR_PANEL_RUNTIME[idForApply]
         );
         rebuildOrderForApply = true;
+      }
+      if (deletedQuizIdsForApply.size > 0) {
+        reconcileQuizPanesAfterDeleteForPanelRuntime(deletedQuizIdsForApply);
+        updateQuizSelectionControlsForPanelRuntime();
       }
       if (rebuildOrderForApply) {
         refreshQuizOrderForPanelRuntime();
@@ -6828,8 +6842,12 @@
       const previewRawForSync = String(quizDataForSync.questionText || '');
       const previewTextForSync = previewRawForSync.length > 60 ? previewRawForSync.slice(0, 57) + '...' : previewRawForSync;
       const dueLabelClassForSync = dueLabelForSync.overdue ? ' overdue' : '';
+      const checkboxForSync = quizSelectModeForPanelRuntime
+        ? `<input type="checkbox" class="qi-select-cb" data-action="toggle-question-select" data-question-id="${escHtml(qidForSync)}"${quizSelectedIdsForPanelRuntime.has(Number(qidForSync)) ? ' checked' : ''}>`
+        : '';
       questionItemForSync.innerHTML = `
         <div class="qi-top">
+          ${checkboxForSync}
           <div class="qi-title">${escHtml(quizDataForSync.title || '')}</div>
           <div class="qi-badges">
             <span class="qi-badge ${typeBadgeClassForSync}">${typeLabelForSync}</span>
@@ -14627,6 +14645,11 @@
       const optsForQuizFilterForPanelRuntime = optionsForQuizFilter || {};
       const normalizedFilterForQuizFilter =
         filter === 'due' || filter === 'paused' ? filter : 'all';
+      // A selection made under one tab would silently span rows the new tab
+      // hides, so switching tabs starts the selection over.
+      if (quizSelectModeForPanelRuntime && normalizedFilterForQuizFilter !== S.quizFilter) {
+        clearQuizSelectionForPanelRuntime();
+      }
       S.quizFilter = normalizedFilterForQuizFilter;
       root.querySelectorAll('.qftab').forEach(t => {
         t.classList.toggle('active', t.dataset.qfilter === normalizedFilterForQuizFilter);
@@ -14981,20 +15004,212 @@
           return;
         }
       }
-      delete QUIZ_STORE_FOR_PANEL_RUNTIME[resolvedQuestionIdForPanelRuntime];
-      const orderIndexForPanelRuntime = QUIZ_ORDER_FOR_PANEL_RUNTIME.indexOf(resolvedQuestionIdForPanelRuntime);
-      if (orderIndexForPanelRuntime >= 0) QUIZ_ORDER_FOR_PANEL_RUNTIME.splice(orderIndexForPanelRuntime, 1);
-      syncSearchIndexForPanelRuntime('questions', 'remove', resolvedQuestionIdForPanelRuntime);
-      removeMainQuizListItemForPanelRuntime(resolvedQuestionIdForPanelRuntime);
+      dropQuestionFromLocalStateForPanelRuntime(resolvedQuestionIdForPanelRuntime);
       if (QS.activeQid === resolvedQuestionIdForPanelRuntime) {
         closeAnswerView();
       } else {
         showQuizPane('empty');
       }
+      refreshQuizOrderForPanelRuntime();
+      updateQuizSelectionControlsForPanelRuntime();
       const activeQuizFilterForPanelRuntime = root.querySelector('.qftab.active');
       if (activeQuizFilterForPanelRuntime) {
         setQuizFilter(activeQuizFilterForPanelRuntime.dataset.qfilter || 'all');
       }
+    }
+
+    // Removes one question from every in-memory list structure: store, order,
+    // render window, search index, selection set and DOM. The render-window
+    // decrement matters: leaving it too high makes the next paged render skip
+    // an item, punching a hole in the list.
+    function dropQuestionFromLocalStateForPanelRuntime(questionIdForDrop) {
+      const numericIdForDrop = Number(questionIdForDrop);
+      delete QUIZ_STORE_FOR_PANEL_RUNTIME[numericIdForDrop];
+      const orderIndexForDrop = QUIZ_ORDER_FOR_PANEL_RUNTIME.indexOf(numericIdForDrop);
+      if (orderIndexForDrop >= 0) {
+        if (orderIndexForDrop < renderedQuizCountForPanelRuntime && renderedQuizCountForPanelRuntime > 0) {
+          renderedQuizCountForPanelRuntime--;
+        }
+        QUIZ_ORDER_FOR_PANEL_RUNTIME.splice(orderIndexForDrop, 1);
+      }
+      syncSearchIndexForPanelRuntime('questions', 'remove', numericIdForDrop);
+      removeMainQuizListItemForPanelRuntime(numericIdForDrop);
+      quizSelectedIdsForPanelRuntime.delete(numericIdForDrop);
+    }
+
+    /* ============================================================
+      QUIZ MULTI-SELECT (BULK DELETE)
+    ============================================================ */
+
+    // Every question the active filter tab would show, including ones past the
+    // render window. "Select all" deliberately covers the whole filtered set,
+    // not just the rows scrolled into view.
+    function getQuizIdsForActiveFilterForPanelRuntime() {
+      const filterForIds = S.quizFilter === 'due' || S.quizFilter === 'paused' ? S.quizFilter : 'all';
+      return QUIZ_ORDER_FOR_PANEL_RUNTIME.filter(function (idForIds) {
+        const dataForIds = QUIZ_STORE_FOR_PANEL_RUNTIME[idForIds];
+        if (!dataForIds) return false;
+        if (filterForIds === 'all') return true;
+        return getQuizStatusForPanelRuntime(dataForIds) === filterForIds;
+      });
+    }
+
+    function redrawRenderedQuizItemsForPanelRuntime() {
+      const questionsListForRedraw = root.getElementById('questions-list');
+      if (!questionsListForRedraw) return;
+      questionsListForRedraw.querySelectorAll('.question-item').forEach(function (itemForRedraw) {
+        syncMainQuizListItemForPanelRuntime(Number(itemForRedraw.dataset.qid));
+      });
+    }
+
+    function setQuizSelectModeForPanelRuntime(enabledForSelectMode) {
+      const nextModeForSelectMode = Boolean(enabledForSelectMode);
+      if (quizSelectModeForPanelRuntime === nextModeForSelectMode) return;
+      quizSelectModeForPanelRuntime = nextModeForSelectMode;
+      quizSelectedIdsForPanelRuntime.clear();
+      const bulkBarForSelectMode = root.getElementById('quiz-bulk-bar');
+      if (bulkBarForSelectMode) bulkBarForSelectMode.classList.toggle('hidden', !nextModeForSelectMode);
+      const modeBtnForSelectMode = root.getElementById('quiz-select-mode-btn');
+      if (modeBtnForSelectMode) {
+        modeBtnForSelectMode.classList.toggle('active', nextModeForSelectMode);
+        modeBtnForSelectMode.setAttribute('aria-pressed', nextModeForSelectMode ? 'true' : 'false');
+      }
+      redrawRenderedQuizItemsForPanelRuntime();
+      updateQuizSelectionControlsForPanelRuntime();
+    }
+
+    function toggleQuizSelectModeForPanelRuntime() {
+      setQuizSelectModeForPanelRuntime(!quizSelectModeForPanelRuntime);
+    }
+
+    function clearQuizSelectionForPanelRuntime() {
+      if (quizSelectedIdsForPanelRuntime.size === 0) {
+        updateQuizSelectionControlsForPanelRuntime();
+        return;
+      }
+      quizSelectedIdsForPanelRuntime.clear();
+      root.querySelectorAll('.question-item .qi-select-cb').forEach(function (boxForClear) {
+        boxForClear.checked = false;
+      });
+      updateQuizSelectionControlsForPanelRuntime();
+    }
+
+    function updateQuizSelectionControlsForPanelRuntime() {
+      const deleteBtnForControls = root.getElementById('quiz-delete-selected-btn');
+      const selectAllForControls = root.getElementById('quiz-select-all');
+      const countForControls = quizSelectedIdsForPanelRuntime.size;
+      if (deleteBtnForControls) {
+        deleteBtnForControls.classList.toggle('hidden', countForControls === 0);
+        deleteBtnForControls.textContent = 'Delete selected (' + countForControls + ')';
+      }
+      if (selectAllForControls) {
+        const filteredCountForControls = getQuizIdsForActiveFilterForPanelRuntime().length;
+        selectAllForControls.checked = filteredCountForControls > 0 && countForControls >= filteredCountForControls;
+      }
+    }
+
+    function toggleQuestionSelectForPanelRuntime(checkboxForSelect) {
+      if (!checkboxForSelect) return;
+      const idForSelect = Number(checkboxForSelect.dataset.questionId);
+      if (!Number.isFinite(idForSelect)) return;
+      if (checkboxForSelect.checked) quizSelectedIdsForPanelRuntime.add(idForSelect);
+      else quizSelectedIdsForPanelRuntime.delete(idForSelect);
+      updateQuizSelectionControlsForPanelRuntime();
+    }
+
+    function toggleQuestionSelectByRowForPanelRuntime(rowForToggle) {
+      if (!rowForToggle) return;
+      const checkboxForToggle = rowForToggle.querySelector('.qi-select-cb');
+      if (!checkboxForToggle) return;
+      checkboxForToggle.checked = !checkboxForToggle.checked;
+      toggleQuestionSelectForPanelRuntime(checkboxForToggle);
+    }
+
+    function toggleSelectAllQuestionsForPanelRuntime(checkboxForSelectAll) {
+      quizSelectedIdsForPanelRuntime.clear();
+      if (checkboxForSelectAll && checkboxForSelectAll.checked) {
+        getQuizIdsForActiveFilterForPanelRuntime().forEach(function (idForSelectAll) {
+          quizSelectedIdsForPanelRuntime.add(Number(idForSelectAll));
+        });
+      }
+      root.querySelectorAll('.question-item .qi-select-cb').forEach(function (boxForSelectAll) {
+        boxForSelectAll.checked = quizSelectedIdsForPanelRuntime.has(Number(boxForSelectAll.dataset.questionId));
+      });
+      updateQuizSelectionControlsForPanelRuntime();
+    }
+
+    function confirmDeleteSelectedQuestionsForPanelRuntime() {
+      const countForConfirm = quizSelectedIdsForPanelRuntime.size;
+      if (countForConfirm === 0) return;
+      const containerForConfirm = root.querySelector('.panel-content');
+      if (!containerForConfirm) return;
+      showConfirmPromptForPanelRuntime(
+        containerForConfirm,
+        countForConfirm + ' question' + (countForConfirm === 1 ? '' : 's') + ' will be permanently deleted and cannot be recovered.',
+        'Delete',
+        function () { doDeleteSelectedQuestionsForPanelRuntime(); }
+      );
+    }
+
+    async function doDeleteSelectedQuestionsForPanelRuntime() {
+      const idsForDelete = Array.from(quizSelectedIdsForPanelRuntime).filter(function (idForDelete) {
+        return QUIZ_STORE_FOR_PANEL_RUNTIME[idForDelete] != null;
+      });
+      if (idsForDelete.length === 0) return;
+      const panelDataRepoForDelete = getPanelDataRepoForPanelRuntime();
+      if (panelDataRepoForDelete && typeof panelDataRepoForDelete.deleteQuestions === 'function') {
+        try {
+          await panelDataRepoForDelete.deleteQuestions(idsForDelete);
+        } catch (errorForDelete) {
+          return;
+        }
+      }
+      const deletedSetForDelete = new Set(idsForDelete.map(Number));
+      idsForDelete.forEach(function (idForDelete) {
+        dropQuestionFromLocalStateForPanelRuntime(idForDelete);
+      });
+      reconcileQuizPanesAfterDeleteForPanelRuntime(deletedSetForDelete);
+      refreshQuizOrderForPanelRuntime();
+      setQuizFilter(S.quizFilter, { skipStateSync: true });
+      updateQuizSelectionControlsForPanelRuntime();
+      const toastForDelete = ABChatContent && ABChatContent.ui && ABChatContent.ui.toast;
+      if (toastForDelete && typeof toastForDelete.show === 'function') {
+        toastForDelete.show(idsForDelete.length + ' question' + (idsForDelete.length === 1 ? '' : 's') + ' deleted.');
+      }
+    }
+
+    // Keeps the answer/editor pane and any running session honest about
+    // questions that just disappeared.
+    function reconcileQuizPanesAfterDeleteForPanelRuntime(deletedSetForReconcile) {
+      const activeWasDeletedForReconcile =
+        QS.activeQid != null && deletedSetForReconcile.has(Number(QS.activeQid));
+      if (QS.mode === 'session' && QS.sessionQueue.length) {
+        const currentQidForReconcile = Number(QS.sessionQueue[QS.sessionIndex]);
+        QS.sessionQueue = QS.sessionQueue.filter(function (idForReconcile) {
+          return !deletedSetForReconcile.has(Number(idForReconcile));
+        });
+        if (QS.sessionQueue.length === 0) {
+          QS.mode = null;
+          QS.activeQid = null;
+          endSession();
+          return;
+        }
+        const survivorIndexForReconcile = QS.sessionQueue.indexOf(currentQidForReconcile);
+        QS.sessionIndex = survivorIndexForReconcile >= 0
+          ? survivorIndexForReconcile
+          : Math.min(QS.sessionIndex, QS.sessionQueue.length - 1);
+        if (activeWasDeletedForReconcile) {
+          loadSessionQuestion();
+        } else {
+          const progressElForReconcile = root.getElementById('qav-session-progress');
+          if (progressElForReconcile) {
+            progressElForReconcile.textContent =
+              'Question ' + (QS.sessionIndex + 1) + ' of ' + QS.sessionQueue.length;
+          }
+        }
+        return;
+      }
+      if (activeWasDeletedForReconcile) closeAnswerView();
     }
 
     function deleteQuestionForPanelRuntime(questionIdForPanelRuntime) {
@@ -15792,7 +16007,17 @@
             case 'open-quiz-editor':     openQuizEditor(); break;
             case 'start-session':        startSession(); break;
             case 'set-quiz-filter':      setQuizFilter(tgtForRuntime.dataset.filter); break;
-            case 'open-question-answer': openQuestionAnswer(Number(tgtForRuntime.dataset.qid)); break;
+            case 'open-question-answer':
+              // In select mode the whole row is a selection target; the per-row
+              // edit/delete buttons keep their own actions.
+              if (quizSelectModeForPanelRuntime) toggleQuestionSelectByRowForPanelRuntime(tgtForRuntime);
+              else openQuestionAnswer(Number(tgtForRuntime.dataset.qid));
+              break;
+            case 'toggle-quiz-select-mode':     toggleQuizSelectModeForPanelRuntime(); break;
+            case 'exit-quiz-select-mode':       setQuizSelectModeForPanelRuntime(false); break;
+            case 'toggle-question-select':      toggleQuestionSelectForPanelRuntime(tgtForRuntime); break;
+            case 'toggle-select-all-questions': toggleSelectAllQuestionsForPanelRuntime(tgtForRuntime); break;
+            case 'delete-selected-questions':   confirmDeleteSelectedQuestionsForPanelRuntime(); break;
             case 'open-question-edit':   openQuestionEditById(Number(tgtForRuntime.dataset.questionId)); break;
             case 'delete-question':      {
               const questionIdForPanelRuntime = Number(tgtForRuntime.dataset.questionId);

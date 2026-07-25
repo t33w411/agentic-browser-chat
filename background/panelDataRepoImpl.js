@@ -972,6 +972,16 @@
     return true;
   }
 
+  async function deleteQuestionsForPanelDataRepo(idsForPanelDataRepo) {
+    var dbForPanelDataRepo = requireDbForPanelDataRepo();
+    var normalizedIdsForPanelDataRepo = (Array.isArray(idsForPanelDataRepo) ? idsForPanelDataRepo : [])
+      .map(Number)
+      .filter(function (idForPanelDataRepo) { return Number.isFinite(idForPanelDataRepo); });
+    if (normalizedIdsForPanelDataRepo.length === 0) return 0;
+    await dbForPanelDataRepo.questions.bulkDelete(normalizedIdsForPanelDataRepo);
+    return normalizedIdsForPanelDataRepo.length;
+  }
+
   async function getNoteForPanelDataRepo(idForPanelDataRepo) {
     var dbForPanelDataRepo = requireDbForPanelDataRepo();
     return dbForPanelDataRepo.notes.get(Number(idForPanelDataRepo));
@@ -1037,6 +1047,7 @@
     createQuestion:               createQuestionForPanelDataRepo,
     updateQuestion:               updateQuestionForPanelDataRepo,
     deleteQuestion:               deleteQuestionForPanelDataRepo,
+    deleteQuestions:              deleteQuestionsForPanelDataRepo,
     createAttachmentBlob:         createAttachmentBlobForPanelDataRepo,
     getAttachmentBlob:            getAttachmentBlobForPanelDataRepo,
     deleteAttachmentBlob:         deleteAttachmentBlobForPanelDataRepo,

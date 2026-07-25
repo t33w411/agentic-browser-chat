@@ -3468,7 +3468,7 @@ img.ecs-icon {
   padding: 10px 12px; border-bottom: 1px solid var(--abchat-border);
   display: flex; flex-direction: column; gap: 8px; flex-shrink: 0;
 }
-.quiz-row1 { display: flex; align-items: center; gap: 6px; }
+.quiz-row1 { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
 .session-btn {
   display: flex; align-items: center; gap: 5px; margin-left: auto;
@@ -3503,6 +3503,21 @@ img.ecs-icon {
   background: var(--abchat-bg-panel); color: var(--abchat-text-primary);
   box-shadow: 0 1px 3px rgba(0,0,0,0.07);
 }
+
+/* Quiz multi-select (bulk delete) */
+#quiz-select-mode-btn.active {
+  background: var(--abchat-bg-active); border-color: var(--abchat-border-med);
+  color: var(--abchat-text-accent);
+}
+.quiz-bulk-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.quiz-select-all-label {
+  display: inline-flex; align-items: center; gap: 4px; margin-right: auto;
+  font-size: 12px; color: var(--abchat-text-muted); cursor: pointer; user-select: none;
+}
+.quiz-select-all-label input { cursor: pointer; }
+.qi-select-cb { flex-shrink: 0; margin: 1px 0 0; cursor: pointer; }
 
 .questions-list {
   flex: 1; overflow-y: auto; padding: 8px;

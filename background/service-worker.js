@@ -509,7 +509,8 @@ const dbOpMutationStoreMapForServiceWorker = {
   deleteTask:                   'tasks',
   createQuestion:               'questions',
   updateQuestion:               'questions',
-  deleteQuestion:               'questions'
+  deleteQuestion:               'questions',
+  deleteQuestions:              'questions'
 };
 
 // Per-mutation extractors that turn the dbOp result + args into ops describing
@@ -612,6 +613,19 @@ const dbOpRecordExtractorForServiceWorker = {
     var idForExtractor = Number(argsForExtractor[0]);
     if (!Number.isFinite(idForExtractor)) return [{ op: 'bulk' }];
     return [{ op: 'delete', id: idForExtractor }];
+  },
+  deleteQuestions: function (resultForExtractor, argsForExtractor) {
+    // Per-id ops; the MAX_OPS_PER_SIGNAL cap collapses oversized batches to
+    // 'bulk' downstream, so no length check is needed here.
+    var idsForExtractor = Array.isArray(argsForExtractor[0]) ? argsForExtractor[0] : null;
+    if (!idsForExtractor) return [{ op: 'bulk' }];
+    var opsForExtractor = [];
+    for (var iForExtractor = 0; iForExtractor < idsForExtractor.length; iForExtractor++) {
+      var idForExtractor = Number(idsForExtractor[iForExtractor]);
+      if (!Number.isFinite(idForExtractor)) return [{ op: 'bulk' }];
+      opsForExtractor.push({ op: 'delete', id: idForExtractor });
+    }
+    return opsForExtractor;
   }
 };
 
