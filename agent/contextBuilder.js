@@ -66,8 +66,8 @@
   function costCategoryForContextBuilder(costForCategory) {
     var numericCostForCategory = Number(costForCategory);
     if (!Number.isFinite(numericCostForCategory) || numericCostForCategory <= 0) return 'cheap';
-    if (numericCostForCategory <= 1.5) return 'cheap';
-    if (numericCostForCategory <= 3) return 'standard';
+    if (numericCostForCategory <= 5) return 'cheap';
+    if (numericCostForCategory <= 10) return 'standard';
     if (numericCostForCategory <= 15) return 'expensive';
     return 'extreme';
   }

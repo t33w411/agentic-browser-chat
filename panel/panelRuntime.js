@@ -10064,7 +10064,7 @@
       const contextBuilderForTier = agentNsForTier.contextBuilder || null;
       const categoryForTier = (contextBuilderForTier && typeof contextBuilderForTier.costCategoryFor === 'function')
         ? contextBuilderForTier.costCategoryFor(cost)
-        : (cost <= 1.5 ? 'cheap' : cost <= 3 ? 'standard' : cost <= 15 ? 'expensive' : 'extreme');
+        : (cost <= 5 ? 'cheap' : cost <= 10 ? 'standard' : cost <= 15 ? 'expensive' : 'extreme');
       const tierByCategoryForPanelRuntime = {
         cheap: { label: 'Cheap', cls: 'mp-tier-cheap' },
         standard: { label: 'Standard', cls: 'mp-tier-mid' },
