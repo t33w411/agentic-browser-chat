@@ -40,6 +40,7 @@
     extractDocxImages: "extractDocxImages",
     addImageToChat: "addImageToChat",
     addSelectionToChat: "addSelectionToChat",
+    saveSelectionToClips: "saveSelectionToClips",
     // Cross-tab live chat streaming relay.
     //   receiverDeliver: SW → content. Receivers process and render the stream
     //                    events the offscreen loop emits (see offscreenStreamBroadcast).

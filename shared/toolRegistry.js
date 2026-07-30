@@ -57,6 +57,15 @@
       defaultEnabled: true,
       contexts: ["selection"],
       menuTitle: "Add selection to chat"
+    },
+    {
+      id: "saveSelectionToClips",
+      action: actionsForRegistry.saveSelectionToClips || "saveSelectionToClips",
+      label: "Save Selection to Clips",
+      description: "Keep the selected text as a clip for reuse in any chat later",
+      defaultEnabled: true,
+      contexts: ["selection"],
+      menuTitle: "Save selection to clips"
     }
   ];
 

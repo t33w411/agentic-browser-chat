@@ -480,6 +480,9 @@
     removeContextMenuForContentSelector();
 
     var hostNodeForContentSelector = document.createElement("div");
+    // The shadow is closed, so outside observers only ever see this host element;
+    // the id is what lets the event shields recognize menu clicks as extension UI.
+    hostNodeForContentSelector.id = "abchat-content-selector-menu-host";
     var shadowForContextMenu = hostNodeForContentSelector.attachShadow({ mode: "closed" });
 
     var styleNodeForContentSelector = document.createElement("style");
@@ -503,6 +506,11 @@
     addRawBtnForContentSelector.className = "cs-menu-btn";
     addRawBtnForContentSelector.textContent = "Add raw HTML to chat";
     menuNodeForContentSelector.appendChild(addRawBtnForContentSelector);
+
+    var saveClipBtnForContentSelector = document.createElement("button");
+    saveClipBtnForContentSelector.className = "cs-menu-btn";
+    saveClipBtnForContentSelector.textContent = "Save for later";
+    menuNodeForContentSelector.appendChild(saveClipBtnForContentSelector);
 
     shadowForContextMenu.appendChild(menuNodeForContentSelector);
 
@@ -537,7 +545,7 @@
       evtForContentSelector.stopPropagation();
       evtForContentSelector.preventDefault();
       removeContextMenuForContentSelector();
-      addElementToChatForContentSelector(targetElementForContentSelector, false);
+      captureElementForContentSelector(targetElementForContentSelector, false, "chat");
       setContentSelectorEnabledForContentSelector(false, { showToast: false });
     });
 
@@ -545,7 +553,15 @@
       evtForContentSelector.stopPropagation();
       evtForContentSelector.preventDefault();
       removeContextMenuForContentSelector();
-      addElementToChatForContentSelector(targetElementForContentSelector, true);
+      captureElementForContentSelector(targetElementForContentSelector, true, "chat");
+      setContentSelectorEnabledForContentSelector(false, { showToast: false });
+    });
+
+    saveClipBtnForContentSelector.addEventListener("click", function onSaveClipClickForContentSelector(evtForContentSelector) {
+      evtForContentSelector.stopPropagation();
+      evtForContentSelector.preventDefault();
+      removeContextMenuForContentSelector();
+      captureElementForContentSelector(targetElementForContentSelector, false, "clip");
       setContentSelectorEnabledForContentSelector(false, { showToast: false });
     });
 
@@ -592,9 +608,37 @@
     contentNamespaceForContentSelector.state.contentSelectorMenuStateForContentSelector = menuStateForContentSelector;
   }
 
-  // --- "Add to chat" action ---
+  // --- "Add to chat" / "Save for later" actions ---
 
-  async function addElementToChatForContentSelector(targetElementForContentSelector, isRawForContentSelector) {
+  // Waits briefly for the panel runtime relay to appear. Saving a clip does not require the
+  // panel to be visible, but it does require the runtime to have initialised, since the clip
+  // write goes through it.
+  function waitForPanelRuntimeForContentSelector() {
+    var MAX_WAIT_MS_FOR_RUNTIME = 1500;
+    var POLL_MS_FOR_RUNTIME = 50;
+    var waitedForRuntime = 0;
+    return new Promise(function (resolveForRuntime) {
+      function pollForRuntime() {
+        var nsForRuntime = globalThis.ABChatContent || {};
+        var runtimeForRuntime = nsForRuntime.ui && nsForRuntime.ui.panelRuntime ? nsForRuntime.ui.panelRuntime : null;
+        if (runtimeForRuntime && typeof runtimeForRuntime.saveClip === "function") {
+          resolveForRuntime(runtimeForRuntime);
+          return;
+        }
+        if (waitedForRuntime >= MAX_WAIT_MS_FOR_RUNTIME) {
+          resolveForRuntime(null);
+          return;
+        }
+        waitedForRuntime += POLL_MS_FOR_RUNTIME;
+        setTimeout(pollForRuntime, POLL_MS_FOR_RUNTIME);
+      }
+      pollForRuntime();
+    });
+  }
+
+  // targetForCapture is "chat" (attach as an input chip) or "clip" (keep for later). Extraction
+  // is identical either way; only the destination differs.
+  async function captureElementForContentSelector(targetElementForContentSelector, isRawForContentSelector, targetForCapture) {
     if (!targetElementForContentSelector || !targetElementForContentSelector.isConnected) {
       if (toastForContentSelector) {
         toastForContentSelector.show("Element is no longer on the page.");
@@ -603,6 +647,7 @@
     }
 
     var ns = globalThis.ABChatContent || {};
+    var isClipCaptureForContentSelector = targetForCapture === "clip";
 
     var flattenedContentToolForContentSelector =
       ns.tools && ns.tools.flattenedContent ? ns.tools.flattenedContent : null;
@@ -626,6 +671,30 @@
       if (toastForContentSelector) {
         toastForContentSelector.show("Element content is too large. Select a smaller element.");
       }
+      return;
+    }
+
+    var labelForContentSelector = generateSelectorForContentSelector(targetElementForContentSelector);
+    var uniqueSelectorForContentSelector = buildUniqueSelectorForContentSelector(targetElementForContentSelector);
+
+    if (isClipCaptureForContentSelector) {
+      var runtimeForClipForContentSelector = await waitForPanelRuntimeForContentSelector();
+      if (!runtimeForClipForContentSelector) {
+        if (toastForContentSelector) {
+          toastForContentSelector.show("Panel not ready. Open the chat panel once, then try again.");
+        }
+        return;
+      }
+      runtimeForClipForContentSelector.saveClip({
+        clipKind: "page",
+        title: labelForContentSelector,
+        payloadText: flatHtmlForContentSelector,
+        mimeType: "text/html",
+        sourceUrl: window.location.href,
+        sourceTitle: document.title,
+        sourceSelector: uniqueSelectorForContentSelector,
+        sourceHtmlFormat: isRawForContentSelector ? "raw" : "simplified"
+      });
       return;
     }
 
@@ -655,8 +724,6 @@
 
     // Add chip to chat input
     if (typeof panelRuntimeForContentSelector.addInputChip === "function") {
-      var labelForContentSelector = generateSelectorForContentSelector(targetElementForContentSelector);
-      var uniqueSelectorForContentSelector = buildUniqueSelectorForContentSelector(targetElementForContentSelector);
       panelRuntimeForContentSelector.addInputChip({
         type: "page",
         label: labelForContentSelector,

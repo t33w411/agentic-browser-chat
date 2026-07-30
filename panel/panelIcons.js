@@ -56,6 +56,7 @@
   var cameraPaths = '<path d="M4 7h4l2-2h4l2 2h4v12H4z"/><circle cx="12" cy="13" r="4"/>';
   var pastePaths = '<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/>';
   var trashPaths = '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>';
+  var bookmarkPaths = '<path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>';
   var codePaths = '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>';
   var stopSquarePath = '<rect x="4" y="4" width="16" height="16" rx="2"/>';
   var bellPaths = '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>';
@@ -135,6 +136,11 @@
   icons.brain13 = svgForPanelIcon(13, 2, brainPaths);
   icons.history12 = svgForPanelIcon(12, 2, historyPaths);
   icons.mic16 = svgForPanelIcon(16, 2, micPaths);
+  icons.bookmark10 = svgForPanelIcon(10, 2.5, bookmarkPaths);
+  icons.bookmark12 = svgForPanelIcon(12, 2.2, bookmarkPaths);
+  icons.bookmarkFilled12 = svgForPanelIcon(12, 2.2, bookmarkPaths, '', 'currentColor', 'currentColor');
+  icons.bookmark16 = svgForPanelIcon(16, 2, bookmarkPaths);
+  icons.bookmark32 = svgForPanelIcon(32, 1.5, bookmarkPaths);
 
   ns.icons = icons;
   globalScope.ABChatContent = ns;

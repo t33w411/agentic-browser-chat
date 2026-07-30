@@ -443,22 +443,25 @@
 }
 .favs-btn:hover, .favs-btn.active { background: var(--abchat-bg-chip); color: var(--abchat-text-primary); }
 
-/* Chat type filter tabs (Chats / Quick Q) */
-.chat-type-row {
+/* Chat type filter tabs (Chats / Quick Q) and note sub-tabs (Notes / Clips) */
+.chat-type-row,
+.note-type-row {
   display: flex; gap: 2px;
   background: var(--abchat-bg-sidebar);
   border: 1px solid var(--abchat-border);
   border-radius: var(--abchat-r-sm);
   padding: 4px;
 }
-.ctab-btn {
+.ctab-btn,
+.ntab-btn {
   flex: 1; border: none; border-radius: 4px; padding: 4px 0;
   font-family: var(--abchat-font); font-size: 12px; font-weight: 500;
   cursor: pointer; background: transparent; color: var(--abchat-text-muted);
   transition: background 0.1s, color 0.1s; white-space: nowrap;
   display: flex; align-items: center; justify-content: center; gap: 4px;
 }
-.ctab-btn.active {
+.ctab-btn.active,
+.ntab-btn.active {
   background: var(--abchat-bg-panel); color: var(--abchat-text-primary);
   box-shadow: 0 1px 3px rgba(0,0,0,0.07);
 }
@@ -1253,8 +1256,25 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
+/* A chip whose source was deleted: struck through and faded so it reads as unusable at a glance,
+   not just carrying a small badge. The status indicator and the remove control stay legible. */
+.input-chips-row .ic-status-error .ic-label,
+.input-chips-row .ic-status-error .ic-domain {
+  text-decoration: line-through;
+}
+.input-chips-row .ic-status-error {
+  opacity: 0.7;
+}
+.input-chips-row .ic-status-error .ic-status-indicator,
+.input-chips-row .ic-status-error .ic-remove {
+  opacity: 1;
+  text-decoration: none;
+}
 .ic-remove { cursor: pointer; opacity: 0.55; margin-left: 2px; display: inline-flex; align-items: center; vertical-align: middle; }
 .ic-remove:hover { opacity: 1; }
+.ic-save { cursor: pointer; opacity: 0.45; margin-left: 2px; display: inline-flex; align-items: center; vertical-align: middle; }
+.ic-save:hover { opacity: 1; }
+.ic-save.is-saved { opacity: 1; color: var(--abchat-accent, #2563eb); cursor: default; }
 .ic-domain { opacity: 0.6; font-size: 10px; margin-left: 3px; }
 
 /* Live turn bubble — tool steps row */
@@ -1327,6 +1347,9 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 .panel-host[data-theme="dark"] .m-chip-paste   { background:#1e1433; color:#c4b5fd; border-color:#6d28d9; }
 .m-chip-page-snapshot { background:#ccfbf1; color:#0f766e; border-color:#5eead4; }
 .panel-host[data-theme="dark"] .m-chip-page-snapshot { background:#0d2e2a; color:#5eead4; border-color:#0f766e; }
+/* Clip chips are m-chip-note plus m-chip-clip, so these must stay after the note variants to win. */
+.m-chip-clip    { background:#fef3c7; color:#92400e; border-color:#fcd34d; }
+.panel-host[data-theme="dark"] .m-chip-clip    { background:#3a2a08; color:#fcd34d; border-color:#8a6a12; }
 
 .chat-textarea {
   width: 100%;
@@ -1605,6 +1628,9 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
   flex-shrink: 0;
 }
 .ns-row1 { display: flex; align-items: center; gap: 5px; }
+/* Clips sub-tab hides "New note", which was the row's flex filler. Let Favs take that space so
+   the row stays full width instead of leaving a gap to the right of a small button. */
+.ns-row1.is-clips-mode .favs-btn { flex: 1; justify-content: center; margin-left: 0; }
 .sec-btn {
   flex: 1; display: flex; align-items: center; justify-content: center; gap: 5px;
   border: 1px solid var(--abchat-border-med); border-radius: var(--abchat-r-sm);
@@ -1643,6 +1669,62 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 .ni-tag { background: var(--abchat-bg-chip); border: 1px solid var(--abchat-border); border-radius: 4px; padding: 1px 5px; font-size: 11px; color: var(--abchat-text-muted); flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ni-tag-overflow { background: var(--abchat-bg-chip); border: 1px solid var(--abchat-border); border-radius: 4px; padding: 1px 5px; font-size: 11px; color: var(--abchat-text-muted); flex-shrink: 0; white-space: nowrap; }
 .ni-date { font-size: 11px; color: var(--abchat-text-muted); flex-shrink: 0; white-space: nowrap; margin-left: auto; }
+
+/* Clip rows: provenance line under the title, plus a brief flash when a duplicate save
+   points the user at the clip they already have. */
+.ni-clip-source {
+  display: flex; align-items: center; gap: 4px; margin-bottom: 3px;
+  font-size: 11px; color: var(--abchat-text-muted); min-width: 0;
+}
+.ni-clip-source svg { flex-shrink: 0; opacity: 0.7; }
+.ni-clip-domain { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; min-width: 0; }
+.ni-clip-kind {
+  flex-shrink: 0; padding: 0 4px; border-radius: 3px;
+  background: var(--abchat-bg-chip); border: 1px solid var(--abchat-border);
+}
+.note-item.ni-flash { animation: abchat-ni-flash 1.2s ease-out; }
+@keyframes abchat-ni-flash {
+  0%, 40% { background: var(--abchat-bg-active); border-color: #bfdbfe; }
+  100% { background: transparent; border-color: transparent; }
+}
+
+/* Notes / Clips list empty state */
+.notes-list-empty {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; padding: 24px 18px; text-align: center;
+}
+/* While the empty state is showing there are no rows to scroll, so the list stops growing and
+   the message centers in the column rather than being pinned below it. */
+.notes-sidebar.notes-list-is-empty .notes-list { flex: 0 0 auto; }
+.notes-list-empty .nle-icon { color: var(--abchat-border-med); }
+.notes-list-empty .nle-title { font-size: 13px; font-weight: 600; color: var(--abchat-text-primary); }
+.notes-list-empty .nle-sub { font-size: 12px; color: var(--abchat-text-muted); line-height: 1.5; }
+
+/* Clip detail: source header above the read-only body */
+.ne-clip-source {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 8px 10px; margin-bottom: 10px;
+  background: var(--abchat-bg-chip); border: 1px solid var(--abchat-border);
+  border-radius: var(--abchat-r-sm);
+  font-size: 12px; color: var(--abchat-text-muted);
+}
+.ne-clip-source-row { display: flex; gap: 6px; min-width: 0; }
+.ne-clip-source-label { flex-shrink: 0; font-weight: 600; color: var(--abchat-text-primary); }
+.ne-clip-source-value { min-width: 0; overflow-wrap: anywhere; }
+.ne-clip-source-value a { color: var(--abchat-accent, #2563eb); text-decoration: none; }
+.ne-clip-source-value a:hover { text-decoration: underline; }
+.ne-clip-readonly-note { font-size: 11px; color: var(--abchat-text-muted); margin-top: 6px; }
+/* Clip mode: the captured payload is not editable, so the raw body textarea never shows and
+   the rendered excerpt stays visible in both preview and edit mode. */
+#note-editor-form.is-clip-mode .ne-body-ta-wrap { display: none !important; }
+#note-editor-form.is-clip-mode .ne-preview { display: block !important; }
+#note-editor-form.is-clip-mode .ne-note-only { display: none; }
+#note-editor-form:not(.is-clip-mode) .ne-clip-only { display: none; }
+/* A clip's single attachment IS its payload: detaching it would orphan the captured content
+   and leave an empty clip, so neither removing it nor adding more is offered. */
+#note-editor-form.is-clip-mode .ne-attach-chip .ic-remove { display: none; }
+#note-editor-form.is-clip-mode .ne-attach-add { display: none; }
 
 /* Note item meta controls (star + more, shown on hover) */
 .ni-meta {

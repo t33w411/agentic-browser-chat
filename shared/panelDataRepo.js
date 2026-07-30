@@ -63,7 +63,7 @@
     listNotes:                    function (noteType)                                 { return sendDbOpForPanelDataRepo('listNotes',                    [noteType]); },
     createNote:                   function (input)                                    { return sendDbOpForPanelDataRepo('createNote',                   [input]); },
     updateNote:                   function (id, patch, options)                       { return sendDbOpForPanelDataRepo('updateNote',                   [id, patch, options]); },
-    deleteNote:                   function (id)                                       { return sendDbOpForPanelDataRepo('deleteNote',                   [id]); },
+    deleteNote:                   function (id, protectedBlobIds)                     { return sendDbOpForPanelDataRepo('deleteNote',                   [id, protectedBlobIds]); },
     listNoteVersions:             function (noteId)                                   { return sendDbOpForPanelDataRepo('listNoteVersions',             [noteId]); },
     listTasks:                    function ()                                         { return sendDbOpForPanelDataRepo('listTasks',                    []); },
     createTask:                   function (input)                                    { return sendDbOpForPanelDataRepo('createTask',                   [input]); },
@@ -78,12 +78,15 @@
     createAttachmentBlob:         function (input)                                    { return sendDbOpForPanelDataRepo('createAttachmentBlob',         [input]); },
     getAttachmentBlob:            function (id)                                       { return sendDbOpForPanelDataRepo('getAttachmentBlob',            [id]); },
     deleteAttachmentBlob:         function (id)                                       { return sendDbOpForPanelDataRepo('deleteAttachmentBlob',         [id]); },
+    deleteAttachmentBlobIfUnreferenced:
+                                  function (id, protectedBlobIds)                     { return sendDbOpForPanelDataRepo('deleteAttachmentBlobIfUnreferenced', [id, protectedBlobIds]); },
     seedIfEmpty:                  function (data)                                     { return sendDbOpForPanelDataRepo('seedIfEmpty',                  [data]); },
     getNote:                      function (id)                                       { return sendDbOpForPanelDataRepo('getNote',                      [id]); },
     getTask:                      function (id)                                       { return sendDbOpForPanelDataRepo('getTask',                      [id]); },
     getQuestion:                  function (id)                                       { return sendDbOpForPanelDataRepo('getQuestion',                  [id]); },
     pruneOrphanedBlobs:           function (protectedBlobIds)                         { return sendDbOpForPanelDataRepo('pruneOrphanedBlobs',           [protectedBlobIds]); },
     deleteChatsOlderThan:         function (days, protectedBlobIds)                   { return sendDbOpForPanelDataRepo('deleteChatsOlderThan',         [days, protectedBlobIds]); },
+    deleteClipsOlderThan:         function (days, protectedBlobIds)                   { return sendDbOpForPanelDataRepo('deleteClipsOlderThan',         [days, protectedBlobIds]); },
     // Cross-tab DB-sync identifier. Receivers compare incoming signal sourceId
     // against this to skip their own echoes. NOT a DB function; the SW handles
     // it via the dbOp envelope, so no entry is required in dbHandler.js.

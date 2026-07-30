@@ -67,6 +67,15 @@ const panelVisibilityFieldKeyForServiceWorker = "abchat_panel_ui_state_field_isO
 const legacyPanelUiStateKeyForServiceWorker = "abchat_panel_ui_state";
 let desiredPanelOpenForServiceWorker = null;
 let panelVisibilityEnforceSeqForServiceWorker = 0;
+// The one tab this SW last told (or confirmed) to show the panel. Lets enforce
+// send a single targeted close instead of broadcasting to every tab on each
+// switch. null after a cold start; the broadcast fallback covers that, and any
+// tab the tracking misses heals via its own reconcile pull.
+let lastPanelShownTabIdForServiceWorker = null;
+// True once a close-all broadcast has run while the desired state is closed, so
+// repeated enforce calls (every tab switch) stop re-broadcasting to all tabs.
+// Reset whenever the panel opens again.
+let panelCloseBroadcastDoneForServiceWorker = false;
 // Background-mediated active-tab tracking. A single "currently active tab" id
 // that survives the browser losing OS-level focus to another app (focusChanged
 // to WINDOW_ID_NONE is ignored). Content scripts use the pushed value to gate
@@ -248,6 +257,23 @@ function sendPanelVisibilityCommandForServiceWorker(tabIdForPanelVisibility, isO
   } catch (errorForPanelVisibility) {}
 }
 
+// Record which tab is now confirmed to show the panel, and close the
+// previously tracked one if it differs. Without the close here, a resolve
+// confirming the NEW tab overwrites the tracked id before enforce ever closed
+// the old tab, so the old panel lingered until its own pull got around to
+// closing it — visibly late.
+function markPanelShownTabForServiceWorker(tabIdForPanelShown) {
+  if (typeof tabIdForPanelShown !== "number") return;
+  if (
+    typeof lastPanelShownTabIdForServiceWorker === "number" &&
+    lastPanelShownTabIdForServiceWorker !== tabIdForPanelShown
+  ) {
+    sendPanelVisibilityCommandForServiceWorker(lastPanelShownTabIdForServiceWorker, false);
+  }
+  lastPanelShownTabIdForServiceWorker = tabIdForPanelShown;
+  panelCloseBroadcastDoneForServiceWorker = false;
+}
+
 function closePanelInTabsExceptForServiceWorker(activeTabIdForPanelVisibility) {
   try {
     chrome.tabs.query({}, function (tabsForPanelVisibility) {
@@ -282,16 +308,39 @@ function enforceSingleVisiblePanelForServiceWorker(desiredOpenForPanelVisibility
   var enforceSeqForPanelVisibility = panelVisibilityEnforceSeqForServiceWorker;
   desiredPanelOpenForServiceWorker = Boolean(desiredOpenForPanelVisibility);
   if (!desiredPanelOpenForServiceWorker) {
+    // Closed: target the one tab known to show the panel; fall back to a
+    // single all-tab broadcast when it is unknown (cold start), then stay
+    // quiet on later enforce calls until the panel opens again. Tabs neither
+    // path reaches heal via their own reconcile pull on activation.
+    if (typeof lastPanelShownTabIdForServiceWorker === "number") {
+      sendPanelVisibilityCommandForServiceWorker(lastPanelShownTabIdForServiceWorker, false);
+      lastPanelShownTabIdForServiceWorker = null;
+      panelCloseBroadcastDoneForServiceWorker = true;
+      return;
+    }
+    if (panelCloseBroadcastDoneForServiceWorker) return;
+    panelCloseBroadcastDoneForServiceWorker = true;
     closePanelInTabsExceptForServiceWorker(null);
     return;
   }
+  panelCloseBroadcastDoneForServiceWorker = false;
   getActiveFocusedTabForPanelVisibilityForServiceWorker(function (activeTabForPanelVisibility) {
     if (enforceSeqForPanelVisibility !== panelVisibilityEnforceSeqForServiceWorker) return;
     if (!isSupportedPanelTabForServiceWorker(activeTabForPanelVisibility)) {
-      closePanelInTabsExceptForServiceWorker(null);
+      // Panel is open but the active tab cannot host it: close the shown tab
+      // without clearing the desired-open intent.
+      if (typeof lastPanelShownTabIdForServiceWorker === "number") {
+        sendPanelVisibilityCommandForServiceWorker(lastPanelShownTabIdForServiceWorker, false);
+        lastPanelShownTabIdForServiceWorker = null;
+      } else {
+        closePanelInTabsExceptForServiceWorker(null);
+      }
       return;
     }
-    closePanelInTabsExceptForServiceWorker(activeTabForPanelVisibility.id);
+    if (lastPanelShownTabIdForServiceWorker === null) {
+      closePanelInTabsExceptForServiceWorker(activeTabForPanelVisibility.id);
+    }
+    markPanelShownTabForServiceWorker(activeTabForPanelVisibility.id);
     openPanelInActiveTabForServiceWorker(activeTabForPanelVisibility, enforceSeqForPanelVisibility);
   });
 }
@@ -503,6 +552,7 @@ const dbOpMutationStoreMapForServiceWorker = {
   createNote:                   'notes',
   updateNote:                   'notes',
   deleteNote:                   'notes',
+  deleteClipsOlderThan:         'notes',
   createTask:                   'tasks',
   updateTask:                   'tasks',
   toggleTaskCompleted:          'tasks',
@@ -580,6 +630,18 @@ const dbOpRecordExtractorForServiceWorker = {
     var idForExtractor = Number(argsForExtractor[0]);
     if (!Number.isFinite(idForExtractor)) return [{ op: 'bulk' }];
     return [{ op: 'delete', id: idForExtractor }];
+  },
+  deleteClipsOlderThan: function (resultForExtractor) {
+    // The retention sweep deletes many clip rows at once. Emit per-id deletes when the impl
+    // reported them so receivers can drop those rows surgically; fall back to a full refresh
+    // when it did not.
+    var deletedIdsForExtractor = (resultForExtractor && resultForExtractor.deletedIds) || [];
+    if (!Array.isArray(deletedIdsForExtractor) || deletedIdsForExtractor.length === 0) {
+      return [{ op: 'bulk' }];
+    }
+    return deletedIdsForExtractor.map(function (idForExtractor) {
+      return { op: 'delete', id: Number(idForExtractor) };
+    });
   },
   createTask: function (resultForExtractor) {
     if (!resultForExtractor || resultForExtractor.id == null) return [];
@@ -3085,6 +3147,21 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
         sendResponseForServiceWorker({ ok: true, shouldBeOpen: false });
         return;
       }
+      // Fast path: answer "open" straight from the tracked active tab, with no
+      // Chrome API round trips. Only the POSITIVE answer may take this path: a
+      // "no" derived from a possibly-stale tracked id would close a panel that
+      // should stay open, so every negative re-derives from the live focused
+      // window below. A stale positive merely opens a panel one reconcile
+      // early; the next enforce/pull corrects it.
+      if (
+        typeof currentActiveTabIdForServiceWorker === "number" &&
+        senderTabIdForResolve === currentActiveTabIdForServiceWorker &&
+        isSupportedPanelTabForServiceWorker(senderTabForResolve)
+      ) {
+        markPanelShownTabForServiceWorker(senderTabIdForResolve);
+        sendResponseForServiceWorker({ ok: true, shouldBeOpen: true });
+        return;
+      }
       getActiveFocusedTabForPanelVisibilityForServiceWorker(function (activeTabForResolve) {
         var shouldBeOpenForResolve = false;
         if (activeTabForResolve) {
@@ -3104,6 +3181,9 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
             isSupportedPanelTabForServiceWorker(senderTabForResolve) &&
             senderTabIdForResolve === currentActiveTabIdForServiceWorker;
         }
+        if (shouldBeOpenForResolve) {
+          markPanelShownTabForServiceWorker(senderTabIdForResolve);
+        }
         sendResponseForServiceWorker({ ok: true, shouldBeOpen: Boolean(shouldBeOpenForResolve) });
       });
     });
@@ -3112,6 +3192,18 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
 
   if (messageForServiceWorker.action === (actionsForServiceWorker.panelVisibilityChanged || "panelVisibilityChanged")) {
     desiredPanelOpenForServiceWorker = Boolean(messageForServiceWorker.isOpen);
+    // The sender is the tab where the user just toggled the panel. On open it
+    // becomes the tracked shown tab, so the enforce below (and the next tab
+    // switch) can close it with one targeted message instead of a broadcast.
+    var senderTabForVisibilityChanged =
+      senderForServiceWorker && senderForServiceWorker.tab ? senderForServiceWorker.tab : null;
+    if (
+      desiredPanelOpenForServiceWorker &&
+      senderTabForVisibilityChanged &&
+      typeof senderTabForVisibilityChanged.id === "number"
+    ) {
+      markPanelShownTabForServiceWorker(senderTabForVisibilityChanged.id);
+    }
     enforceSingleVisiblePanelForServiceWorker(desiredPanelOpenForServiceWorker);
     return false;
   }

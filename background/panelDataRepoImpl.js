@@ -436,67 +436,143 @@
     return true;
   }
 
-  async function pruneOrphanedBlobsForPanelDataRepo(protectedBlobIdsForPanelDataRepo) {
+  // Draft keys in chrome.storage.local that carry blob references. Kept in step with the panel
+  // constants of the same value: the chat input draft (one key, chips[].refId) and one key per
+  // note being edited (attachments[].refId).
+  var INPUT_DRAFT_STORAGE_KEY_FOR_PANEL_DATA_REPO = 'abchat_input_draft';
+  var NOTE_DRAFT_STORAGE_KEY_PREFIX_FOR_PANEL_DATA_REPO = 'abchat_note_draft_sync:';
+
+  function readAllLocalStorageForPanelDataRepo() {
+    return new Promise(function (resolveForStorageRead) {
+      try {
+        if (!chrome || !chrome.storage || !chrome.storage.local) {
+          resolveForStorageRead({});
+          return;
+        }
+        chrome.storage.local.get(null, function (itemsForStorageRead) {
+          resolveForStorageRead(itemsForStorageRead && typeof itemsForStorageRead === 'object' ? itemsForStorageRead : {});
+        });
+      } catch (errForStorageRead) {
+        resolveForStorageRead({});
+      }
+    });
+  }
+
+  function addBlobRefIdsFromEntryListForPanelDataRepo(targetSetForRefIds, entryListForRefIds) {
+    if (!Array.isArray(entryListForRefIds)) return;
+    for (var iForRefIds = 0; iForRefIds < entryListForRefIds.length; iForRefIds++) {
+      var entryForRefIds = entryListForRefIds[iForRefIds];
+      var refIdForRefIds = Number(entryForRefIds && entryForRefIds.refId);
+      if (Number.isFinite(refIdForRefIds) && refIdForRefIds > 0) {
+        targetSetForRefIds.add(refIdForRefIds);
+      }
+    }
+  }
+
+  // Every reference to an attachment blob that exists anywhere: the three tables that persist
+  // refIds, the two markdown markers that name a blob inline, and the synced drafts. A blob
+  // absent from this set is referenced by nothing and is safe to delete.
+  //
+  // The drafts belong here because a chip that has been attached but not sent, and a note
+  // attachment that has not been saved, are real references that no table records yet. Reading
+  // them from storage (rather than trusting a caller-supplied list scraped from one tab's DOM)
+  // is what makes the set complete for every tab, including tabs with no panel mounted and
+  // callers running in the service worker.
+  //
+  // A storage read failure degrades to the table references alone, which is the behaviour that
+  // predates the draft scan; callers still pass their own protected ids as a second line.
+  async function collectReferencedBlobIdsForPanelDataRepo() {
     var dbForPanelDataRepo = requireDbForPanelDataRepo();
-    var referencedBlobIdsForPrune = new Set();
-    var imageBlobRefRegexForPrune = /__blob:(\d+)__/g;
-    var docBlobRefRegexForPrune = /#abchat-docblob-(\d+)/g;
+    var referencedBlobIdsForRefs = new Set();
+    var imageBlobRefRegexForRefs = /__blob:(\d+)__/g;
+    var docBlobRefRegexForRefs = /#abchat-docblob-(\d+)/g;
 
-    var allMessagesForPrune = await dbForPanelDataRepo.messages.toArray();
-    for (var msgIndexForPrune = 0; msgIndexForPrune < allMessagesForPrune.length; msgIndexForPrune++) {
-      var msgForPrune = allMessagesForPrune[msgIndexForPrune];
-      if (msgForPrune && msgForPrune.md) {
-        var matchForPrune;
-        imageBlobRefRegexForPrune.lastIndex = 0;
-        while ((matchForPrune = imageBlobRefRegexForPrune.exec(msgForPrune.md)) !== null) {
-          referencedBlobIdsForPrune.add(Number(matchForPrune[1]));
+    var allMessagesForRefs = await dbForPanelDataRepo.messages.toArray();
+    for (var msgIndexForRefs = 0; msgIndexForRefs < allMessagesForRefs.length; msgIndexForRefs++) {
+      var msgForRefs = allMessagesForRefs[msgIndexForRefs];
+      if (msgForRefs && msgForRefs.md) {
+        var matchForRefs;
+        imageBlobRefRegexForRefs.lastIndex = 0;
+        while ((matchForRefs = imageBlobRefRegexForRefs.exec(msgForRefs.md)) !== null) {
+          referencedBlobIdsForRefs.add(Number(matchForRefs[1]));
         }
-        docBlobRefRegexForPrune.lastIndex = 0;
-        while ((matchForPrune = docBlobRefRegexForPrune.exec(msgForPrune.md)) !== null) {
-          referencedBlobIdsForPrune.add(Number(matchForPrune[1]));
+        docBlobRefRegexForRefs.lastIndex = 0;
+        while ((matchForRefs = docBlobRefRegexForRefs.exec(msgForRefs.md)) !== null) {
+          referencedBlobIdsForRefs.add(Number(matchForRefs[1]));
         }
       }
-      if (msgForPrune && Array.isArray(msgForPrune.chips)) {
-        for (var chipIndexForPrune = 0; chipIndexForPrune < msgForPrune.chips.length; chipIndexForPrune++) {
-          var chipForPrune = msgForPrune.chips[chipIndexForPrune];
-          if (chipForPrune && Number.isFinite(chipForPrune.refId)) {
-            referencedBlobIdsForPrune.add(chipForPrune.refId);
-          }
-        }
+      if (msgForRefs) {
+        addBlobRefIdsFromEntryListForPanelDataRepo(referencedBlobIdsForRefs, msgForRefs.chips);
       }
     }
 
-    var allNotesForPrune = await dbForPanelDataRepo.notes.toArray();
-    for (var noteIndexForPrune = 0; noteIndexForPrune < allNotesForPrune.length; noteIndexForPrune++) {
-      var noteForPrune = allNotesForPrune[noteIndexForPrune];
-      if (noteForPrune && Array.isArray(noteForPrune.attachments)) {
-        for (var noteAttachIndexForPrune = 0; noteAttachIndexForPrune < noteForPrune.attachments.length; noteAttachIndexForPrune++) {
-          var noteAttachForPrune = noteForPrune.attachments[noteAttachIndexForPrune];
-          if (noteAttachForPrune && Number.isFinite(noteAttachForPrune.refId)) {
-            referencedBlobIdsForPrune.add(noteAttachForPrune.refId);
-          }
-        }
+    var allNotesForRefs = await dbForPanelDataRepo.notes.toArray();
+    for (var noteIndexForRefs = 0; noteIndexForRefs < allNotesForRefs.length; noteIndexForRefs++) {
+      var noteForRefs = allNotesForRefs[noteIndexForRefs];
+      if (noteForRefs) {
+        addBlobRefIdsFromEntryListForPanelDataRepo(referencedBlobIdsForRefs, noteForRefs.attachments);
       }
     }
 
-    var allNoteVersionsForPrune = await dbForPanelDataRepo.noteVersions.toArray();
-    for (var nvIndexForPrune = 0; nvIndexForPrune < allNoteVersionsForPrune.length; nvIndexForPrune++) {
-      var nvForPrune = allNoteVersionsForPrune[nvIndexForPrune];
-      if (nvForPrune && Array.isArray(nvForPrune.attachments)) {
-        for (var nvAttachIndexForPrune = 0; nvAttachIndexForPrune < nvForPrune.attachments.length; nvAttachIndexForPrune++) {
-          var nvAttachForPrune = nvForPrune.attachments[nvAttachIndexForPrune];
-          if (nvAttachForPrune && Number.isFinite(nvAttachForPrune.refId)) {
-            referencedBlobIdsForPrune.add(nvAttachForPrune.refId);
-          }
-        }
+    var allNoteVersionsForRefs = await dbForPanelDataRepo.noteVersions.toArray();
+    for (var nvIndexForRefs = 0; nvIndexForRefs < allNoteVersionsForRefs.length; nvIndexForRefs++) {
+      var nvForRefs = allNoteVersionsForRefs[nvIndexForRefs];
+      if (nvForRefs) {
+        addBlobRefIdsFromEntryListForPanelDataRepo(referencedBlobIdsForRefs, nvForRefs.attachments);
       }
     }
 
-    var protectedSetForPrune = new Set(
+    var storedItemsForRefs = await readAllLocalStorageForPanelDataRepo();
+    var storedKeysForRefs = Object.keys(storedItemsForRefs);
+    for (var keyIndexForRefs = 0; keyIndexForRefs < storedKeysForRefs.length; keyIndexForRefs++) {
+      var keyForRefs = storedKeysForRefs[keyIndexForRefs];
+      var valueForRefs = storedItemsForRefs[keyForRefs];
+      if (!valueForRefs || typeof valueForRefs !== 'object') continue;
+      if (keyForRefs === INPUT_DRAFT_STORAGE_KEY_FOR_PANEL_DATA_REPO) {
+        addBlobRefIdsFromEntryListForPanelDataRepo(referencedBlobIdsForRefs, valueForRefs.chips);
+      } else if (keyForRefs.indexOf(NOTE_DRAFT_STORAGE_KEY_PREFIX_FOR_PANEL_DATA_REPO) === 0) {
+        addBlobRefIdsFromEntryListForPanelDataRepo(referencedBlobIdsForRefs, valueForRefs.attachments);
+      }
+    }
+
+    return referencedBlobIdsForRefs;
+  }
+
+  function buildProtectedBlobIdSetForPanelDataRepo(protectedBlobIdsForPanelDataRepo) {
+    return new Set(
       Array.isArray(protectedBlobIdsForPanelDataRepo)
         ? protectedBlobIdsForPanelDataRepo.map(Number).filter(function (n) { return Number.isFinite(n) && n > 0; })
         : []
     );
+  }
+
+  // Space reclaim for a single blob whose last visible reference the caller just removed. Deletes
+  // only when nothing else points at it, so a blob shared between (for example) an input chip and
+  // a clip saved from that chip survives the removal of either one.
+  //
+  // Callers must persist the removal before calling this: the stored draft is how pending chips
+  // are seen here, so a chip still present in storage keeps its blob alive.
+  async function deleteAttachmentBlobIfUnreferencedForPanelDataRepo(blobIdForPanelDataRepo, protectedBlobIdsForPanelDataRepo) {
+    var dbForPanelDataRepo = requireDbForPanelDataRepo();
+    var numericBlobIdForPanelDataRepo = Number(blobIdForPanelDataRepo);
+    if (!Number.isFinite(numericBlobIdForPanelDataRepo) || numericBlobIdForPanelDataRepo <= 0) {
+      throw new Error('Invalid attachment blob id');
+    }
+    var referencedBlobIdsForDelete = await collectReferencedBlobIdsForPanelDataRepo();
+    if (referencedBlobIdsForDelete.has(numericBlobIdForPanelDataRepo)) {
+      return { deleted: false, reason: 'referenced' };
+    }
+    if (buildProtectedBlobIdSetForPanelDataRepo(protectedBlobIdsForPanelDataRepo).has(numericBlobIdForPanelDataRepo)) {
+      return { deleted: false, reason: 'protected' };
+    }
+    await dbForPanelDataRepo.attachmentBlobs.delete(numericBlobIdForPanelDataRepo);
+    return { deleted: true, reason: '' };
+  }
+
+  async function pruneOrphanedBlobsForPanelDataRepo(protectedBlobIdsForPanelDataRepo) {
+    var dbForPanelDataRepo = requireDbForPanelDataRepo();
+    var referencedBlobIdsForPrune = await collectReferencedBlobIdsForPanelDataRepo();
+    var protectedSetForPrune = buildProtectedBlobIdSetForPanelDataRepo(protectedBlobIdsForPanelDataRepo);
 
     var allBlobIdsForPrune = await dbForPanelDataRepo.attachmentBlobs.toCollection().primaryKeys();
     var orphanIdsForPrune = allBlobIdsForPrune.filter(function (blobIdForPrune) {
@@ -667,6 +743,37 @@
     }
   }
 
+  var VALID_NOTE_TYPES_FOR_PANEL_DATA_REPO = { user: true, agent: true, clip: true };
+
+  function normalizeNoteTypeForPanelDataRepo(rawNoteTypeForPanelDataRepo) {
+    var noteTypeForPanelDataRepo = String(rawNoteTypeForPanelDataRepo || '');
+    return VALID_NOTE_TYPES_FOR_PANEL_DATA_REPO[noteTypeForPanelDataRepo] ? noteTypeForPanelDataRepo : 'user';
+  }
+
+  // Clip provenance. Present on noteType 'clip' rows and empty everywhere else. Kept as
+  // flat fields so both object literals below can merge them without a nested clone.
+  function normalizeClipFieldsForPanelDataRepo(sourceForPanelDataRepo, fallbackForPanelDataRepo) {
+    var srcForClip = sourceForPanelDataRepo || {};
+    var fbForClip = fallbackForPanelDataRepo || {};
+    function pickForClip(keyForClip) {
+      return srcForClip[keyForClip] != null ? String(srcForClip[keyForClip]) : String(fbForClip[keyForClip] || '');
+    }
+    var rawPayloadSizeForClip = srcForClip.clipPayloadSize != null
+      ? Number(srcForClip.clipPayloadSize)
+      : Number(fbForClip.clipPayloadSize);
+    return {
+      clipKind: pickForClip('clipKind'),
+      sourceUrl: pickForClip('sourceUrl'),
+      sourceTitle: pickForClip('sourceTitle'),
+      sourceSelector: pickForClip('sourceSelector'),
+      sourceHtmlFormat: pickForClip('sourceHtmlFormat'),
+      capturedAt: pickForClip('capturedAt'),
+      // Payload byte/char length, kept on the row so duplicate detection never has to fetch
+      // every clip's blob.
+      clipPayloadSize: Number.isFinite(rawPayloadSizeForClip) ? rawPayloadSizeForClip : 0
+    };
+  }
+
   async function listNotesForPanelDataRepo(noteTypeForPanelDataRepo) {
     var dbForPanelDataRepo = requireDbForPanelDataRepo();
     var notesForPanelDataRepo = await dbForPanelDataRepo.notes.toArray();
@@ -685,26 +792,38 @@
     var dbForPanelDataRepo = requireDbForPanelDataRepo();
     var inputForPanelDataRepo = noteInputForPanelDataRepo || {};
     var nowForPanelDataRepo = getIsoNowForPanelDataRepo();
+    var noteTypeForCreate = normalizeNoteTypeForPanelDataRepo(inputForPanelDataRepo.noteType);
+    var clipFieldsForCreate = normalizeClipFieldsForPanelDataRepo(inputForPanelDataRepo, null);
     var recordForPanelDataRepo = {
       title: String(inputForPanelDataRepo.title || ''),
       body: String(inputForPanelDataRepo.body || ''),
       tags: normalizeTagsForPanelDataRepo(inputForPanelDataRepo.tags),
       attachments: normalizeAttachmentsForPanelDataRepo(inputForPanelDataRepo.attachments),
-      noteType: inputForPanelDataRepo.noteType === 'agent' ? 'agent' : 'user',
+      noteType: noteTypeForCreate,
       sourceChatId: inputForPanelDataRepo.sourceChatId != null ? inputForPanelDataRepo.sourceChatId : null,
       starred: inputForPanelDataRepo.starred === true,
+      clipKind: clipFieldsForCreate.clipKind,
+      sourceUrl: clipFieldsForCreate.sourceUrl,
+      sourceTitle: clipFieldsForCreate.sourceTitle,
+      sourceSelector: clipFieldsForCreate.sourceSelector,
+      sourceHtmlFormat: clipFieldsForCreate.sourceHtmlFormat,
+      capturedAt: clipFieldsForCreate.capturedAt,
+      clipPayloadSize: clipFieldsForCreate.clipPayloadSize,
       createdAt: normalizeTimestampForPanelDataRepo(inputForPanelDataRepo.createdAt, nowForPanelDataRepo),
       updatedAt: normalizeTimestampForPanelDataRepo(inputForPanelDataRepo.updatedAt, nowForPanelDataRepo)
     };
     var noteIdForPanelDataRepo = await dbForPanelDataRepo.notes.add(recordForPanelDataRepo);
-    await dbForPanelDataRepo.noteVersions.add({
-      noteId: noteIdForPanelDataRepo,
-      title: recordForPanelDataRepo.title,
-      body: recordForPanelDataRepo.body,
-      attachments: recordForPanelDataRepo.attachments,
-      savedAt: recordForPanelDataRepo.updatedAt
-    });
-    await trimNoteVersionsForPanelDataRepo(dbForPanelDataRepo, noteIdForPanelDataRepo);
+    // Clips are snapshots with a read-only body, so they never accumulate version history.
+    if (noteTypeForCreate !== 'clip') {
+      await dbForPanelDataRepo.noteVersions.add({
+        noteId: noteIdForPanelDataRepo,
+        title: recordForPanelDataRepo.title,
+        body: recordForPanelDataRepo.body,
+        attachments: recordForPanelDataRepo.attachments,
+        savedAt: recordForPanelDataRepo.updatedAt
+      });
+      await trimNoteVersionsForPanelDataRepo(dbForPanelDataRepo, noteIdForPanelDataRepo);
+    }
     return dbForPanelDataRepo.notes.get(noteIdForPanelDataRepo);
   }
 
@@ -734,8 +853,8 @@
         ? normalizeAttachmentsForPanelDataRepo(patchForUpdate.attachments)
         : normalizeAttachmentsForPanelDataRepo(existingForPanelDataRepo.attachments),
       noteType: patchForUpdate.noteType != null
-        ? (patchForUpdate.noteType === 'agent' ? 'agent' : 'user')
-        : (existingForPanelDataRepo.noteType === 'agent' ? 'agent' : 'user'),
+        ? normalizeNoteTypeForPanelDataRepo(patchForUpdate.noteType)
+        : normalizeNoteTypeForPanelDataRepo(existingForPanelDataRepo.noteType),
       sourceChatId: patchForUpdate.sourceChatId !== undefined
         ? (patchForUpdate.sourceChatId != null ? patchForUpdate.sourceChatId : null)
         : (existingForPanelDataRepo.sourceChatId != null ? existingForPanelDataRepo.sourceChatId : null),
@@ -743,10 +862,21 @@
       createdAt: normalizeTimestampForPanelDataRepo(existingForPanelDataRepo.createdAt, getIsoNowForPanelDataRepo()),
       updatedAt: normalizeTimestampForPanelDataRepo(patchForUpdate.updatedAt, getIsoNowForPanelDataRepo())
     };
+    var clipFieldsForUpdate = normalizeClipFieldsForPanelDataRepo(patchForUpdate, existingForPanelDataRepo);
+    mergedForPanelDataRepo.clipKind = clipFieldsForUpdate.clipKind;
+    mergedForPanelDataRepo.sourceUrl = clipFieldsForUpdate.sourceUrl;
+    mergedForPanelDataRepo.sourceTitle = clipFieldsForUpdate.sourceTitle;
+    mergedForPanelDataRepo.sourceSelector = clipFieldsForUpdate.sourceSelector;
+    mergedForPanelDataRepo.sourceHtmlFormat = clipFieldsForUpdate.sourceHtmlFormat;
+    mergedForPanelDataRepo.capturedAt = clipFieldsForUpdate.capturedAt;
+    mergedForPanelDataRepo.clipPayloadSize = clipFieldsForUpdate.clipPayloadSize;
 
     await dbForPanelDataRepo.notes.update(idForPanelDataRepo, mergedForPanelDataRepo);
 
-    if (optsForPanelDataRepo.saveVersion !== false) {
+    // A clip's body is read-only, so it never writes version history regardless of what the
+    // caller passes. Converting a clip to a note (noteType patched away from 'clip') starts
+    // history from that save onwards.
+    if (optsForPanelDataRepo.saveVersion !== false && mergedForPanelDataRepo.noteType !== 'clip') {
       await dbForPanelDataRepo.noteVersions.add({
         noteId: idForPanelDataRepo,
         title: mergedForPanelDataRepo.title,
@@ -760,14 +890,57 @@
     return dbForPanelDataRepo.notes.get(idForPanelDataRepo);
   }
 
-  async function deleteNoteForPanelDataRepo(idForPanelDataRepo) {
+  async function deleteNoteForPanelDataRepo(idForPanelDataRepo, protectedBlobIdsForPanelDataRepo) {
     var dbForPanelDataRepo = requireDbForPanelDataRepo();
     await dbForPanelDataRepo.transaction('rw', dbForPanelDataRepo.notes, dbForPanelDataRepo.noteVersions, async function () {
       await dbForPanelDataRepo.noteVersions.where('noteId').equals(idForPanelDataRepo).delete();
       await dbForPanelDataRepo.notes.delete(idForPanelDataRepo);
     });
-    pruneOrphanedBlobsForPanelDataRepo().catch(function () {});
+    // Pending (unsubmitted) chips hold blobs no table references yet. The prune scan reads the
+    // stored drafts for exactly that reason; the caller's protected list is a second line for
+    // anything not yet written there.
+    pruneOrphanedBlobsForPanelDataRepo(protectedBlobIdsForPanelDataRepo).catch(function () {});
     return true;
+  }
+
+  // Retention sweep for clips. Starred clips are excluded, mirroring how pinned chats are
+  // excluded from deleteChatsOlderThan. Cutoff is measured from capturedAt when present so a
+  // title or tag edit (which bumps updatedAt) never extends a clip's life.
+  async function deleteClipsOlderThanForPanelDataRepo(daysForPanelDataRepo, protectedBlobIdsForPanelDataRepo) {
+    var dbForPanelDataRepo = requireDbForPanelDataRepo();
+    var numDaysForPanelDataRepo = Number(daysForPanelDataRepo);
+    if (!Number.isFinite(numDaysForPanelDataRepo) || numDaysForPanelDataRepo <= 0) {
+      throw new Error('Invalid days value');
+    }
+
+    var cutoffForPanelDataRepo = new Date(Date.now() - numDaysForPanelDataRepo * 86400000).toISOString();
+    var oldClipsForPanelDataRepo = await dbForPanelDataRepo.notes
+      .where('noteType').equals('clip')
+      .filter(function (clipForPanelDataRepo) {
+        if (clipForPanelDataRepo.starred === true) return false;
+        var stampForPanelDataRepo = String(clipForPanelDataRepo.capturedAt || clipForPanelDataRepo.createdAt || '');
+        if (!stampForPanelDataRepo) return false;
+        return stampForPanelDataRepo < cutoffForPanelDataRepo;
+      })
+      .toArray();
+
+    var oldClipIdsForPanelDataRepo = oldClipsForPanelDataRepo.map(function (cForPanelDataRepo) { return cForPanelDataRepo.id; });
+
+    if (oldClipIdsForPanelDataRepo.length > 0) {
+      await dbForPanelDataRepo.transaction('rw', dbForPanelDataRepo.notes, dbForPanelDataRepo.noteVersions, async function () {
+        for (var iForPanelDataRepo = 0; iForPanelDataRepo < oldClipIdsForPanelDataRepo.length; iForPanelDataRepo++) {
+          await dbForPanelDataRepo.noteVersions.where('noteId').equals(oldClipIdsForPanelDataRepo[iForPanelDataRepo]).delete();
+        }
+        await dbForPanelDataRepo.notes.bulkDelete(oldClipIdsForPanelDataRepo);
+      });
+    }
+
+    var pruneResultForPanelDataRepo = await pruneOrphanedBlobsForPanelDataRepo(protectedBlobIdsForPanelDataRepo);
+    return {
+      deleted: oldClipIdsForPanelDataRepo.length,
+      deletedIds: oldClipIdsForPanelDataRepo,
+      blobsDeleted: pruneResultForPanelDataRepo.deleted
+    };
   }
 
   async function listNoteVersionsForPanelDataRepo(noteIdForPanelDataRepo) {
@@ -1051,11 +1224,13 @@
     createAttachmentBlob:         createAttachmentBlobForPanelDataRepo,
     getAttachmentBlob:            getAttachmentBlobForPanelDataRepo,
     deleteAttachmentBlob:         deleteAttachmentBlobForPanelDataRepo,
+    deleteAttachmentBlobIfUnreferenced: deleteAttachmentBlobIfUnreferencedForPanelDataRepo,
     getNote:                      getNoteForPanelDataRepo,
     getTask:                      getTaskForPanelDataRepo,
     getQuestion:                  getQuestionForPanelDataRepo,
     pruneOrphanedBlobs:           pruneOrphanedBlobsForPanelDataRepo,
-    deleteChatsOlderThan:         deleteChatsOlderThanForPanelDataRepo
+    deleteChatsOlderThan:         deleteChatsOlderThanForPanelDataRepo,
+    deleteClipsOlderThan:         deleteClipsOlderThanForPanelDataRepo
   };
 
   globalScopeForPanelDataRepo.ABChatShared = nsForPanelDataRepo;

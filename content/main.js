@@ -610,7 +610,9 @@
       var requestedVisibleForPanelCommand = Boolean(messageForContentMain.isOpen);
       var panelStateSyncNsForPanelCommand =
         contentNamespaceForContentMain.ui && contentNamespaceForContentMain.ui.panelStateSync;
-      if (panelStateSyncNsForPanelCommand && typeof panelStateSyncNsForPanelCommand.applyState === 'function') {
+      if (panelStateSyncNsForPanelCommand && typeof panelStateSyncNsForPanelCommand.applyVisibilityCommand === 'function') {
+        panelStateSyncNsForPanelCommand.applyVisibilityCommand(requestedVisibleForPanelCommand);
+      } else if (panelStateSyncNsForPanelCommand && typeof panelStateSyncNsForPanelCommand.applyState === 'function') {
         panelStateSyncNsForPanelCommand.applyState({ isOpen: requestedVisibleForPanelCommand }, new Set(['isOpen']));
       } else {
         var panelUiForPanelCommand = contentNamespaceForContentMain.ui && contentNamespaceForContentMain.ui.panel;
@@ -763,6 +765,39 @@
           var panelRuntimeNsForAddImage = contentNamespaceForContentMain.ui && contentNamespaceForContentMain.ui.panelRuntime;
           if (panelRuntimeNsForAddImage && typeof panelRuntimeNsForAddImage.addImageChipFromContextMenu === 'function') {
             panelRuntimeNsForAddImage.addImageChipFromContextMenu(srcUrlForContentMain);
+          }
+        });
+      }
+    );
+
+    contentNamespaceForContentMain.registerActionHandler(
+      actionsForContentMain.saveSelectionToClips || 'saveSelectionToClips',
+      function handleSaveSelectionToClipsForContentMain(payloadForContentMain) {
+        var innerPayloadForSaveClip = payloadForContentMain && payloadForContentMain.payload
+          ? payloadForContentMain.payload
+          : (payloadForContentMain || {});
+        var textForSaveClip = typeof innerPayloadForSaveClip.selectedText === 'string'
+          ? innerPayloadForSaveClip.selectedText
+          : '';
+        if (!textForSaveClip) return;
+
+        // Saving does not need the panel visible, but it does need the runtime initialised,
+        // since the clip write goes through it. Open the panel only when the relay is missing.
+        var panelRuntimeNsForSaveClip = contentNamespaceForContentMain.ui && contentNamespaceForContentMain.ui.panelRuntime;
+        if (panelRuntimeNsForSaveClip && typeof panelRuntimeNsForSaveClip.saveTextClip === 'function') {
+          panelRuntimeNsForSaveClip.saveTextClip(textForSaveClip);
+          return;
+        }
+        var floatingPanelNsForSaveClip = contentNamespaceForContentMain.ui && contentNamespaceForContentMain.ui.floatingPanel;
+        if (floatingPanelNsForSaveClip && typeof floatingPanelNsForSaveClip.open === 'function') {
+          floatingPanelNsForSaveClip.open();
+        }
+        var panelUiNsForSaveClip = contentNamespaceForContentMain.ui && contentNamespaceForContentMain.ui.panel;
+        if (!panelUiNsForSaveClip || typeof panelUiNsForSaveClip.whenVisible !== 'function') return;
+        panelUiNsForSaveClip.whenVisible(function () {
+          var runtimeAfterVisibleForSaveClip = contentNamespaceForContentMain.ui && contentNamespaceForContentMain.ui.panelRuntime;
+          if (runtimeAfterVisibleForSaveClip && typeof runtimeAfterVisibleForSaveClip.saveTextClip === 'function') {
+            runtimeAfterVisibleForSaveClip.saveTextClip(textForSaveClip);
           }
         });
       }

@@ -22,6 +22,7 @@
 //                          pane. setMode does NOT write these; only
 //                          open/back/new/delete do.)
 //   chatSubTab           ('chats' | 'quickq'; sub-tab inside Chats)
+//   noteSubTab           ('notes' | 'clips'; sub-tab inside Notes)
 //   taskFilter           ('all' | 'pending' | 'completed')
 //   quizFilter           ('all' | 'due' | 'paused')
 //   chatSearchQuery      (text in the Chats sidebar search input)
@@ -57,6 +58,14 @@
   const LEGACY_PANEL_UI_STATE_KEY_FOR_PANEL_STATE_SYNC = "abchat_panel_ui_state";
   const PANEL_UI_FIELD_KEY_PREFIX_FOR_PANEL_STATE_SYNC = "abchat_panel_ui_state_field_";
   const WRITE_DEBOUNCE_MS_FOR_PANEL_STATE_SYNC = 50;
+  const RECONCILE_DEBOUNCE_MS_FOR_PANEL_STATE_SYNC = 50;
+  const PREWARM_IDLE_TIMEOUT_MS_FOR_PANEL_STATE_SYNC = 2000;
+  const PREWARM_FALLBACK_DELAY_MS_FOR_PANEL_STATE_SYNC = 500;
+  // How long after an activation signal (with isOpen true) a reconcile "close"
+  // verdict is treated as suspect and re-verified instead of applied. Covers
+  // the window-focus transition where the SW's tracked active tab and
+  // getLastFocused still point at the previous window for a few hundred ms.
+  const OPTIMISTIC_CLOSE_GRACE_MS_FOR_PANEL_STATE_SYNC = 800;
   const PANEL_UI_STATE_FIELDS_FOR_PANEL_STATE_SYNC = [
     "isOpen",
     "mode",
@@ -71,6 +80,7 @@
     "paneTasks",
     "paneQuestions",
     "chatSubTab",
+    "noteSubTab",
     "taskFilter",
     "quizFilter",
     "chatSearchQuery",
@@ -89,6 +99,16 @@
   // Monotonic guard so a slow `resolvePanelStateForTab` response from a
   // superseded reconcile cannot flip visibility back after a newer one resolved.
   let reconcileSeqForPanelStateSync = 0;
+  // Locally mirrored copy of the global isOpen intent, kept current from the
+  // initial seed read, local writeState calls, and storage.onChanged records.
+  // Powers the zero-round-trip optimistic show on activation and the hidden-tab
+  // pre-warm; the SW reconcile pull remains the authority and corrects it.
+  let cachedIsOpenForPanelStateSync = null;
+  let reconcileTimerForPanelStateSync = null;
+  let prewarmScheduledForPanelStateSync = false;
+  // Set by maybeOptimisticShow on every activation signal that expects the
+  // panel open; arms the close-grace check in applyResolvedVisibility.
+  let lastActivationShowAtMsForPanelStateSync = 0;
   const fieldSetForPanelStateSync = new Set(PANEL_UI_STATE_FIELDS_FOR_PANEL_STATE_SYNC);
 
   const capturedGenerationForPanelStateSync = window.abchatListenerGeneration || 0;
@@ -184,6 +204,39 @@
     }
   }
 
+  // Seed the local isOpen mirror once at injection time. The null guard means a
+  // storage event or local write that lands before this read resolves wins over
+  // the (older) stored value.
+  function seedCachedIsOpenForPanelStateSync(callbackForPanelStateSync) {
+    function finishSeedForPanelStateSync() {
+      if (typeof callbackForPanelStateSync === "function") {
+        try { callbackForPanelStateSync(); } catch (errorForPanelStateSync) {}
+      }
+    }
+    try {
+      const isOpenKeyForSeed = getFieldKeyForPanelStateSync("isOpen");
+      chrome.storage.local.get(
+        [isOpenKeyForSeed, LEGACY_PANEL_UI_STATE_KEY_FOR_PANEL_STATE_SYNC],
+        function (resForSeed) {
+          if (cachedIsOpenForPanelStateSync === null) {
+            const recordForSeed = resForSeed && resForSeed[isOpenKeyForSeed];
+            if (isFieldRecordForPanelStateSync(recordForSeed) && typeof recordForSeed.value === "boolean") {
+              cachedIsOpenForPanelStateSync = recordForSeed.value;
+            } else {
+              const legacyForSeed = resForSeed && resForSeed[LEGACY_PANEL_UI_STATE_KEY_FOR_PANEL_STATE_SYNC];
+              if (legacyForSeed && typeof legacyForSeed.isOpen === "boolean") {
+                cachedIsOpenForPanelStateSync = legacyForSeed.isOpen;
+              }
+            }
+          }
+          finishSeedForPanelStateSync();
+        }
+      );
+    } catch (errorForPanelStateSync) {
+      finishSeedForPanelStateSync();
+    }
+  }
+
   function valuesEqualForPanelStateSync(aForCompare, bForCompare) {
     if (aForCompare === bForCompare) return true;
     if (Array.isArray(aForCompare) && Array.isArray(bForCompare)) {
@@ -263,6 +316,7 @@
     if (!partialForPanelStateSync || typeof partialForPanelStateSync !== "object") return;
     if (Object.prototype.hasOwnProperty.call(partialForPanelStateSync, "isOpen") &&
         typeof partialForPanelStateSync.isOpen === "boolean") {
+      cachedIsOpenForPanelStateSync = partialForPanelStateSync.isOpen;
       try {
         const actionsForVisibilityNotify =
           globalScopeForPanelStateSync.ABChatShared &&
@@ -331,11 +385,17 @@
             : false;
         if (stateForPanelStateSync.isOpen !== isCurrentlyVisibleForPanelStateSync) {
           if (stateForPanelStateSync.isOpen) {
-            if (typeof panelUiForPanelStateSync.ensureReady === "function") {
-              panelUiForPanelStateSync.ensureReady();
-            }
-            if (typeof panelUiForPanelStateSync.setVisible === "function") {
-              panelUiForPanelStateSync.setVisible(true);
+            // Never unhide the panel in a hidden tab: a background tab only
+            // pre-warms its DOM and shows via the optimistic path (or the
+            // reconcile pull) when it actually becomes visible. The close
+            // direction below stays ungated so hidden tabs still tear down.
+            if (document.visibilityState === "visible") {
+              if (typeof panelUiForPanelStateSync.ensureReady === "function") {
+                panelUiForPanelStateSync.ensureReady();
+              }
+              if (typeof panelUiForPanelStateSync.setVisible === "function") {
+                panelUiForPanelStateSync.setVisible(true);
+              }
             }
           } else if (typeof panelUiForPanelStateSync.setVisible === "function") {
             panelUiForPanelStateSync.setVisible(false);
@@ -434,6 +494,12 @@
       ) {
         runtimeForPanelStateSync.setChatSubTab(stateForPanelStateSync.chatSubTab);
       }
+      if (hasField("noteSubTab") &&
+        typeof stateForPanelStateSync.noteSubTab === "string" &&
+        typeof runtimeForPanelStateSync.setNoteSubTab === "function"
+      ) {
+        runtimeForPanelStateSync.setNoteSubTab(stateForPanelStateSync.noteSubTab);
+      }
       if (hasField("taskFilter") &&
         typeof stateForPanelStateSync.taskFilter === "string" &&
         typeof runtimeForPanelStateSync.setTaskFilter === "function"
@@ -479,6 +545,25 @@
     return actionsForResolve.resolvePanelStateForTab || "resolvePanelStateForTab";
   }
 
+  // Close-grace: a "close" verdict landing right after this tab was activated
+  // with isOpen true is usually the SW's view lagging the focus transition
+  // (tracked active tab / getLastFocused still on the previous window), not a
+  // real decision. Applying it would flash the panel closed and reopened.
+  // While inside the grace window the close is deferred and re-verified by
+  // another pull; a "no" that survives past the grace is trusted and closes.
+  // The re-ask loop is bounded by the grace duration. A genuine global close
+  // never defers: cachedIsOpen is false by then, and a stale-open tab in a
+  // background window fails the recent-activation check.
+  function shouldDeferSuspectCloseForPanelStateSync() {
+    if (cachedIsOpenForPanelStateSync !== true) return false;
+    if (document.visibilityState !== "visible") return false;
+    const sinceActivationForGrace = Date.now() - lastActivationShowAtMsForPanelStateSync;
+    return (
+      sinceActivationForGrace >= 0 &&
+      sinceActivationForGrace < OPTIMISTIC_CLOSE_GRACE_MS_FOR_PANEL_STATE_SYNC
+    );
+  }
+
   // Apply the service worker's authoritative per-tab decision. Guarded by the
   // monotonic sequence so a superseded reconcile's late response can't apply.
   function applyResolvedVisibilityForPanelStateSync(shouldBeOpenForApply, seqForApply) {
@@ -489,7 +574,32 @@
     const isVisibleForApply =
       typeof panelUiForApply.isVisible === "function" ? Boolean(panelUiForApply.isVisible()) : false;
     if (Boolean(shouldBeOpenForApply) === isVisibleForApply) return;
+    if (!shouldBeOpenForApply && isVisibleForApply && shouldDeferSuspectCloseForPanelStateSync()) {
+      scheduleReconcileForPanelStateSync();
+      return;
+    }
     applyStateForPanelStateSync({ isOpen: Boolean(shouldBeOpenForApply) }, new Set(["isOpen"]));
+  }
+
+  // Entry point for the SW's panelVisibilityCommand push (see content/main.js).
+  // Closes go through the same close-grace as reconcile verdicts: a stale
+  // enforce whose active-tab query resolved after the focus moved can target
+  // the newly activated tab, and applying that push directly would reintroduce
+  // the flash the grace exists to prevent.
+  function applyVisibilityCommandForPanelStateSync(isOpenForCommand) {
+    if (isStaleForPanelStateSync()) return;
+    if (!isOpenForCommand) {
+      const panelUiForCommand = getPanelUiNamespaceForPanelStateSync();
+      const isVisibleForCommand =
+        panelUiForCommand && typeof panelUiForCommand.isVisible === "function"
+          ? Boolean(panelUiForCommand.isVisible())
+          : false;
+      if (isVisibleForCommand && shouldDeferSuspectCloseForPanelStateSync()) {
+        scheduleReconcileForPanelStateSync();
+        return;
+      }
+    }
+    applyStateForPanelStateSync({ isOpen: Boolean(isOpenForCommand) }, new Set(["isOpen"]));
   }
 
   // Fallback when the service worker can't be reached: apply only the safe CLOSE
@@ -544,6 +654,72 @@
     }
   }
 
+  // Coalesce the burst of reconcile triggers a single tab switch produces
+  // (visibilitychange, window focus, the activeTabChanged push, an isOpen
+  // storage change) into one pull per burst. The optimistic show below keeps
+  // perceived latency at zero, so delaying the authoritative pull by the
+  // debounce window costs nothing visible.
+  function scheduleReconcileForPanelStateSync() {
+    if (reconcileTimerForPanelStateSync) return;
+    reconcileTimerForPanelStateSync = setTimeout(function () {
+      reconcileTimerForPanelStateSync = null;
+      reconcilePanelVisibilityForPanelStateSync();
+    }, RECONCILE_DEBOUNCE_MS_FOR_PANEL_STATE_SYNC);
+  }
+
+  // Zero-round-trip show for a tab that just became visible or focused while
+  // the mirrored global isOpen is true. The trailing reconcile pull stays
+  // authoritative: in the rare case this tab should not show the panel (e.g.
+  // it was activated inside an unfocused window), the pull closes it within
+  // one round trip. Applying through applyState keeps the applyingFromRemote
+  // guard engaged, so the show does not echo back into storage as fresh
+  // intent. Only activation signals call this; a remote isOpen change alone
+  // must not, because visible tabs in unfocused windows would wrongly show.
+  function maybeOptimisticShowForPanelStateSync() {
+    if (isStaleForPanelStateSync()) return;
+    if (cachedIsOpenForPanelStateSync !== true) return;
+    if (document.visibilityState !== "visible") return;
+    // Arm the close-grace window even when the panel is already visible: this
+    // activation expects the panel open, so a "close" verdict landing within
+    // the grace is suspect regardless of who flipped the display first.
+    lastActivationShowAtMsForPanelStateSync = Date.now();
+    const panelUiForOptimisticShow = getPanelUiNamespaceForPanelStateSync();
+    if (!panelUiForOptimisticShow) return;
+    const isVisibleForOptimisticShow =
+      typeof panelUiForOptimisticShow.isVisible === "function"
+        ? Boolean(panelUiForOptimisticShow.isVisible())
+        : false;
+    if (isVisibleForOptimisticShow) return;
+    applyStateForPanelStateSync({ isOpen: true }, new Set(["isOpen"]));
+  }
+
+  // Pre-warm: build the panel DOM (still hidden) while the tab is idle, so a
+  // later switch to this tab is a display flip instead of a full markup build,
+  // CSS load, and runtime init at switch time. Only runs while the global
+  // isOpen is true; a tab whose panel is never going to be needed pays nothing
+  // beyond the storage read it already does.
+  function schedulePrewarmForPanelStateSync() {
+    if (prewarmScheduledForPanelStateSync) return;
+    prewarmScheduledForPanelStateSync = true;
+    function runPrewarmForPanelStateSync() {
+      prewarmScheduledForPanelStateSync = false;
+      if (isStaleForPanelStateSync()) return;
+      if (cachedIsOpenForPanelStateSync !== true) return;
+      const panelUiForPrewarm = getPanelUiNamespaceForPanelStateSync();
+      if (!panelUiForPrewarm || typeof panelUiForPrewarm.ensureReady !== "function") return;
+      try { panelUiForPrewarm.ensureReady(); } catch (errorForPanelStateSync) {}
+    }
+    try {
+      if (typeof requestIdleCallback === "function") {
+        requestIdleCallback(runPrewarmForPanelStateSync, {
+          timeout: PREWARM_IDLE_TIMEOUT_MS_FOR_PANEL_STATE_SYNC
+        });
+        return;
+      }
+    } catch (errorForPanelStateSync) {}
+    setTimeout(runPrewarmForPanelStateSync, PREWARM_FALLBACK_DELAY_MS_FOR_PANEL_STATE_SYNC);
+  }
+
   function bindActivationListenersForPanelStateSync() {
     if (!visibilityListenerForPanelStateSync) {
       visibilityListenerForPanelStateSync = function panelStateSyncVisibilityListenerForPanelStateSync() {
@@ -555,7 +731,8 @@
           return;
         }
         if (document.visibilityState !== "visible") return;
-        reconcilePanelVisibilityForPanelStateSync();
+        maybeOptimisticShowForPanelStateSync();
+        scheduleReconcileForPanelStateSync();
       };
       try {
         document.addEventListener("visibilitychange", visibilityListenerForPanelStateSync, true);
@@ -570,7 +747,8 @@
           windowFocusListenerForPanelStateSync = null;
           return;
         }
-        reconcilePanelVisibilityForPanelStateSync();
+        maybeOptimisticShowForPanelStateSync();
+        scheduleReconcileForPanelStateSync();
       };
       try {
         window.addEventListener("focus", windowFocusListenerForPanelStateSync, true);
@@ -587,14 +765,28 @@
           activeTabPushListenerForPanelStateSync = null;
           return;
         }
-        // The SW pushes this whenever the active tab changes. The payload is
-        // only a trigger; the authoritative answer comes from the reconcile pull
-        // that follows. Reconcile whether this tab gained OR lost active status:
-        // a tab that just lost active must close if it should no longer show the
-        // panel.
+        // The SW pushes this whenever the active tab changes. The payload's
+        // isActive tells this tab whether it gained or lost active status; the
+        // authoritative answer still comes from the reconcile pull that
+        // follows. Reconcile on both directions: a tab that just lost active
+        // must close if it should no longer show the panel.
         if (!msgForActiveTabPush || msgForActiveTabPush.action !== "activeTabChanged") return;
+        if (msgForActiveTabPush.isActive === false) {
+          // This tab just LOST active status. Disarm the close-grace so the
+          // legitimate close that follows (push command or pull verdict)
+          // applies immediately instead of being deferred as a suspect stale
+          // close. Never arm or optimistic-show on a loss: that is what let a
+          // still-visible tab in a newly unfocused window keep its panel for
+          // the whole grace window and blink out late.
+          lastActivationShowAtMsForPanelStateSync = 0;
+          if (document.visibilityState === "visible") {
+            scheduleReconcileForPanelStateSync();
+          }
+          return;
+        }
         if (document.visibilityState === "visible") {
-          reconcilePanelVisibilityForPanelStateSync();
+          maybeOptimisticShowForPanelStateSync();
+          scheduleReconcileForPanelStateSync();
         }
       };
       try {
@@ -644,6 +836,12 @@
           return;
         }
         if (fieldNameForDiff === "isOpen") {
+          if (typeof nextRecordForField.value === "boolean") {
+            cachedIsOpenForPanelStateSync = nextRecordForField.value;
+            if (nextRecordForField.value === true) {
+              schedulePrewarmForPanelStateSync();
+            }
+          }
           needsVisibilityReconcileForDiff = true;
           return;
         }
@@ -659,6 +857,12 @@
           if (!Object.prototype.hasOwnProperty.call(legacyIncomingForPanelStateSync, fieldNameForLegacy)) return;
           if (valuesEqualForPanelStateSync(legacyPreviousForPanelStateSync[fieldNameForLegacy], legacyIncomingForPanelStateSync[fieldNameForLegacy])) return;
           if (fieldNameForLegacy === "isOpen") {
+            if (typeof legacyIncomingForPanelStateSync.isOpen === "boolean") {
+              cachedIsOpenForPanelStateSync = legacyIncomingForPanelStateSync.isOpen;
+              if (legacyIncomingForPanelStateSync.isOpen === true) {
+                schedulePrewarmForPanelStateSync();
+              }
+            }
             needsVisibilityReconcileForDiff = true;
             return;
           }
@@ -671,7 +875,7 @@
         applyStateForPanelStateSync(incomingForPanelStateSync, changedFieldsForDiff);
       }
       if (needsVisibilityReconcileForDiff) {
-        reconcilePanelVisibilityForPanelStateSync();
+        scheduleReconcileForPanelStateSync();
       }
     };
     try {
@@ -717,6 +921,10 @@
       clearTimeout(writeTimerForPanelStateSync);
       writeTimerForPanelStateSync = null;
     }
+    if (reconcileTimerForPanelStateSync) {
+      clearTimeout(reconcileTimerForPanelStateSync);
+      reconcileTimerForPanelStateSync = null;
+    }
     initializedForPanelStateSync = false;
   }
 
@@ -729,6 +937,7 @@
     teardown: teardownForPanelStateSync,
     writeState: writeStateForPanelStateSync,
     applyState: applyStateForPanelStateSync,
+    applyVisibilityCommand: applyVisibilityCommandForPanelStateSync,
     isApplyingFromRemote: isApplyingFromRemoteForPanelStateSync
   };
 
@@ -769,16 +978,32 @@
   // The reconcile applies via applyState (the applyingFromRemote guard makes the
   // setVisible write-back a no-op), so it does not re-broadcast as fresh intent.
   //
+  // The seed read primes the local isOpen mirror first, then:
+  //   - optimistic show: if this tab is visible and isOpen is true, open
+  //     immediately without waiting for the SW round trip (page navigation on
+  //     the active tab). The reconcile that follows stays the authority.
+  //   - pre-warm: if isOpen is true but this tab is hidden, build the panel
+  //     DOM at idle so a later switch to this tab is a pure display flip.
+  //
   // Defer to ensure document.body exists (document_idle should already
   // guarantee this, but the deferral also lets panel.js finish its IIFE
   // setup if injection order ever changes).
   // -----------------------------------------------------------------
+  function bootVisibilityForPanelStateSync() {
+    seedCachedIsOpenForPanelStateSync(function () {
+      if (cachedIsOpenForPanelStateSync === true) {
+        maybeOptimisticShowForPanelStateSync();
+        schedulePrewarmForPanelStateSync();
+      }
+      reconcilePanelVisibilityForPanelStateSync();
+    });
+  }
   if (document && document.body) {
-    reconcilePanelVisibilityForPanelStateSync();
+    bootVisibilityForPanelStateSync();
   } else {
     document.addEventListener(
       "DOMContentLoaded",
-      reconcilePanelVisibilityForPanelStateSync,
+      bootVisibilityForPanelStateSync,
       { once: true }
     );
   }

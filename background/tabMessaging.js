@@ -20,8 +20,15 @@
   // try/catch as before, so a misbehaving tab cannot stall a worker for more
   // than reInjectPerTabTimeoutMsForTabMessaging.
   const reInjectConcurrencyForTabMessaging = 4;
+  // Per-tab in-flight guard for ensureContentInjected. Activation of a tab can
+  // trigger several concurrent callers (onActivated enforce, onFocusChanged
+  // enforce, the post-reload recovery sweep, sendActionToTab retries); without
+  // this guard two racing calls could both decide to inject and tear down a
+  // live panel twice in a row.
+  const inflightEnsureInjectedForTabMessaging = new Map();
 
   const injectableJsFilesForTabMessaging = [
+    "content/keyboardShield.js",
     "content/preInit.js",
     "shared/messages.js",
     "shared/agentRunStop.js",
@@ -70,6 +77,15 @@
   ];
 
   const injectableCssFilesForTabMessaging = ["styles.css"];
+
+  // Injected into the page's MAIN world, never the isolated world: it patches the
+  // page's EventTarget.prototype so page listeners skip events originating in the
+  // extension UI. Running it in the isolated world would instead wrap the content
+  // scripts' own prototypes and hide panel events from the extension itself, so it
+  // must stay out of injectableJsFilesForTabMessaging. It is idempotent (window
+  // flag) and uses no chrome.* APIs, so re-injection after an extension reload is
+  // safe and the already-installed copy keeps working regardless.
+  const mainWorldJsFilesForTabMessaging = ["content/pageEventShield.js"];
 
   function getHostnameFromUrlForTabMessaging(urlForTabMessaging) {
     if (!urlForTabMessaging || typeof urlForTabMessaging !== "string") {
@@ -259,6 +275,21 @@
     });
   }
 
+  function executeMainWorldScriptFilesForTabMessaging(tabIdForTabMessaging, filesForTabMessaging) {
+    return new Promise((resolveForTabMessaging) => {
+      chrome.scripting.executeScript(
+        {
+          target: { tabId: tabIdForTabMessaging },
+          files: filesForTabMessaging,
+          world: "MAIN"
+        },
+        () => {
+          resolveForTabMessaging(!chrome.runtime.lastError);
+        }
+      );
+    });
+  }
+
   function insertCssFilesForTabMessaging(tabIdForTabMessaging, filesForTabMessaging) {
     return new Promise((resolveForTabMessaging) => {
       chrome.scripting.insertCSS(
@@ -293,21 +324,72 @@
     return false;
   }
 
-  async function ensureContentInjectedForTabMessaging(tabIdForTabMessaging) {
-    const checkResultForTabMessaging = await sendMessageToTabForTabMessaging(tabIdForTabMessaging, {
-      action: actionsForTabMessaging.checkInjected || "checkInjected"
-    }, actionResponseTimeoutMsForTabMessaging);
+  // Deterministic injected-state probe. Reads window.abchatMainInitNonce from
+  // the extension's ISOLATED world in the tab. main.js (the last file in the
+  // bundle) sets the nonce, so a non-null read proves the full bundle from
+  // THIS extension instance already ran there. Isolated worlds are per
+  // extension instance, so after a genuine extension reload the old world's
+  // nonce is invisible and the probe correctly reports "not injected".
+  //
+  // This replaces the previous message-based checkInjected handshake, whose
+  // 700 ms timeout produced false "not injected" verdicts on any tab that was
+  // slow to answer (throttled/frozen background tab, busy main thread, paused
+  // debugger). Each false verdict re-injected all content scripts, and the
+  // re-init in main.js then tore down and rebuilt a live panel: a visible
+  // flash on tab activation. The probe cannot time out; it either runs in the
+  // world (definitive answer) or errors (in which case file injection into
+  // the same target would fail for the same reason).
+  function probeInjectedNonceForTabMessaging(tabIdForTabMessaging) {
+    return new Promise((resolveForTabMessaging) => {
+      try {
+        chrome.scripting.executeScript(
+          {
+            target: { tabId: tabIdForTabMessaging },
+            func: function readInjectionNonceForTabMessaging() {
+              return window.abchatMainInitNonce || null;
+            }
+          },
+          (probeResultsForTabMessaging) => {
+            if (chrome.runtime.lastError) {
+              resolveForTabMessaging({ ok: false, nonce: null });
+              return;
+            }
+            const firstResultForTabMessaging =
+              Array.isArray(probeResultsForTabMessaging) && probeResultsForTabMessaging[0]
+                ? probeResultsForTabMessaging[0]
+                : null;
+            resolveForTabMessaging({
+              ok: true,
+              nonce: firstResultForTabMessaging && firstResultForTabMessaging.result
+                ? firstResultForTabMessaging.result
+                : null
+            });
+          }
+        );
+      } catch (errorForTabMessaging) {
+        resolveForTabMessaging({ ok: false, nonce: null });
+      }
+    });
+  }
 
-    // Trust "already injected" only when context validity is explicitly confirmed.
-    // Older/stale scripts may reply injected:true even after extension reload, which
-    // can block required reinjection unless we require this stronger handshake signal.
-    if (
-      checkResultForTabMessaging.response &&
-      checkResultForTabMessaging.response.injected &&
-      checkResultForTabMessaging.response.contextValid === true
-    ) {
+  async function runEnsureContentInjectedForTabMessaging(tabIdForTabMessaging) {
+    const probeForTabMessaging = await probeInjectedNonceForTabMessaging(tabIdForTabMessaging);
+    if (probeForTabMessaging.ok && probeForTabMessaging.nonce) {
       return true;
     }
+    if (!probeForTabMessaging.ok) {
+      // The probe could not execute in the tab (no host access, tab gone,
+      // frame mid-navigation). File injection into the same target would fail
+      // identically, so do not attempt it; callers retry via their own paths.
+      return false;
+    }
+
+    // Best-effort: the main-world shield is protective, not functional, so a
+    // failure here must not block the isolated-world injection below.
+    await executeMainWorldScriptFilesForTabMessaging(
+      tabIdForTabMessaging,
+      mainWorldJsFilesForTabMessaging
+    );
 
     const isScriptInjectedForTabMessaging = await executeScriptFilesForTabMessaging(
       tabIdForTabMessaging,
@@ -320,6 +402,26 @@
 
     await insertCssFilesForTabMessaging(tabIdForTabMessaging, injectableCssFilesForTabMessaging);
     return true;
+  }
+
+  function ensureContentInjectedForTabMessaging(tabIdForTabMessaging) {
+    if (typeof tabIdForTabMessaging !== "number") {
+      return Promise.resolve(false);
+    }
+    const existingRunForTabMessaging = inflightEnsureInjectedForTabMessaging.get(tabIdForTabMessaging);
+    if (existingRunForTabMessaging) {
+      return existingRunForTabMessaging;
+    }
+    const runForTabMessaging = runEnsureContentInjectedForTabMessaging(tabIdForTabMessaging)
+      .catch(function () {
+        return false;
+      })
+      .then(function (resultForTabMessaging) {
+        inflightEnsureInjectedForTabMessaging.delete(tabIdForTabMessaging);
+        return resultForTabMessaging;
+      });
+    inflightEnsureInjectedForTabMessaging.set(tabIdForTabMessaging, runForTabMessaging);
+    return runForTabMessaging;
   }
 
   async function sendActionToTabForTabMessaging(
@@ -426,7 +528,9 @@
   // (abchatMainInitNonce + legacy fallback) and perform a clean reset (see content/main.js).
   //
   // Lessons learned:
-  // - "checkInjected" is insufficient by itself; require explicit context validity.
+  // - A message-based injected check with a timeout produces false "not
+  //   injected" verdicts on slow tabs; the executeScript nonce probe in
+  //   ensureContentInjected is deterministic and replaced it.
   // - Per-tab timeouts are necessary so one hung tab cannot block all recovery.
   // - Bounded-concurrency (small worker pool) is faster than fully sequential
   //   while remaining safely under chrome.scripting.executeScript limits.

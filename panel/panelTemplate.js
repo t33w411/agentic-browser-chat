@@ -161,6 +161,7 @@
                     <button class="ap-item" data-action="capture-screenshot"><span class="ap-icon">${icForPanelTemplate.screenshot16}</span> Take screenshot</button>
                     <button class="ap-item" data-action="open-tab-picker"><span class="ap-icon">${icForPanelTemplate.browserTab16}</span> Browser tab content</button>
                     <button class="ap-item" data-action="open-note-picker"><span class="ap-icon">${icForPanelTemplate.fileText16}</span> Note</button>
+                    <button class="ap-item" data-action="open-clip-picker"><span class="ap-icon">${icForPanelTemplate.bookmark16}</span> Saved clip</button>
                     <button class="ap-item" data-action="open-chat-picker"><span class="ap-icon">${icForPanelTemplate.message16}</span> Chat summary</button>
                     <button class="ap-item" data-action="spreadsheet-from-clipboard"><span class="ap-icon">${icForPanelTemplate.spreadsheet16}</span> Spreadsheet in page</button>
                   </div>
@@ -216,7 +217,7 @@
         <div class="notes-sidebar">
           <div class="ns-header">
             <div class="ns-row1">
-              <button class="sec-btn" data-action="open-note-editor">
+              <button class="sec-btn" id="new-note-btn" data-action="open-note-editor">
                 ${icForPanelTemplate.plus12}
                 New note
               </button>
@@ -224,6 +225,10 @@
               <button class="collapse-btn" data-action="collapse-notes-sidebar" title="Collapse sidebar">
                 ${icForPanelTemplate.chevronLeft12}
               </button>
+            </div>
+            <div class="note-type-row">
+              <button class="ntab-btn active" data-ntype="notes" data-action="set-note-type" data-note-type="notes">Notes</button>
+              <button class="ntab-btn" data-ntype="clips" data-action="set-note-type" data-note-type="clips">${icForPanelTemplate.bookmark12} Clips</button>
             </div>
             <div class="ns-search">
               <span class="s-icon">
@@ -235,6 +240,11 @@
           </div>
           <div class="notes-list">
           </div>
+          <div class="notes-list-empty hidden" id="notes-list-empty">
+            <div class="nle-icon">${icForPanelTemplate.bookmark32}</div>
+            <div class="nle-title" id="notes-list-empty-title">No notes yet</div>
+            <div class="nle-sub" id="notes-list-empty-sub"></div>
+          </div>
         </div>
 
         <!-- Note Editor -->
@@ -244,7 +254,7 @@
           </button>
           <button class="ne-back-btn" data-action="back-from-note">
             ${icForPanelTemplate.chevronLeft12}
-            All notes
+            <span class="ne-back-label" id="ne-back-label">All notes</span>
           </button>
 
           <!-- Pane empty state: visible in expanded mode when nothing is selected -->
@@ -273,6 +283,26 @@
               </button>
             </div>
             <div class="ne-body">
+              <!-- Clip mode only: where this snapshot came from -->
+              <div class="ne-clip-source hidden" id="ne-clip-source">
+                <div class="ne-clip-source-row" id="ne-clip-source-url-row">
+                  <span class="ne-clip-source-label">Source</span>
+                  <span class="ne-clip-source-value" id="ne-clip-source-url"></span>
+                </div>
+                <div class="ne-clip-source-row" id="ne-clip-source-title-row">
+                  <span class="ne-clip-source-label">Page</span>
+                  <span class="ne-clip-source-value" id="ne-clip-source-title"></span>
+                </div>
+                <div class="ne-clip-source-row" id="ne-clip-source-selector-row">
+                  <span class="ne-clip-source-label">Element</span>
+                  <span class="ne-clip-source-value" id="ne-clip-source-selector"></span>
+                </div>
+                <div class="ne-clip-source-row" id="ne-clip-source-captured-row">
+                  <span class="ne-clip-source-label">Captured</span>
+                  <span class="ne-clip-source-value" id="ne-clip-source-captured"></span>
+                </div>
+                <div class="ne-clip-readonly-note" id="ne-clip-readonly-note"></div>
+              </div>
               <!-- Preview mode: rendered output -->
               <div class="ne-preview" id="ne-preview"></div>
               <!-- Edit mode: raw text -->
@@ -297,7 +327,9 @@
               <!-- Preview mode footer -->
               <div class="ne-preview-btns" style="align-items:center;gap:6px;width:100%">
                 <button class="btn-primary" data-action="enter-note-edit-mode">Edit</button>
-                <button class="btn-ghost" data-action="open-note-popout">Pop out</button>
+                <button class="btn-ghost ne-clip-only" data-action="view-active-clip-payload">View full payload</button>
+                <button class="btn-ghost ne-clip-only" data-action="convert-active-clip-to-note">Convert to note</button>
+                <button class="btn-ghost ne-note-only" data-action="open-note-popout">Pop out</button>
                 <button class="btn-danger" id="ne-delete-btn" data-action="delete-note" style="margin-left:auto">Delete</button>
               </div>
               <!-- Edit mode footer -->
@@ -550,6 +582,18 @@
                 <option value="90">90 days</option>
                 <option value="180">6 months</option>
                 <option value="365">1 year</option>
+              </select>
+            </div>
+            <div class="stg-row">
+              <div class="stg-label">
+                <strong>Delete clips older than</strong>
+                <span>Starred clips are excluded</span>
+              </div>
+              <select class="stg-select" id="settings-delete-clips-older-than" data-action="save-delete-clips-older-than">
+                <option value="1">1 day</option>
+                <option value="7">7 days</option>
+                <option value="14">14 days</option>
+                <option value="30">30 days</option>
               </select>
             </div>
             <div class="stg-data-row">

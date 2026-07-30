@@ -59,6 +59,14 @@
     if (nodeForKeyboardShield.id === "abchat-quick-question-overlay") {
       return true;
     }
+
+    // Closed-shadow hosts: events from inside retarget to the host element itself.
+    if (
+      nodeForKeyboardShield.id === "abchat-content-selector-menu-host" ||
+      nodeForKeyboardShield.id === "abchat-toast-host"
+    ) {
+      return true;
+    }
     if (typeof nodeForKeyboardShield.closest === "function") {
       if (nodeForKeyboardShield.closest("#abchat-quick-question-overlay")) {
         return true;
@@ -216,8 +224,10 @@
   // Stop page bubble listeners from acting on clicks that landed in the extension UI.
   function isolatePointerEventForKeyboardShield(eventForKeyboardShield) {
     if (isStaleForKeyboardShield()) {
+      document.removeEventListener("pointerdown", isolatePointerEventForKeyboardShield, false);
       document.removeEventListener("mousedown", isolatePointerEventForKeyboardShield, false);
       document.removeEventListener("click", isolatePointerEventForKeyboardShield, false);
+      document.removeEventListener("touchstart", isolatePointerEventForKeyboardShield, false);
       return;
     }
     if (!shouldIsolatePointerEventForKeyboardShield(eventForKeyboardShield)) {
@@ -241,9 +251,13 @@
   document.addEventListener("keyup", isolateKeyboardEventForKeyboardShield, false);
 
   // Pointer: capture neutralizes preventDefault (restores focus-on-click); bubble stops page listeners.
+  // mouseup/pointerup are deliberately absent from the bubble list: panel drags
+  // (note popout, resize) end via bubble-phase document listeners.
   document.addEventListener("mousedown", capturePointerEventForKeyboardShield, true);
   document.addEventListener("mouseup", capturePointerEventForKeyboardShield, true);
   document.addEventListener("click", capturePointerEventForKeyboardShield, true);
+  document.addEventListener("pointerdown", isolatePointerEventForKeyboardShield, false);
   document.addEventListener("mousedown", isolatePointerEventForKeyboardShield, false);
   document.addEventListener("click", isolatePointerEventForKeyboardShield, false);
+  document.addEventListener("touchstart", isolatePointerEventForKeyboardShield, false);
 })();

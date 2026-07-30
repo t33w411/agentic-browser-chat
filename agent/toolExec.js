@@ -25,10 +25,51 @@
     return typeof note.body === 'string' ? note.body : '';
   }
 
+  // A clip's body holds only a short excerpt; the captured payload lives in its single attached
+  // blob. Resolves that blob so a clip can serve the payload as its content. An image payload has
+  // no text to serve, so isImage is reported instead and the caller keeps the excerpt.
+  async function resolveClipPayloadForToolExec(panelDataRepo, note) {
+    var payloadForClip = { blobId: null, name: '', isImage: false, text: '', blob: null };
+    var attachmentsForClip = Array.isArray(note && note.attachments) ? note.attachments : [];
+    var firstForClip = attachmentsForClip.length > 0 ? attachmentsForClip[0] : null;
+    var refIdForClip = Number(firstForClip && firstForClip.refId);
+    if (!Number.isFinite(refIdForClip) || refIdForClip <= 0) return payloadForClip;
+    payloadForClip.blobId = refIdForClip;
+    payloadForClip.name = String(firstForClip.name || '');
+    if (!panelDataRepo || typeof panelDataRepo.getAttachmentBlob !== 'function') return payloadForClip;
+    try {
+      var blobForClip = await panelDataRepo.getAttachmentBlob(refIdForClip);
+      if (!blobForClip) return payloadForClip;
+      payloadForClip.blob = blobForClip;
+      var mimeForClip = String(blobForClip.mimeType || '');
+      var dataUrlForClip = String(blobForClip.dataUrl || '');
+      payloadForClip.isImage = mimeForClip.indexOf('image/') === 0 || dataUrlForClip.indexOf('data:image/') === 0;
+      if (!payloadForClip.isImage) payloadForClip.text = String(blobForClip.textContent || '');
+    } catch (errForClip) { /* fall back to the excerpt */ }
+    return payloadForClip;
+  }
+
+  // Content string for a note, with a clip's captured payload standing in for its excerpt whenever
+  // that payload is text. Every consumer of a note's content goes through here (read, grep, the rev
+  // token), so all three describe the same bytes. The resolved payload rides along so callers do
+  // not fetch the blob a second time.
+  async function resolveNoteContentStringForToolExec(panelDataRepo, note) {
+    var bodyForNoteContent = serializeNoteContentForToolExec(note);
+    if (!note || note.noteType !== 'clip') return { contentString: bodyForNoteContent, clipPayload: null };
+    var payloadForNoteContent = await resolveClipPayloadForToolExec(panelDataRepo, note);
+    return {
+      contentString: payloadForNoteContent.text || bodyForNoteContent,
+      clipPayload: payloadForNoteContent
+    };
+  }
+
   // Note attachments are persisted as { name, refId } only; the byte content lives in the
   // attachmentBlobs store keyed by refId. This builds a compact metadata summary (never the
   // content) so a note read always discloses its attachments and the blob_id to read them.
-  async function buildNoteAttachmentsSummaryForToolExec(panelDataRepo, note) {
+  // prefetchedBlobsByIdForSummary lets a caller that already loaded a blob (a clip serving its
+  // payload) hand it over rather than pay a second fetch of the same bytes.
+  async function buildNoteAttachmentsSummaryForToolExec(panelDataRepo, note, prefetchedBlobsByIdForSummary) {
+    var prefetchedForSummary = prefetchedBlobsByIdForSummary || {};
     var attachmentsForSummary = Array.isArray(note.attachments) ? note.attachments : [];
     if (attachmentsForSummary.length === 0) return '';
     var partsForSummary = [];
@@ -42,9 +83,11 @@
       var isImageForSummary = false;
       var blobFetchedForSummary = false;
       var hasTextForSummary = false;
-      if (hasBlobIdForSummary && panelDataRepo && typeof panelDataRepo.getAttachmentBlob === 'function') {
+      var canFetchBlobForSummary = panelDataRepo && typeof panelDataRepo.getAttachmentBlob === 'function';
+      if (hasBlobIdForSummary && (prefetchedForSummary[parsedRefIdForSummary] || canFetchBlobForSummary)) {
         try {
-          var blobForSummary = await panelDataRepo.getAttachmentBlob(parsedRefIdForSummary);
+          var blobForSummary = prefetchedForSummary[parsedRefIdForSummary]
+            || await panelDataRepo.getAttachmentBlob(parsedRefIdForSummary);
           if (blobForSummary) {
             blobFetchedForSummary = true;
             mimeForSummary = String(blobForSummary.mimeType || '');
@@ -192,12 +235,32 @@
 
   // ---- Shared repo helpers ----
 
+  // Blob ids held by pending (unsubmitted) input chips, so repo calls that trigger blob
+  // pruning do not delete a blob the user is still composing with. Empty when there is no
+  // panel runtime in this context (the offscreen document has no input row).
+  function getPendingBlobIdsForToolExec() {
+    try {
+      var nsForPendingBlobs = globalThis.ABChatContent || {};
+      var runtimeForPendingBlobs = nsForPendingBlobs.ui && nsForPendingBlobs.ui.panelRuntime;
+      if (runtimeForPendingBlobs && typeof runtimeForPendingBlobs.getPendingBlobIds === 'function') {
+        var idsForPendingBlobs = runtimeForPendingBlobs.getPendingBlobIds();
+        return Array.isArray(idsForPendingBlobs) ? idsForPendingBlobs : [];
+      }
+    } catch (errForPendingBlobs) { /* best effort */ }
+    return [];
+  }
+
   async function getItemWithContentStringForToolExec(panelDataRepo, type, id) {
     var item = null;
     var contentString = '';
+    var clipPayloadForItem = null;
     if (type === 'note') {
       item = await panelDataRepo.getNote(id);
-      if (item) contentString = serializeNoteContentForToolExec(item);
+      if (item) {
+        var resolvedForItem = await resolveNoteContentStringForToolExec(panelDataRepo, item);
+        contentString = resolvedForItem.contentString;
+        clipPayloadForItem = resolvedForItem.clipPayload;
+      }
     } else if (type === 'task') {
       item = await panelDataRepo.getTask(id);
       if (item) contentString = serializeTaskContentForToolExec(item);
@@ -210,11 +273,11 @@
         contentString = serializeChatMessagesContentForToolExec(item.messages || []);
       }
     }
-    return { item: item, contentString: contentString };
+    return { item: item, contentString: contentString, clipPayload: clipPayloadForItem };
   }
 
   async function getContentStringForItemForToolExec(panelDataRepo, type, item) {
-    if (type === 'note') return serializeNoteContentForToolExec(item);
+    if (type === 'note') return (await resolveNoteContentStringForToolExec(panelDataRepo, item)).contentString;
     if (type === 'task') return serializeTaskContentForToolExec(item);
     if (type === 'question') return serializeQuestionContentForToolExec(item);
     if (type === 'chat') {
@@ -409,8 +472,44 @@
       if (!responseForRead.ok) return responseForRead;
 
       if (type === 'note') {
-        var attStringForRead = await buildNoteAttachmentsSummaryForToolExec(panelDataRepo, got.item);
+        // A clip has already loaded its payload blob to serve the content; hand it to the summary
+        // builder so a large payload does not cross the messaging boundary a second time.
+        var prefetchedBlobsForRead = {};
+        if (got.clipPayload && got.clipPayload.blobId && got.clipPayload.blob) {
+          prefetchedBlobsForRead[got.clipPayload.blobId] = got.clipPayload.blob;
+        }
+        var attStringForRead = await buildNoteAttachmentsSummaryForToolExec(panelDataRepo, got.item, prefetchedBlobsForRead);
         if (attStringForRead) responseForRead.attachments = attStringForRead;
+        // A text clip serves its captured payload as the content above, so the notice confirms that
+        // and points at paging. An image clip has no text payload to serve, so the content is the
+        // short excerpt and the notice must say so, or the excerpt reads as the whole clip.
+        if (got.item.noteType === 'clip') {
+          var clipPayloadForRead = got.clipPayload || {};
+          responseForRead.meta = {
+            noteType: 'clip',
+            clipKind: got.item.clipKind || '',
+            sourceUrl: got.item.sourceUrl || '',
+            sourceTitle: got.item.sourceTitle || '',
+            sourceSelector: got.item.sourceSelector || '',
+            capturedAt: got.item.capturedAt || '',
+            payloadSize: Number(got.item.clipPayloadSize) || 0
+          };
+          if (clipPayloadForRead.text) {
+            responseForRead.notice = 'This note is a clip: the content above is the full captured payload '
+              + 'itself, not the short excerpt shown in the extension UI. It is read-only. If has_more is '
+              + 'true, page forward with offset until you have all of it.';
+          } else if (clipPayloadForRead.isImage) {
+            responseForRead.notice = 'This note is a clip whose captured payload is an image, so the content '
+              + 'above is only a short text excerpt. Call read with type:"attachment" and id:'
+              + clipPayloadForRead.blobId + ' for a vision-model description of the captured image.';
+          } else {
+            responseForRead.notice = 'This note is a clip and the content above is only a short excerpt: its '
+              + 'captured payload could not be loaded'
+              + (clipPayloadForRead.blobId
+                ? '. Try read with type:"attachment" and id:' + clipPayloadForRead.blobId + '.'
+                : ' and no payload attachment is recorded.');
+          }
+        }
       } else if (type === 'task') {
         responseForRead.meta = {
           dueAt: got.item.dueAt || '',
@@ -672,6 +771,9 @@
       try {
         var gotForOverwrite = await getItemWithContentStringForToolExec(panelDataRepo, type, overwriteId);
         if (!gotForOverwrite.item) return { ok: false, error: 'Item not found: ' + type + ' ' + overwriteId };
+        if (type === 'note' && gotForOverwrite.item.noteType === 'clip') {
+          return { ok: false, error: 'Note ' + overwriteId + ' is a clip: its captured content is read-only. Read it instead, or write a new note.' };
+        }
         if (computeRevTokenForToolExec(gotForOverwrite.contentString) !== args.rev) {
           return { ok: false, error: 'Stale rev: item was modified since your last read. Read again before overwriting.' };
         }
@@ -717,6 +819,9 @@
     }
     var isCompleted = typeof args.is_completed === 'boolean' ? args.is_completed : null;
 
+    if (type === 'note' && args.noteType === 'clip') {
+      return { ok: false, error: 'Clips cannot be created with write; they are snapshots captured from a page by the user. Write a note instead.' };
+    }
     if (type === 'note' && args.noteType !== undefined && args.noteType !== null && ['user', 'agent'].indexOf(args.noteType) === -1) {
       return { ok: false, error: 'Invalid noteType "' + args.noteType + '"; valid values are: user, agent' };
     }
@@ -915,7 +1020,7 @@
       if (!slug) return { ok: false, error: 'slug is required for delete' };
       var noteForDelete = await findSkillBySlugForToolExec(panelDataRepo, slug);
       if (!noteForDelete) return { ok: false, error: 'No skill found with command /' + slug };
-      await panelDataRepo.deleteNote(noteForDelete.id);
+      await panelDataRepo.deleteNote(noteForDelete.id, getPendingBlobIdsForToolExec());
       return { ok: true, operation: 'delete', slug: slug };
     }
   }
@@ -980,6 +1085,9 @@
     try {
       var got = await getItemWithContentStringForToolExec(panelDataRepo, type, id);
       if (!got.item) return { ok: false, error: 'Item not found: ' + type + ' ' + id };
+      if (type === 'note' && got.item.noteType === 'clip') {
+        return { ok: false, error: 'Note ' + id + ' is a clip: its captured content is read-only and cannot be edited.' };
+      }
 
       var currentRev = computeRevTokenForToolExec(got.contentString);
       if (currentRev !== rev) {
@@ -1149,8 +1257,8 @@
     if (args.noteType !== undefined) {
       if (type !== null && type !== 'note') {
         ignoredFieldsForGrep.push('noteType');
-      } else if (noteType !== null && ['user', 'agent'].indexOf(noteType) === -1) {
-        return { ok: false, error: 'Invalid noteType "' + noteType + '"; valid values are: user, agent' };
+      } else if (noteType !== null && ['user', 'agent', 'clip'].indexOf(noteType) === -1) {
+        return { ok: false, error: 'Invalid noteType "' + noteType + '"; valid values are: user, agent, clip' };
       }
     }
 
@@ -1330,8 +1438,8 @@
     if (type && !isKnownTypeForToolExec(type)) return { ok: false, error: 'Unknown type "' + type + '"; valid values are: note, chat, task, question' };
     // Validate noteType's value only when it will actually be used (type unset or note); when
     // a specific non-note type is requested, noteType is inert and is reported as ignored below.
-    if (args.noteType !== undefined && (type === null || type === 'note') && noteType !== null && ['user', 'agent'].indexOf(noteType) === -1) {
-      return { ok: false, error: 'Invalid noteType "' + noteType + '"; valid values are: user, agent' };
+    if (args.noteType !== undefined && (type === null || type === 'note') && noteType !== null && ['user', 'agent', 'clip'].indexOf(noteType) === -1) {
+      return { ok: false, error: 'Invalid noteType "' + noteType + '"; valid values are: user, agent, clip' };
     }
     if (dueBefore && dueAfter && dueBefore < dueAfter) {
       return { ok: false, error: 'due_before cannot be earlier than due_after; no items can satisfy both constraints' };
@@ -1408,14 +1516,22 @@
           var note = allNotes[ni];
           var nt = note.noteType || 'user';
           if (!grouped[nt]) grouped[nt] = [];
-          grouped[nt].push({
+          var noteEntryForLs = {
             id: note.id,
             title: note.title || '',
             sourceChatId: note.sourceChatId || null,
             tags: Array.isArray(note.tags) ? note.tags : [],
-            updatedAt: note.updatedAt || '',
-            total_lines: countLinesForToolExec(serializeNoteContentForToolExec(note))
-          });
+            updatedAt: note.updatedAt || ''
+          };
+          // A clip row stores only the excerpt while a read serves its captured payload, so an
+          // excerpt line count would understate the read badly. Report the payload size the row
+          // already carries; counting its lines would mean fetching every clip's blob.
+          if (nt === 'clip') {
+            noteEntryForLs.payload_size = Number(note.clipPayloadSize) || 0;
+          } else {
+            noteEntryForLs.total_lines = countLinesForToolExec(serializeNoteContentForToolExec(note));
+          }
+          grouped[nt].push(noteEntryForLs);
         }
         if (Object.keys(grouped).length > 0) result.notes = grouped;
       }

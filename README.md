@@ -354,8 +354,9 @@ agentic-browser-chat/
 │   ├── panelDataRepoImpl.js   # Repository functions backing the panel (notes, chats, tasks, blobs)
 │   └── apiLoggerImpl.js       # Persistent log of LLM API calls
 ├── content/                   # Content-script bootstrap
+│   ├── pageEventShield.js     # Main-world patch hiding panel events from page listeners
 │   ├── preInit.js             # First in the load order; bumps the listener-generation counter
-│   ├── keyboardShield.js      # Captures keys early to protect panel inputs
+│   ├── keyboardShield.js      # Shields panel keyboard and pointer events from page listeners
 │   └── main.js                # Last in the load order; runs re-init recovery
 ├── panel/                     # The injected overlay panel (shadow-DOM UI)
 │   ├── panel.js               # Boot controller; attaches the shadow root

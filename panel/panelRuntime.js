@@ -4,6 +4,9 @@
   const ic = contentNamespaceForPanelRuntime.icons || {};
 
   var _exposedAddInputChipForPanelRuntime = null;
+  var _exposedGetPendingBlobIdsForPanelRuntime = null;
+  var _exposedSaveClipForPanelRuntime = null;
+  var _exposedSaveTextClipForPanelRuntime = null;
   var _exposedSetTabForPanelRuntime = null;
   var _exposedRefreshStoreForPanelRuntime = null;
   // Buffer for refreshStore calls that arrive before the runtime is ready
@@ -40,6 +43,7 @@
   var _exposedRunDelegatedPageToolForPanelRuntime = null;
   var _exposedSetReducedPaneForPanelRuntime = null;
   var _exposedSetChatSubTabForPanelRuntime = null;
+  var _exposedSetNoteSubTabForPanelRuntime = null;
   var _exposedSetTaskFilterForPanelRuntime = null;
   var _exposedSetQuizFilterForPanelRuntime = null;
   var _exposedSetChatSearchQueryForPanelRuntime = null;
@@ -71,6 +75,30 @@
     const QUIZ_DATA = Array.isArray(panelDataNamespaceForRuntime.QUIZ_DATA) ? panelDataNamespaceForRuntime.QUIZ_DATA : [];
     const NOTE_POPOUT_POSITION_KEY_PREFIX_FOR_PANEL_RUNTIME = 'abchat-note-popout-position-session:';
 
+    // noteType partitions the notes table into three disjoint surfaces: 'user' notes (Notes
+    // sub-tab), 'clip' snapshots (Clips sub-tab), and 'agent' rows (skills/memory, never listed).
+    // Test for the surface you mean with these helpers rather than `!== 'agent'`, which conflates
+    // notes and clips.
+    const VALID_NOTE_TYPES_FOR_PANEL_RUNTIME = { user: true, agent: true, clip: true };
+
+    function normalizeNoteTypeForPanelRuntime(rawNoteTypeForPanelRuntime) {
+      const noteTypeForPanelRuntime = String(rawNoteTypeForPanelRuntime || '');
+      return VALID_NOTE_TYPES_FOR_PANEL_RUNTIME[noteTypeForPanelRuntime] ? noteTypeForPanelRuntime : 'user';
+    }
+
+    function isClipNoteTypeForPanelRuntime(rawNoteTypeForPanelRuntime) {
+      return normalizeNoteTypeForPanelRuntime(rawNoteTypeForPanelRuntime) === 'clip';
+    }
+
+    // True for every row that belongs in the Notes tab, either sub-tab. Excludes agent rows only.
+    function isListableNoteTypeForPanelRuntime(rawNoteTypeForPanelRuntime) {
+      return normalizeNoteTypeForPanelRuntime(rawNoteTypeForPanelRuntime) !== 'agent';
+    }
+
+    function isUserNoteTypeForPanelRuntime(rawNoteTypeForPanelRuntime) {
+      return normalizeNoteTypeForPanelRuntime(rawNoteTypeForPanelRuntime) === 'user';
+    }
+
     function cloneNoteRecordForPanelRuntime(noteForPanelRuntime) {
       const safeNoteForPanelRuntime = noteForPanelRuntime || {};
       const createdAtForPanelRuntime = typeof safeNoteForPanelRuntime.createdAt === 'string' ? safeNoteForPanelRuntime.createdAt : '';
@@ -87,9 +115,16 @@
               return { name: aForClone.name || '', refId: Number.isFinite(refIdForClone) ? refIdForClone : null };
             })
           : [],
-        noteType: safeNoteForPanelRuntime.noteType === 'agent' ? 'agent' : 'user',
+        noteType: normalizeNoteTypeForPanelRuntime(safeNoteForPanelRuntime.noteType),
         sourceChatId: safeNoteForPanelRuntime.sourceChatId != null ? safeNoteForPanelRuntime.sourceChatId : null,
         starred: safeNoteForPanelRuntime.starred === true,
+        clipKind: String(safeNoteForPanelRuntime.clipKind || ''),
+        sourceUrl: String(safeNoteForPanelRuntime.sourceUrl || ''),
+        sourceTitle: String(safeNoteForPanelRuntime.sourceTitle || ''),
+        sourceSelector: String(safeNoteForPanelRuntime.sourceSelector || ''),
+        sourceHtmlFormat: String(safeNoteForPanelRuntime.sourceHtmlFormat || ''),
+        capturedAt: String(safeNoteForPanelRuntime.capturedAt || ''),
+        clipPayloadSize: Number.isFinite(Number(safeNoteForPanelRuntime.clipPayloadSize)) ? Number(safeNoteForPanelRuntime.clipPayloadSize) : 0,
         createdAt: createdAtForPanelRuntime,
         updatedAt: updatedAtForPanelRuntime
       };
@@ -266,7 +301,7 @@
     const NOTE_ORDER_FOR_PANEL_RUNTIME = [];
     NOTE_DATA.forEach(function(itemForNoteInit) {
       NOTE_STORE_FOR_PANEL_RUNTIME[itemForNoteInit.id] = cloneNoteRecordForPanelRuntime(itemForNoteInit);
-      if (itemForNoteInit.noteType !== 'agent') {
+      if (isListableNoteTypeForPanelRuntime(itemForNoteInit.noteType)) {
         NOTE_ORDER_FOR_PANEL_RUNTIME.push(itemForNoteInit.id);
       }
     });
@@ -432,7 +467,13 @@
     // filterForcedChatIdsForPanelRuntime covers all three chat-list filters (sub-tab, favs,
     // search) since they share a single window-aware apply path.
     var filterForcedChatIdsForPanelRuntime = new Set();
-    var searchForcedNoteIdsForPanelRuntime = new Set();
+    var filterForcedNoteIdsForPanelRuntime = new Set();
+    // Clip retention. Mirrored from settings so the Clips empty state can name the current
+    // window without an async read on every render; the sweep itself always re-reads settings.
+    const DEFAULT_CLIP_RETENTION_DAYS_FOR_PANEL_RUNTIME = 7;
+    const MAX_CLIP_RETENTION_DAYS_FOR_PANEL_RUNTIME = 30;
+    const CLIP_EXCERPT_LENGTH_FOR_PANEL_RUNTIME = 500;
+    var clipRetentionDaysForPanelRuntime = DEFAULT_CLIP_RETENTION_DAYS_FOR_PANEL_RUNTIME;
     var searchForcedTaskIdsForPanelRuntime = new Set();
     var searchForcedQuizIdsForPanelRuntime = new Set();
     CHAT_DATA.forEach(function(srcForStore) {
@@ -762,8 +803,9 @@
       activeTaskId: null,
       handoffNoteId: null,
       hiddenPairIds: new Set(),
-      pickerMode: null, // 'note' | 'chat'
+      pickerMode: null, // 'note' | 'chat' | 'clip'
       chatType: 'chats', // 'chats' | 'quickq'
+      noteType: 'notes', // 'notes' | 'clips' (sub-tab inside Notes)
       taskFilter: 'all', // 'all' | 'pending' | 'completed'
       quizFilter: 'all', // 'all' | 'due' | 'paused'
       // Reduced-view pane state per main tab. Tracks user navigation intent
@@ -804,9 +846,14 @@
     function ensureRemoteBubbleForPanelRuntime(numericChatIdForEnsure) {
       const wasRemoteStreamingForEnsure = remoteStreamingChatsForPanelRuntime.has(numericChatIdForEnsure);
       remoteStreamingChatsForPanelRuntime.add(numericChatIdForEnsure);
+      // A bubble marked ended belongs to the previous run and is only lingering until
+      // the stream_end refresh paints the persisted message; a new run must not reuse
+      // it (its ended flag would get the fresh bubble removed on the next refresh).
+      // createLiveTurnBubble tears the old one down before building the replacement.
+      const existingBubbleForEnsure = liveTurnBubblesForPanelRuntime.get(numericChatIdForEnsure);
       if (
         S.activeChatId === numericChatIdForEnsure &&
-        !liveTurnBubblesForPanelRuntime.has(numericChatIdForEnsure)
+        (!existingBubbleForEnsure || existingBubbleForEnsure.endedAwaitingFinalRender)
       ) {
         createLiveTurnBubbleForPanelRuntime(numericChatIdForEnsure);
       }
@@ -1051,7 +1098,13 @@
         // Remove the chat-list streaming dot now that the run has ended (the
         // remoteStreaming/offscreenInitiated sets were cleared above).
         syncMainChatListItemForPanelRuntime(numericChatIdForRemote);
-        removeLiveTurnBubbleForPanelRuntime(numericChatIdForRemote, true);
+        // Do NOT remove the live bubble here. The persisted final message only renders
+        // after the async refresh below (50ms debounce + DB round-trips), so removing now
+        // paints frames with the finished response missing entirely (visible flash).
+        // Mark the bubble ended instead: the refresh's post-render reattach call removes
+        // it in the same task as the innerHTML commit, and a fallback timer covers a
+        // refresh that errors or never renders (e.g. the user navigated to another chat).
+        markLiveTurnBubbleEndedForPanelRuntime(numericChatIdForRemote);
         // Force the active-chat message refetch in the refresh below. executeStoreRefresh
         // gates that refetch on the chat's updatedAt changing, but the offscreen loop
         // persists messages with touchChat:false, so updatedAt may be unchanged (cancel,
@@ -1196,6 +1249,7 @@
     }
     let isKeyboardIsolationBoundForPanelRuntime = false;
     let isEditableFocusIsolationBoundForPanelRuntime = false;
+    let isPointerIsolationBoundForPanelRuntime = false;
     // Focus-steal defense against page-side modal focus traps (react-focus-lock et al).
     const FOCUS_RECLAIM_WINDOW_MS_FOR_PANEL_RUNTIME = 1500;
     const FOCUS_RECLAIM_MAX_ATTEMPTS_FOR_PANEL_RUNTIME = 3;
@@ -1240,8 +1294,11 @@
       }
       return false;
     }
-    // Map<chatId, { wrap, shownAt, hasText, toolsDoneAt, removeTimer, bufferText, renderedLength, renderRafId }> — per-chat live bubble state
+    // Map<chatId, { wrap, shownAt, hasText, toolsDoneAt, removeTimer, bufferText, renderedLength, renderRafId, endedAwaitingFinalRender }> — per-chat live bubble state
     const liveTurnBubblesForPanelRuntime = new Map();
+    // How long an ended bubble may outlive its run while waiting for the stream_end
+    // refresh to render the persisted final message, before being force-removed.
+    const LIVE_TURN_END_REMOVE_FALLBACK_MS_FOR_PANEL_RUNTIME = 2000;
 
     let apiLogsPageForPanelRuntime = 0;
     let apiLogsCacheForPanelRuntime = [];
@@ -1717,6 +1774,30 @@
       rootNodeForPanelRuntime.addEventListener('keydown', isolateKeyboardEventForPanelRuntime);
       rootNodeForPanelRuntime.addEventListener('keypress', isolateKeyboardEventForPanelRuntime);
       rootNodeForPanelRuntime.addEventListener('keyup', isolateKeyboardEventForPanelRuntime);
+    }
+
+    // Pages that dismiss modals/popovers on "outside press" delegate pointer events
+    // on body/html/document/window and see panel clicks retargeted to the shadow
+    // host, an element outside their modal. Stopping propagation at the shadow root
+    // in the bubble phase runs after every panel-internal handler but before any
+    // page node in the bubble path, whichever node the page delegates on.
+    // mouseup/pointerup are deliberately NOT stopped: the note-popout drag and the
+    // panel resize drag end via bubble-phase document listeners, and dismissal
+    // logic never keys off the up events alone.
+    function isolatePointerEventForPanelRuntime(eventForPanelRuntime) {
+      if (!eventForPanelRuntime || typeof eventForPanelRuntime.stopPropagation !== 'function') return;
+      eventForPanelRuntime.stopPropagation();
+    }
+
+    function bindPointerIsolationForPanelRuntime(rootNodeForPanelRuntime) {
+      if (!rootNodeForPanelRuntime || !rootNodeForPanelRuntime.addEventListener) return;
+      if (isPointerIsolationBoundForPanelRuntime) return;
+      isPointerIsolationBoundForPanelRuntime = true;
+      rootNodeForPanelRuntime.addEventListener('pointerdown', isolatePointerEventForPanelRuntime);
+      rootNodeForPanelRuntime.addEventListener('mousedown', isolatePointerEventForPanelRuntime);
+      rootNodeForPanelRuntime.addEventListener('click', isolatePointerEventForPanelRuntime);
+      rootNodeForPanelRuntime.addEventListener('touchstart', isolatePointerEventForPanelRuntime);
+      rootNodeForPanelRuntime.addEventListener('contextmenu', isolatePointerEventForPanelRuntime);
     }
 
     const capturedGenerationForPanelFocusGuard = window.abchatListenerGeneration || 0;
@@ -2709,7 +2790,8 @@
       image: ic.image10,
       screenshot: ic.screenshot10,
       spreadsheet: ic.spreadsheet10,
-      paste: ic.paste10
+      paste: ic.paste10,
+      clip: ic.bookmark10
     };
 
     function escHtml(s) {
@@ -3024,11 +3106,14 @@
           ? `<div class="msg-chips">${(msg.chips).map(function (c, chipIndexForPanelRuntime) {
               const chipTypeForPanelRuntime = String((c && c.type) || 'file').replace(/[^a-z0-9_-]/gi, '').toLowerCase();
               const chipLabelForPanelRuntime = escHtml(truncateChipLabelForPanelRuntime(String((c && c.label) || 'Attachment')));
+              const chipKindForPanelRuntime = String((c && c.kind) || '').replace(/[^a-z0-9_-]/gi, '').toLowerCase();
               const chipHiddenStyleForPanelRuntime = (c && c.kind === 'generated_image') ? ' style="display:none"' : '';
               const chipActionAttrsForPanelRuntime = chipTypeForPanelRuntime === 'page-snapshot'
                 ? ''
                 : ` data-action="preview-message-chip" data-message-id="${Number(msg.id) || 0}" data-chip-index="${chipIndexForPanelRuntime}"`;
-              return `<span class="m-chip m-chip-${chipTypeForPanelRuntime}"${chipHiddenStyleForPanelRuntime}${chipActionAttrsForPanelRuntime}>${CHIP_SVGS[chipTypeForPanelRuntime] || ''} ${chipLabelForPanelRuntime}</span>`;
+              const chipClassForPanelRuntime = 'm-chip m-chip-' + chipTypeForPanelRuntime
+                + (chipKindForPanelRuntime === 'clip' ? ' m-chip-clip' : '');
+              return `<span class="${chipClassForPanelRuntime}"${chipHiddenStyleForPanelRuntime}${chipActionAttrsForPanelRuntime}>${getAttachIconSvgForPanelRuntime(chipTypeForPanelRuntime, chipKindForPanelRuntime)} ${chipLabelForPanelRuntime}</span>`;
             }).join('')}</div>`
           : '';
 
@@ -3446,6 +3531,7 @@
         if (agentRulesTaForTab) setTimeout(function() { updateAutoExpandForTextareaForPanelRuntime(agentRulesTaForTab); }, 0);
         loadStorageEstimateForPanelRuntime();
         loadDeleteChatsOlderThanSettingForPanelRuntime();
+        loadClipRetentionSettingForPanelRuntime();
         refreshAgentManageCountsForPanelRuntime();
       }
       if (tab === 'skills') {
@@ -3563,7 +3649,7 @@
         const divForPickerPage = document.createElement('div');
         divForPickerPage.className = 'pk-item';
         divForPickerPage.innerHTML =
-          `<div class="pk-item-icon ${typeForPickerPage === 'chat' ? 'chat-icon' : ''}">${typeForPickerPage === 'note' ? ic.fileText14 : ic.message14}</div>` +
+          `<div class="pk-item-icon ${typeForPickerPage === 'chat' ? 'chat-icon' : ''}">${typeForPickerPage === 'note' ? ic.fileText14 : (typeForPickerPage === 'clip' ? ic.bookmark12 : ic.message14)}</div>` +
           `<div class="pk-item-body">` +
           `<div class="pk-item-title">${escHtml(itemForPickerPage.title)}</div>` +
           `<div class="pk-item-excerpt">${escHtml(itemForPickerPage.excerpt)}</div>` +
@@ -3636,8 +3722,8 @@
         syncMainNoteListItemForPanelRuntime(NOTE_ORDER_FOR_PANEL_RUNTIME[iForPage]);
       }
       // Newly paged-in items default to display:'' and would otherwise escape an
-      // active search filter, so reapply it over the enlarged set.
-      reapplyActiveSearchForListTypeForPanelRuntime('notes');
+      // active favs/sub-tab/search filter, so reapply it over the enlarged set.
+      applyNoteListFilterForPanelRuntime();
     }
 
     function renderNextTaskPageForPanelRuntime() {
@@ -3945,6 +4031,7 @@
       }
       removeChatFromRuntimeStoreForPanelRuntime(numericChatIdForPanelRuntime);
       removeChatUiForPanelRuntime(numericChatIdForPanelRuntime);
+      markPendingChipsForDeletedRecordForPanelRuntime('chat', numericChatIdForPanelRuntime, 'chat');
       closeRawViewForPanelRuntime();
       if (S.activeChatId === numericChatIdForPanelRuntime) {
         S.activeChatId = null;
@@ -4207,6 +4294,105 @@
 
     function setChatSubTabForMirrorForPanelRuntime(typeForMirror) {
       setChatType(typeForMirror, { skipStateSync: true });
+    }
+
+    function setNoteType(typeForNoteType, optionsForNoteType) {
+      const optsForNoteType = optionsForNoteType || {};
+      const normalizedTypeForNoteType = (typeForNoteType === 'clips') ? 'clips' : 'notes';
+      S.noteType = normalizedTypeForNoteType;
+      // Clear search when switching sub-tabs. The one input serves both lists, so its placeholder
+      // has to name whichever one is showing.
+      const notesSearchInputForNoteType = root.getElementById('notes-search-input');
+      if (notesSearchInputForNoteType) {
+        notesSearchInputForNoteType.value = '';
+        notesSearchInputForNoteType.placeholder = normalizedTypeForNoteType === 'clips'
+          ? 'Search clips...'
+          : 'Search notes...';
+        const searchWrapForNoteType = notesSearchInputForNoteType.closest('.ns-search');
+        if (searchWrapForNoteType) searchWrapForNoteType.classList.remove('has-value');
+      }
+      root.querySelectorAll('.ntab-btn').forEach(function (bForNoteType) {
+        bForNoteType.classList.toggle('active', bForNoteType.dataset.ntype === normalizedTypeForNoteType);
+      });
+      // Reset favs filter when switching sub-tabs
+      const noteFavsBtnForNoteType = root.getElementById('note-favs-btn');
+      if (noteFavsBtnForNoteType) {
+        noteFavsBtnForNoteType.classList.remove('active');
+        noteFavsBtnForNoteType.innerHTML = ic.starEmpty12 + ' Favs';
+      }
+      // Clips are captured from pages, never authored in the panel. The New note button is the
+      // row's flex filler, so the row is flagged too and Favs takes over the freed space
+      // instead of leaving a gap.
+      const newNoteBtnForNoteType = root.getElementById('new-note-btn');
+      if (newNoteBtnForNoteType) {
+        newNoteBtnForNoteType.classList.toggle('hidden', normalizedTypeForNoteType === 'clips');
+      }
+      const noteRow1ForNoteType = root.querySelector('.ns-row1');
+      if (noteRow1ForNoteType) {
+        noteRow1ForNoteType.classList.toggle('is-clips-mode', normalizedTypeForNoteType === 'clips');
+      }
+      applyNoteListFilterForPanelRuntime();
+      if (!optsForNoteType.skipStateSync) {
+        writePanelStateSyncForPanelRuntime({ noteSubTab: normalizedTypeForNoteType, notesSearchQuery: '' });
+      }
+    }
+
+    function setNoteSubTabForMirrorForPanelRuntime(typeForMirror) {
+      setNoteType(typeForMirror, { skipStateSync: true });
+    }
+
+    // Empty-state copy depends on which sub-tab is showing and whether a filter is narrowing
+    // the list, so an empty result never reads as "you have nothing saved" when it is really
+    // "nothing matched".
+    function updateNotesEmptyStateForPanelRuntime(visibleCountForEmpty, filterStateForEmpty) {
+      const emptyElForEmpty = root.getElementById('notes-list-empty');
+      if (!emptyElForEmpty) return;
+      // .notes-list is the flex:1 child of the sidebar, so while the empty state shows the list
+      // must stop growing or the message is pinned to the bottom of the column.
+      const sidebarForEmpty = root.querySelector('.notes-sidebar');
+      if (sidebarForEmpty) {
+        sidebarForEmpty.classList.toggle('notes-list-is-empty', visibleCountForEmpty === 0);
+      }
+      if (visibleCountForEmpty > 0) {
+        emptyElForEmpty.classList.add('hidden');
+        return;
+      }
+      const titleElForEmpty = root.getElementById('notes-list-empty-title');
+      const subElForEmpty = root.getElementById('notes-list-empty-sub');
+      const isClipsForEmpty = filterStateForEmpty && filterStateForEmpty.type === 'clips';
+      const isFilteredForEmpty = Boolean(
+        filterStateForEmpty && (filterStateForEmpty.query || filterStateForEmpty.favsOn)
+      );
+      let titleTextForEmpty;
+      let subTextForEmpty;
+      if (isFilteredForEmpty) {
+        titleTextForEmpty = isClipsForEmpty ? 'No matching clips' : 'No matching notes';
+        subTextForEmpty = filterStateForEmpty.query
+          ? 'Try a different search term.'
+          : 'Nothing here is favourited yet.';
+      } else if (isClipsForEmpty) {
+        titleTextForEmpty = 'No clips yet';
+        subTextForEmpty = 'Grab content from a page with the content selector, the right-click menu, '
+          + 'or the save icon on an attachment, and it lands here for reuse in any chat. '
+          + getClipRetentionHintForPanelRuntime();
+      } else {
+        titleTextForEmpty = 'No notes yet';
+        subTextForEmpty = 'Create one with New note.';
+      }
+      if (titleElForEmpty) titleElForEmpty.textContent = titleTextForEmpty;
+      if (subElForEmpty) subElForEmpty.textContent = subTextForEmpty;
+      emptyElForEmpty.classList.remove('hidden');
+    }
+
+    // Clips are swept on a retention timer with no "never" option, so the two ways to keep
+    // one permanently have to be discoverable from the Clips view itself.
+    function getClipRetentionHintForPanelRuntime() {
+      const daysForHint = Number(clipRetentionDaysForPanelRuntime);
+      const dayLabelForHint = Number.isFinite(daysForHint) && daysForHint > 0
+        ? (daysForHint === 1 ? '1 day' : daysForHint + ' days')
+        : String(DEFAULT_CLIP_RETENTION_DAYS_FOR_PANEL_RUNTIME) + ' days';
+      return 'Clips are deleted after ' + dayLabelForHint
+        + '; star a clip or convert it to a note to keep it.';
     }
 
     /* ============================================================
@@ -4566,8 +4752,11 @@
       if (btn) btn.classList.remove('open');
     }
 
-    function getAttachIconSvgForPanelRuntime(typeForPanelRuntime) {
-      return CHIP_SVGS[typeForPanelRuntime] || CHIP_SVGS.file || '';
+    // kind wins over type when it has its own glyph: a clip chip is type 'note' (it references
+    // a notes row) but should not look like a note.
+    function getAttachIconSvgForPanelRuntime(typeForPanelRuntime, kindForPanelRuntime) {
+      const kindGlyphForPanelRuntime = kindForPanelRuntime ? CHIP_SVGS[kindForPanelRuntime] : '';
+      return kindGlyphForPanelRuntime || CHIP_SVGS[typeForPanelRuntime] || CHIP_SVGS.file || '';
     }
 
     function truncateChipLabelForPanelRuntime(labelForPanelRuntime) {
@@ -4614,6 +4803,9 @@
       }
 
       const statusLabelForPanelRuntime = String(statusTextForPanelRuntime || '').trim();
+      // Kept on the node (not only in the title attribute, which falls back to the attachment
+      // name) so the draft can carry an errored chip's reason across a rebuild.
+      chipNodeForPanelRuntime.dataset.attachStatusText = statusLabelForPanelRuntime;
       if (statusLabelForPanelRuntime) {
         chipNodeForPanelRuntime.title = statusLabelForPanelRuntime;
       } else if (chipNodeForPanelRuntime.dataset.attachName) {
@@ -4665,7 +4857,8 @@
         return null;
       }
       const chipForPanelRuntime = document.createElement('span');
-      chipForPanelRuntime.className = 'ic m-chip-' + chipTypeForPanelRuntime;
+      chipForPanelRuntime.className = 'ic m-chip-' + chipTypeForPanelRuntime
+        + (String(chipDataForPanelRuntime.kind || '') === 'clip' ? ' m-chip-clip' : '');
       chipForPanelRuntime.dataset.action = 'preview-input-chip';
       chipForPanelRuntime.dataset.attachType = chipTypeForPanelRuntime;
       chipForPanelRuntime.dataset.attachName = chipLabelForPanelRuntime;
@@ -4691,11 +4884,18 @@
       const domainSuffixForChip = domainForChip
         ? ' <span class="ic-domain">' + escHtml(domainForChip) + '</span>'
         : '';
+      // Note and chat chips already point at durable records, so saving them as a clip would
+      // just duplicate a row; every other chip type can be kept.
+      const canSaveChipAsClipForPanelRuntime = chipTypeForPanelRuntime !== 'note' && chipTypeForPanelRuntime !== 'chat';
+      const saveButtonForChip = canSaveChipAsClipForPanelRuntime
+        ? ' <span class="ic-save" data-action="save-chip-as-clip" title="Save to clips">' + ic.bookmark10 + '</span>'
+        : '';
       chipForPanelRuntime.innerHTML =
-        getAttachIconSvgForPanelRuntime(chipTypeForPanelRuntime) +
-        ' ' + escHtml(truncateChipLabelForPanelRuntime(chipLabelForPanelRuntime)) +
+        getAttachIconSvgForPanelRuntime(chipTypeForPanelRuntime, String(chipDataForPanelRuntime.kind || '')) +
+        ' <span class="ic-label">' + escHtml(truncateChipLabelForPanelRuntime(chipLabelForPanelRuntime)) + '</span>' +
         domainSuffixForChip +
         ' <span class="ic-status-indicator" aria-hidden="true"></span>' +
+        saveButtonForChip +
         ' <span class="ic-remove" data-action="remove-ic">' + ic.x10 + '</span>';
       rowForPanelRuntime.appendChild(chipForPanelRuntime);
       setInputChipStatusForPanelRuntime(
@@ -4717,21 +4917,26 @@
       const chipTypeForRemove = String(chipNodeForPanelRuntime.dataset.attachType || '').trim();
       const chipKindForRemove = String(chipNodeForPanelRuntime.dataset.attachKind || '').trim();
       const chipContextForRemove = String(chipNodeForPanelRuntime.dataset.attachContext || '').trim();
-      // generated_image blobs are already referenced by a persisted assistant message; removing the
-      // input chip must not delete the blob or the displayed image in chat would break.
-      // note-context chips reference blobs that may still be cited by saved note versions; let pruning handle cleanup.
+      // note/chat chips carry a record id, not a blob, so there is nothing to reclaim for them.
+      // generated_image and note-context chips do own a blob, and the reference scan in the repo
+      // already keeps theirs alive (the assistant message's __blob marker, the saved note
+      // versions). They stay excluded here so a bug in that scan cannot cost anyone content.
       const isBlobChipForRemove = chipTypeForRemove !== 'note' && chipTypeForRemove !== 'chat' && chipKindForRemove !== 'generated_image' && chipContextForRemove !== 'note';
-      if (isBlobChipForRemove) {
-        const blobIdForPanelRuntime = Number(chipNodeForPanelRuntime.dataset.attachRefId);
-        if (Number.isFinite(blobIdForPanelRuntime)) {
-          const panelDataRepoForPanelRuntime = getPanelDataRepoForPanelRuntime();
-          if (panelDataRepoForPanelRuntime && typeof panelDataRepoForPanelRuntime.deleteAttachmentBlob === 'function') {
-            panelDataRepoForPanelRuntime.deleteAttachmentBlob(blobIdForPanelRuntime).catch(function () {});
-          }
-        }
-      }
+      const blobIdForRemove = Number(chipNodeForPanelRuntime.dataset.attachRefId);
+      const canReclaimBlobForRemove = isBlobChipForRemove && Number.isFinite(blobIdForRemove) && blobIdForRemove > 0;
+
       chipNodeForPanelRuntime.remove();
-      saveDraftForPanelRuntime();
+      const draftWriteForRemove = saveDraftForPanelRuntime();
+      if (!canReclaimBlobForRemove) return;
+
+      const panelDataRepoForRemove = getPanelDataRepoForPanelRuntime();
+      if (!panelDataRepoForRemove || typeof panelDataRepoForRemove.deleteAttachmentBlobIfUnreferenced !== 'function') return;
+      // Never an unconditional delete: the same blob can be referenced by a clip saved from this
+      // chip, by a sent message, or by a pending chip in another tab. The repo decides against the
+      // full reference set, so this has to wait for the removal to reach the stored draft first.
+      Promise.resolve(draftWriteForRemove).then(function () {
+        return panelDataRepoForRemove.deleteAttachmentBlobIfUnreferenced(blobIdForRemove, getPendingBlobIdsForPanelRuntime());
+      }).catch(function () {});
     }
 
     async function createAttachmentBlobForPanelRuntime(blobInputForPanelRuntime) {
@@ -4792,6 +4997,160 @@
         };
       }
       return null;
+    }
+
+    // Note, chat, and clip chips carry only a record id; file/image/screenshot chips carry only a
+    // blob id. Either source can be gone by the time the chip is used: deleted in this tab, in
+    // another tab, by the agent, or by the clip retention sweep. Marking the chip at deletion time
+    // only covers the first of those, and the mark itself does not survive a chips-row rebuild, so
+    // the reference is re-checked at the three points that matter: draft restore, store refresh,
+    // and send.
+    function describeChipSourceKindForPanelRuntime(chipMetaForDescribe) {
+      const typeForDescribe = String((chipMetaForDescribe || {}).type || '').trim().toLowerCase();
+      const kindForDescribe = String((chipMetaForDescribe || {}).kind || '').trim().toLowerCase();
+      if (kindForDescribe === 'clip') return 'clip';
+      if (typeForDescribe === 'note') return 'note';
+      if (typeForDescribe === 'chat') return 'chat';
+      return 'attachment';
+    }
+
+    function buildChipSourceMissingMessageForPanelRuntime(sourceLabelForMessage) {
+      return 'This ' + String(sourceLabelForMessage || 'attachment')
+        + ' was deleted, so it will not be sent. Remove the attachment.';
+    }
+
+    async function isChipSourceMissingForPanelRuntime(chipMetaForMissing) {
+      if (!chipMetaForMissing) return false;
+      const refIdForMissing = Number(chipMetaForMissing.refId);
+      if (!Number.isFinite(refIdForMissing) || refIdForMissing <= 0) return false;
+      const repoForMissing = getPanelDataRepoForPanelRuntime();
+      if (!repoForMissing) return false;
+      const typeForMissing = String(chipMetaForMissing.type || '').trim().toLowerCase();
+      // Report missing only on a lookup that succeeded and came back empty. A thrown repo call
+      // (service worker asleep, DB busy) must never flag a chip whose source is actually fine.
+      if (typeForMissing === 'note') {
+        if (typeof repoForMissing.getNote !== 'function') return false;
+        try {
+          return !(await repoForMissing.getNote(refIdForMissing));
+        } catch (errForMissingNote) {
+          return false;
+        }
+      }
+      if (typeForMissing === 'chat') {
+        if (typeof repoForMissing.getChatMeta !== 'function') return false;
+        try {
+          return !(await repoForMissing.getChatMeta(refIdForMissing));
+        } catch (errForMissingChat) {
+          return false;
+        }
+      }
+      // Everything else is blob-backed, but a chip that still carries its content inline stands
+      // on its own, so a missing blob does not break it.
+      if (String(chipMetaForMissing.content || '').trim()) return false;
+      if (typeof repoForMissing.getAttachmentBlob !== 'function') return false;
+      try {
+        return !(await repoForMissing.getAttachmentBlob(refIdForMissing));
+      } catch (errForMissingBlob) {
+        return false;
+      }
+    }
+
+    // The filled bookmark set by save-chip-as-clip is session-only display state, so the
+    // in-memory clip store is the right authority for whether it is still true.
+    function refreshChipSavedToClipsMarkerForPanelRuntime(chipNodeForMarker) {
+      if (!chipNodeForMarker || !chipNodeForMarker.dataset) return;
+      const clipIdForMarker = Number(chipNodeForMarker.dataset.attachClipId);
+      if (!Number.isFinite(clipIdForMarker) || clipIdForMarker <= 0) return;
+      if (getClipRecordForPanelRuntime(clipIdForMarker)) return;
+      delete chipNodeForMarker.dataset.attachClipId;
+      const saveButtonForMarker = chipNodeForMarker.querySelector('.ic-save');
+      if (saveButtonForMarker) {
+        saveButtonForMarker.classList.remove('is-saved');
+        saveButtonForMarker.innerHTML = ic.bookmark10;
+        saveButtonForMarker.title = 'Save to clips';
+      }
+    }
+
+    var chipValidationQueueForPanelRuntime = null;
+    var chipValidationTimerForPanelRuntime = null;
+
+    async function runChipReferenceValidationForPanelRuntime() {
+      const rowForValidate = root.querySelector('.input-chips-row');
+      // isConnected is false once the old panel host has been torn down on re-injection, which is
+      // what keeps a scheduled pass from writing a draft out of a dead closure's DOM.
+      if (!rowForValidate || !rowForValidate.isConnected) return [];
+      const brokenForValidate = [];
+      const chipNodesForValidate = Array.from(rowForValidate.querySelectorAll('.ic'));
+      for (var chipIdxForValidate = 0; chipIdxForValidate < chipNodesForValidate.length; chipIdxForValidate++) {
+        const chipNodeForValidate = chipNodesForValidate[chipIdxForValidate];
+        if (!chipNodeForValidate || !chipNodeForValidate.dataset) continue;
+        refreshChipSavedToClipsMarkerForPanelRuntime(chipNodeForValidate);
+        // A mid-upload chip has no source to check yet.
+        if (String(chipNodeForValidate.dataset.attachStatus || '') === 'loading') continue;
+        const metaForValidate = normalizeChipPreviewSourceForPanelRuntime(chipNodeForValidate);
+        if (!metaForValidate) continue;
+        const missingForValidate = await isChipSourceMissingForPanelRuntime(metaForValidate);
+        // The row can be rebuilt or edited while a lookup is in flight.
+        if (!chipNodeForValidate.isConnected) continue;
+        if (!missingForValidate) continue;
+        const sourceLabelForValidate = describeChipSourceKindForPanelRuntime(metaForValidate);
+        const messageForValidate = buildChipSourceMissingMessageForPanelRuntime(sourceLabelForValidate);
+        brokenForValidate.push({
+          label: String(metaForValidate.name || 'Attachment'),
+          sourceLabel: sourceLabelForValidate
+        });
+        // Only ever add an error, never clear or replace one. A chip already errored for another
+        // reason (a failed upload) keeps its own message, which is the more specific one, and is
+        // already excluded from the send either way. Not rewriting an identical message also keeps
+        // this pass from writing the draft, and so from echoing to every other tab, on every run.
+        if (String(chipNodeForValidate.dataset.attachStatus || '') !== 'error') {
+          setInputChipStatusForPanelRuntime(chipNodeForValidate, 'error', messageForValidate);
+        }
+      }
+      return brokenForValidate;
+    }
+
+    // Serialized rather than guarded by a boolean: a caller that arrives mid-pass (the send path)
+    // must get a fresh result, not an empty "nothing broken" from a pass it did not see.
+    function validatePendingChipReferencesForPanelRuntime() {
+      const previousForValidate = chipValidationQueueForPanelRuntime;
+      const trackedForValidate = previousForValidate
+        ? previousForValidate
+            .catch(function () { return []; })
+            .then(function () { return runChipReferenceValidationForPanelRuntime(); })
+        : runChipReferenceValidationForPanelRuntime();
+      chipValidationQueueForPanelRuntime = trackedForValidate;
+      trackedForValidate.catch(function () {}).then(function () {
+        if (chipValidationQueueForPanelRuntime === trackedForValidate) {
+          chipValidationQueueForPanelRuntime = null;
+        }
+      });
+      return trackedForValidate;
+    }
+
+    function scheduleChipReferenceValidationForPanelRuntime() {
+      if (chipValidationTimerForPanelRuntime) clearTimeout(chipValidationTimerForPanelRuntime);
+      chipValidationTimerForPanelRuntime = setTimeout(function () {
+        chipValidationTimerForPanelRuntime = null;
+        validatePendingChipReferencesForPanelRuntime().catch(function () {});
+      }, 150);
+    }
+
+    function showChipSourceMissingToastForPanelRuntime(brokenChipsForToast) {
+      if (!Array.isArray(brokenChipsForToast) || brokenChipsForToast.length === 0) return;
+      const namesForToast = brokenChipsForToast.slice(0, 3).map(function (brokenForToast) {
+        return brokenForToast.label;
+      }).join(', ');
+      const extraForToast = brokenChipsForToast.length > 3
+        ? ' and ' + (brokenChipsForToast.length - 3) + ' more'
+        : '';
+      const messageForToast = brokenChipsForToast.length === 1
+        ? 'Skipped 1 attachment whose ' + brokenChipsForToast[0].sourceLabel + ' was deleted: ' + namesForToast + '.'
+        : 'Skipped ' + brokenChipsForToast.length + ' attachments whose source was deleted: ' + namesForToast + extraForToast + '.';
+      const toastForMissing = ABChatContent && ABChatContent.ui && ABChatContent.ui.toast;
+      if (toastForMissing && typeof toastForMissing.show === 'function') {
+        toastForMissing.show(messageForToast, { durationMs: 5000 });
+      }
     }
 
     function extractImageDataUrlFromTextForPanelRuntime(textForPanelRuntime) {
@@ -5068,6 +5427,42 @@
         ? String(blobRecordForPanelRuntime.textContent || '').trim()
         : '';
       const chipTypeForPanelRuntime = String(chipMetaForPanelRuntime.type || '').trim().toLowerCase();
+      const chipKindForPanelRuntime = String(chipMetaForPanelRuntime.kind || '').trim().toLowerCase();
+
+      // Clip chips reference a notes row, so refId is a NOTE id here, never a blob id: the
+      // payload blob has to be resolved through the note's attachments. Preview shows that
+      // payload rather than the short excerpt the chip carries.
+      if (chipKindForPanelRuntime === 'clip' && Number.isFinite(Number(chipMetaForPanelRuntime.refId))) {
+        const clipNoteIdForPreview = Number(chipMetaForPanelRuntime.refId);
+        const repoForClipPreview = getPanelDataRepoForPanelRuntime();
+        if (repoForClipPreview && typeof repoForClipPreview.getNote === 'function') {
+          try {
+            const clipNoteForPreview = await repoForClipPreview.getNote(clipNoteIdForPreview);
+            if (!clipNoteForPreview) {
+              return { previewType: 'text', content: '', sourceMissing: true, sourceType: 'clip' };
+            }
+            if (clipNoteForPreview) {
+              const clipChangedForPreview = await isChipSourceChangedForPanelRuntime('note', clipNoteIdForPreview, chipMetaForPanelRuntime.sourceHash);
+              const clipPayloadForPreview = await getClipPayloadTextForPanelRuntime(cloneNoteRecordForPanelRuntime(clipNoteForPreview));
+              if (clipPayloadForPreview.dataUrl && clipPayloadForPreview.dataUrl.indexOf('data:image/') === 0) {
+                return {
+                  previewType: 'image',
+                  dataUrl: clipPayloadForPreview.dataUrl,
+                  sourceChanged: clipChangedForPreview,
+                  sourceType: 'note'
+                };
+              }
+              const clipTextForPreview = clipPayloadForPreview.text || String(clipNoteForPreview.body || '');
+              return {
+                previewType: clipPayloadForPreview.mimeType === 'text/html' ? 'code' : 'markdown',
+                content: clipTextForPreview,
+                sourceChanged: clipChangedForPreview,
+                sourceType: 'note'
+              };
+            }
+          } catch (errForClipPreview) { /* fall through to the generic paths */ }
+        }
+      }
 
       if ((chipTypeForPanelRuntime === 'image' || chipTypeForPanelRuntime === 'screenshot') && imageDataUrlForPanelRuntime.indexOf('data:image/') === 0) {
         return {
@@ -5102,6 +5497,9 @@
         if (repoForNotePreview && typeof repoForNotePreview.getNote === 'function') {
           try {
             var noteForPreview = await repoForNotePreview.getNote(Number(chipMetaForPanelRuntime.refId));
+            if (!noteForPreview) {
+              return { previewType: 'text', content: '', sourceMissing: true, sourceType: 'note' };
+            }
             if (noteForPreview) {
               var noteChangedForPreview = await isChipSourceChangedForPanelRuntime('note', Number(chipMetaForPanelRuntime.refId), chipMetaForPanelRuntime.sourceHash);
               return { previewType: 'markdown', content: noteForPreview.body || '', sourceChanged: noteChangedForPreview, sourceType: 'note' };
@@ -5129,6 +5527,14 @@
             if (linesForChatPreview.length > 0) {
               var chatChangedForPreview = await isChipSourceChangedForPanelRuntime('chat', Number(chipMetaForPanelRuntime.refId), chipMetaForPanelRuntime.sourceHash);
               return { previewType: 'text', content: linesForChatPreview.join('\n'), sourceChanged: chatChangedForPreview, sourceType: 'chat' };
+            }
+            // No renderable messages: distinguish a deleted chat from one that simply has
+            // nothing previewable, so the modal never implies the attachment was always empty.
+            if (typeof repoForChatPreview.getChatMeta === 'function') {
+              var chatMetaForPreview = await repoForChatPreview.getChatMeta(Number(chipMetaForPanelRuntime.refId));
+              if (!chatMetaForPreview) {
+                return { previewType: 'text', content: '', sourceMissing: true, sourceType: 'chat' };
+              }
             }
           } catch (eForChatPreview) { /* fall through */ }
         }
@@ -5458,6 +5864,16 @@
           }),
         noteType: existingNoteForDraft ? existingNoteForDraft.noteType : 'user',
         sourceChatId: existingNoteForDraft ? existingNoteForDraft.sourceChatId : null,
+        // Clip provenance is not editable in the form, so carry it through from the record.
+        // Without this, the no-repo fallback path in saveMainNote would rebuild the in-memory
+        // record from the draft alone and drop it.
+        clipKind: existingNoteForDraft ? existingNoteForDraft.clipKind : '',
+        sourceUrl: existingNoteForDraft ? existingNoteForDraft.sourceUrl : '',
+        sourceTitle: existingNoteForDraft ? existingNoteForDraft.sourceTitle : '',
+        sourceSelector: existingNoteForDraft ? existingNoteForDraft.sourceSelector : '',
+        sourceHtmlFormat: existingNoteForDraft ? existingNoteForDraft.sourceHtmlFormat : '',
+        capturedAt: existingNoteForDraft ? existingNoteForDraft.capturedAt : '',
+        clipPayloadSize: existingNoteForDraft ? existingNoteForDraft.clipPayloadSize : 0,
       };
     }
 
@@ -5561,6 +5977,12 @@
     async function executeStoreRefreshForPanelRuntime(storeNameForRefresh) {
       var repoForRefresh = getPanelDataRepoForPanelRuntime();
       if (!repoForRefresh) return;
+
+      // Same reason as the incremental path: a bulk delete (retention sweep, delete-chats-older-than)
+      // arrives here with no per-record ops, so pending chips have to be re-checked wholesale.
+      if (storeNameForRefresh === 'notes' || storeNameForRefresh === 'chats') {
+        scheduleChipReferenceValidationForPanelRuntime();
+      }
 
       if (storeNameForRefresh === 'chats') {
         var chatsFromDb;
@@ -5811,7 +6233,7 @@
           if (!nForRefresh || nForRefresh.id == null) return;
           var numIdForRefresh = Number(nForRefresh.id);
           NOTE_STORE_FOR_PANEL_RUNTIME[numIdForRefresh] = cloneNoteRecordForPanelRuntime(nForRefresh);
-          if (nForRefresh.noteType !== 'agent' && NOTE_ORDER_FOR_PANEL_RUNTIME.indexOf(numIdForRefresh) < 0) {
+          if (isListableNoteTypeForPanelRuntime(nForRefresh.noteType) && NOTE_ORDER_FOR_PANEL_RUNTIME.indexOf(numIdForRefresh) < 0) {
             NOTE_ORDER_FOR_PANEL_RUNTIME.push(numIdForRefresh);
           }
         });
@@ -5836,7 +6258,7 @@
             syncSearchIndexForPanelRuntime('notes', 'update', idForSearchRefresh, noteForSearchRefresh);
           }
         });
-        reapplyActiveSearchForListTypeForPanelRuntime('notes');
+        applyNoteListFilterForPanelRuntime();
         var activeNoteIdForRefresh = Number(S.activeNoteId);
         if (Number.isFinite(activeNoteIdForRefresh) && NOTE_STORE_FOR_PANEL_RUNTIME[activeNoteIdForRefresh]) {
           var mainFormForNoteRefresh = root.getElementById('note-editor-form');
@@ -6063,7 +6485,7 @@
         if (!fetchedForApply) continue;
         var wasInOrderForApply = NOTE_ORDER_FOR_PANEL_RUNTIME.indexOf(idForApply) >= 0;
         NOTE_STORE_FOR_PANEL_RUNTIME[idForApply] = cloneNoteRecordForPanelRuntime(fetchedForApply);
-        if (fetchedForApply.noteType !== 'agent' && !wasInOrderForApply) {
+        if (isListableNoteTypeForPanelRuntime(fetchedForApply.noteType) && !wasInOrderForApply) {
           // Insert at the front, not the end: syncMainNoteListItem's window
           // guard rejects positions >= renderedNoteCount, so a freshly created
           // note appended at the end never gets a DOM node when there are more
@@ -6075,7 +6497,7 @@
             NOTE_ORDER_FOR_PANEL_RUNTIME.length
           );
         }
-        if (fetchedForApply.noteType !== 'agent') {
+        if (isListableNoteTypeForPanelRuntime(fetchedForApply.noteType)) {
           syncMainNoteListItemForPanelRuntime(idForApply, false);
         }
         syncSearchIndexForPanelRuntime(
@@ -6123,7 +6545,7 @@
       }
       if (rebuildOrderForApply) {
         refreshNoteOrderForPanelRuntime();
-        reapplyActiveSearchForListTypeForPanelRuntime('notes');
+        applyNoteListFilterForPanelRuntime();
       }
     }
 
@@ -6459,6 +6881,11 @@
       if (opsForApply.length === 0) return;
       var repoForApply = getPanelDataRepoForPanelRuntime();
       if (!repoForApply) throw new Error('panelDataRepo unavailable for incremental apply');
+      // A note/clip/chat this tab has attached may have just been deleted elsewhere (another tab,
+      // the agent, the clip retention sweep). Re-check the pending chips against the new state.
+      if (storeNameForApply === 'notes' || storeNameForApply === 'chats') {
+        scheduleChipReferenceValidationForPanelRuntime();
+      }
       if (storeNameForApply === 'notes') {
         await applyNotesOpsIncrementalForPanelRuntime(opsForApply, repoForApply);
         return;
@@ -6569,6 +6996,14 @@
         noteItemForPanelRuntime.className = 'note-item';
         noteItemForPanelRuntime.dataset.noteId = noteIdForPanelRuntime;
         noteItemForPanelRuntime.dataset.action = 'select-note';
+        // Start hidden when the row belongs to the other sub-tab, so a note created while
+        // Clips is showing (or a clip saved while Notes is showing) never flashes into the
+        // wrong list before applyNoteListFilter runs. That function remains the single
+        // ongoing writer of display.
+        const belongsToClipsSubTabForNewItem = isClipNoteTypeForPanelRuntime(noteDataForPanelRuntime.noteType);
+        if (belongsToClipsSubTabForNewItem !== ((S.noteType || 'notes') === 'clips')) {
+          noteItemForPanelRuntime.style.display = 'none';
+        }
         if (prependForPanelRuntime) {
           notesListForPanelRuntime.prepend(noteItemForPanelRuntime);
           renderedNoteCountForPanelRuntime++;
@@ -6587,17 +7022,37 @@
         ? `<span class="ni-tag-overflow">+${tagsForNoteItem.length - 2}</span>`
         : '';
       const starredClassForPanelRuntime = wasStarredForPanelRuntime ? ' starred' : '';
+      const isClipItemForPanelRuntime = isClipNoteTypeForPanelRuntime(noteDataForPanelRuntime.noteType);
       const starredTextForPanelRuntime = wasStarredForPanelRuntime ? ic.starFilled12 : ic.starEmpty12;
-      const starredTitleForPanelRuntime = wasStarredForPanelRuntime ? 'Unfavorite' : 'Favorite';
+      const starredTitleForPanelRuntime = wasStarredForPanelRuntime
+        ? (isClipItemForPanelRuntime ? 'Unstar (clip becomes deletable again)' : 'Unfavorite')
+        : (isClipItemForPanelRuntime ? 'Star to keep past the retention window' : 'Favorite');
       const updatedLabelForPanelRuntime = formatNoteUpdatedLabelForPanelRuntime(noteDataForPanelRuntime);
-      noteItemForPanelRuntime.innerHTML = `
-        <div class="ni-header">
-          <div class="ni-title">${escHtml(noteDataForPanelRuntime.title || 'Untitled')}</div>
-          <div class="ni-meta">
-            <button class="ni-btn${starredClassForPanelRuntime}" title="${starredTitleForPanelRuntime}" data-action="toggle-note-star">${starredTextForPanelRuntime}</button>
-            <div class="ni-dropdown-wrap">
-              <button class="ni-btn" title="More options" data-action="toggle-note-dropdown">···</button>
-              <div class="ni-dropdown">
+      // Clips get provenance in place of the note dropdown's edit/history actions: their body
+      // is read-only and they keep no version history.
+      const dropdownItemsForPanelRuntime = isClipItemForPanelRuntime
+        ? `
+                <button class="ni-dd-item" data-action="attach-clip-to-chat" data-note-id="${escHtml(noteIdForPanelRuntime)}">
+                  ${ic.paperclip12}
+                  Attach to chat
+                </button>
+                <button class="ni-dd-item" data-action="copy-clip-payload" data-note-id="${escHtml(noteIdForPanelRuntime)}">
+                  ${ic.copy12}
+                  Copy payload
+                </button>
+                <button class="ni-dd-item" data-action="open-clip-source" data-note-id="${escHtml(noteIdForPanelRuntime)}">
+                  ${ic.globe10}
+                  Open source
+                </button>
+                <button class="ni-dd-item" data-action="convert-clip-to-note" data-note-id="${escHtml(noteIdForPanelRuntime)}">
+                  ${ic.noteEdit12}
+                  Convert to note
+                </button>
+                <button class="ni-dd-item danger" data-action="delete-note" data-note-id="${escHtml(noteIdForPanelRuntime)}">
+                  ${ic.trash12}
+                  Delete
+                </button>`
+        : `
                 <button class="ni-dd-item" data-action="edit-note" data-note-id="${escHtml(noteIdForPanelRuntime)}">
                   ${ic.noteEdit12}
                   Edit
@@ -6609,11 +7064,23 @@
                 <button class="ni-dd-item danger" data-action="delete-note" data-note-id="${escHtml(noteIdForPanelRuntime)}">
                   ${ic.trash12}
                   Delete
-                </button>
+                </button>`;
+      const clipProvenanceForPanelRuntime = isClipItemForPanelRuntime
+        ? `<div class="ni-clip-source">${ic.bookmark10}<span class="ni-clip-domain">${escHtml(extractChipDomainForPanelRuntime(noteDataForPanelRuntime.sourceUrl) || 'unknown source')}</span><span class="ni-clip-kind">${escHtml(formatClipKindLabelForPanelRuntime(noteDataForPanelRuntime.clipKind))}</span></div>`
+        : '';
+      noteItemForPanelRuntime.innerHTML = `
+        <div class="ni-header">
+          <div class="ni-title">${escHtml(noteDataForPanelRuntime.title || 'Untitled')}</div>
+          <div class="ni-meta">
+            <button class="ni-btn${starredClassForPanelRuntime}" title="${starredTitleForPanelRuntime}" data-action="toggle-note-star">${starredTextForPanelRuntime}</button>
+            <div class="ni-dropdown-wrap">
+              <button class="ni-btn" title="More options" data-action="toggle-note-dropdown">···</button>
+              <div class="ni-dropdown">${dropdownItemsForPanelRuntime}
               </div>
             </div>
           </div>
         </div>
+        ${clipProvenanceForPanelRuntime}
         <div class="ni-excerpt">${escHtml(getNoteExcerptForPanelRuntime(noteDataForPanelRuntime.body))}</div>
         <div class="ni-footer">
           <div class="ni-tags">
@@ -6624,7 +7091,22 @@
           <span class="ni-date">${escHtml(updatedLabelForPanelRuntime)}</span>
         </div>
       `;
+      noteItemForPanelRuntime.dataset.noteType = isClipItemForPanelRuntime ? 'clip' : 'note';
+      noteItemForPanelRuntime.classList.toggle('is-clip', isClipItemForPanelRuntime);
       noteItemForPanelRuntime.classList.toggle('active', noteIdForPanelRuntime === S.activeNoteId);
+    }
+
+    const CLIP_KIND_LABELS_FOR_PANEL_RUNTIME = {
+      page: 'page element',
+      paste: 'selection',
+      tab: 'tab snapshot',
+      screenshot: 'screenshot',
+      file: 'file'
+    };
+
+    function formatClipKindLabelForPanelRuntime(clipKindForLabel) {
+      const keyForLabel = String(clipKindForLabel || '').trim();
+      return CLIP_KIND_LABELS_FOR_PANEL_RUNTIME[keyForLabel] || 'clip';
     }
 
     function syncMainChatListItemForPanelRuntime(chatIdForSync, prependForSync, bypassWindowForSync) {
@@ -7068,12 +7550,98 @@
       if (noteFormForPanelRuntime.dataset) {
         noteFormForPanelRuntime.dataset.noteRemoteDraft = optsForPanelRuntime.remoteDraft ? '1' : '';
       }
+      applyClipModeToMainEditorForPanelRuntime(noteFormForPanelRuntime, noteIdForPanelRuntime);
       showNoteForm(true);
       S.inNoteView = true;
       setReducedPaneForPanelRuntime('notes', 'detail');
       S.activeNoteId = noteIdForPanelRuntime;
       setActiveNoteListItemForPanelRuntime(noteIdForPanelRuntime);
       return true;
+    }
+
+    // Clips reuse the note editor with the body locked: their payload is a snapshot, so only
+    // the title and tags are editable. The read-only body plus a source header is what makes
+    // the row read as "captured", not "authored".
+    function applyClipModeToMainEditorForPanelRuntime(noteFormForClipMode, noteIdForClipMode) {
+      if (!noteFormForClipMode) return;
+      const clipRecordForClipMode = getClipRecordForPanelRuntime(noteIdForClipMode);
+      const isClipForClipMode = Boolean(clipRecordForClipMode);
+      noteFormForClipMode.classList.toggle('is-clip-mode', isClipForClipMode);
+
+      // Reduced view navigates back to the sub-tab this record actually lives in.
+      const backLabelForClipMode = root.getElementById('ne-back-label');
+      if (backLabelForClipMode) {
+        backLabelForClipMode.textContent = isClipForClipMode ? 'All clips' : 'All notes';
+      }
+
+      const bodyInputForClipMode = root.getElementById('ne-body');
+      if (bodyInputForClipMode) {
+        bodyInputForClipMode.readOnly = isClipForClipMode;
+      }
+      const sourceBlockForClipMode = root.getElementById('ne-clip-source');
+      if (!sourceBlockForClipMode) return;
+      if (!isClipForClipMode) {
+        sourceBlockForClipMode.classList.add('hidden');
+        return;
+      }
+
+      const urlForClipMode = String(clipRecordForClipMode.sourceUrl || '');
+      const urlRowForClipMode = root.getElementById('ne-clip-source-url-row');
+      const urlValueForClipMode = root.getElementById('ne-clip-source-url');
+      if (urlRowForClipMode && urlValueForClipMode) {
+        urlValueForClipMode.innerHTML = '';
+        if (/^https?:\/\//i.test(urlForClipMode)) {
+          const linkForClipMode = document.createElement('a');
+          linkForClipMode.href = urlForClipMode;
+          linkForClipMode.target = '_blank';
+          linkForClipMode.rel = 'noopener noreferrer';
+          linkForClipMode.textContent = urlForClipMode;
+          urlValueForClipMode.appendChild(linkForClipMode);
+        } else {
+          urlValueForClipMode.textContent = urlForClipMode;
+        }
+        urlRowForClipMode.classList.toggle('hidden', !urlForClipMode);
+      }
+
+      const titleRowForClipMode = root.getElementById('ne-clip-source-title-row');
+      const titleValueForClipMode = root.getElementById('ne-clip-source-title');
+      if (titleRowForClipMode && titleValueForClipMode) {
+        titleValueForClipMode.textContent = String(clipRecordForClipMode.sourceTitle || '');
+        titleRowForClipMode.classList.toggle('hidden', !clipRecordForClipMode.sourceTitle);
+      }
+
+      const selectorRowForClipMode = root.getElementById('ne-clip-source-selector-row');
+      const selectorValueForClipMode = root.getElementById('ne-clip-source-selector');
+      if (selectorRowForClipMode && selectorValueForClipMode) {
+        const formatSuffixForClipMode = clipRecordForClipMode.sourceHtmlFormat
+          ? ' (' + clipRecordForClipMode.sourceHtmlFormat + ' HTML)'
+          : '';
+        selectorValueForClipMode.textContent = String(clipRecordForClipMode.sourceSelector || '') + formatSuffixForClipMode;
+        selectorRowForClipMode.classList.toggle('hidden', !clipRecordForClipMode.sourceSelector);
+      }
+
+      const capturedRowForClipMode = root.getElementById('ne-clip-source-captured-row');
+      const capturedValueForClipMode = root.getElementById('ne-clip-source-captured');
+      if (capturedRowForClipMode && capturedValueForClipMode) {
+        const capturedStampForClipMode = String(clipRecordForClipMode.capturedAt || clipRecordForClipMode.createdAt || '');
+        const capturedDateForClipMode = capturedStampForClipMode ? new Date(capturedStampForClipMode) : null;
+        const capturedLabelForClipMode = capturedDateForClipMode && Number.isFinite(capturedDateForClipMode.getTime())
+          ? capturedDateForClipMode.toLocaleString()
+          : '';
+        capturedValueForClipMode.textContent = capturedLabelForClipMode
+          + ' \u00b7 ' + formatClipKindLabelForPanelRuntime(clipRecordForClipMode.clipKind);
+        capturedRowForClipMode.classList.toggle('hidden', !capturedLabelForClipMode);
+      }
+
+      const readonlyNoteForClipMode = root.getElementById('ne-clip-readonly-note');
+      if (readonlyNoteForClipMode) {
+        readonlyNoteForClipMode.textContent = 'Showing an excerpt; the full payload is attached. '
+          + 'Title and tags are editable, the captured content is not. '
+          + (clipRecordForClipMode.starred === true
+            ? 'Starred, so the retention sweep will not delete it.'
+            : getClipRetentionHintForPanelRuntime());
+      }
+      sourceBlockForClipMode.classList.remove('hidden');
     }
 
     function applyNoteDataToMainEditorForPanelRuntime(noteIdForPanelRuntime, keepEditModeForPanelRuntime) {
@@ -7405,12 +7973,6 @@
       writePanelStateSyncForPanelRuntime({ popoutNoteIds: Object.keys(NOTE_POPOUT_MAP_FOR_PANEL_RUNTIME).map(Number) });
     }
 
-    function closeAllNotePopoutsForPanelRuntime() {
-      Object.keys(NOTE_POPOUT_MAP_FOR_PANEL_RUNTIME).forEach(function (noteIdForPanelRuntime) {
-        closeNotePopoutForPanelRuntime(noteIdForPanelRuntime);
-      });
-    }
-
     function syncNotePopoutsForNoteForPanelRuntime(noteIdForPanelRuntime, skippedPopoutForPanelRuntime) {
       const popoutForPanelRuntime = NOTE_POPOUT_MAP_FOR_PANEL_RUNTIME[noteIdForPanelRuntime];
       if (!popoutForPanelRuntime || popoutForPanelRuntime === skippedPopoutForPanelRuntime) return;
@@ -7422,17 +7984,44 @@
       applyNoteDataToPopoutForPanelRuntime(popoutForPanelRuntime, noteDataForPanelRuntime);
     }
 
+    // Instant feedback for a deletion this tab performed. The durable guarantee comes from
+    // validatePendingChipReferences, which re-checks every pending chip on draft restore, on any
+    // notes/chats refresh, and at send time; this only saves waiting for that pass.
+    function markPendingChipsForDeletedRecordForPanelRuntime(chipTypeForMark, recordIdForMark, labelForMark) {
+      const numericRecordIdForMark = Number(recordIdForMark);
+      if (!Number.isFinite(numericRecordIdForMark)) return;
+      const chipsRowForMark = root.querySelector('.input-chips-row');
+      if (!chipsRowForMark) return;
+      chipsRowForMark.querySelectorAll('.ic').forEach(function (chipForMark) {
+        if (!chipForMark.dataset) return;
+        // A chip that handed its blob to a clip loses its "saved to clips" state when that clip
+        // goes, whether or not the chip itself is broken.
+        refreshChipSavedToClipsMarkerForPanelRuntime(chipForMark);
+        if (String(chipForMark.dataset.attachType || '') !== chipTypeForMark) return;
+        if (Number(chipForMark.dataset.attachRefId) !== numericRecordIdForMark) return;
+        setInputChipStatusForPanelRuntime(
+          chipForMark,
+          'error',
+          buildChipSourceMissingMessageForPanelRuntime(labelForMark)
+        );
+      });
+    }
+
     async function deleteNoteByIdForPanelRuntime(noteIdForPanelRuntime) {
       if (!noteIdForPanelRuntime || !NOTE_STORE_FOR_PANEL_RUNTIME[noteIdForPanelRuntime]) return;
       const panelDataRepoForPanelRuntime = getPanelDataRepoForPanelRuntime();
       if (panelDataRepoForPanelRuntime && typeof panelDataRepoForPanelRuntime.deleteNote === 'function') {
         try {
-          await panelDataRepoForPanelRuntime.deleteNote(noteIdForPanelRuntime);
+          await panelDataRepoForPanelRuntime.deleteNote(noteIdForPanelRuntime, getPendingBlobIdsForPanelRuntime());
         } catch (errorForPanelRuntime) {
           return;
         }
       }
+      const wasClipForDelete = isClipNoteTypeForPanelRuntime(
+        (NOTE_STORE_FOR_PANEL_RUNTIME[noteIdForPanelRuntime] || {}).noteType
+      );
       delete NOTE_STORE_FOR_PANEL_RUNTIME[noteIdForPanelRuntime];
+      markPendingChipsForDeletedRecordForPanelRuntime('note', noteIdForPanelRuntime, wasClipForDelete ? 'clip' : 'note');
       const orderIndexForPanelRuntime = NOTE_ORDER_FOR_PANEL_RUNTIME.indexOf(noteIdForPanelRuntime);
       if (orderIndexForPanelRuntime >= 0) NOTE_ORDER_FOR_PANEL_RUNTIME.splice(orderIndexForPanelRuntime, 1);
       syncSearchIndexForPanelRuntime('notes', 'remove', noteIdForPanelRuntime);
@@ -7607,6 +8196,9 @@
     function openNotePopoutForPanelRuntime(noteIdForPanelRuntime) {
       const noteDataForPanelRuntime = NOTE_STORE_FOR_PANEL_RUNTIME[noteIdForPanelRuntime];
       if (!noteDataForPanelRuntime) return;
+      // The popout is an editing surface; a clip's captured body is read-only, so it stays in
+      // the main panel where clip mode applies.
+      if (isClipNoteTypeForPanelRuntime(noteDataForPanelRuntime.noteType)) return;
       const existingPopoutForPanelRuntime = NOTE_POPOUT_MAP_FOR_PANEL_RUNTIME[noteIdForPanelRuntime];
       if (existingPopoutForPanelRuntime) {
         bringNotePopoutToFrontForPanelRuntime(existingPopoutForPanelRuntime);
@@ -8332,6 +8924,15 @@
       const form = root.getElementById('note-editor-form');
       if (!form) return;
       form.classList.add('in-edit-mode');
+      // A previously previewed note with no tags/attachments leaves display:none on these
+      // sections; clear it so the new draft can always add tags and attachments.
+      syncNoteSectionsForPanelRuntime(
+        root.getElementById('ne-tags-section'),
+        root.getElementById('ne-attachments-section'),
+        false,
+        false,
+        true
+      );
       setNoteBaseSnapshotForPanelRuntime(form, { title: '', body: '', tags: [], attachments: [] }, '');
       const display = root.getElementById('ne-title-display');
       if (display) {
@@ -8379,9 +8980,11 @@
     function deleteNoteFromMainEditorForPanelRuntime(noteIdForPanelRuntime) {
       const resolvedNoteIdForPanelRuntime = noteIdForPanelRuntime || S.activeNoteId;
       if (!resolvedNoteIdForPanelRuntime) return;
+      // This path serves both sub-tabs, so the prompt names what the row actually is.
+      const recordLabelForDelete = getClipRecordForPanelRuntime(resolvedNoteIdForPanelRuntime) ? 'clip' : 'note';
       showConfirmPromptForPanelRuntime(
         root.querySelector('.panel-content'),
-        'This note will be permanently deleted and cannot be recovered.',
+        'This ' + recordLabelForDelete + ' will be permanently deleted and cannot be recovered.',
         'Delete',
         async function() { await deleteNoteByIdForPanelRuntime(resolvedNoteIdForPanelRuntime); }
       );
@@ -8633,14 +9236,6 @@
     if (mainNoteBodyInputForDraftSync) {
       mainNoteBodyInputForDraftSync.addEventListener('input', scheduleMainNoteDraftSyncForPanelRuntime);
     }
-    const closeMainPanelButtonForRuntime = root.querySelector('#panel-host .ctrl-close');
-    if (closeMainPanelButtonForRuntime && closeMainPanelButtonForRuntime.dataset.abchatClosePopoutBound !== '1') {
-      closeMainPanelButtonForRuntime.dataset.abchatClosePopoutBound = '1';
-      closeMainPanelButtonForRuntime.addEventListener('click', function () {
-        closeAllNotePopoutsForPanelRuntime();
-      });
-    }
-
     /* ============================================================
       TASKS
     ============================================================ */
@@ -8968,7 +9563,7 @@
     function getPickerNotesForPanelRuntime() {
       return NOTE_ORDER_FOR_PANEL_RUNTIME.filter(function (idForPicker) {
         const nForPicker = NOTE_STORE_FOR_PANEL_RUNTIME[idForPicker];
-        return nForPicker && nForPicker.noteType !== 'agent';
+        return nForPicker && isUserNoteTypeForPanelRuntime(nForPicker.noteType);
       }).map(function (idForPicker) {
         const nForPicker = NOTE_STORE_FOR_PANEL_RUNTIME[idForPicker];
         return {
@@ -9049,15 +9644,530 @@
         closePickerModal();
         return;
       }
+      // A clip IS a note row, so it rides the note chip type (and therefore the existing
+      // <note_reference> + read tool path). Only `kind` marks it as a clip, for the icon
+      // and label.
+      const chipTypeForPicker = type === 'clip' ? 'note' : type;
+      const clipRecordForPicker = type === 'clip' ? getClipRecordForPanelRuntime(item && item.id) : null;
       addInputChipForPanelRuntime({
-        type: type,
+        type: chipTypeForPicker,
         label: String(item.title || ''),
         content: '',
         refId: item.id,
         kind: type,
-        preview: String(item.excerpt || '')
+        preview: String(item.excerpt || ''),
+        pageUrl: clipRecordForPicker ? String(clipRecordForPicker.sourceUrl || '') : '',
+        pageTitle: clipRecordForPicker ? String(clipRecordForPicker.sourceTitle || '') : ''
       });
       closePickerModal();
+    }
+
+    /* ============================================================
+      CLIPS (page grabs kept for later, stored as noteType 'clip')
+
+      A clip is a notes-table row whose full payload lives in an attachmentBlobs
+      record referenced by attachments[0].refId, with only a short excerpt in body.
+      The excerpt keeps listNotes responses and the notes search index small; the
+      agent reaches the payload via read type:'attachment' with the blob_id the note
+      read already discloses.
+    ============================================================ */
+    function getClipRecordForPanelRuntime(clipIdForClip) {
+      const numericIdForClip = Number(clipIdForClip);
+      if (!Number.isFinite(numericIdForClip)) return null;
+      const recordForClip = NOTE_STORE_FOR_PANEL_RUNTIME[numericIdForClip];
+      if (!recordForClip || !isClipNoteTypeForPanelRuntime(recordForClip.noteType)) return null;
+      return recordForClip;
+    }
+
+    function getClipBlobIdForPanelRuntime(clipRecordForClip) {
+      const attachmentsForClip = (clipRecordForClip && clipRecordForClip.attachments) || [];
+      for (let iForClip = 0; iForClip < attachmentsForClip.length; iForClip++) {
+        const refIdForClip = Number(attachmentsForClip[iForClip] && attachmentsForClip[iForClip].refId);
+        if (Number.isFinite(refIdForClip) && refIdForClip > 0) return refIdForClip;
+      }
+      return null;
+    }
+
+    function buildClipExcerptForPanelRuntime(payloadTextForClip) {
+      const flattenedForClip = String(payloadTextForClip || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (flattenedForClip.length <= CLIP_EXCERPT_LENGTH_FOR_PANEL_RUNTIME) return flattenedForClip;
+      return flattenedForClip.slice(0, CLIP_EXCERPT_LENGTH_FOR_PANEL_RUNTIME - 3) + '...';
+    }
+
+    function deriveClipTitleForPanelRuntime(inputForClipTitle) {
+      const explicitTitleForClip = String(inputForClipTitle.title || '').trim();
+      if (explicitTitleForClip) return explicitTitleForClip.slice(0, 120);
+      const selectorForClip = String(inputForClipTitle.sourceSelector || '').trim();
+      if (selectorForClip) return selectorForClip.slice(0, 120);
+      const firstLineForClip = String(inputForClipTitle.payloadText || '')
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 80);
+      if (firstLineForClip) return firstLineForClip;
+      const domainForClip = extractChipDomainForPanelRuntime(inputForClipTitle.sourceUrl);
+      if (domainForClip) return formatClipKindLabelForPanelRuntime(inputForClipTitle.clipKind) + ' from ' + domainForClip;
+      return 'Clip';
+    }
+
+    // Duplicate captures of the same element are silently skipped rather than piling up.
+    // Matching on source URL + selector + payload size + excerpt keeps this cheap (no blob
+    // reads) while still distinguishing a page whose content actually changed.
+    function findDuplicateClipIdForPanelRuntime(candidateForDup) {
+      const sourceUrlForDup = String(candidateForDup.sourceUrl || '');
+      const selectorForDup = String(candidateForDup.sourceSelector || '');
+      const sizeForDup = Number(candidateForDup.clipPayloadSize) || 0;
+      const excerptForDup = String(candidateForDup.body || '');
+      if (!sourceUrlForDup && !selectorForDup && !excerptForDup) return null;
+      const idsForDup = Object.keys(NOTE_STORE_FOR_PANEL_RUNTIME);
+      for (let iForDup = 0; iForDup < idsForDup.length; iForDup++) {
+        const existingForDup = NOTE_STORE_FOR_PANEL_RUNTIME[idsForDup[iForDup]];
+        if (!existingForDup || !isClipNoteTypeForPanelRuntime(existingForDup.noteType)) continue;
+        if (String(existingForDup.sourceUrl || '') !== sourceUrlForDup) continue;
+        if (String(existingForDup.sourceSelector || '') !== selectorForDup) continue;
+        if ((Number(existingForDup.clipPayloadSize) || 0) !== sizeForDup) continue;
+        if (String(existingForDup.body || '') !== excerptForDup) continue;
+        return Number(idsForDup[iForDup]);
+      }
+      return null;
+    }
+
+    function showClipToastForPanelRuntime(messageForClipToast) {
+      const toastForClip = ABChatContent && ABChatContent.ui && ABChatContent.ui.toast;
+      if (toastForClip && typeof toastForClip.show === 'function') {
+        toastForClip.show(String(messageForClipToast), { durationMs: 3000 });
+      }
+    }
+
+    // Single entry point for every capture surface (content selector, selection context menu,
+    // input chip, message chip). Creates the payload blob when the caller does not already own
+    // one, writes the clip row, and folds it into the in-memory store / list / search index.
+    async function saveClipForPanelRuntime(inputForSaveClip) {
+      const safeInputForSaveClip = inputForSaveClip || {};
+      const payloadTextForSaveClip = String(safeInputForSaveClip.payloadText || '');
+      const existingBlobIdForSaveClip = Number(safeInputForSaveClip.blobId);
+      const hasExistingBlobForSaveClip = Number.isFinite(existingBlobIdForSaveClip) && existingBlobIdForSaveClip > 0;
+      if (!payloadTextForSaveClip && !hasExistingBlobForSaveClip) {
+        showClipToastForPanelRuntime('Nothing to save.');
+        return { ok: false };
+      }
+
+      const repoForSaveClip = getPanelDataRepoForPanelRuntime();
+      if (!repoForSaveClip || typeof repoForSaveClip.createNote !== 'function') {
+        showClipToastForPanelRuntime('Clip storage is not available.');
+        return { ok: false };
+      }
+
+      const clipKindForSaveClip = String(safeInputForSaveClip.clipKind || 'page');
+      const titleForSaveClip = deriveClipTitleForPanelRuntime({
+        title: safeInputForSaveClip.title,
+        payloadText: payloadTextForSaveClip,
+        clipKind: clipKindForSaveClip,
+        sourceSelector: safeInputForSaveClip.sourceSelector,
+        sourceUrl: safeInputForSaveClip.sourceUrl
+      });
+      const nowIsoForSaveClip = new Date().toISOString();
+      const payloadSizeForSaveClip = hasExistingBlobForSaveClip && !payloadTextForSaveClip
+        ? Number(safeInputForSaveClip.payloadSize) || 0
+        : payloadTextForSaveClip.length;
+      const excerptForSaveClip = payloadTextForSaveClip
+        ? buildClipExcerptForPanelRuntime(payloadTextForSaveClip)
+        : String(safeInputForSaveClip.excerpt || '');
+
+      const duplicateIdForSaveClip = findDuplicateClipIdForPanelRuntime({
+        sourceUrl: safeInputForSaveClip.sourceUrl,
+        sourceSelector: safeInputForSaveClip.sourceSelector,
+        clipPayloadSize: payloadSizeForSaveClip,
+        body: excerptForSaveClip
+      });
+      if (duplicateIdForSaveClip != null) {
+        showClipToastForPanelRuntime('Already saved to clips.');
+        revealClipInListForPanelRuntime(duplicateIdForSaveClip);
+        return { ok: true, id: duplicateIdForSaveClip, duplicate: true };
+      }
+
+      // A chip saved as a clip keeps its own file name; a fresh capture gets a derived one.
+      const payloadNameForSaveClip = String(safeInputForSaveClip.payloadName || '').trim()
+        || buildClipPayloadNameForPanelRuntime(clipKindForSaveClip, safeInputForSaveClip.mimeType);
+
+      let blobIdForSaveClip = hasExistingBlobForSaveClip ? existingBlobIdForSaveClip : null;
+      if (blobIdForSaveClip == null) {
+        try {
+          const persistedBlobForSaveClip = await createAttachmentBlobForPanelRuntime({
+            name: payloadNameForSaveClip,
+            kind: 'clip',
+            mimeType: String(safeInputForSaveClip.mimeType || 'text/plain'),
+            size: payloadTextForSaveClip.length,
+            textContent: payloadTextForSaveClip
+          });
+          blobIdForSaveClip = Number(persistedBlobForSaveClip.id);
+        } catch (errorForSaveClip) {
+          showClipToastForPanelRuntime('Could not save the clip payload.');
+          return { ok: false };
+        }
+      }
+
+      const clipInputForSaveClip = {
+        title: titleForSaveClip,
+        body: excerptForSaveClip,
+        tags: [],
+        attachments: [{
+          name: payloadNameForSaveClip,
+          refId: blobIdForSaveClip
+        }],
+        noteType: 'clip',
+        sourceChatId: null,
+        clipKind: clipKindForSaveClip,
+        sourceUrl: String(safeInputForSaveClip.sourceUrl || ''),
+        sourceTitle: String(safeInputForSaveClip.sourceTitle || ''),
+        sourceSelector: String(safeInputForSaveClip.sourceSelector || ''),
+        sourceHtmlFormat: String(safeInputForSaveClip.sourceHtmlFormat || ''),
+        capturedAt: nowIsoForSaveClip,
+        clipPayloadSize: payloadSizeForSaveClip
+      };
+
+      let persistedClipForSaveClip = null;
+      try {
+        persistedClipForSaveClip = await repoForSaveClip.createNote(clipInputForSaveClip);
+      } catch (errorForSaveClip) {
+        showClipToastForPanelRuntime('Could not save the clip.');
+        return { ok: false };
+      }
+      const clipIdForSaveClip = Number(persistedClipForSaveClip && persistedClipForSaveClip.id);
+      if (!Number.isFinite(clipIdForSaveClip)) {
+        showClipToastForPanelRuntime('Could not save the clip.');
+        return { ok: false };
+      }
+
+      const savedClipForSaveClip = cloneNoteRecordForPanelRuntime(persistedClipForSaveClip);
+      NOTE_STORE_FOR_PANEL_RUNTIME[clipIdForSaveClip] = savedClipForSaveClip;
+      if (NOTE_ORDER_FOR_PANEL_RUNTIME.indexOf(clipIdForSaveClip) === -1) {
+        // Front-insert and grow the window by one so syncMainNoteListItem's window guard
+        // creates the node; refreshNoteOrder re-sorts it into place afterwards.
+        NOTE_ORDER_FOR_PANEL_RUNTIME.unshift(clipIdForSaveClip);
+        renderedNoteCountForPanelRuntime = Math.min(
+          renderedNoteCountForPanelRuntime + 1,
+          NOTE_ORDER_FOR_PANEL_RUNTIME.length
+        );
+      }
+      syncSearchIndexForPanelRuntime('notes', 'add', clipIdForSaveClip, savedClipForSaveClip);
+      syncMainNoteListItemForPanelRuntime(clipIdForSaveClip);
+      refreshNoteOrderForPanelRuntime();
+      applyNoteListFilterForPanelRuntime();
+      showClipToastForPanelRuntime('Saved to clips.');
+      return { ok: true, id: clipIdForSaveClip, duplicate: false };
+    }
+
+    function buildClipPayloadNameForPanelRuntime(clipKindForName, mimeTypeForName) {
+      const mimeForName = String(mimeTypeForName || '');
+      if (mimeForName.indexOf('image/') === 0) {
+        return 'clip-' + String(clipKindForName || 'image') + '.' + (mimeForName.split('/')[1] || 'png');
+      }
+      if (mimeForName === 'text/html') return 'clip-' + String(clipKindForName || 'page') + '.html';
+      if (mimeForName === 'application/json') return 'clip-' + String(clipKindForName || 'data') + '.json';
+      return 'clip-' + String(clipKindForName || 'text') + '.txt';
+    }
+
+    // Brings a clip into view: switches to the Notes tab's Clips sub-tab and flashes the row.
+    function revealClipInListForPanelRuntime(clipIdForReveal) {
+      const numericIdForReveal = Number(clipIdForReveal);
+      if (!Number.isFinite(numericIdForReveal)) return;
+      if (S.tab !== 'notes') setTab('notes');
+      if ((S.noteType || 'notes') !== 'clips') setNoteType('clips');
+      else applyNoteListFilterForPanelRuntime();
+      const itemForReveal = root.querySelector('.note-item[data-note-id="' + numericIdForReveal + '"]');
+      if (!itemForReveal) return;
+      if (typeof itemForReveal.scrollIntoView === 'function') {
+        itemForReveal.scrollIntoView({ block: 'nearest' });
+      }
+      itemForReveal.classList.add('ni-flash');
+      setTimeout(function () {
+        if (itemForReveal && itemForReveal.classList) itemForReveal.classList.remove('ni-flash');
+      }, 1200);
+    }
+
+    // Saves an input chip (or a persisted message chip object) as a clip. Blob-backed chips
+    // hand their existing blob id to the clip instead of duplicating the bytes, so the blob then
+    // has two referrers and outlives whichever one is deleted first.
+    async function saveChipAsClipForPanelRuntime(chipSourceForSaveChip) {
+      const normalizedChipForSaveChip = normalizeChipPreviewSourceForPanelRuntime(chipSourceForSaveChip);
+      if (!normalizedChipForSaveChip) return;
+      const chipTypeForSaveChip = String(normalizedChipForSaveChip.type || '');
+      if (chipTypeForSaveChip === 'note' || chipTypeForSaveChip === 'chat') {
+        showClipToastForPanelRuntime('Notes and chats are already saved; no clip needed.');
+        return;
+      }
+      const blobIdForSaveChip = Number(normalizedChipForSaveChip.refId);
+      const hasBlobForSaveChip = Number.isFinite(blobIdForSaveChip) && blobIdForSaveChip > 0;
+      const inlineTextForSaveChip = String(normalizedChipForSaveChip.content || '');
+
+      let payloadTextForSaveChip = inlineTextForSaveChip;
+      let excerptForSaveChip = '';
+      let payloadSizeForSaveChip = inlineTextForSaveChip.length;
+      let mimeTypeForSaveChip = String(normalizedChipForSaveChip.mimeType || '');
+      if (!payloadTextForSaveChip && hasBlobForSaveChip) {
+        const blobForSaveChip = await getAttachmentBlobForPanelRuntime(blobIdForSaveChip);
+        if (!blobForSaveChip) {
+          showClipToastForPanelRuntime('Attachment content is no longer available.');
+          return;
+        }
+        mimeTypeForSaveChip = mimeTypeForSaveChip || String(blobForSaveChip.mimeType || '');
+        payloadSizeForSaveChip = Number(blobForSaveChip.size) || String(blobForSaveChip.textContent || '').length;
+        excerptForSaveChip = String(blobForSaveChip.textContent || '')
+          ? buildClipExcerptForPanelRuntime(blobForSaveChip.textContent)
+          : normalizedChipForSaveChip.name + ' (' + (mimeTypeForSaveChip || 'binary') + ')';
+      }
+
+      const clipKindForSaveChip =
+        chipTypeForSaveChip === 'screenshot' ? 'screenshot' :
+        chipTypeForSaveChip === 'image' ? 'screenshot' :
+        chipTypeForSaveChip === 'file' || chipTypeForSaveChip === 'spreadsheet' ? 'file' :
+        chipTypeForSaveChip === 'tab' ? 'tab' :
+        chipTypeForSaveChip === 'paste' ? 'paste' : 'page';
+
+      const resultForSaveChip = await saveClipForPanelRuntime({
+        clipKind: clipKindForSaveChip,
+        title: normalizedChipForSaveChip.name,
+        payloadName: normalizedChipForSaveChip.name,
+        payloadText: payloadTextForSaveChip,
+        excerpt: excerptForSaveChip,
+        payloadSize: payloadSizeForSaveChip,
+        blobId: hasBlobForSaveChip && !payloadTextForSaveChip ? blobIdForSaveChip : null,
+        mimeType: mimeTypeForSaveChip,
+        sourceUrl: normalizedChipForSaveChip.pageUrl,
+        sourceTitle: normalizedChipForSaveChip.pageTitle,
+        sourceSelector: chipSourceForSaveChip && chipSourceForSaveChip.dataset
+          ? String(chipSourceForSaveChip.dataset.attachElementSelector || '')
+          : String((chipSourceForSaveChip && chipSourceForSaveChip.elementSelector) || ''),
+        sourceHtmlFormat: chipSourceForSaveChip && chipSourceForSaveChip.dataset
+          ? String(chipSourceForSaveChip.dataset.attachHtmlFormat || '')
+          : String((chipSourceForSaveChip && chipSourceForSaveChip.htmlFormat) || '')
+      });
+
+      // Mark the chip as saved. This is display state only: blob reclaim asks the repo for the
+      // full reference set rather than reading anything off the chip, so losing this on a draft
+      // reload cannot put the payload at risk.
+      if (resultForSaveChip && resultForSaveChip.ok && chipSourceForSaveChip && chipSourceForSaveChip.dataset) {
+        chipSourceForSaveChip.dataset.attachClipId = String(resultForSaveChip.id);
+        const saveBtnForChip = chipSourceForSaveChip.querySelector('.ic-save');
+        if (saveBtnForChip) {
+          saveBtnForChip.classList.add('is-saved');
+          saveBtnForChip.innerHTML = ic.bookmarkFilled12;
+          saveBtnForChip.title = 'Saved to clips';
+        }
+      }
+    }
+
+    function attachClipToChatForPanelRuntime(clipIdForAttach) {
+      const clipRecordForAttach = getClipRecordForPanelRuntime(clipIdForAttach);
+      if (!clipRecordForAttach) return;
+      setTab('chats');
+      addInputChipForPanelRuntime({
+        type: 'note',
+        kind: 'clip',
+        label: String(clipRecordForAttach.title || 'Clip'),
+        content: '',
+        refId: Number(clipIdForAttach),
+        preview: String(clipRecordForAttach.body || ''),
+        pageUrl: String(clipRecordForAttach.sourceUrl || ''),
+        pageTitle: String(clipRecordForAttach.sourceTitle || '')
+      });
+    }
+
+    async function getClipPayloadTextForPanelRuntime(clipRecordForPayload) {
+      const blobIdForPayload = getClipBlobIdForPanelRuntime(clipRecordForPayload);
+      if (blobIdForPayload == null) return { text: '', dataUrl: '', mimeType: '' };
+      const blobForPayload = await getAttachmentBlobForPanelRuntime(blobIdForPayload);
+      if (!blobForPayload) return { text: '', dataUrl: '', mimeType: '' };
+      return {
+        text: String(blobForPayload.textContent || ''),
+        dataUrl: String(blobForPayload.dataUrl || ''),
+        mimeType: String(blobForPayload.mimeType || '')
+      };
+    }
+
+    async function copyClipPayloadForPanelRuntime(clipIdForCopy) {
+      const clipRecordForCopy = getClipRecordForPanelRuntime(clipIdForCopy);
+      if (!clipRecordForCopy) return;
+      const payloadForCopy = await getClipPayloadTextForPanelRuntime(clipRecordForCopy);
+      if (!payloadForCopy.text) {
+        showClipToastForPanelRuntime(payloadForCopy.dataUrl
+          ? 'Image clips cannot be copied as text.'
+          : 'Nothing to copy.');
+        return;
+      }
+      const clipboardUtilForCopy = ABChatContent && ABChatContent.utils && ABChatContent.utils.clipboard;
+      let copiedForCopy = false;
+      if (clipboardUtilForCopy && typeof clipboardUtilForCopy.copyText === 'function') {
+        copiedForCopy = await clipboardUtilForCopy.copyText(payloadForCopy.text);
+      }
+      showClipToastForPanelRuntime(copiedForCopy ? 'Payload copied.' : 'Could not copy payload.');
+    }
+
+    function openClipSourceForPanelRuntime(clipIdForOpen) {
+      const clipRecordForOpen = getClipRecordForPanelRuntime(clipIdForOpen);
+      if (!clipRecordForOpen) return;
+      const urlForOpen = String(clipRecordForOpen.sourceUrl || '').trim();
+      if (!/^https?:\/\//i.test(urlForOpen)) {
+        showClipToastForPanelRuntime('This clip has no web source to open.');
+        return;
+      }
+      window.open(urlForOpen, '_blank', 'noopener');
+    }
+
+    async function viewClipPayloadForPanelRuntime(clipIdForView) {
+      const clipRecordForView = getClipRecordForPanelRuntime(clipIdForView);
+      if (!clipRecordForView) return;
+      const payloadForView = await getClipPayloadTextForPanelRuntime(clipRecordForView);
+      if (payloadForView.dataUrl && payloadForView.dataUrl.indexOf('data:image/') === 0) {
+        openAttachmentPreview(String(clipRecordForView.title || 'Clip'), {
+          previewType: 'image',
+          dataUrl: payloadForView.dataUrl,
+          pageUrl: String(clipRecordForView.sourceUrl || ''),
+          pageTitle: String(clipRecordForView.sourceTitle || '')
+        });
+        return;
+      }
+      if (!payloadForView.text) {
+        showClipToastForPanelRuntime('This clip has no readable payload.');
+        return;
+      }
+      openAttachmentPreview(String(clipRecordForView.title || 'Clip'), {
+        previewType: payloadForView.mimeType === 'text/html' ? 'code' : 'markdown',
+        content: payloadForView.text,
+        pageUrl: String(clipRecordForView.sourceUrl || ''),
+        pageTitle: String(clipRecordForView.sourceTitle || '')
+      });
+    }
+
+    // Converting keeps the payload attached but moves the row into Notes, where it becomes a
+    // normal editable note with version history from this point on, and is no longer swept by
+    // the clip retention timer.
+    async function convertClipToNoteForPanelRuntime(clipIdForConvert) {
+      const numericIdForConvert = Number(clipIdForConvert);
+      const clipRecordForConvert = getClipRecordForPanelRuntime(numericIdForConvert);
+      if (!clipRecordForConvert) return;
+      const repoForConvert = getPanelDataRepoForPanelRuntime();
+      if (!repoForConvert || typeof repoForConvert.updateNote !== 'function') return;
+      let persistedForConvert = null;
+      try {
+        persistedForConvert = await repoForConvert.updateNote(numericIdForConvert, { noteType: 'user' });
+      } catch (errorForConvert) {
+        showClipToastForPanelRuntime('Could not convert this clip.');
+        return;
+      }
+      const convertedForConvert = cloneNoteRecordForPanelRuntime(persistedForConvert || Object.assign({}, clipRecordForConvert, { noteType: 'user' }));
+      NOTE_STORE_FOR_PANEL_RUNTIME[numericIdForConvert] = convertedForConvert;
+      syncSearchIndexForPanelRuntime('notes', 'update', numericIdForConvert, convertedForConvert);
+      syncMainNoteListItemForPanelRuntime(numericIdForConvert);
+      applyNoteListFilterForPanelRuntime();
+      showClipToastForPanelRuntime('Converted to a note.');
+    }
+
+    function getPickerClipsForPanelRuntime() {
+      return NOTE_ORDER_FOR_PANEL_RUNTIME.filter(function (idForPicker) {
+        const cForPicker = NOTE_STORE_FOR_PANEL_RUNTIME[idForPicker];
+        return cForPicker && isClipNoteTypeForPanelRuntime(cForPicker.noteType);
+      }).map(function (idForPicker) {
+        const cForPicker = NOTE_STORE_FOR_PANEL_RUNTIME[idForPicker];
+        const domainForPicker = extractChipDomainForPanelRuntime(cForPicker.sourceUrl);
+        return {
+          id: idForPicker,
+          title: cForPicker.title || 'Clip',
+          excerpt: String(cForPicker.body || ''),
+          tags: domainForPicker ? [domainForPicker] : []
+        };
+      });
+    }
+
+    function openClipPicker() {
+      closeAttachPicker();
+      S.pickerMode = 'clip';
+      root.getElementById('pk-title').textContent = 'Attach Saved Clip';
+      root.getElementById('pk-search').placeholder = 'Search clips...';
+      renderPickerList(getPickerClipsForPanelRuntime(), 'clip');
+      pickerOverlay.classList.remove('hidden');
+      writePanelStateSyncForPanelRuntime({ pickerOpen: true, pickerMode: 'clip' });
+    }
+
+    /* ---- Clip retention ---- */
+
+    function normalizeClipRetentionDaysForPanelRuntime(rawDaysForRetention) {
+      const parsedForRetention = parseInt(rawDaysForRetention, 10);
+      if (!Number.isFinite(parsedForRetention) || parsedForRetention <= 0) {
+        return DEFAULT_CLIP_RETENTION_DAYS_FOR_PANEL_RUNTIME;
+      }
+      return Math.min(parsedForRetention, MAX_CLIP_RETENTION_DAYS_FOR_PANEL_RUNTIME);
+    }
+
+    async function loadClipRetentionSettingForPanelRuntime() {
+      const storageManagerForRetention = (globalThis.ABChatShared || {}).storageManager;
+      if (!storageManagerForRetention) return;
+      const settingsForRetention = await storageManagerForRetention.getSettings();
+      clipRetentionDaysForPanelRuntime = normalizeClipRetentionDaysForPanelRuntime(
+        settingsForRetention.deleteClipsOlderThanDays
+      );
+      const selectForRetention = root.getElementById('settings-delete-clips-older-than');
+      if (selectForRetention) selectForRetention.value = String(clipRetentionDaysForPanelRuntime);
+    }
+
+    async function saveClipRetentionForPanelRuntime(valueForRetention) {
+      const storageManagerForRetention = (globalThis.ABChatShared || {}).storageManager;
+      if (!storageManagerForRetention) return;
+      clipRetentionDaysForPanelRuntime = normalizeClipRetentionDaysForPanelRuntime(valueForRetention);
+      await storageManagerForRetention.saveSettings({ deleteClipsOlderThanDays: clipRetentionDaysForPanelRuntime });
+      applyNoteListFilterForPanelRuntime();
+    }
+
+    function hasClipDueForSweepForPanelRuntime(daysForDueCheck) {
+      const cutoffIsoForDueCheck = new Date(Date.now() - daysForDueCheck * 86400000).toISOString();
+      const idsForDueCheck = Object.keys(NOTE_STORE_FOR_PANEL_RUNTIME);
+      for (let iForDueCheck = 0; iForDueCheck < idsForDueCheck.length; iForDueCheck++) {
+        const recordForDueCheck = NOTE_STORE_FOR_PANEL_RUNTIME[idsForDueCheck[iForDueCheck]];
+        if (!recordForDueCheck || !isClipNoteTypeForPanelRuntime(recordForDueCheck.noteType)) continue;
+        if (recordForDueCheck.starred === true) continue;
+        const stampForDueCheck = String(recordForDueCheck.capturedAt || recordForDueCheck.createdAt || '');
+        if (stampForDueCheck && stampForDueCheck < cutoffIsoForDueCheck) return true;
+      }
+      return false;
+    }
+
+    // Runs once per panel init, like the chat sweep. Rows deleted in the DB are dropped from
+    // the in-memory store here rather than waiting for the next full refresh.
+    async function autoDeleteOldClipsForPanelRuntime() {
+      const repoForSweep = getPanelDataRepoForPanelRuntime();
+      if (!repoForSweep || typeof repoForSweep.deleteClipsOlderThan !== 'function') return;
+      const daysForSweep = normalizeClipRetentionDaysForPanelRuntime(clipRetentionDaysForPanelRuntime);
+      // The panel runs this on every init, and every successful repo mutation broadcasts a
+      // notes-refresh signal to the other tabs. The in-memory store already holds every clip
+      // with its capturedAt, so check locally first and skip the round trip (and therefore the
+      // needless cross-tab refresh) when nothing is actually due for deletion.
+      if (!hasClipDueForSweepForPanelRuntime(daysForSweep)) return;
+      let resultForSweep = null;
+      try {
+        resultForSweep = await repoForSweep.deleteClipsOlderThan(daysForSweep, getPendingBlobIdsForPanelRuntime());
+      } catch (errorForSweep) {
+        return;
+      }
+      const deletedIdsForSweep = (resultForSweep && resultForSweep.deletedIds) || [];
+      if (!deletedIdsForSweep.length) return;
+      deletedIdsForSweep.forEach(function (idForSweep) {
+        const numericIdForSweep = Number(idForSweep);
+        delete NOTE_STORE_FOR_PANEL_RUNTIME[numericIdForSweep];
+        markPendingChipsForDeletedRecordForPanelRuntime('note', numericIdForSweep, 'clip');
+        const orderIndexForSweep = NOTE_ORDER_FOR_PANEL_RUNTIME.indexOf(numericIdForSweep);
+        if (orderIndexForSweep >= 0) {
+          if (orderIndexForSweep < renderedNoteCountForPanelRuntime && renderedNoteCountForPanelRuntime > 0) {
+            renderedNoteCountForPanelRuntime--;
+          }
+          NOTE_ORDER_FOR_PANEL_RUNTIME.splice(orderIndexForSweep, 1);
+        }
+        removeMainNoteListItemForPanelRuntime(numericIdForSweep);
+        syncSearchIndexForPanelRuntime('notes', 'remove', numericIdForSweep);
+      });
+      applyNoteListFilterForPanelRuntime();
     }
 
     /* ============================================================
@@ -9144,7 +10254,15 @@
       }
       const changedBannerEl = root.getElementById('ap-changed-banner');
       if (changedBannerEl) {
-        if (normalizedPayloadForPanelRuntime.sourceChanged) {
+        if (normalizedPayloadForPanelRuntime.sourceMissing) {
+          // Note, chat, and clip chips are references, so their content lives in a record that
+          // can be deleted after the attachment was made. Say that plainly instead of rendering
+          // an empty body, which reads as "this attachment was always empty".
+          const missingSourceLabel = String(normalizedPayloadForPanelRuntime.sourceType || 'note');
+          changedBannerEl.textContent = 'This ' + missingSourceLabel + ' has been deleted, so its content is no longer available.'
+            + (missingSourceLabel === 'clip' ? ' Clips are also removed automatically once they pass the retention window.' : '');
+          changedBannerEl.classList.remove('hidden');
+        } else if (normalizedPayloadForPanelRuntime.sourceChanged) {
           const changedSourceLabel = normalizedPayloadForPanelRuntime.sourceType === 'chat' ? 'chat' : 'note';
           changedBannerEl.textContent = 'This ' + changedSourceLabel + ' was edited after it was attached. Showing its current content, which may differ from what the assistant read.';
           changedBannerEl.classList.remove('hidden');
@@ -9719,58 +10837,111 @@
       });
     }
 
-    function filterNotesListForPanelRuntime(query) {
-      const notesListForFilter = root.querySelector('.notes-list');
-      if (!notesListForFilter) return;
+    function getActiveNoteFilterStateForPanelRuntime() {
+      var favsBtnForState = root.getElementById('note-favs-btn');
+      var searchInputForState = root.getElementById('notes-search-input');
+      return {
+        type: (S.noteType || 'notes') === 'clips' ? 'clips' : 'notes',
+        favsOn: Boolean(favsBtnForState && favsBtnForState.classList.contains('active')),
+        query: searchInputForState ? (searchInputForState.value || '').trim() : ''
+      };
+    }
 
-      const trimmedQueryForFilter = (query || '').trim();
+    // Scans the WHOLE store (not just the render window) for notes matching the
+    // current sub-tab + favs + search constraints. Returns a Set of note IDs.
+    function computeVisibleNoteIdsForPanelRuntime(filterStateForCompute) {
+      var matchedIdsForCompute = new Set();
 
-      searchForcedNoteIdsForPanelRuntime.forEach(function (idForClear) {
+      // null search set => no query active => match by sub-tab/favs only.
+      var searchMatchSetForCompute = null;
+      if (filterStateForCompute.query) {
+        searchMatchSetForCompute = new Set();
+        var searchNsForCompute = (globalThis.ABChatShared || {}).search;
+        if (searchNsForCompute && typeof searchNsForCompute.search === 'function') {
+          searchNsForCompute.search('notes', filterStateForCompute.query, 200).forEach(function (idForCompute) {
+            searchMatchSetForCompute.add(Number(idForCompute));
+          });
+        } else {
+          var lowerForCompute = filterStateForCompute.query.toLowerCase();
+          Object.keys(NOTE_STORE_FOR_PANEL_RUNTIME).forEach(function (idForFallback) {
+            var noteForFallback = NOTE_STORE_FOR_PANEL_RUNTIME[idForFallback];
+            if (!noteForFallback) return;
+            if (
+              (noteForFallback.title || '').toLowerCase().includes(lowerForCompute) ||
+              (noteForFallback.body || '').toLowerCase().includes(lowerForCompute)
+            ) {
+              searchMatchSetForCompute.add(Number(idForFallback));
+            }
+          });
+        }
+      }
+
+      var wantClipsForCompute = filterStateForCompute.type === 'clips';
+      NOTE_ORDER_FOR_PANEL_RUNTIME.forEach(function (idForCompute) {
+        var noteForCompute = NOTE_STORE_FOR_PANEL_RUNTIME[idForCompute];
+        if (!noteForCompute) return;
+        if (isClipNoteTypeForPanelRuntime(noteForCompute.noteType) !== wantClipsForCompute) return;
+        if (filterStateForCompute.favsOn && noteForCompute.starred !== true) return;
+        if (searchMatchSetForCompute && !searchMatchSetForCompute.has(Number(idForCompute))) return;
+        matchedIdsForCompute.add(Number(idForCompute));
+      });
+      return matchedIdsForCompute;
+    }
+
+    // THE single writer of .note-item display. Sub-tab, favs, and search are three
+    // constraints on one attribute, so they must be resolved together in one pass;
+    // separate per-filter passes overwrite each other (favs used to wipe out an active
+    // search, and vice versa).
+    function applyNoteListFilterForPanelRuntime() {
+      var notesListForApply = root.querySelector('.notes-list');
+      if (!notesListForApply) return;
+
+      var filterStateForApply = getActiveNoteFilterStateForPanelRuntime();
+      var visibleIdsForApply = computeVisibleNoteIdsForPanelRuntime(filterStateForApply);
+
+      // Favs, the clips sub-tab, and search are narrowing filters: their matches may sit
+      // beyond the render window and must be pulled into the DOM. The default notes view
+      // (no favs, no query) must NOT force-render or it would defeat the windowing.
+      var isNarrowingForApply =
+        filterStateForApply.favsOn ||
+        filterStateForApply.type === 'clips' ||
+        Boolean(filterStateForApply.query);
+
+      // Drop any previously force-rendered, out-of-window node so stale items do not
+      // accumulate in the sidebar.
+      filterForcedNoteIdsForPanelRuntime.forEach(function (idForClear) {
         var posForClear = NOTE_ORDER_FOR_PANEL_RUNTIME.indexOf(Number(idForClear));
         if (posForClear >= renderedNoteCountForPanelRuntime) {
-          var elForClear = notesListForFilter.querySelector('.note-item[data-note-id="' + idForClear + '"]');
+          var elForClear = notesListForApply.querySelector('.note-item[data-note-id="' + idForClear + '"]');
           if (elForClear) elForClear.remove();
         }
       });
-      searchForcedNoteIdsForPanelRuntime.clear();
+      filterForcedNoteIdsForPanelRuntime.clear();
 
-      if (!trimmedQueryForFilter) {
-        notesListForFilter.querySelectorAll('.note-item').forEach(function (itemForFilter) { itemForFilter.style.display = ''; });
-        return;
-      }
-
-      const searchNsForFilter = (globalThis.ABChatShared || {}).search;
-      const matchedIdsForFilter = new Set();
-
-      if (searchNsForFilter && typeof searchNsForFilter.search === 'function') {
-        searchNsForFilter.search('notes', trimmedQueryForFilter, 200).forEach(function (id) {
-          matchedIdsForFilter.add(Number(id));
-        });
-      } else {
-        const lowerForFilter = trimmedQueryForFilter.toLowerCase();
-        Object.keys(NOTE_STORE_FOR_PANEL_RUNTIME).forEach(function (id) {
-          const noteForFallback = NOTE_STORE_FOR_PANEL_RUNTIME[id];
-          if (
-            (noteForFallback.title || '').toLowerCase().includes(lowerForFilter) ||
-            (noteForFallback.body || '').toLowerCase().includes(lowerForFilter)
-          ) {
-            matchedIdsForFilter.add(Number(id));
+      if (isNarrowingForApply) {
+        visibleIdsForApply.forEach(function (idForForce) {
+          var posForForce = NOTE_ORDER_FOR_PANEL_RUNTIME.indexOf(Number(idForForce));
+          if (posForForce >= renderedNoteCountForPanelRuntime) {
+            syncMainNoteListItemForPanelRuntime(idForForce, false, true);
+            filterForcedNoteIdsForPanelRuntime.add(Number(idForForce));
           }
         });
       }
 
-      matchedIdsForFilter.forEach(function (id) {
-        var posForNoteSearch = NOTE_ORDER_FOR_PANEL_RUNTIME.indexOf(Number(id));
-        if (posForNoteSearch >= renderedNoteCountForPanelRuntime) {
-          syncMainNoteListItemForPanelRuntime(id, false, true);
-          searchForcedNoteIdsForPanelRuntime.add(id);
-        }
+      notesListForApply.querySelectorAll('.note-item').forEach(function (itemForApply) {
+        itemForApply.style.display =
+          visibleIdsForApply.has(Number(itemForApply.dataset.noteId)) ? '' : 'none';
       });
 
-      notesListForFilter.querySelectorAll('.note-item').forEach(function (itemForFilter) {
-        const noteIdForFilter = Number(itemForFilter.dataset.noteId);
-        itemForFilter.style.display = matchedIdsForFilter.has(noteIdForFilter) ? '' : 'none';
-      });
+      updateNotesEmptyStateForPanelRuntime(visibleIdsForApply.size, filterStateForApply);
+    }
+
+    function filterNotesListForPanelRuntime(query) {
+      const notesSearchInputForFilter = root.getElementById('notes-search-input');
+      if (notesSearchInputForFilter && typeof query === 'string' && notesSearchInputForFilter.value !== query) {
+        notesSearchInputForFilter.value = query; // keep input in sync for mirror/reapply callers
+      }
+      applyNoteListFilterForPanelRuntime();
     }
 
     function applySearchInputMirrorForPanelRuntime(inputIdForMirror, queryForMirror, filterFnForMirror) {
@@ -10316,7 +11487,7 @@
     function serializeCurrentDraftForPanelRuntime() {
       const taForDraft = root.querySelector('.chat-textarea');
       const text = taForDraft ? taForDraft.value : '';
-      const chips = collectInputChipsForPanelRuntime();
+      const chips = collectDraftChipsForPanelRuntime();
       return JSON.stringify({ text: text, chips: chips });
     }
 
@@ -10335,17 +11506,25 @@
       return true;
     }
 
+    // Resolves once the write has landed in storage. Most callers ignore the result; blob reclaim
+    // sequences behind it, because the stored draft is how the background sees pending chips.
     function saveDraftForPanelRuntime() {
-      if (draftApplyingForPanelRuntime) return;
+      if (draftApplyingForPanelRuntime) return Promise.resolve();
       const serialized = serializeCurrentDraftForPanelRuntime();
       const parsed = JSON.parse(serialized);
-      if (!parsed.text && parsed.chips.length === 0) {
-        recordSelfDraftWriteForPanelRuntime(JSON.stringify({ text: '', chips: [] }));
-        try { chrome.storage.local.remove(INPUT_DRAFT_KEY_FOR_PANEL_RUNTIME); } catch (e) {}
-      } else {
-        recordSelfDraftWriteForPanelRuntime(serialized);
-        try { chrome.storage.local.set({ [INPUT_DRAFT_KEY_FOR_PANEL_RUNTIME]: parsed }); } catch (e) {}
-      }
+      return new Promise(function (resolveForDraftSave) {
+        try {
+          if (!parsed.text && parsed.chips.length === 0) {
+            recordSelfDraftWriteForPanelRuntime(JSON.stringify({ text: '', chips: [] }));
+            chrome.storage.local.remove(INPUT_DRAFT_KEY_FOR_PANEL_RUNTIME, function () { resolveForDraftSave(); });
+          } else {
+            recordSelfDraftWriteForPanelRuntime(serialized);
+            chrome.storage.local.set({ [INPUT_DRAFT_KEY_FOR_PANEL_RUNTIME]: parsed }, function () { resolveForDraftSave(); });
+          }
+        } catch (e) {
+          resolveForDraftSave();
+        }
+      });
     }
 
     function scheduleDraftSaveForPanelRuntime() {
@@ -10378,6 +11557,9 @@
       } finally {
         draftApplyingForPanelRuntime = false;
       }
+      // The draft carries record ids, not content, so a chip restored here can point at something
+      // deleted while this row did not exist. Re-check rather than trusting the stored status.
+      scheduleChipReferenceValidationForPanelRuntime();
     }
 
     function restoreDraftForPanelRuntime() {
@@ -10861,7 +12043,7 @@
           '</div>' +
           '<div class="abchat-lt-text" style="display:none"></div>' +
         '</div>';
-      liveTurnBubblesForPanelRuntime.set(chatId, { wrap: wrap, shownAt: Date.now(), hasText: false, toolsDoneAt: 0, removeTimer: null, bufferText: '', renderedLength: 0, renderRafId: null });
+      liveTurnBubblesForPanelRuntime.set(chatId, { wrap: wrap, shownAt: Date.now(), hasText: false, toolsDoneAt: 0, removeTimer: null, bufferText: '', renderedLength: 0, renderRafId: null, endedAwaitingFinalRender: false });
       if (S.activeChatId === chatId) {
         const container = root.getElementById('chat-messages-content');
         if (container) {
@@ -10875,6 +12057,15 @@
       if (S.activeChatId !== chatId) return;
       const state = liveTurnBubblesForPanelRuntime.get(chatId);
       if (!state || !state.wrap) return;
+      if (state.endedAwaitingFinalRender) {
+        // The run has ended and the render that just committed includes the persisted
+        // final message (the offscreen loop persists everything before stream_end, and
+        // the stream_end handler evicts the chat from the loaded-set to force the
+        // refetch). Removing here, in the same task as the innerHTML commit, swaps the
+        // bubble for the persisted copy without ever painting a message-less frame.
+        removeLiveTurnBubbleForPanelRuntime(chatId, true);
+        return;
+      }
       const container = root.getElementById('chat-messages-content');
       if (!container) return;
       if (!container.contains(state.wrap)) {
@@ -10938,7 +12129,9 @@
       tmp.innerHTML = renderedHtml;
       if (!tmp.textContent || !tmp.textContent.trim()) return;
       textEl.innerHTML = renderedHtml;
-      appendLiveTurnCaretForPanelRuntime(textEl);
+      // A pending rAF paint can land after stream_end marked the bubble ended; the
+      // text is final at that point, so don't re-add the "more coming" caret.
+      if (!state.endedAwaitingFinalRender) appendLiveTurnCaretForPanelRuntime(textEl);
       const spinner = state.wrap.querySelector('.abchat-lt-spinner');
       if (spinner && spinner.style.display !== 'none') {
         spinner.style.display = 'none';
@@ -11035,6 +12228,38 @@
         var noteRecordForAgentCheck = NOTE_STORE_FOR_PANEL_RUNTIME[idForAgentCheck];
         return !!(noteRecordForAgentCheck && noteRecordForAgentCheck.noteType === 'agent');
       }
+      function getClipNoteForLiveTurnLabel(typeForClipCheck, idForClipCheck) {
+        if (typeForClipCheck !== 'note' || !idForClipCheck) return null;
+        var noteRecordForClipCheck = NOTE_STORE_FOR_PANEL_RUNTIME[idForClipCheck];
+        return (noteRecordForClipCheck && noteRecordForClipCheck.noteType === 'clip') ? noteRecordForClipCheck : null;
+      }
+      // Reverse-resolves an attachment blob id to the record that references it, so an attachment
+      // read is labelled by what the user recognises (the clip, or the file's name) rather than by
+      // a blob id they have never seen. Returns null when nothing in this tab's store matches.
+      function findAttachmentOwnerForLiveTurnLabel(blobIdForOwnerLookup) {
+        var wantedIdForOwnerLookup = Number(blobIdForOwnerLookup);
+        if (!Number.isFinite(wantedIdForOwnerLookup) || wantedIdForOwnerLookup <= 0) return null;
+        var noteIdsForOwnerLookup = Object.keys(NOTE_STORE_FOR_PANEL_RUNTIME);
+        for (var iForOwnerLookup = 0; iForOwnerLookup < noteIdsForOwnerLookup.length; iForOwnerLookup++) {
+          var noteForOwnerLookup = NOTE_STORE_FOR_PANEL_RUNTIME[noteIdsForOwnerLookup[iForOwnerLookup]];
+          var attachmentsForOwnerLookup = (noteForOwnerLookup && Array.isArray(noteForOwnerLookup.attachments))
+            ? noteForOwnerLookup.attachments
+            : [];
+          for (var aForOwnerLookup = 0; aForOwnerLookup < attachmentsForOwnerLookup.length; aForOwnerLookup++) {
+            if (Number(attachmentsForOwnerLookup[aForOwnerLookup].refId) !== wantedIdForOwnerLookup) continue;
+            return {
+              isClip: noteForOwnerLookup.noteType === 'clip',
+              title: String(noteForOwnerLookup.title || ''),
+              attachmentName: String(attachmentsForOwnerLookup[aForOwnerLookup].name || '')
+            };
+          }
+        }
+        return null;
+      }
+      function quotedNameForLiveTurnLabel(nameForQuotedLabel) {
+        var trimmedForQuotedLabel = String(nameForQuotedLabel || '').trim();
+        return trimmedForQuotedLabel ? ' “' + trunc(trimmedForQuotedLabel, 20) + '”' : '';
+      }
       // Ref labels come from this tab's observe registry. Only resolve when this tab owns
       // the run (offscreen initiator); a remote receiver's registry is a different page and
       // would show the wrong name.
@@ -11046,9 +12271,23 @@
         return nameForQuoted ? ' “' + trunc(nameForQuoted, 20) + '”' : '';
       }
       switch (name) {
-        case 'read':
+        case 'read': {
           if (isAgentNoteForLiveTurnLabel(args.type, args.id)) return 'Introspecting';
+          var clipNoteForReadLabel = getClipNoteForLiveTurnLabel(args.type, args.id);
+          if (clipNoteForReadLabel) {
+            return 'Reading clip' + (quotedNameForLiveTurnLabel(clipNoteForReadLabel.title) || ' #' + args.id);
+          }
+          if (args.type === 'attachment' && args.id) {
+            var ownerForReadLabel = findAttachmentOwnerForLiveTurnLabel(args.id);
+            if (ownerForReadLabel && ownerForReadLabel.isClip) {
+              return 'Reading full clip' + (quotedNameForLiveTurnLabel(ownerForReadLabel.title) || ' #' + args.id);
+            }
+            if (ownerForReadLabel && ownerForReadLabel.attachmentName) {
+              return 'Reading file' + quotedNameForLiveTurnLabel(ownerForReadLabel.attachmentName);
+            }
+          }
           return 'Reading ' + (args.type || 'item') + (args.id ? ' #' + args.id : '');
+        }
         case 'write':
           if (isAgentNoteForLiveTurnLabel(args.type, args.id)) return 'Working';
           if (args.id) return 'Updating ' + (args.type || 'item') + (args.title ? ' “' + trunc(args.title, 20) + '”' : ' #' + args.id);
@@ -11196,6 +12435,31 @@
       if (S.activeChatId === chatId) scrollChatToBottomForPanelRuntime();
     }
 
+    // Called on stream_end instead of removing the bubble outright: the bubble keeps
+    // the finished text on screen until the DB refresh re-renders the persisted copy
+    // (reattachLiveTurnBubbleForPanelRuntime then removes it in the same task as the
+    // rebuild, so no frame paints without the message). The fallback timer removes it
+    // when that render never happens: the refresh failed, or the chat is no longer
+    // active so the post-render callback is skipped.
+    function markLiveTurnBubbleEndedForPanelRuntime(chatId) {
+      const state = liveTurnBubblesForPanelRuntime.get(chatId);
+      if (!state) return;
+      state.endedAwaitingFinalRender = true;
+      // The text is final; drop the "more coming" caret while the bubble waits.
+      if (state.wrap) {
+        const caretsForEndedBubble = state.wrap.querySelectorAll('.abchat-lt-caret');
+        for (let iForEndedBubble = 0; iForEndedBubble < caretsForEndedBubble.length; iForEndedBubble++) {
+          const caretForEndedBubble = caretsForEndedBubble[iForEndedBubble];
+          if (caretForEndedBubble.parentNode) caretForEndedBubble.parentNode.removeChild(caretForEndedBubble);
+        }
+      }
+      if (state.removeTimer !== null) clearTimeout(state.removeTimer);
+      state.removeTimer = setTimeout(function () {
+        state.removeTimer = null;
+        doRemoveLiveBubbleForPanelRuntime(chatId);
+      }, LIVE_TURN_END_REMOVE_FALLBACK_MS_FOR_PANEL_RUNTIME);
+    }
+
     function removeLiveTurnBubbleForPanelRuntime(chatId, immediate) {
       const state = liveTurnBubblesForPanelRuntime.get(chatId);
       if (!state) return;
@@ -11303,20 +12567,23 @@
       }
     }
 
-    function collectInputChipsForPanelRuntime() {
+    // The send path and the draft need different chip sets from the same row: a chip whose source
+    // was deleted must never be sent, but it must stay in the draft, or marking it errored would
+    // silently drop it from the input on the next rebuild (and in every other tab immediately, via
+    // draft sync). Mid-upload chips are excluded from both; the draft picks them up once settled.
+    function collectInputChipRecordsForPanelRuntime(includeBrokenForPanelRuntime) {
       const chipsRowForPanelRuntime = root.querySelector('.input-chips-row');
       if (!chipsRowForPanelRuntime) return [];
       return Array.from(chipsRowForPanelRuntime.querySelectorAll('.ic')).map(function (chipForPanelRuntime) {
         const attachStatusForPanelRuntime = String(chipForPanelRuntime.dataset.attachStatus || '').trim().toLowerCase();
-        if (attachStatusForPanelRuntime === 'loading' || attachStatusForPanelRuntime === 'error') {
-          return null;
-        }
+        if (attachStatusForPanelRuntime === 'loading') return null;
+        if (attachStatusForPanelRuntime === 'error' && !includeBrokenForPanelRuntime) return null;
         const attachTypeForPanelRuntime = String(chipForPanelRuntime.dataset.attachType || '').trim();
         const attachLabelForPanelRuntime = String(chipForPanelRuntime.dataset.attachName || chipForPanelRuntime.textContent || '').trim();
         if (!attachTypeForPanelRuntime || !attachLabelForPanelRuntime) return null;
         const parsedRefIdForPanelRuntime = Number(chipForPanelRuntime.dataset.attachRefId);
         const parsedSizeForPanelRuntime = Number(chipForPanelRuntime.dataset.attachSize);
-        return {
+        const recordForPanelRuntime = {
           type: attachTypeForPanelRuntime,
           label: attachLabelForPanelRuntime,
           content: String(chipForPanelRuntime.dataset.attachContent || ''),
@@ -11330,7 +12597,22 @@
           htmlFormat: String(chipForPanelRuntime.dataset.attachHtmlFormat || ''),
           sourceHash: String(chipForPanelRuntime.dataset.attachSourceHash || '')
         };
+        // Draft-only fields. They are deliberately absent from the send path, so they never reach
+        // normalizeMessageChips and are not part of the persisted chip shape.
+        if (includeBrokenForPanelRuntime && attachStatusForPanelRuntime === 'error') {
+          recordForPanelRuntime.status = 'error';
+          recordForPanelRuntime.statusText = String(chipForPanelRuntime.dataset.attachStatusText || '');
+        }
+        return recordForPanelRuntime;
       }).filter(Boolean);
+    }
+
+    function collectInputChipsForPanelRuntime() {
+      return collectInputChipRecordsForPanelRuntime(false);
+    }
+
+    function collectDraftChipsForPanelRuntime() {
+      return collectInputChipRecordsForPanelRuntime(true);
     }
 
     function clearInputChipsForPanelRuntime(removeBlobRefsForPanelRuntime) {
@@ -12628,7 +13910,7 @@
     async function deleteSkillForPanelRuntime(skillIdForDelete) {
       var repoForDelete = getPanelDataRepoForPanelRuntime();
       if (!repoForDelete) return;
-      try { await repoForDelete.deleteNote(Number(skillIdForDelete)); } catch (errForDelete) {}
+      try { await repoForDelete.deleteNote(Number(skillIdForDelete), getPendingBlobIdsForPanelRuntime()); } catch (errForDelete) {}
       await loadSkillsViewForPanelRuntime();
     }
 
@@ -12993,6 +14275,13 @@
           const autoChipBlobIdOffscreen = Number(autoChipMatchOffscreen[1]);
           if (!Number.isFinite(autoChipBlobIdOffscreen)) continue;
           addInputChipForPanelRuntime({ type: 'image', label: 'Generated image', mimeType: 'image/png', refId: autoChipBlobIdOffscreen, size: 0, kind: 'generated_image' });
+        }
+        // Last line of defence: a chip whose source is gone would otherwise be sent as a
+        // <note_reference>/<chat_reference> the read tool cannot resolve. Broken chips are marked
+        // here and dropped by collectInputChips; the rest of the message still goes.
+        const brokenChipsForSend = await validatePendingChipReferencesForPanelRuntime();
+        if (brokenChipsForSend.length > 0) {
+          showChipSourceMissingToastForPanelRuntime(brokenChipsForSend);
         }
         await stampInputChipSourceHashesForPanelRuntime();
         const chipsForOffscreen = collectInputChipsForPanelRuntime();
@@ -13950,7 +15239,7 @@
 
       const favsBtn = root.getElementById('note-favs-btn');
       if (favsBtn && favsBtn.classList.contains('active')) {
-        applyNoteFavsFilter(true);
+        applyNoteListFilterForPanelRuntime();
       }
     }
 
@@ -13958,17 +15247,7 @@
       btn.classList.toggle('active');
       const on = btn.classList.contains('active');
       btn.innerHTML = on ? (ic.starFilled12 + ' Favs') : (ic.starEmpty12 + ' Favs');
-      applyNoteFavsFilter(on);
-    }
-
-    function applyNoteFavsFilter(on) {
-      root.querySelectorAll('.note-item').forEach(item => {
-        if (on) {
-          item.style.display = item.querySelector('.ni-btn.starred') ? '' : 'none';
-        } else {
-          item.style.display = '';
-        }
-      });
+      applyNoteListFilterForPanelRuntime();
     }
 
     function toggleNoteDropdown(btn) {
@@ -15743,6 +17022,7 @@
             case 'collapse-notes-sidebar': collapseNotesSidebar(); break;
             case 'expand-notes-sidebar':   expandNotesSidebar(); break;
             case 'set-chat-type':        setChatType(tgtForRuntime.dataset.chatType); break;
+            case 'set-note-type':        setNoteType(tgtForRuntime.dataset.noteType); break;
             case 'select-chat':          selectChat(Number(tgtForRuntime.dataset.chatId)); break;
             case 'toggle-message-dropdown': toggleMessageDropdown(tgtForRuntime); evtForRuntime.stopPropagation(); break;
             case 'toggle-msg-sources': {
@@ -15950,6 +17230,12 @@
               if (noteDraftParentForRuntime) notifyNoteDraftChangedForElementForPanelRuntime(noteDraftParentForRuntime);
               break;
             }
+            case 'save-chip-as-clip':    {
+              const chipForSaveClip = tgtForRuntime.closest('.ic');
+              if (chipForSaveClip) saveChipAsClipForPanelRuntime(chipForSaveClip);
+              evtForRuntime.stopPropagation();
+              break;
+            }
             case 'preview-input-chip':   previewInputChipForPanelRuntime(tgtForRuntime); break;
             case 'preview-message-chip': previewMessageChipForPanelRuntime(tgtForRuntime.dataset.messageId, tgtForRuntime.dataset.chipIndex); break;
             case 'toggle-attach-picker': toggleAttachPicker(); evtForRuntime.stopPropagation(); break;
@@ -15962,6 +17248,7 @@
             case 'open-tab-picker':      openTabPicker(); break;
             case 'open-note-picker':     openNotePicker(); break;
             case 'open-chat-picker':     openChatPicker(); break;
+            case 'open-clip-picker':     openClipPicker(); break;
             case 'spreadsheet-from-clipboard': handleSpreadsheetFromClipboardForPanelRuntime(); break;
             case 'open-note-editor':     openNoteEditor(); break;
             case 'toggle-note-favs':     toggleNoteFavs(tgtForRuntime); break;
@@ -15988,6 +17275,12 @@
             case 'delete-note':          deleteNoteFromMainEditorForPanelRuntime(Number(tgtForRuntime.dataset.noteId)); break;
             case 'edit-note':            editNoteFromDropdown(Number(tgtForRuntime.dataset.noteId)); break;
             case 'note-version-history': openNoteVersionHistoryForPanelRuntime(Number(tgtForRuntime.dataset.noteId)); break;
+            case 'attach-clip-to-chat':  attachClipToChatForPanelRuntime(Number(tgtForRuntime.dataset.noteId)); break;
+            case 'copy-clip-payload':    copyClipPayloadForPanelRuntime(Number(tgtForRuntime.dataset.noteId)); break;
+            case 'open-clip-source':     openClipSourceForPanelRuntime(Number(tgtForRuntime.dataset.noteId)); break;
+            case 'convert-clip-to-note': convertClipToNoteForPanelRuntime(Number(tgtForRuntime.dataset.noteId)); break;
+            case 'view-active-clip-payload':   viewClipPayloadForPanelRuntime(Number(S.activeNoteId)); break;
+            case 'convert-active-clip-to-note': convertClipToNoteForPanelRuntime(Number(S.activeNoteId)); break;
             case 'close-note-history':   closeNoteVersionHistoryForPanelRuntime(); break;
             case 'note-history-select':  selectNoteHistoryVersionForPanelRuntime(tgtForRuntime.dataset.versionId); break;
             case 'note-history-back':    backToNoteHistoryListForPanelRuntime(); break;
@@ -16150,6 +17443,7 @@
             case 'save-default-model':             saveDefaultModelForPanelRuntime(tgtForRuntime.value); break;
             case 'save-image-model':               saveImageModelForPanelRuntime(tgtForRuntime.value); break;
             case 'save-delete-chats-older-than':   saveDeleteChatsOlderThanForPanelRuntime(tgtForRuntime.value); break;
+            case 'save-delete-clips-older-than':   saveClipRetentionForPanelRuntime(tgtForRuntime.value); break;
             case 'prune-orphaned-blobs':           pruneOrphanedBlobsFromSettingsForPanelRuntime(); break;
             case 'save-alert-sound':               saveAlertSoundForPanelRuntime(tgtForRuntime.checked); break;
             case 'toggle-page-context':            savePageContextEnabledForPanelRuntime(tgtForRuntime.checked); break;
@@ -16236,6 +17530,7 @@
       const mountNodeForPanelRuntime = root.getElementById('abchat-panel-mount') || document.body;
       bindDelegatedActionsForPanelRuntime(mountNodeForPanelRuntime);
       bindKeyboardIsolationForPanelRuntime(root);
+      bindPointerIsolationForPanelRuntime(root);
       bindEditableFocusIsolationForPanelRuntime(root);
       bindDragDropForPanelRuntime(root);
       bindSelectorTabHoverTooltipForPanelRuntime(root);
@@ -16421,6 +17716,11 @@
       bindPageContextStorageSyncForPanelRuntime();
       initModelSelectsForPanelRuntime();
       autoDeleteOldChatsForPanelRuntime();
+      // Retention days must be read before the sweep so it uses the user's setting rather
+      // than the default; both are fire-and-forget so a slow read cannot delay panel init.
+      loadClipRetentionSettingForPanelRuntime()
+        .then(autoDeleteOldClipsForPanelRuntime)
+        .catch(function () {});
       restoreDraftForPanelRuntime();
       bindDraftStorageSyncForPanelRuntime();
       bindNoteDraftStorageSyncForPanelRuntime();
@@ -16462,6 +17762,9 @@
       for (var iForNoteInit = 0; iForNoteInit < renderedNoteCountForPanelRuntime; iForNoteInit++) {
         syncMainNoteListItemForPanelRuntime(NOTE_ORDER_FOR_PANEL_RUNTIME[iForNoteInit]);
       }
+      // Notes and clips share this list, so the sub-tab filter has to run on first paint or
+      // clips would show up under Notes until the first filter-triggering interaction.
+      applyNoteListFilterForPanelRuntime();
       if (notesListElForInit) setupListSentinelForPanelRuntime(notesListElForInit, renderNextNotePageForPanelRuntime);
     })();
     (function initTaskListForPanelRuntime() {
@@ -16702,6 +18005,18 @@
           setInputChipStatusForPanelRuntime(pendingChipForCtxMenu, 'error', 'Could not save image.');
         }
       }
+    }
+
+    function saveTextClipFromContextMenuForPanelRuntime(textForCtxMenu) {
+      if (!textForCtxMenu || typeof textForCtxMenu !== 'string' || !textForCtxMenu.trim()) return;
+      saveClipForPanelRuntime({
+        clipKind: 'paste',
+        title: '',
+        payloadText: textForCtxMenu,
+        mimeType: 'text/plain',
+        sourceUrl: String(window.location.href || ''),
+        sourceTitle: String(document.title || '')
+      });
     }
 
     function addTextChipFromContextMenuForPanelRuntime(textForCtxMenu) {
@@ -17060,6 +18375,9 @@
 
     // Expose inner functions for cross-script access via ui.panelRuntime relays.
     _exposedAddInputChipForPanelRuntime = addInputChipForPanelRuntime;
+    _exposedGetPendingBlobIdsForPanelRuntime = getPendingBlobIdsForPanelRuntime;
+    _exposedSaveClipForPanelRuntime = saveClipForPanelRuntime;
+    _exposedSaveTextClipForPanelRuntime = saveTextClipFromContextMenuForPanelRuntime;
     _exposedSetTabForPanelRuntime = setTab;
     _exposedRefreshStoreForPanelRuntime = scheduleStoreRefreshForPanelRuntime;
     // Drain any refresh signals that arrived before the runtime was ready
@@ -17103,6 +18421,7 @@
     _exposedRunDelegatedPageToolForPanelRuntime = runDelegatedPageToolForPanelRuntime;
     _exposedSetReducedPaneForPanelRuntime = setReducedPaneForMirrorForPanelRuntime;
     _exposedSetChatSubTabForPanelRuntime = setChatSubTabForMirrorForPanelRuntime;
+    _exposedSetNoteSubTabForPanelRuntime = setNoteSubTabForMirrorForPanelRuntime;
     _exposedSetTaskFilterForPanelRuntime = setTaskFilterForMirrorForPanelRuntime;
     _exposedSetQuizFilterForPanelRuntime = setQuizFilterForMirrorForPanelRuntime;
     _exposedSetChatSearchQueryForPanelRuntime = setChatSearchQueryForMirrorForPanelRuntime;
@@ -17120,6 +18439,19 @@
     initialize: initializePanelRuntimeForPanel,
     addInputChip: function addInputChipRelayForPanelRuntime(chipDataForRelay) {
       return _exposedAddInputChipForPanelRuntime ? _exposedAddInputChipForPanelRuntime(chipDataForRelay) : null;
+    },
+    // Blob ids held by pending (unsubmitted) chips. Any caller that triggers blob pruning
+    // must pass these through as protected or the pruner treats them as orphans.
+    getPendingBlobIds: function getPendingBlobIdsRelayForPanelRuntime() {
+      return _exposedGetPendingBlobIdsForPanelRuntime ? _exposedGetPendingBlobIdsForPanelRuntime() : [];
+    },
+    saveClip: function saveClipRelayForPanelRuntime(clipInputForRelay) {
+      return _exposedSaveClipForPanelRuntime
+        ? _exposedSaveClipForPanelRuntime(clipInputForRelay)
+        : Promise.resolve({ ok: false });
+    },
+    saveTextClip: function saveTextClipRelayForPanelRuntime(textForRelay) {
+      if (_exposedSaveTextClipForPanelRuntime) _exposedSaveTextClipForPanelRuntime(textForRelay);
     },
     setTab: function setTabRelayForPanelRuntime(tabForRelay) {
       if (_exposedSetTabForPanelRuntime) _exposedSetTabForPanelRuntime(tabForRelay);
@@ -17233,6 +18565,9 @@
     },
     setChatSubTab: function setChatSubTabRelayForPanelRuntime(typeForRelay) {
       if (_exposedSetChatSubTabForPanelRuntime) _exposedSetChatSubTabForPanelRuntime(typeForRelay);
+    },
+    setNoteSubTab: function setNoteSubTabRelayForPanelRuntime(typeForRelay) {
+      if (_exposedSetNoteSubTabForPanelRuntime) _exposedSetNoteSubTabForPanelRuntime(typeForRelay);
     },
     setTaskFilter: function setTaskFilterRelayForPanelRuntime(filterForRelay) {
       if (_exposedSetTaskFilterForPanelRuntime) _exposedSetTaskFilterForPanelRuntime(filterForRelay);

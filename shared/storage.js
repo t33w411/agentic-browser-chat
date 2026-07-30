@@ -19,6 +19,9 @@
       agentRulesUpdatedAt: 0,
       toastDurationMs: 1700,
       deleteChatsOlderThanDays: null,
+      // Clips are page grabs kept for reuse. Unlike chats there is no "never": the sweep
+      // always runs, capped at 30 days, and starred clips are what survives it.
+      deleteClipsOlderThanDays: 7,
       alertSound: true,
       reminderLeadTime: 15,
       sendPageContext: true
@@ -116,6 +119,10 @@
         safePatchSettingsForStorage.deleteChatsOlderThanDays === null
           ? safePatchSettingsForStorage.deleteChatsOlderThanDays
           : safeBaseSettingsForStorage.deleteChatsOlderThanDays,
+      deleteClipsOlderThanDays:
+        typeof safePatchSettingsForStorage.deleteClipsOlderThanDays === "number"
+          ? safePatchSettingsForStorage.deleteClipsOlderThanDays
+          : safeBaseSettingsForStorage.deleteClipsOlderThanDays,
       alertSound:
         typeof safePatchSettingsForStorage.alertSound === "boolean"
           ? safePatchSettingsForStorage.alertSound
