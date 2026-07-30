@@ -569,6 +569,12 @@
       systemText += "\n\n" + NAVIGATION_ALLOWED_GUIDANCE_FOR_CONTEXT_BUILDER;
     }
 
+    // Facts first, then behaviour, so the directive text sits closest to the conversation. Callers
+    // pass "" for a field the user has toggled off; there is no enabled flag to interpret here.
+    if (optsForSystem.aboutUser && typeof optsForSystem.aboutUser === "string") {
+      systemText += "\n\nAbout the user:\n" + optsForSystem.aboutUser;
+    }
+
     if (optsForSystem.agentRules && typeof optsForSystem.agentRules === "string") {
       systemText += "\n\nUser-defined agent rules:\n" + optsForSystem.agentRules;
     }

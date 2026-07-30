@@ -3527,8 +3527,14 @@
         if (chatTaForTabFocus) setTimeout(function() { chatTaForTabFocus.focus(); }, 0);
       }
       if (tab === 'settings') {
-        var agentRulesTaForTab = root.getElementById('settings-agent-rules-input');
-        if (agentRulesTaForTab) setTimeout(function() { updateAutoExpandForTextareaForPanelRuntime(agentRulesTaForTab); }, 0);
+        PROFILE_FIELDS_FOR_PANEL_RUNTIME.forEach(function (descriptorForTab) {
+          var profileTaForTab = root.getElementById(descriptorForTab.inputId);
+          if (!profileTaForTab) return;
+          setTimeout(function () {
+            updateAutoExpandForTextareaForPanelRuntime(profileTaForTab);
+            updateProfileFieldCounterForPanelRuntime(descriptorForTab);
+          }, 0);
+        });
         loadStorageEstimateForPanelRuntime();
         loadDeleteChatsOlderThanSettingForPanelRuntime();
         loadClipRetentionSettingForPanelRuntime();
@@ -10525,6 +10531,8 @@
       const inlineMemCtxForPanelRuntime = await loadAgentMemoryContextForPanelRuntime();
       const inlineMessagesForPanelRuntime = contextBuilderForInline.build
         ? await contextBuilderForInline.build(S.inlineMessages, {
+            aboutUser: getEffectiveProfileTextForPanelRuntime('aboutUser'),
+            agentRules: getEffectiveProfileTextForPanelRuntime('agentRules'),
             agentMemory: inlineMemCtxForPanelRuntime.agentMemory,
             agentMemoryId: inlineMemCtxForPanelRuntime.agentMemoryId,
             agentSkills: inlineMemCtxForPanelRuntime.agentSkills
@@ -11025,8 +11033,34 @@
     const HEADER_BTN_KEY_FOR_PANEL_RUNTIME = 'abchat_header_btn';
     const INPUT_DRAFT_KEY_FOR_PANEL_RUNTIME = 'abchat_input_draft';
     const NOTE_DRAFT_SYNC_KEY_PREFIX_FOR_PANEL_RUNTIME = 'abchat_note_draft_sync:';
-    var currentAgentRulesForPanelRuntime = '';
-    var currentAgentRulesUpdatedAtForPanelRuntime = 0;
+    // User-authored profile text sent with every model call. Each field is independently toggleable:
+    // switching one off omits it from the prompt while leaving the stored text untouched.
+    var PROFILE_FIELDS_FOR_PANEL_RUNTIME = [
+      {
+        key: 'aboutUser',
+        label: 'About you',
+        timestampKey: 'aboutUserUpdatedAt',
+        enabledKey: 'aboutUserEnabled',
+        inputId: 'settings-about-user-input',
+        toggleId: 'settings-about-user-toggle',
+        counterId: 'about-user-counter',
+        messageId: 'about-user-saved-msg'
+      },
+      {
+        key: 'agentRules',
+        label: 'Custom instructions',
+        timestampKey: 'agentRulesUpdatedAt',
+        enabledKey: 'agentRulesEnabled',
+        inputId: 'settings-agent-rules-input',
+        toggleId: 'settings-agent-rules-toggle',
+        counterId: 'agent-rules-counter',
+        messageId: 'agent-rules-saved-msg'
+      }
+    ];
+    var profileFieldStateForPanelRuntime = {
+      aboutUser: { text: '', updatedAt: 0, enabled: true },
+      agentRules: { text: '', updatedAt: 0, enabled: true }
+    };
     var currentReminderLeadTimeForPanelRuntime = 15;
     // Defaults on: the current page's title/url is snapshotted onto each user message so the model
     // can resolve references like "this page"/"this domain". Overwritten from stored settings on load.
@@ -11864,7 +11898,8 @@
           }
         } catch (eOverheadMem) { memCtxForOverhead = null; }
         const estimateForOverhead = contextBuilderForOverhead.estimateSystemOverheadTokens({
-          agentRules: currentAgentRulesForPanelRuntime || '',
+          aboutUser: getEffectiveProfileTextForPanelRuntime('aboutUser'),
+          agentRules: getEffectiveProfileTextForPanelRuntime('agentRules'),
           agentMemory: memCtxForOverhead ? memCtxForOverhead.agentMemory : '',
           agentMemoryId: memCtxForOverhead ? memCtxForOverhead.agentMemoryId : null,
           agentSkills: memCtxForOverhead ? memCtxForOverhead.agentSkills : [],
@@ -14357,7 +14392,8 @@
             apiKey: apiKey,
             imageModel: imageModelForOffscreen,
             automationEnabled: automationEnabledOffscreen,
-            agentRules: currentAgentRulesForPanelRuntime || '',
+            aboutUser: getEffectiveProfileTextForPanelRuntime('aboutUser'),
+            agentRules: getEffectiveProfileTextForPanelRuntime('agentRules'),
             userText: getOriginatingUserTextForMemoryGuardForPanelRuntime(chatId, text),
             visualPreflightSessionId: 'vp_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2),
             isResend: isResendForPanelRuntime,
@@ -14616,29 +14652,100 @@
       inputForKey.value = key;
     }
 
-    async function loadAgentRulesIntoSettingsForPanelRuntime() {
-      const storageManagerForRuntime = (globalThis.ABChatShared || {}).storageManager;
-      if (!storageManagerForRuntime) return;
-      const settings = await storageManagerForRuntime.getSettings();
-      currentAgentRulesForPanelRuntime = settings.agentRules || '';
-      currentAgentRulesUpdatedAtForPanelRuntime =
-        typeof settings.agentRulesUpdatedAt === 'number' ? settings.agentRulesUpdatedAt : 0;
-      const el = root.getElementById('settings-agent-rules-input');
-      if (el) {
-        el.value = currentAgentRulesForPanelRuntime;
-        el.dataset.agentRulesBaseUpdatedAt = String(currentAgentRulesUpdatedAtForPanelRuntime);
-        updateAutoExpandForTextareaForPanelRuntime(el);
+    // The cap is owned by the storage layer, which is what actually enforces it; the panel reads it
+    // rather than restating it so the counter, the textarea maxlength, and the clamp cannot drift.
+    function getProfileFieldMaxCharsForPanelRuntime() {
+      const storageManagerForMax = (globalThis.ABChatShared || {}).storageManager;
+      const maxFromStorageForMax =
+        storageManagerForMax && typeof storageManagerForMax.maxProfileTextChars === 'number'
+          ? storageManagerForMax.maxProfileTextChars
+          : 0;
+      return maxFromStorageForMax > 0 ? maxFromStorageForMax : 2500;
+    }
+
+    function getProfileFieldDescriptorForPanelRuntime(fieldKeyForDescriptor) {
+      for (var iForDescriptor = 0; iForDescriptor < PROFILE_FIELDS_FOR_PANEL_RUNTIME.length; iForDescriptor++) {
+        if (PROFILE_FIELDS_FOR_PANEL_RUNTIME[iForDescriptor].key === fieldKeyForDescriptor) {
+          return PROFILE_FIELDS_FOR_PANEL_RUNTIME[iForDescriptor];
+        }
+      }
+      return null;
+    }
+
+    // The value actually sent to the model: a field toggled off contributes nothing while its text
+    // stays in storage. Every send path and the token-overhead estimate read through this.
+    function getEffectiveProfileTextForPanelRuntime(fieldKeyForEffective) {
+      const stateForEffective = profileFieldStateForPanelRuntime[fieldKeyForEffective];
+      if (!stateForEffective || !stateForEffective.enabled) return '';
+      return stateForEffective.text || '';
+    }
+
+    function updateProfileFieldCounterForPanelRuntime(descriptorForCounter) {
+      if (!descriptorForCounter) return;
+      const inputElForCounter = root.getElementById(descriptorForCounter.inputId);
+      const counterElForCounter = root.getElementById(descriptorForCounter.counterId);
+      if (!inputElForCounter || !counterElForCounter) return;
+      const maxCharsForCounter = getProfileFieldMaxCharsForPanelRuntime();
+      const usedForCounter = (inputElForCounter.value || '').length;
+      counterElForCounter.textContent =
+        usedForCounter.toLocaleString() + ' / ' + maxCharsForCounter.toLocaleString();
+      const isFullForCounter = usedForCounter >= maxCharsForCounter;
+      const isNearForCounter = !isFullForCounter && usedForCounter >= Math.floor(maxCharsForCounter * 0.9);
+      counterElForCounter.classList.toggle('stg-field-counter-full', isFullForCounter);
+      counterElForCounter.classList.toggle('stg-field-counter-near', isNearForCounter);
+    }
+
+    function applyProfileFieldEnabledUiForPanelRuntime(descriptorForEnabledUi) {
+      if (!descriptorForEnabledUi) return;
+      const stateForEnabledUi = profileFieldStateForPanelRuntime[descriptorForEnabledUi.key];
+      if (!stateForEnabledUi) return;
+      const toggleElForEnabledUi = root.getElementById(descriptorForEnabledUi.toggleId);
+      if (toggleElForEnabledUi) toggleElForEnabledUi.checked = stateForEnabledUi.enabled;
+      const inputElForEnabledUi = root.getElementById(descriptorForEnabledUi.inputId);
+      const rowElForEnabledUi = inputElForEnabledUi ? inputElForEnabledUi.closest('.stg-row') : null;
+      if (rowElForEnabledUi) {
+        rowElForEnabledUi.classList.toggle('stg-row-profile-disabled', !stateForEnabledUi.enabled);
       }
     }
 
-    function showAgentRulesNoticeForPanelRuntime(textForNotice, isConflictForNotice) {
-      const msgElForNotice = root.getElementById('agent-rules-saved-msg');
+    function refreshProfileFieldUiForPanelRuntime(descriptorForRefresh) {
+      if (!descriptorForRefresh) return;
+      const stateForRefresh = profileFieldStateForPanelRuntime[descriptorForRefresh.key];
+      const inputElForRefresh = root.getElementById(descriptorForRefresh.inputId);
+      if (inputElForRefresh && stateForRefresh) {
+        inputElForRefresh.maxLength = getProfileFieldMaxCharsForPanelRuntime();
+        inputElForRefresh.value = stateForRefresh.text;
+        inputElForRefresh.dataset.profileBaseUpdatedAt = String(stateForRefresh.updatedAt);
+        updateAutoExpandForTextareaForPanelRuntime(inputElForRefresh);
+      }
+      updateProfileFieldCounterForPanelRuntime(descriptorForRefresh);
+      applyProfileFieldEnabledUiForPanelRuntime(descriptorForRefresh);
+    }
+
+    async function loadProfileFieldsIntoSettingsForPanelRuntime() {
+      const storageManagerForRuntime = (globalThis.ABChatShared || {}).storageManager;
+      if (!storageManagerForRuntime) return;
+      const settings = await storageManagerForRuntime.getSettings();
+      PROFILE_FIELDS_FOR_PANEL_RUNTIME.forEach(function (descriptorForLoad) {
+        const stateForLoad = profileFieldStateForPanelRuntime[descriptorForLoad.key];
+        if (!stateForLoad) return;
+        stateForLoad.text = typeof settings[descriptorForLoad.key] === 'string' ? settings[descriptorForLoad.key] : '';
+        stateForLoad.updatedAt =
+          typeof settings[descriptorForLoad.timestampKey] === 'number' ? settings[descriptorForLoad.timestampKey] : 0;
+        stateForLoad.enabled = settings[descriptorForLoad.enabledKey] !== false;
+        refreshProfileFieldUiForPanelRuntime(descriptorForLoad);
+      });
+    }
+
+    function showProfileFieldNoticeForPanelRuntime(descriptorForNotice, textForNotice, isConflictForNotice) {
+      if (!descriptorForNotice) return;
+      const msgElForNotice = root.getElementById(descriptorForNotice.messageId);
       if (!msgElForNotice) return;
       msgElForNotice.textContent = textForNotice;
       if (isConflictForNotice) {
-        msgElForNotice.classList.add('stg-agent-rules-conflict-msg');
+        msgElForNotice.classList.add('stg-field-conflict-msg');
       } else {
-        msgElForNotice.classList.remove('stg-agent-rules-conflict-msg');
+        msgElForNotice.classList.remove('stg-field-conflict-msg');
       }
       if (!isConflictForNotice) {
         setTimeout(function () {
@@ -14747,32 +14854,86 @@
       await storageManagerForLead.saveSettings({ reminderLeadTime: parsedForLead });
     }
 
-    async function saveAgentRulesFromSettingsForPanelRuntime() {
+    async function saveProfileFieldFromSettingsForPanelRuntime(fieldKeyForSave) {
       const storageManagerForRuntime = (globalThis.ABChatShared || {}).storageManager;
-      if (!storageManagerForRuntime) return;
-      const el = root.getElementById('settings-agent-rules-input');
+      const descriptorForSave = getProfileFieldDescriptorForPanelRuntime(fieldKeyForSave);
+      const stateForSave = descriptorForSave ? profileFieldStateForPanelRuntime[descriptorForSave.key] : null;
+      if (!storageManagerForRuntime || !descriptorForSave || !stateForSave) return;
+      const el = root.getElementById(descriptorForSave.inputId);
       if (!el) return;
-      const draftValueForSave = el.value.trim();
-      const baselineTsForSave = Number(el.dataset.agentRulesBaseUpdatedAt || '0') || 0;
+
+      const maxCharsForSave = getProfileFieldMaxCharsForPanelRuntime();
+      let draftValueForSave = el.value.trim();
+      if (draftValueForSave.length > maxCharsForSave) {
+        draftValueForSave = draftValueForSave.slice(0, maxCharsForSave);
+      }
+
+      const baselineTsForSave = Number(el.dataset.profileBaseUpdatedAt || '0') || 0;
       const freshSettingsForSave = await storageManagerForRuntime.getSettings();
       const storedTsForSave =
-        typeof freshSettingsForSave.agentRulesUpdatedAt === 'number' ? freshSettingsForSave.agentRulesUpdatedAt : 0;
+        typeof freshSettingsForSave[descriptorForSave.timestampKey] === 'number'
+          ? freshSettingsForSave[descriptorForSave.timestampKey]
+          : 0;
       if (storedTsForSave !== baselineTsForSave) {
-        currentAgentRulesForPanelRuntime = freshSettingsForSave.agentRules || '';
-        currentAgentRulesUpdatedAtForPanelRuntime = storedTsForSave;
-        el.dataset.agentRulesBaseUpdatedAt = String(storedTsForSave);
-        showAgentRulesNoticeForPanelRuntime(
-          'Rules changed in another tab. Click Save again to overwrite.',
+        stateForSave.text = freshSettingsForSave[descriptorForSave.key] || '';
+        stateForSave.updatedAt = storedTsForSave;
+        el.dataset.profileBaseUpdatedAt = String(storedTsForSave);
+        showProfileFieldNoticeForPanelRuntime(
+          descriptorForSave,
+          descriptorForSave.label + ' changed in another tab. Click Save again to overwrite.',
           true
         );
         return;
       }
-      const mergedForSave = await storageManagerForRuntime.saveSettings({ agentRules: draftValueForSave });
-      currentAgentRulesForPanelRuntime = mergedForSave.agentRules || '';
-      currentAgentRulesUpdatedAtForPanelRuntime =
-        typeof mergedForSave.agentRulesUpdatedAt === 'number' ? mergedForSave.agentRulesUpdatedAt : 0;
-      el.dataset.agentRulesBaseUpdatedAt = String(currentAgentRulesUpdatedAtForPanelRuntime);
-      showAgentRulesNoticeForPanelRuntime('Saved', false);
+
+      const patchForSave = {};
+      patchForSave[descriptorForSave.key] = draftValueForSave;
+      const resultForSave = await storageManagerForRuntime.saveSettingsWithStatus(patchForSave);
+      if (!resultForSave || !resultForSave.ok) {
+        showProfileFieldNoticeForPanelRuntime(
+          descriptorForSave,
+          'Not saved: ' + ((resultForSave && resultForSave.error) || 'the settings write failed.'),
+          true
+        );
+        return;
+      }
+
+      const mergedForSave = resultForSave.settings || {};
+      stateForSave.text = mergedForSave[descriptorForSave.key] || '';
+      stateForSave.updatedAt =
+        typeof mergedForSave[descriptorForSave.timestampKey] === 'number'
+          ? mergedForSave[descriptorForSave.timestampKey]
+          : 0;
+      // Reflect the trim/clamp back into the textarea so what is shown is what is stored.
+      refreshProfileFieldUiForPanelRuntime(descriptorForSave);
+      showProfileFieldNoticeForPanelRuntime(descriptorForSave, 'Saved', false);
+      refreshSystemOverheadEstimateForPanelRuntime();
+    }
+
+    async function saveProfileFieldEnabledForPanelRuntime(fieldKeyForToggle, isCheckedForToggle) {
+      const storageManagerForToggle = (globalThis.ABChatShared || {}).storageManager;
+      const descriptorForToggle = getProfileFieldDescriptorForPanelRuntime(fieldKeyForToggle);
+      const stateForToggle = descriptorForToggle ? profileFieldStateForPanelRuntime[descriptorForToggle.key] : null;
+      if (!storageManagerForToggle || !descriptorForToggle || !stateForToggle) return;
+
+      const previousEnabledForToggle = stateForToggle.enabled;
+      stateForToggle.enabled = Boolean(isCheckedForToggle);
+      applyProfileFieldEnabledUiForPanelRuntime(descriptorForToggle);
+
+      const patchForToggle = {};
+      patchForToggle[descriptorForToggle.enabledKey] = Boolean(isCheckedForToggle);
+      const resultForToggle = await storageManagerForToggle.saveSettingsWithStatus(patchForToggle);
+      if (!resultForToggle || !resultForToggle.ok) {
+        stateForToggle.enabled = previousEnabledForToggle;
+        applyProfileFieldEnabledUiForPanelRuntime(descriptorForToggle);
+        showProfileFieldNoticeForPanelRuntime(
+          descriptorForToggle,
+          'Not saved: ' + ((resultForToggle && resultForToggle.error) || 'the settings write failed.'),
+          true
+        );
+        return;
+      }
+      refreshSystemOverheadEstimateForPanelRuntime();
     }
 
     var pageContextStorageSyncListenerForPanelRuntime = null;
@@ -14800,54 +14961,69 @@
       } catch (ePageContextSyncBind) {}
     }
 
-    var agentRulesStorageSyncListenerForPanelRuntime = null;
-    function bindAgentRulesStorageSyncForPanelRuntime() {
+    var profileFieldsStorageSyncListenerForPanelRuntime = null;
+    function bindProfileFieldsStorageSyncForPanelRuntime() {
       try {
-        if (agentRulesStorageSyncListenerForPanelRuntime) {
-          chrome.storage.onChanged.removeListener(agentRulesStorageSyncListenerForPanelRuntime);
-          agentRulesStorageSyncListenerForPanelRuntime = null;
+        if (profileFieldsStorageSyncListenerForPanelRuntime) {
+          chrome.storage.onChanged.removeListener(profileFieldsStorageSyncListenerForPanelRuntime);
+          profileFieldsStorageSyncListenerForPanelRuntime = null;
         }
-        var capturedGenForAgentRulesSync = window.abchatListenerGeneration || 0;
-        agentRulesStorageSyncListenerForPanelRuntime = function agentRulesStorageSyncHandlerForPanelRuntime(changes, area) {
-          if ((window.abchatListenerGeneration || 0) !== capturedGenForAgentRulesSync) {
-            chrome.storage.onChanged.removeListener(agentRulesStorageSyncListenerForPanelRuntime);
-            agentRulesStorageSyncListenerForPanelRuntime = null;
+        var capturedGenForProfileSync = window.abchatListenerGeneration || 0;
+        profileFieldsStorageSyncListenerForPanelRuntime = function profileFieldsStorageSyncHandlerForPanelRuntime(changes, area) {
+          if ((window.abchatListenerGeneration || 0) !== capturedGenForProfileSync) {
+            chrome.storage.onChanged.removeListener(profileFieldsStorageSyncListenerForPanelRuntime);
+            profileFieldsStorageSyncListenerForPanelRuntime = null;
             return;
           }
           if (area !== 'sync' || !changes.abchatSettings) return;
           const newSettingsForSync = changes.abchatSettings.newValue;
           if (!newSettingsForSync || typeof newSettingsForSync !== 'object') return;
-          const newRulesForSync = typeof newSettingsForSync.agentRules === 'string' ? newSettingsForSync.agentRules : '';
-          const newRulesTsForSync =
-            typeof newSettingsForSync.agentRulesUpdatedAt === 'number' ? newSettingsForSync.agentRulesUpdatedAt : 0;
-          if (newRulesTsForSync === currentAgentRulesUpdatedAtForPanelRuntime &&
-              newRulesForSync === currentAgentRulesForPanelRuntime) {
-            return;
-          }
-          const elForSync = root.getElementById('settings-agent-rules-input');
-          if (!elForSync) {
-            currentAgentRulesForPanelRuntime = newRulesForSync;
-            currentAgentRulesUpdatedAtForPanelRuntime = newRulesTsForSync;
-            return;
-          }
-          const hasLocalEditsForSync = elForSync.value !== currentAgentRulesForPanelRuntime;
-          if (hasLocalEditsForSync) {
-            currentAgentRulesForPanelRuntime = newRulesForSync;
-            currentAgentRulesUpdatedAtForPanelRuntime = newRulesTsForSync;
-            elForSync.dataset.agentRulesBaseUpdatedAt = String(newRulesTsForSync);
-            showAgentRulesNoticeForPanelRuntime(
-              'Rules updated in another tab. Save to overwrite, or discard your edits.',
-              true
-            );
-          } else {
-            currentAgentRulesForPanelRuntime = newRulesForSync;
-            currentAgentRulesUpdatedAtForPanelRuntime = newRulesTsForSync;
-            elForSync.value = newRulesForSync;
-            elForSync.dataset.agentRulesBaseUpdatedAt = String(newRulesTsForSync);
-            updateAutoExpandForTextareaForPanelRuntime(elForSync);
-          }
+
+          PROFILE_FIELDS_FOR_PANEL_RUNTIME.forEach(function (descriptorForSync) {
+            const stateForSync = profileFieldStateForPanelRuntime[descriptorForSync.key];
+            if (!stateForSync) return;
+
+            const newEnabledForSync = newSettingsForSync[descriptorForSync.enabledKey] !== false;
+            if (newEnabledForSync !== stateForSync.enabled) {
+              stateForSync.enabled = newEnabledForSync;
+              applyProfileFieldEnabledUiForPanelRuntime(descriptorForSync);
+            }
+
+            const newTextForSync =
+              typeof newSettingsForSync[descriptorForSync.key] === 'string' ? newSettingsForSync[descriptorForSync.key] : '';
+            const newTsForSync =
+              typeof newSettingsForSync[descriptorForSync.timestampKey] === 'number'
+                ? newSettingsForSync[descriptorForSync.timestampKey]
+                : 0;
+            if (newTsForSync === stateForSync.updatedAt && newTextForSync === stateForSync.text) {
+              return;
+            }
+
+            const elForSync = root.getElementById(descriptorForSync.inputId);
+            if (!elForSync) {
+              stateForSync.text = newTextForSync;
+              stateForSync.updatedAt = newTsForSync;
+              return;
+            }
+
+            const hasLocalEditsForSync = elForSync.value !== stateForSync.text;
+            stateForSync.text = newTextForSync;
+            stateForSync.updatedAt = newTsForSync;
+            if (hasLocalEditsForSync) {
+              // Keep the user's unsaved draft on screen; only re-baseline so the next Save is a
+              // deliberate overwrite rather than a second conflict.
+              elForSync.dataset.profileBaseUpdatedAt = String(newTsForSync);
+              showProfileFieldNoticeForPanelRuntime(
+                descriptorForSync,
+                descriptorForSync.label + ' updated in another tab. Save to overwrite, or discard your edits.',
+                true
+              );
+            } else {
+              refreshProfileFieldUiForPanelRuntime(descriptorForSync);
+            }
+          });
         };
-        chrome.storage.onChanged.addListener(agentRulesStorageSyncListenerForPanelRuntime);
+        chrome.storage.onChanged.addListener(profileFieldsStorageSyncListenerForPanelRuntime);
       } catch (e) {}
     }
 
@@ -16610,7 +16786,8 @@
       nextBtn.classList.add('hidden');
       skipBtn.classList.toggle('hidden', !isSession);
 
-      // Pause/Resume button: show in single mode only, label depends on status
+      // Pause/Resume button: show in single mode only, label depends on status. The click itself is
+      // routed by the delegated toggle-pause-question action, which reads the status at click time.
       const pauseBtn   = root.getElementById('qav-pause-btn');
       const pauseLabel = root.getElementById('qav-pause-label');
       if (pauseBtn) {
@@ -16618,9 +16795,6 @@
         if (pauseLabel) {
           pauseLabel.textContent = getQuizStatusForPanelRuntime(data) === 'paused' ? 'Resume' : 'Pause';
         }
-        pauseBtn.onclick = getQuizStatusForPanelRuntime(data) === 'paused'
-          ? function() { resumeQuestion(QS.activeQid); }
-          : function() { openPauseDialog(); };
       }
 
       QS.answered = false;
@@ -16878,9 +17052,7 @@
 
       // Update pause button label in answer view
       const pauseLabel = root.getElementById('qav-pause-label');
-      const pauseBtn   = root.getElementById('qav-pause-btn');
       if (pauseLabel) pauseLabel.textContent = 'Resume';
-      if (pauseBtn) pauseBtn.onclick = function() { resumeQuestion(qid); };
     }
 
     async function resumeQuestion(qid) {
@@ -16916,9 +17088,7 @@
 
       // Update pause button label in answer view
       const pauseLabelEl = root.getElementById('qav-pause-label');
-      const pauseBtn     = root.getElementById('qav-pause-btn');
       if (pauseLabelEl) pauseLabelEl.textContent = 'Pause';
-      if (pauseBtn) pauseBtn.onclick = function() { openPauseDialog(); };
     }
 
     /* ============================================================
@@ -17010,7 +17180,8 @@
             }
             case 'tour-skip':
             case 'tour-finish': dismissFeatureTourForPanelRuntime(); break;
-            case 'save-agent-rules-btn': saveAgentRulesFromSettingsForPanelRuntime(); break;
+            case 'save-about-user-btn': saveProfileFieldFromSettingsForPanelRuntime('aboutUser'); break;
+            case 'save-agent-rules-btn': saveProfileFieldFromSettingsForPanelRuntime('agentRules'); break;
             case 'sync-all':             triggerFullSyncForPanelRuntime(tgtForRuntime.closest('.ctrl-btn') || tgtForRuntime); break;
             case 'toggle-header-theme':  toggleHeaderThemeForPanelRuntime(); break;
             case 'set-mode':             setMode(tgtForRuntime.dataset.mode); break;
@@ -17328,7 +17499,15 @@
             case 'submit-mcq':           submitMcq(); break;
             case 'next-question':        nextQuestion(); break;
             case 'skip-question':        skipQuestion(); break;
-            case 'open-pause-dialog':    openPauseDialog(); break;
+            case 'toggle-pause-question': {
+              const dataForPauseToggle = QUIZ_STORE_FOR_PANEL_RUNTIME[QS.activeQid];
+              if (dataForPauseToggle && getQuizStatusForPanelRuntime(dataForPauseToggle) === 'paused') {
+                resumeQuestion(QS.activeQid);
+              } else {
+                openPauseDialog();
+              }
+              break;
+            }
             case 'confirm-pause':        confirmPause(); break;
             case 'close-pause-dialog':   closePauseDialog(); break;
             case 'send-chat':            sendChatForPanelRuntime(); break;
@@ -17445,6 +17624,8 @@
             case 'save-delete-chats-older-than':   saveDeleteChatsOlderThanForPanelRuntime(tgtForRuntime.value); break;
             case 'save-delete-clips-older-than':   saveClipRetentionForPanelRuntime(tgtForRuntime.value); break;
             case 'prune-orphaned-blobs':           pruneOrphanedBlobsFromSettingsForPanelRuntime(); break;
+            case 'toggle-about-user-enabled':      saveProfileFieldEnabledForPanelRuntime('aboutUser', tgtForRuntime.checked); break;
+            case 'toggle-agent-rules-enabled':     saveProfileFieldEnabledForPanelRuntime('agentRules', tgtForRuntime.checked); break;
             case 'save-alert-sound':               saveAlertSoundForPanelRuntime(tgtForRuntime.checked); break;
             case 'toggle-page-context':            savePageContextEnabledForPanelRuntime(tgtForRuntime.checked); break;
             case 'toggle-automation':              handleAutomationToggleForPanelRuntime(tgtForRuntime.checked); break;
@@ -17523,6 +17704,11 @@
               if (wrapForModelSearch) wrapForModelSearch.classList.toggle('has-value', tgtForRuntime.value.length > 0);
               break;
             }
+            case 'count-profile-field':
+              updateProfileFieldCounterForPanelRuntime(
+                getProfileFieldDescriptorForPanelRuntime(tgtForRuntime.dataset.profileField)
+              );
+              break;
           }
         });
       }
@@ -17702,7 +17888,7 @@
 
       // Load saved API key into settings input when settings tab is visible
       loadApiKeyIntoSettingsForPanelRuntime();
-      loadAgentRulesIntoSettingsForPanelRuntime();
+      loadProfileFieldsIntoSettingsForPanelRuntime();
       loadBehaviourSettingsForPanelRuntime();
       loadThemeIntoSettingsForPanelRuntime();
       bindThemeStorageSyncForPanelRuntime();
@@ -17712,7 +17898,7 @@
       bindHeaderButtonStorageSyncForPanelRuntime();
       bindAutomationStorageSyncForPanelRuntime();
       maybeShowAutomationIntroForPanelRuntime();
-      bindAgentRulesStorageSyncForPanelRuntime();
+      bindProfileFieldsStorageSyncForPanelRuntime();
       bindPageContextStorageSyncForPanelRuntime();
       initModelSelectsForPanelRuntime();
       autoDeleteOldChatsForPanelRuntime();
@@ -18611,9 +18797,9 @@
         try { chrome.storage.onChanged.removeListener(transparencyStorageSyncListenerForPanelRuntime); } catch (e) {}
         transparencyStorageSyncListenerForPanelRuntime = null;
       }
-      if (agentRulesStorageSyncListenerForPanelRuntime) {
-        try { chrome.storage.onChanged.removeListener(agentRulesStorageSyncListenerForPanelRuntime); } catch (e) {}
-        agentRulesStorageSyncListenerForPanelRuntime = null;
+      if (profileFieldsStorageSyncListenerForPanelRuntime) {
+        try { chrome.storage.onChanged.removeListener(profileFieldsStorageSyncListenerForPanelRuntime); } catch (e) {}
+        profileFieldsStorageSyncListenerForPanelRuntime = null;
       }
       Object.keys(noteDraftSyncTimersForPanelRuntime).forEach(function (timerKeyForNoteDraft) {
         clearTimeout(noteDraftSyncTimersForPanelRuntime[timerKeyForNoteDraft]);

@@ -506,13 +506,32 @@
           <div class="stg-section">
             <div class="stg-section-title">Agent</div>
             <div class="stg-row stg-row-col">
-              <div class="stg-label">
-                <strong>Custom instructions</strong>
-                <span>Injected into every new chat</span>
+              <div class="stg-field-head">
+                <div class="stg-label">
+                  <strong>About you</strong>
+                  <span>Facts about you the assistant should know in every chat</span>
+                </div>
+                <label class="ts"><input type="checkbox" id="settings-about-user-toggle" data-action="toggle-about-user-enabled"><span class="ts-slider"></span></label>
               </div>
-              <textarea class="stg-input stg-textarea" id="settings-agent-rules-input" placeholder="e.g. Always respond in Spanish. Keep answers concise." style="min-height:80px"></textarea>
-              <div class="stg-agent-rules-footer">
-                <span class="stg-agent-rules-saved-msg" id="agent-rules-saved-msg"></span>
+              <textarea class="stg-input stg-textarea" id="settings-about-user-input" data-action="count-profile-field" data-profile-field="aboutUser" maxlength="2500" placeholder="e.g. I'm a frontend developer. I prefer British English and metric units." style="min-height:80px"></textarea>
+              <div class="stg-field-footer">
+                <span class="stg-field-counter" id="about-user-counter"></span>
+                <span class="stg-field-saved-msg" id="about-user-saved-msg"></span>
+                <button class="btn-primary btn-sm" data-action="save-about-user-btn">Save</button>
+              </div>
+            </div>
+            <div class="stg-row stg-row-col">
+              <div class="stg-field-head">
+                <div class="stg-label">
+                  <strong>Custom instructions</strong>
+                  <span>How the assistant should behave, injected into every new chat</span>
+                </div>
+                <label class="ts"><input type="checkbox" id="settings-agent-rules-toggle" data-action="toggle-agent-rules-enabled"><span class="ts-slider"></span></label>
+              </div>
+              <textarea class="stg-input stg-textarea" id="settings-agent-rules-input" data-action="count-profile-field" data-profile-field="agentRules" maxlength="2500" placeholder="e.g. Always respond in Spanish. Keep answers concise." style="min-height:80px"></textarea>
+              <div class="stg-field-footer">
+                <span class="stg-field-counter" id="agent-rules-counter"></span>
+                <span class="stg-field-saved-msg" id="agent-rules-saved-msg"></span>
                 <button class="btn-primary btn-sm" data-action="save-agent-rules-btn">Save</button>
               </div>
             </div>
@@ -598,7 +617,7 @@
             </div>
             <div class="stg-data-row">
               <button class="btn-ghost btn-sm" data-action="prune-orphaned-blobs">Prune orphaned blobs</button>
-              <span class="stg-agent-rules-saved-msg" id="settings-prune-blobs-result"></span>
+              <span class="stg-field-saved-msg" id="settings-prune-blobs-result"></span>
             </div>
           </div>
 
@@ -948,7 +967,7 @@
               <!-- Skip (session mode only) -->
               <button class="qav-skip-btn hidden" id="qav-skip-btn" data-action="skip-question">Skip</button>
               <!-- Pause / Resume button -->
-              <button class="qav-pause-btn hidden" id="qav-pause-btn" data-action="open-pause-dialog">
+              <button class="qav-pause-btn hidden" id="qav-pause-btn" data-action="toggle-pause-question">
                 ${icForPanelTemplate.pause11}
                 <span id="qav-pause-label">Pause</span>
               </button>

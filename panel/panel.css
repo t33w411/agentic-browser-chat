@@ -2376,9 +2376,17 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 .stg-data-row { padding: 10px 13px; display: flex; flex-wrap: wrap; gap: 6px; }
 .stg-row.stg-row-col { flex-direction: column; align-items: stretch; gap: 5px; }
 .stg-textarea { resize: vertical; min-width: unset; width: 100%; box-sizing: border-box; min-height: 52px; }
-.stg-agent-rules-footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 2px; }
-.stg-agent-rules-saved-msg { font-size: 12px; color: var(--abchat-text-muted); transition: opacity 0.3s; }
-.stg-agent-rules-saved-msg.stg-agent-rules-conflict-msg { color: var(--abchat-danger, #c0392b); font-weight: 500; }
+.stg-field-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.stg-field-head .stg-label { min-width: 0; }
+.stg-field-footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 2px; }
+.stg-field-counter { font-size: 12px; color: var(--abchat-text-muted); margin-right: auto; font-variant-numeric: tabular-nums; }
+.stg-field-counter.stg-field-counter-near { color: var(--abchat-warning, #b7791f); }
+.stg-field-counter.stg-field-counter-full { color: var(--abchat-danger, #c0392b); font-weight: 500; }
+.stg-field-saved-msg { font-size: 12px; color: var(--abchat-text-muted); transition: opacity 0.3s; }
+.stg-field-saved-msg.stg-field-conflict-msg { color: var(--abchat-danger, #c0392b); font-weight: 500; }
+/* Disabled fields stay editable: the toggle controls whether the text is sent, not whether it can be written. */
+.stg-row-profile-disabled .stg-textarea,
+.stg-row-profile-disabled .stg-field-footer { opacity: 0.55; }
 
 /* Reduced mode: stack label + control vertically so neither squishes the other */
 .panel-host.mode-reduced .stg-row {

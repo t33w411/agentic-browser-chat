@@ -8,6 +8,19 @@
     lastCopyMeta: "abchatLastCopyMeta"
   };
 
+  // Every setting shares one chrome.storage.sync item, which Chrome caps at 8,192 bytes. The two
+  // free-text profile fields are the only ones that can grow, so they are capped well inside that
+  // budget: 2 x 2,500 chars leaves room for the rest of the object plus JSON/UTF-8 expansion.
+  const MAX_PROFILE_TEXT_CHARS_FOR_STORAGE = 2500;
+
+  function clampProfileTextForStorage(valueForStorage) {
+    const textForStorage = typeof valueForStorage === "string" ? valueForStorage : "";
+    if (textForStorage.length <= MAX_PROFILE_TEXT_CHARS_FOR_STORAGE) {
+      return textForStorage;
+    }
+    return textForStorage.slice(0, MAX_PROFILE_TEXT_CHARS_FOR_STORAGE);
+  }
+
   function getDefaultSettingsForStorage() {
     const enabledToolsFromRegistryForStorage = toolRegistryForStorage
       ? toolRegistryForStorage.getDefaultEnabledMap()
@@ -15,8 +28,12 @@
 
     return {
       enabledTools: enabledToolsFromRegistryForStorage,
+      aboutUser: "",
+      aboutUserUpdatedAt: 0,
+      aboutUserEnabled: true,
       agentRules: "",
       agentRulesUpdatedAt: 0,
+      agentRulesEnabled: true,
       toastDurationMs: 1700,
       deleteChatsOlderThanDays: null,
       // Clips are page grabs kept for reuse. Unlike chats there is no "never": the sweep
@@ -58,12 +75,16 @@
   function setToStoreForStorage(storeForStorage, keyForStorage, valueForStorage) {
     return new Promise((resolveForStorage) => {
       if (!storeForStorage) {
-        resolveForStorage(false);
+        resolveForStorage({ ok: false, error: "Storage is unavailable." });
         return;
       }
 
       storeForStorage.set({ [keyForStorage]: valueForStorage }, () => {
-        resolveForStorage(!chrome.runtime.lastError);
+        const lastErrorForStorage = chrome.runtime.lastError;
+        resolveForStorage({
+          ok: !lastErrorForStorage,
+          error: lastErrorForStorage ? lastErrorForStorage.message || "Storage write failed." : ""
+        });
       });
     });
   }
@@ -81,35 +102,83 @@
     });
   }
 
+  // Text plus an updatedAt token used for cross-tab stale-save detection. The timestamp moves only
+  // when the text itself changes, so writing an unrelated setting (an enabled toggle, say) never
+  // looks like an edit to another tab holding unsaved changes.
+  function mergeProfileTextForStorage(
+    baseSettingsForMerge,
+    patchSettingsForMerge,
+    textKeyForMerge,
+    timestampKeyForMerge
+  ) {
+    const baseTextForMerge = clampProfileTextForStorage(baseSettingsForMerge[textKeyForMerge]);
+    const baseTimestampForMerge =
+      typeof baseSettingsForMerge[timestampKeyForMerge] === "number"
+        ? baseSettingsForMerge[timestampKeyForMerge]
+        : 0;
+    const patchHasTextForMerge = typeof patchSettingsForMerge[textKeyForMerge] === "string";
+    const nextTextForMerge = patchHasTextForMerge
+      ? clampProfileTextForStorage(patchSettingsForMerge[textKeyForMerge])
+      : baseTextForMerge;
+
+    let nextTimestampForMerge;
+    if (typeof patchSettingsForMerge[timestampKeyForMerge] === "number") {
+      nextTimestampForMerge = patchSettingsForMerge[timestampKeyForMerge];
+    } else if (patchHasTextForMerge && nextTextForMerge !== baseTextForMerge) {
+      nextTimestampForMerge = Date.now();
+    } else {
+      nextTimestampForMerge = baseTimestampForMerge;
+    }
+
+    return { text: nextTextForMerge, updatedAt: nextTimestampForMerge };
+  }
+
+  function mergeBooleanForStorage(baseValueForMerge, patchValueForMerge, fallbackValueForMerge) {
+    if (typeof patchValueForMerge === "boolean") {
+      return patchValueForMerge;
+    }
+    if (typeof baseValueForMerge === "boolean") {
+      return baseValueForMerge;
+    }
+    return fallbackValueForMerge;
+  }
+
   function mergeSettingsForStorage(baseSettingsForStorage, patchSettingsForStorage) {
     const safeBaseSettingsForStorage = baseSettingsForStorage || getDefaultSettingsForStorage();
     const safePatchSettingsForStorage = patchSettingsForStorage || {};
 
-    const baseAgentRulesForStorage = safeBaseSettingsForStorage.agentRules || "";
-    const baseAgentRulesUpdatedAtForStorage =
-      typeof safeBaseSettingsForStorage.agentRulesUpdatedAt === "number"
-        ? safeBaseSettingsForStorage.agentRulesUpdatedAt
-        : 0;
-    const patchHasAgentRulesForStorage = typeof safePatchSettingsForStorage.agentRules === "string";
-    const nextAgentRulesForStorage = patchHasAgentRulesForStorage
-      ? safePatchSettingsForStorage.agentRules
-      : baseAgentRulesForStorage;
-    let nextAgentRulesUpdatedAtForStorage;
-    if (typeof safePatchSettingsForStorage.agentRulesUpdatedAt === "number") {
-      nextAgentRulesUpdatedAtForStorage = safePatchSettingsForStorage.agentRulesUpdatedAt;
-    } else if (patchHasAgentRulesForStorage && nextAgentRulesForStorage !== baseAgentRulesForStorage) {
-      nextAgentRulesUpdatedAtForStorage = Date.now();
-    } else {
-      nextAgentRulesUpdatedAtForStorage = baseAgentRulesUpdatedAtForStorage;
-    }
+    const mergedAboutUserForStorage = mergeProfileTextForStorage(
+      safeBaseSettingsForStorage,
+      safePatchSettingsForStorage,
+      "aboutUser",
+      "aboutUserUpdatedAt"
+    );
+    const mergedAgentRulesForStorage = mergeProfileTextForStorage(
+      safeBaseSettingsForStorage,
+      safePatchSettingsForStorage,
+      "agentRules",
+      "agentRulesUpdatedAt"
+    );
 
     return {
       enabledTools: {
         ...(safeBaseSettingsForStorage.enabledTools || {}),
         ...(safePatchSettingsForStorage.enabledTools || {})
       },
-      agentRules: nextAgentRulesForStorage,
-      agentRulesUpdatedAt: nextAgentRulesUpdatedAtForStorage,
+      aboutUser: mergedAboutUserForStorage.text,
+      aboutUserUpdatedAt: mergedAboutUserForStorage.updatedAt,
+      aboutUserEnabled: mergeBooleanForStorage(
+        safeBaseSettingsForStorage.aboutUserEnabled,
+        safePatchSettingsForStorage.aboutUserEnabled,
+        true
+      ),
+      agentRules: mergedAgentRulesForStorage.text,
+      agentRulesUpdatedAt: mergedAgentRulesForStorage.updatedAt,
+      agentRulesEnabled: mergeBooleanForStorage(
+        safeBaseSettingsForStorage.agentRulesEnabled,
+        safePatchSettingsForStorage.agentRulesEnabled,
+        true
+      ),
       toastDurationMs:
         typeof safePatchSettingsForStorage.toastDurationMs === "number"
           ? safePatchSettingsForStorage.toastDurationMs
@@ -153,11 +222,28 @@
     return mergeSettingsForStorage(getDefaultSettingsForStorage(), storedSettingsForStorage || {});
   }
 
-  async function saveSettingsForStorage(nextSettingsForStorage) {
+  // Reports whether the write actually landed. sync has a hard 8,192-byte-per-item cap, so a write
+  // can fail (quota, storage unavailable) with nothing thrown; callers that show the user a result
+  // must use this rather than assume success.
+  async function saveSettingsWithStatusForStorage(nextSettingsForStorage) {
     const existingSettingsForStorage = await getSettingsForStorage();
     const mergedSettingsForStorage = mergeSettingsForStorage(existingSettingsForStorage, nextSettingsForStorage || {});
-    await setToStoreForStorage(getSyncStoreForStorage(), storageKeysForStorage.settings, mergedSettingsForStorage);
-    return mergedSettingsForStorage;
+    const writeResultForStorage = await setToStoreForStorage(
+      getSyncStoreForStorage(),
+      storageKeysForStorage.settings,
+      mergedSettingsForStorage
+    );
+
+    return {
+      ok: writeResultForStorage.ok,
+      error: writeResultForStorage.error,
+      settings: writeResultForStorage.ok ? mergedSettingsForStorage : existingSettingsForStorage
+    };
+  }
+
+  async function saveSettingsForStorage(nextSettingsForStorage) {
+    const saveResultForStorage = await saveSettingsWithStatusForStorage(nextSettingsForStorage);
+    return saveResultForStorage.settings;
   }
 
   async function saveLastCopyMetaForStorage(lastCopyMetaForStorage) {
@@ -165,7 +251,12 @@
       return false;
     }
 
-    return setToStoreForStorage(getLocalStoreForStorage(), storageKeysForStorage.lastCopyMeta, lastCopyMetaForStorage);
+    const writeResultForLastCopy = await setToStoreForStorage(
+      getLocalStoreForStorage(),
+      storageKeysForStorage.lastCopyMeta,
+      lastCopyMetaForStorage
+    );
+    return writeResultForLastCopy.ok;
   }
 
   async function getLastCopyMetaForStorage() {
@@ -204,7 +295,14 @@
       return { ok: false, error: "Invalid import payload." };
     }
 
-    await setToStoreForStorage(getSyncStoreForStorage(), storageKeysForStorage.settings, sanitizedPayloadForStorage.settings);
+    const writeResultForImport = await setToStoreForStorage(
+      getSyncStoreForStorage(),
+      storageKeysForStorage.settings,
+      sanitizedPayloadForStorage.settings
+    );
+    if (!writeResultForImport.ok) {
+      return { ok: false, error: writeResultForImport.error || "Could not save the imported settings." };
+    }
     return { ok: true };
   }
 
@@ -217,9 +315,11 @@
     ...existingNamespaceForStorage,
     storageKeys: storageKeysForStorage,
     storageManager: {
+      maxProfileTextChars: MAX_PROFILE_TEXT_CHARS_FOR_STORAGE,
       getDefaultSettings: getDefaultSettingsForStorage,
       getSettings: getSettingsForStorage,
       saveSettings: saveSettingsForStorage,
+      saveSettingsWithStatus: saveSettingsWithStatusForStorage,
       saveLastCopyMeta: saveLastCopyMetaForStorage,
       getLastCopyMeta: getLastCopyMetaForStorage,
       exportAll: exportAllForStorage,

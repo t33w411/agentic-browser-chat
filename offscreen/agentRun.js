@@ -377,6 +377,7 @@
     var apiKey = String(paramsForRun.apiKey || '');
     var imageModelForRun = String(paramsForRun.imageModel || '');
     var automationEnabledForRun = Boolean(paramsForRun.automationEnabled);
+    var aboutUserForRun = String(paramsForRun.aboutUser || '');
     var agentRulesForRun = String(paramsForRun.agentRules || '');
     var targetTabIdForRun = (typeof paramsForRun.targetTabId === 'number') ? paramsForRun.targetTabId : null;
     var initiatorTabIdForRun = (typeof paramsForRun.initiatorTabId === 'number') ? paramsForRun.initiatorTabId : targetTabIdForRun;
@@ -544,6 +545,7 @@
           var systemOverheadTokensForRun = 10000;
           if (typeof contextBuilderForRun.estimateSystemOverheadTokens === 'function') {
             var systemOverheadEstimateForRun = contextBuilderForRun.estimateSystemOverheadTokens({
+              aboutUser: aboutUserForRun,
               agentRules: agentRulesForRun,
               automationEnabled: automationEnabledForRun,
               pageNavigationAllowed: true,
@@ -617,6 +619,7 @@
         var memCtxForRun = await loadAgentMemoryContextForAgentRun(repoForRun);
         var apiMessages = contextBuilderForRun.build
           ? await contextBuilderForRun.build(messagesForRun, {
+              aboutUser: aboutUserForRun,
               agentRules: agentRulesForRun,
               agentMemory: memCtxForRun.agentMemory,
               agentMemoryId: memCtxForRun.agentMemoryId,
@@ -635,6 +638,9 @@
               }).filter(Boolean);
               if (agentRulesForRun) {
                 msgsForFallbackForRun.unshift({ role: 'system', content: agentRulesForRun });
+              }
+              if (aboutUserForRun) {
+                msgsForFallbackForRun.unshift({ role: 'system', content: 'About the user:\n' + aboutUserForRun });
               }
               return msgsForFallbackForRun;
             }());

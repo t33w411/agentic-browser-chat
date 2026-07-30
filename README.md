@@ -177,17 +177,20 @@ The agent calls these tools mid-conversation. Grouped by purpose, with safeguard
 
 ### Memory, Skills, and Custom Instructions
 
-The extension supports three distinct mechanisms for injecting context into the agent. Knowing the difference matters.
+The extension supports four distinct mechanisms for injecting context into the agent. Knowing the difference matters.
 
 | Mechanism | Who writes it | How it's referenced | When the model sees it |
 |---|---|---|---|
-| **Custom instructions** | You, in Settings → Agent | Static text typed once | Injected automatically into the system prompt of every chat |
+| **About you** | You, in Settings → Agent | Static text typed once (max 2,500 characters) | Injected automatically into the system prompt of every chat, unless toggled off |
+| **Custom instructions** | You, in Settings → Agent | Static text typed once (max 2,500 characters) | Injected automatically into the system prompt of every chat, unless toggled off |
 | **Memory** | The agent (via the `memory` tool) on your request, or you in Settings → Agent → Manage Memory | A single persistent memory note, one entry per line | Injected automatically into every chat |
 | **Skills** | The agent (via the `skill` tool), or you in Settings → Agent → Manage Skills | Each skill has a unique slug like `calculate-worksheet-discrepancy`. The model lists available skills but loads a skill's body **only when needed** | Listed in every chat; full body loaded on demand |
 
 In practice:
 
+- **About you** is who you are: *"I'm a frontend developer"*, *"I live in Lagos"*, *"I'm studying for the CFA"*. It's the counterpart to memory, written by you rather than by the agent.
 - **Custom instructions** are the place for global preferences: *"Always respond in British English"*, *"Keep answers concise"*, *"When showing code, prefer TypeScript"*.
+- Each of those two has its own switch, so you can turn one off for a while without losing what you wrote. Both are capped at 2,500 characters, since they ride on every single request.
 - **Memory** is for facts the agent should always know about you: *"User's name is Tayo"*, *"User uses VS Code"*, *"User's pets are named Bo and Lyra"*. You ask the agent to remember; it calls the `memory` tool and the entry is appended (phrased in third person). You can also add, edit, and delete entries yourself in **Settings → Agent → Manage Memory**.
 - **Skills** are for procedures you don't want to retype: a step-by-step process the agent can re-apply on request. You say *"remember how to do X"*; the agent saves a skill. Later you can say *"do X for this data"* and the agent loads `/x` and follows it. You can also create, edit, and delete skills yourself in **Settings → Agent → Manage Skills**.
 
@@ -251,7 +254,7 @@ There is **no build step**. The extension loads source files directly. After pul
 1. Click the extension's toolbar icon to open the side panel on any page.
 2. Walk through the onboarding carousel, or skip to **Settings** (gear icon).
 3. Paste your **[OpenRouter](https://openrouter.ai) API key** and pick a default model.
-4. Optional: in **Settings → Agent**, add a line or two of **custom instructions** (e.g. *"Be concise. Answer in British English."*).
+4. Optional: in **Settings → Agent**, fill in **About you** (e.g. *"I'm a frontend developer based in Lagos."*) and a line or two of **custom instructions** (e.g. *"Be concise. Answer in British English."*).
 5. Close settings and try:
    - "Summarize this page."
    - Select a paragraph, right-click → **Quick Question about selection**.
@@ -270,7 +273,8 @@ All configuration lives in the panel's **Settings** tab. There is no separate op
 | **OpenRouter API Key** | Your OpenRouter API key. Stored locally in `chrome.storage`. Never transmitted anywhere except in the `Authorization` header of OpenRouter API calls. |
 | **Default chat model** | Used for new conversations. Per-chat overrides are available from inside any chat. |
 | **Image generation model** | Used by the `generate_image` tool. |
-| **Custom instructions** (Agent) | Free-text instructions injected into the system prompt of every new chat. |
+| **About you** (Agent) | Free-text facts about yourself, injected into the system prompt of every new chat. Max 2,500 characters, with a switch to turn it off without erasing it. |
+| **Custom instructions** (Agent) | Free-text instructions injected into the system prompt of every new chat. Max 2,500 characters, with a switch to turn it off without erasing it. |
 | **Manage Skills** | Create, edit, and delete the agent's skills (reusable `/command` instructions). The button shows the current skill count. |
 | **Manage Memory** | Create, edit, and delete memory entries (facts the agent keeps across chats). The button shows the current entry count. |
 | **Alert sound** | Toggles a sound effect for task reminders and agent confirmation prompts. |
