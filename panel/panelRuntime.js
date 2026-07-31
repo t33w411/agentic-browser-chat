@@ -453,6 +453,10 @@
     var pickerCurrentItemsForPanelRuntime = [];
     var pickerCurrentTypeForPanelRuntime = null;
     var pickerObserverForPanelRuntime = null;
+    // Tab picker rows are indexed into this rather than closing over their tab object, so the
+    // delegated select-picker-tab action can resolve a row back to its tab. Reset by
+    // renderTabPickerList, which is also called with a search-filtered subset.
+    var pickerCurrentTabsForPanelRuntime = [];
 
     // Set of chat IDs whose messages have been fetched from DB (lazy loading).
     // Startup only loads chat metadata; messages are pulled on first selectChat().
@@ -3654,18 +3658,27 @@
         const typeForPickerPage = pickerCurrentTypeForPanelRuntime;
         const divForPickerPage = document.createElement('div');
         divForPickerPage.className = 'pk-item';
+        const attachCountForPickerPage = Number(itemForPickerPage.attachCount) || 0;
+        const tagsForPickerPage = (itemForPickerPage.tags && itemForPickerPage.tags.length) ? itemForPickerPage.tags : [];
+        const attachHtmlForPickerPage = attachCountForPickerPage > 0
+          ? `<span class="pk-item-attach" title="${attachCountForPickerPage} attachment${attachCountForPickerPage === 1 ? '' : 's'}">${ic.paperclip12}${attachCountForPickerPage}</span>`
+          : '';
+        const tagsHtmlForPickerPage = tagsForPickerPage.map(function(tForPickerPage) {
+          return `<span class="pk-tag">${escHtml(tForPickerPage)}</span>`;
+        }).join('');
         divForPickerPage.innerHTML =
           `<div class="pk-item-icon ${typeForPickerPage === 'chat' ? 'chat-icon' : ''}">${typeForPickerPage === 'note' ? ic.fileText14 : (typeForPickerPage === 'clip' ? ic.bookmark12 : ic.message14)}</div>` +
           `<div class="pk-item-body">` +
           `<div class="pk-item-title">${escHtml(itemForPickerPage.title)}</div>` +
           `<div class="pk-item-excerpt">${escHtml(itemForPickerPage.excerpt)}</div>` +
-          (itemForPickerPage.tags && itemForPickerPage.tags.length
-            ? '<div class="pk-item-tags">' + itemForPickerPage.tags.map(function(tForPickerPage) { return `<span class="pk-tag">${escHtml(tForPickerPage)}</span>`; }).join('') + '</div>'
+          (attachHtmlForPickerPage || tagsHtmlForPickerPage
+            ? '<div class="pk-item-meta">' + attachHtmlForPickerPage + tagsHtmlForPickerPage + '</div>'
             : '') +
           `</div>`;
-        divForPickerPage.onclick = (function(capturedItemForPicker, capturedTypeForPicker) {
-          return function() { selectPickerItem(capturedItemForPicker, capturedTypeForPicker); };
-        }(itemForPickerPage, typeForPickerPage));
+        // The row's identity travels as an index into pickerCurrentItemsForPanelRuntime, which is
+        // reassigned alongside pickerCurrentTypeForPanelRuntime by renderPickerList on every render.
+        divForPickerPage.dataset.action = 'select-picker-item';
+        divForPickerPage.dataset.pickerIndex = String(iForPickerPage);
         listForPickerPage.appendChild(divForPickerPage);
       }
     }
@@ -5363,8 +5376,10 @@
       if (isPanelVisibleForPanelRuntime) {
         if (canTogglePanelForPanelRuntime) {
           // skipSync: this is a transient local hide for the capture, not a
-          // user-intended close — it must not flip the shared cross-tab state.
-          panelControllerForPanelRuntime.setVisible(false, { skipSync: true });
+          // user-intended close, so it must not flip the shared cross-tab
+          // state. transient: nor may it take down overlay-only mode, or the
+          // restore below would reopen the full panel over a Quick Question.
+          panelControllerForPanelRuntime.setVisible(false, { skipSync: true, transient: true });
         } else if (panelShadowHostForPanelRuntime) {
           panelShadowHostForPanelRuntime.style.display = 'none';
         }
@@ -5398,7 +5413,7 @@
       } finally {
         if (isPanelVisibleForPanelRuntime) {
           if (canTogglePanelForPanelRuntime) {
-            panelControllerForPanelRuntime.setVisible(true, { skipSync: true });
+            panelControllerForPanelRuntime.setVisible(true, { skipSync: true, transient: true });
           } else if (panelShadowHostForPanelRuntime) {
             panelShadowHostForPanelRuntime.style.display = 'block';
           }
@@ -9577,6 +9592,9 @@
           title: nForPicker.title || 'Untitled',
           excerpt: getNoteExcerptForPanelRuntime(nForPicker.body),
           tags: nForPicker.tags ? nForPicker.tags.slice() : [],
+          // Surfaced as a paperclip badge on the row: reading an attached note discloses each
+          // attachment's blob_id to the agent, so the count is what the user is really handing over.
+          attachCount: Array.isArray(nForPicker.attachments) ? nForPicker.attachments.length : 0,
         };
       });
     }
@@ -10079,6 +10097,8 @@
       }).map(function (idForPicker) {
         const cForPicker = NOTE_STORE_FOR_PANEL_RUNTIME[idForPicker];
         const domainForPicker = extractChipDomainForPanelRuntime(cForPicker.sourceUrl);
+        // No attachCount here: a clip's single attachment IS its own payload blob, not something
+        // the user attached, so every row would read "1" and mean nothing.
         return {
           id: idForPicker,
           title: cForPicker.title || 'Clip',
@@ -10531,6 +10551,9 @@
       const inlineMemCtxForPanelRuntime = await loadAgentMemoryContextForPanelRuntime();
       const inlineMessagesForPanelRuntime = contextBuilderForInline.build
         ? await contextBuilderForInline.build(S.inlineMessages, {
+            // This call passes no `tools` to streamCompletion below, so the prompt must not
+            // advertise any.
+            toolsAvailable: false,
             aboutUser: getEffectiveProfileTextForPanelRuntime('aboutUser'),
             agentRules: getEffectiveProfileTextForPanelRuntime('agentRules'),
             agentMemory: inlineMemCtxForPanelRuntime.agentMemory,
@@ -11044,7 +11067,8 @@
         inputId: 'settings-about-user-input',
         toggleId: 'settings-about-user-toggle',
         counterId: 'about-user-counter',
-        messageId: 'about-user-saved-msg'
+        messageId: 'about-user-saved-msg',
+        saveButtonId: 'about-user-save-btn'
       },
       {
         key: 'agentRules',
@@ -11054,7 +11078,8 @@
         inputId: 'settings-agent-rules-input',
         toggleId: 'settings-agent-rules-toggle',
         counterId: 'agent-rules-counter',
-        messageId: 'agent-rules-saved-msg'
+        messageId: 'agent-rules-saved-msg',
+        saveButtonId: 'agent-rules-save-btn'
       }
     ];
     var profileFieldStateForPanelRuntime = {
@@ -14706,6 +14731,17 @@
       if (rowElForEnabledUi) {
         rowElForEnabledUi.classList.toggle('stg-row-profile-disabled', !stateForEnabledUi.enabled);
       }
+      // A field that is off is locked, not just dimmed. readOnly rather than disabled so the stored
+      // text stays selectable and copyable while it cannot be edited or saved.
+      if (inputElForEnabledUi) {
+        inputElForEnabledUi.readOnly = !stateForEnabledUi.enabled;
+      }
+      const saveBtnElForEnabledUi = descriptorForEnabledUi.saveButtonId
+        ? root.getElementById(descriptorForEnabledUi.saveButtonId)
+        : null;
+      if (saveBtnElForEnabledUi) {
+        saveBtnElForEnabledUi.disabled = !stateForEnabledUi.enabled;
+      }
     }
 
     function refreshProfileFieldUiForPanelRuntime(descriptorForRefresh) {
@@ -14859,6 +14895,10 @@
       const descriptorForSave = getProfileFieldDescriptorForPanelRuntime(fieldKeyForSave);
       const stateForSave = descriptorForSave ? profileFieldStateForPanelRuntime[descriptorForSave.key] : null;
       if (!storageManagerForRuntime || !descriptorForSave || !stateForSave) return;
+      // A disabled field is locked: the button is disabled and the textarea is readOnly, so this is
+      // only reachable if the two ever disagree. Refuse rather than write a value the user could
+      // not have typed.
+      if (!stateForSave.enabled) return;
       const el = root.getElementById(descriptorForSave.inputId);
       if (!el) return;
 
@@ -15560,7 +15600,8 @@
     function renderTabPickerList(tabs) {
       const list = root.getElementById('pk-list');
       list.innerHTML = '';
-      tabs.forEach((tab) => {
+      pickerCurrentTabsForPanelRuntime = Array.isArray(tabs) ? tabs : [];
+      pickerCurrentTabsForPanelRuntime.forEach((tab, indexForTabRow) => {
         if (tab.windowLabel) {
           const header = document.createElement('div');
           header.className = 'pk-window-group-header';
@@ -15583,7 +15624,8 @@
             </div>
             <div class="pk-item-excerpt">${escHtml(tab.excerpt)}</div>
           </div>`;
-        div.onclick = () => selectTabItem(tab);
+        div.dataset.action = 'select-picker-tab';
+        div.dataset.tabIndex = String(indexForTabRow);
         list.appendChild(div);
       });
     }
@@ -17124,14 +17166,24 @@
         return;
       }
 
-      const allItemsForPicker = S.pickerMode === 'note' ? getPickerNotesForPanelRuntime() : getPickerChatsForPanelRuntime();
+      let allItemsForPicker;
+      if (S.pickerMode === 'note') {
+        allItemsForPicker = getPickerNotesForPanelRuntime();
+      } else if (S.pickerMode === 'clip') {
+        allItemsForPicker = getPickerClipsForPanelRuntime();
+      } else {
+        allItemsForPicker = getPickerChatsForPanelRuntime();
+      }
 
       if (!qTrimmedForPicker) {
         renderPickerList(allItemsForPicker, S.pickerMode);
         return;
       }
 
-      const flexIndexTypeForPicker = S.pickerMode === 'note' ? 'notes' : 'chats';
+      // Clips are rows in the notes table, so they are indexed under 'notes' alongside real notes.
+      // Intersecting those hits with the clip-only list is what narrows the results back to clips.
+      const flexIndexTypeForPicker =
+        (S.pickerMode === 'note' || S.pickerMode === 'clip') ? 'notes' : 'chats';
       const searchNsForPicker = (globalThis.ABChatShared || {}).search;
       let matchedIdsForPicker = null;
 
@@ -17499,6 +17551,18 @@
             case 'submit-mcq':           submitMcq(); break;
             case 'next-question':        nextQuestion(); break;
             case 'skip-question':        skipQuestion(); break;
+            case 'select-picker-item': {
+              const itemForPickerSelect =
+                pickerCurrentItemsForPanelRuntime[Number(tgtForRuntime.dataset.pickerIndex)];
+              if (itemForPickerSelect) selectPickerItem(itemForPickerSelect, pickerCurrentTypeForPanelRuntime);
+              break;
+            }
+            case 'select-picker-tab': {
+              const tabForPickerSelect =
+                pickerCurrentTabsForPanelRuntime[Number(tgtForRuntime.dataset.tabIndex)];
+              if (tabForPickerSelect) selectTabItem(tabForPickerSelect);
+              break;
+            }
             case 'toggle-pause-question': {
               const dataForPauseToggle = QUIZ_STORE_FOR_PANEL_RUNTIME[QS.activeQid];
               if (dataForPauseToggle && getQuizStatusForPanelRuntime(dataForPauseToggle) === 'paused') {

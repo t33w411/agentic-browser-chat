@@ -28,10 +28,15 @@
       contentNamespaceForFloatingPanel.ui && contentNamespaceForFloatingPanel.ui.panel
         ? contentNamespaceForFloatingPanel.ui.panel
         : null;
+    // isPanelOpen, not isVisible: with only the Quick Question overlay up the
+    // panel is not open, so the button must open it (over the overlay) rather
+    // than read "already open" and toggle to closed.
     const isOpenForFloatingPanel =
-      panelUiNamespaceForFloatingPanel && typeof panelUiNamespaceForFloatingPanel.isVisible === "function"
-        ? Boolean(panelUiNamespaceForFloatingPanel.isVisible())
-        : Boolean(contentNamespaceForFloatingPanel.state.isFloatingPanelOpenForFloatingPanel);
+      panelUiNamespaceForFloatingPanel && typeof panelUiNamespaceForFloatingPanel.isPanelOpen === "function"
+        ? Boolean(panelUiNamespaceForFloatingPanel.isPanelOpen())
+        : panelUiNamespaceForFloatingPanel && typeof panelUiNamespaceForFloatingPanel.isVisible === "function"
+          ? Boolean(panelUiNamespaceForFloatingPanel.isVisible())
+          : Boolean(contentNamespaceForFloatingPanel.state.isFloatingPanelOpenForFloatingPanel);
     setFloatingPanelOpenStateForFloatingPanel(!isOpenForFloatingPanel);
   }
 

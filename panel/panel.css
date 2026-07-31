@@ -2379,14 +2379,16 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 .stg-field-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .stg-field-head .stg-label { min-width: 0; }
 .stg-field-footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 2px; }
-.stg-field-counter { font-size: 12px; color: var(--abchat-text-muted); margin-right: auto; font-variant-numeric: tabular-nums; }
+.stg-field-counter { font-size: 12px; color: var(--abchat-text-muted); margin-right: auto; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .stg-field-counter.stg-field-counter-near { color: var(--abchat-warning, #b7791f); }
 .stg-field-counter.stg-field-counter-full { color: var(--abchat-danger, #c0392b); font-weight: 500; }
 .stg-field-saved-msg { font-size: 12px; color: var(--abchat-text-muted); transition: opacity 0.3s; }
 .stg-field-saved-msg.stg-field-conflict-msg { color: var(--abchat-danger, #c0392b); font-weight: 500; }
-/* Disabled fields stay editable: the toggle controls whether the text is sent, not whether it can be written. */
+/* A field toggled off is locked, not erased: dimmed, readOnly, and its Save button disabled. */
 .stg-row-profile-disabled .stg-textarea,
 .stg-row-profile-disabled .stg-field-footer { opacity: 0.55; }
+.stg-row-profile-disabled .stg-textarea { cursor: not-allowed; }
+.stg-field-footer .btn-primary:disabled { cursor: not-allowed; pointer-events: none; }
 
 /* Reduced mode: stack label + control vertically so neither squishes the other */
 .panel-host.mode-reduced .stg-row {
@@ -2399,10 +2401,17 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
   width: 100%;
   min-width: unset;
 }
-/* Toggle rows stay horizontal — the switch is small and fits fine */
-.panel-host.mode-reduced .stg-row:has(.ts) {
+/* Toggle rows stay horizontal — the switch is small and fits fine.
+   Excludes .stg-row-col: those carry a toggle inside .stg-field-head but are
+   stacked head/textarea/footer by design, and must not be pulled back to a row. */
+.panel-host.mode-reduced .stg-row:has(.ts):not(.stg-row-col) {
   flex-direction: row;
   align-items: center;
+}
+/* Beats the flex-start above so head and footer span the full width,
+   keeping the toggle and Save button on the right edge */
+.panel-host.mode-reduced .stg-row.stg-row-col {
+  align-items: stretch;
 }
 
 /* ============================================================
@@ -3187,7 +3196,12 @@ mjx-container svg { overflow: visible; max-width: 6px; min-height: 17px; }
 .pk-item-title { font-size: 14px; font-weight: 500; color: #0f172a; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #picker-overlay[data-theme="dark"] .pk-item-title { color: #f1f5f9; }
 .pk-item-excerpt { font-size: 12px; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.pk-item-tags { display: flex; gap: 4px; margin-top: 3px; flex-wrap: wrap; }
+.pk-item-meta { display: flex; align-items: center; gap: 4px; margin-top: 3px; flex-wrap: wrap; }
+.pk-item-attach {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 11px; color: var(--abchat-text-muted);
+}
+.pk-item-attach svg { display: block; }
 .pk-tag { background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 4px; padding: 1px 5px; font-size: 11px; color: #64748b; }
 #picker-overlay[data-theme="dark"] .pk-tag { background: #2d3f56; border-color: #3d5068; color: #94a3b8; }
 .pk-item--inaccessible { opacity: 0.55; cursor: not-allowed; }

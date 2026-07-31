@@ -421,7 +421,7 @@
 
       function restorePanelForCapture() {
         if (!isVisibleForCapture) return;
-        if (canToggleForCapture) { try { panelControllerForCapture.setVisible(true); } catch (eRestoreForCapture) {} }
+        if (canToggleForCapture) { try { panelControllerForCapture.setVisible(true, { skipSync: true, transient: true }); } catch (eRestoreForCapture) {} }
         else if (shadowHostForCapture) { shadowHostForCapture.style.display = 'block'; }
       }
       function doCaptureForCapture() {
@@ -440,7 +440,7 @@
       }
 
       if (isVisibleForCapture) {
-        if (canToggleForCapture) { try { panelControllerForCapture.setVisible(false); } catch (eHideForCapture) {} }
+        if (canToggleForCapture) { try { panelControllerForCapture.setVisible(false, { skipSync: true, transient: true }); } catch (eHideForCapture) {} }
         else if (shadowHostForCapture) { shadowHostForCapture.style.display = 'none'; }
         // Let the hide paint before capturing.
         requestAnimationFrame(function () { requestAnimationFrame(function () { setTimeout(doCaptureForCapture, 80); }); });
@@ -617,11 +617,20 @@
       } else {
         var panelUiForPanelCommand = contentNamespaceForContentMain.ui && contentNamespaceForContentMain.ui.panel;
         if (panelUiForPanelCommand) {
-          if (requestedVisibleForPanelCommand && typeof panelUiForPanelCommand.ensureReady === 'function') {
-            panelUiForPanelCommand.ensureReady();
-          }
-          if (typeof panelUiForPanelCommand.setVisible === 'function') {
-            panelUiForPanelCommand.setVisible(requestedVisibleForPanelCommand);
+          // A close targets the panel proper. With only the Quick Question
+          // overlay up the panel is already closed, so honouring the close
+          // here would hide the overlay instead of a panel.
+          var isPanelOpenForPanelCommand =
+            typeof panelUiForPanelCommand.isPanelOpen === 'function'
+              ? Boolean(panelUiForPanelCommand.isPanelOpen())
+              : true;
+          if (requestedVisibleForPanelCommand || isPanelOpenForPanelCommand) {
+            if (requestedVisibleForPanelCommand && typeof panelUiForPanelCommand.ensureReady === 'function') {
+              panelUiForPanelCommand.ensureReady();
+            }
+            if (typeof panelUiForPanelCommand.setVisible === 'function') {
+              panelUiForPanelCommand.setVisible(requestedVisibleForPanelCommand);
+            }
           }
         }
       }

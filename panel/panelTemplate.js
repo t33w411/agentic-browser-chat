@@ -517,7 +517,7 @@
               <div class="stg-field-footer">
                 <span class="stg-field-counter" id="about-user-counter"></span>
                 <span class="stg-field-saved-msg" id="about-user-saved-msg"></span>
-                <button class="btn-primary btn-sm" data-action="save-about-user-btn">Save</button>
+                <button class="btn-primary btn-sm" id="about-user-save-btn" data-action="save-about-user-btn">Save</button>
               </div>
             </div>
             <div class="stg-row stg-row-col">
@@ -532,7 +532,7 @@
               <div class="stg-field-footer">
                 <span class="stg-field-counter" id="agent-rules-counter"></span>
                 <span class="stg-field-saved-msg" id="agent-rules-saved-msg"></span>
-                <button class="btn-primary btn-sm" data-action="save-agent-rules-btn">Save</button>
+                <button class="btn-primary btn-sm" id="agent-rules-save-btn" data-action="save-agent-rules-btn">Save</button>
               </div>
             </div>
             <div class="stg-row stg-agent-manage-row">

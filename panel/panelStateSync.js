@@ -348,6 +348,24 @@
       : null;
   }
 
+  // "Is the panel proper open here?" Never the raw shadow-host display check:
+  // the Quick Question overlay displays the host with #panel-host hidden, which
+  // is not the panel being open. Reading the raw check made every close verdict
+  // (init apply, reconcile pull, SW push) resolve "visible but should not be"
+  // against that overlay and hide it, leaving its queued open to fire on the
+  // next real panel open.
+  function isPanelOpenForPanelStateSync() {
+    const panelUiForIsOpen = getPanelUiNamespaceForPanelStateSync();
+    if (!panelUiForIsOpen) return false;
+    if (typeof panelUiForIsOpen.isPanelOpen === "function") {
+      return Boolean(panelUiForIsOpen.isPanelOpen());
+    }
+    if (typeof panelUiForIsOpen.isVisible === "function") {
+      return Boolean(panelUiForIsOpen.isVisible());
+    }
+    return false;
+  }
+
   function getPanelRuntimeNamespaceForPanelStateSync() {
     return contentNamespaceForPanelStateSync.ui && contentNamespaceForPanelStateSync.ui.panelRuntime
       ? contentNamespaceForPanelStateSync.ui.panelRuntime
@@ -379,10 +397,7 @@
 
       // 1. Visibility (toggle the shadow host)
       if (hasField("isOpen") && typeof stateForPanelStateSync.isOpen === "boolean" && panelUiForPanelStateSync) {
-        const isCurrentlyVisibleForPanelStateSync =
-          typeof panelUiForPanelStateSync.isVisible === "function"
-            ? Boolean(panelUiForPanelStateSync.isVisible())
-            : false;
+        const isCurrentlyVisibleForPanelStateSync = isPanelOpenForPanelStateSync();
         if (stateForPanelStateSync.isOpen !== isCurrentlyVisibleForPanelStateSync) {
           if (stateForPanelStateSync.isOpen) {
             // Never unhide the panel in a hidden tab: a background tab only
@@ -571,8 +586,7 @@
     if (isStaleForPanelStateSync()) return;
     const panelUiForApply = getPanelUiNamespaceForPanelStateSync();
     if (!panelUiForApply) return;
-    const isVisibleForApply =
-      typeof panelUiForApply.isVisible === "function" ? Boolean(panelUiForApply.isVisible()) : false;
+    const isVisibleForApply = isPanelOpenForPanelStateSync();
     if (Boolean(shouldBeOpenForApply) === isVisibleForApply) return;
     if (!shouldBeOpenForApply && isVisibleForApply && shouldDeferSuspectCloseForPanelStateSync()) {
       scheduleReconcileForPanelStateSync();
@@ -589,11 +603,7 @@
   function applyVisibilityCommandForPanelStateSync(isOpenForCommand) {
     if (isStaleForPanelStateSync()) return;
     if (!isOpenForCommand) {
-      const panelUiForCommand = getPanelUiNamespaceForPanelStateSync();
-      const isVisibleForCommand =
-        panelUiForCommand && typeof panelUiForCommand.isVisible === "function"
-          ? Boolean(panelUiForCommand.isVisible())
-          : false;
+      const isVisibleForCommand = isPanelOpenForPanelStateSync();
       if (isVisibleForCommand && shouldDeferSuspectCloseForPanelStateSync()) {
         scheduleReconcileForPanelStateSync();
         return;
@@ -685,11 +695,7 @@
     lastActivationShowAtMsForPanelStateSync = Date.now();
     const panelUiForOptimisticShow = getPanelUiNamespaceForPanelStateSync();
     if (!panelUiForOptimisticShow) return;
-    const isVisibleForOptimisticShow =
-      typeof panelUiForOptimisticShow.isVisible === "function"
-        ? Boolean(panelUiForOptimisticShow.isVisible())
-        : false;
-    if (isVisibleForOptimisticShow) return;
+    if (isPanelOpenForPanelStateSync()) return;
     applyStateForPanelStateSync({ isOpen: true }, new Set(["isOpen"]));
   }
 

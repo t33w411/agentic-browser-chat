@@ -702,9 +702,11 @@
     var floatingPanelForContentSelector = ns.ui && ns.ui.floatingPanel ? ns.ui.floatingPanel : null;
     var panelUiForContentSelector = ns.ui && ns.ui.panel ? ns.ui.panel : null;
     var isPanelVisibleForContentSelector =
-      panelUiForContentSelector && typeof panelUiForContentSelector.isVisible === "function"
-        ? Boolean(panelUiForContentSelector.isVisible())
-        : false;
+      panelUiForContentSelector && typeof panelUiForContentSelector.isPanelOpen === "function"
+        ? Boolean(panelUiForContentSelector.isPanelOpen())
+        : panelUiForContentSelector && typeof panelUiForContentSelector.isVisible === "function"
+          ? Boolean(panelUiForContentSelector.isVisible())
+          : false;
     if (!isPanelVisibleForContentSelector && floatingPanelForContentSelector && typeof floatingPanelForContentSelector.open === "function") {
       floatingPanelForContentSelector.open();
     }

@@ -15,6 +15,11 @@
   let panelCssReadyForPanelBoot = false;
   let panelStateReadyForPanelBoot = false;
   let showPendingForPanelBoot = false;
+  // Overlay-only shows track their own pending flag. showPending means "a real
+  // panel open is queued behind the gates" and is cleared by any hide; sharing
+  // it meant a transient hide (screenshot capture) silently dropped a queued
+  // Quick Question show and left its callbacks to fire on the next real open.
+  let overlayOnlyShowPendingForPanelBoot = false;
   let pendingVisibleCallbacksForPanelBoot = [];
   // Anchor stash: anchor needs offsetWidth/Height which require display:block,
   // so we hold the stored anchor here and apply it inside the show flip.
@@ -191,9 +196,10 @@
   }
 
   function maybeShowVisibleForPanelBoot() {
-    if (!showPendingForPanelBoot) return;
+    if (!showPendingForPanelBoot && !overlayOnlyShowPendingForPanelBoot) return;
     if (!panelCssReadyForPanelBoot || !panelStateReadyForPanelBoot) return;
     showPendingForPanelBoot = false;
+    overlayOnlyShowPendingForPanelBoot = false;
     const shadowHostForPanelBoot = document.getElementById('abchat-panel-shadow-host');
     if (!shadowHostForPanelBoot) return;
     shadowHostForPanelBoot.style.display = 'block';
@@ -433,11 +439,36 @@
     }
   }
 
+  // Overlay-only mode displays the shadow host with #panel-host hidden, so the
+  // Quick Question overlay can appear without the panel proper being open. Any
+  // non-transient visibility change owns the host again and takes the mode
+  // down: #panel-host is restored so an open shows the full panel, with the
+  // overlay still above it (#inline-overlay outranks #panel-host on z-index).
+  function exitOverlayOnlyModeForPanelBoot() {
+    if (!inOverlayOnlyModeForPanelBoot) return;
+    inOverlayOnlyModeForPanelBoot = false;
+    overlayOnlyShowPendingForPanelBoot = false;
+    const shadowHostForExitForPanelBoot = document.getElementById('abchat-panel-shadow-host');
+    if (!shadowHostForExitForPanelBoot) return;
+    const shadowRootForExitForPanelBoot = shadowHostForExitForPanelBoot.shadowRoot;
+    if (!shadowRootForExitForPanelBoot) return;
+    const panelHostForExitForPanelBoot = shadowRootForExitForPanelBoot.getElementById('panel-host');
+    if (panelHostForExitForPanelBoot) panelHostForExitForPanelBoot.style.display = '';
+  }
+
+  // transient: a temporary local hide/restore that does not express panel
+  // open/closed intent (the pre-screenshot hide). It leaves overlay-only mode
+  // standing, so a capture taken while a Quick Question is up restores to the
+  // overlay rather than to the full panel.
   function setPanelVisibleForPanelBoot(isVisibleForPanelBoot, optionsForPanelBoot) {
     const skipSyncForPanelBoot = Boolean(optionsForPanelBoot && optionsForPanelBoot.skipSync);
+    const isTransientForPanelBoot = Boolean(optionsForPanelBoot && optionsForPanelBoot.transient);
     const shadowHostForPanelBoot = document.getElementById('abchat-panel-shadow-host');
     if (!shadowHostForPanelBoot) {
       return;
+    }
+    if (!isTransientForPanelBoot) {
+      exitOverlayOnlyModeForPanelBoot();
     }
     // If showing and either readiness gate is not yet open (CSS not loaded
     // or pre-paint state not yet applied), queue the show until both are.
@@ -500,13 +531,17 @@
     if (shadowHostForInlineOnlyForPanelBoot.style.display !== 'none' && !inOverlayOnlyModeForPanelBoot) return;
     inOverlayOnlyModeForPanelBoot = true;
     function hidePanelHostNodeForPanelBoot() {
+      // The mode can be exited while this callback waits in the queue (a real
+      // open landed first). Hiding #panel-host then would blank the panel the
+      // user just opened.
+      if (!inOverlayOnlyModeForPanelBoot) return;
       const srForHideForPanelBoot = shadowHostForInlineOnlyForPanelBoot.shadowRoot;
       if (!srForHideForPanelBoot) return;
       const panelHostForHideForPanelBoot = srForHideForPanelBoot.getElementById('panel-host');
       if (panelHostForHideForPanelBoot) panelHostForHideForPanelBoot.style.display = 'none';
     }
     if (!panelCssReadyForPanelBoot || !panelStateReadyForPanelBoot) {
-      showPendingForPanelBoot = true;
+      overlayOnlyShowPendingForPanelBoot = true;
       pendingVisibleCallbacksForPanelBoot.push(hidePanelHostNodeForPanelBoot);
       return;
     }
@@ -515,16 +550,14 @@
     hidePanelHostNodeForPanelBoot();
   }
 
+  // Early return when the mode is already down: the panel was opened over the
+  // overlay, so it owns the host now and closing the Quick Question must leave
+  // it standing rather than hide the panel the user is using.
   function restoreAfterInlineChatOnlyForPanelBoot() {
     if (!inOverlayOnlyModeForPanelBoot) return;
-    inOverlayOnlyModeForPanelBoot = false;
+    exitOverlayOnlyModeForPanelBoot();
     const shadowHostForRestoreForPanelBoot = document.getElementById('abchat-panel-shadow-host');
     if (!shadowHostForRestoreForPanelBoot) return;
-    const srForRestoreForPanelBoot = shadowHostForRestoreForPanelBoot.shadowRoot;
-    if (srForRestoreForPanelBoot) {
-      const panelHostForRestoreForPanelBoot = srForRestoreForPanelBoot.getElementById('panel-host');
-      if (panelHostForRestoreForPanelBoot) panelHostForRestoreForPanelBoot.style.display = '';
-    }
     shadowHostForRestoreForPanelBoot.style.display = 'none';
   }
 
@@ -533,7 +566,20 @@
     setVisible: setPanelVisibleForPanelBoot,
     showForInlineChatOnly: showForInlineChatOnlyForPanelBoot,
     restoreAfterInlineChatOnly: restoreAfterInlineChatOnlyForPanelBoot,
+    // Raw "is any panel UI on screen in this tab?". True in overlay-only mode.
+    // Use it for questions about the shadow host itself (can an overlay be
+    // shown right now, is there extension UI to hide before a screenshot).
     isVisible: function isVisibleForPanelBoot() {
+      const shadowHostForPanelBoot = document.getElementById('abchat-panel-shadow-host');
+      return Boolean(shadowHostForPanelBoot && shadowHostForPanelBoot.style.display !== 'none');
+    },
+    // "Is the panel proper open in this tab?". False in overlay-only mode, so
+    // it matches the shared isOpen intent the service worker arbitrates. Every
+    // visibility decision must use this one: deciding on isVisible made each
+    // close verdict resolve "showing but should not be" against a Quick
+    // Question overlay and tear it down.
+    isPanelOpen: function isPanelOpenForPanelBoot() {
+      if (inOverlayOnlyModeForPanelBoot) return false;
       const shadowHostForPanelBoot = document.getElementById('abchat-panel-shadow-host');
       return Boolean(shadowHostForPanelBoot && shadowHostForPanelBoot.style.display !== 'none');
     },
