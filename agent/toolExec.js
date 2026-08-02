@@ -8272,6 +8272,27 @@ self.onmessage = function (e) {
 
   // ---- Tool: web_fetch ----
 
+  // An image whose alt text is descriptive is content, not decoration, so its src is kept on the
+  // placeholder and the model can decide whether the image is worth showing in its reply. Icons,
+  // spacers and logos have short, empty or filename-shaped alt text and keep the bare placeholder.
+  //
+  // Two tiers, because the alt bar does two jobs at once: it bounds cost, and it makes sure the
+  // model can identify what it would be embedding. The second job largely takes care of itself on
+  // small payloads, where the surrounding markup is all in view and disambiguates a thin alt, so a
+  // lower bar is admitted there. Both tiers are capped in bytes; an unbounded tier is unbounded.
+  var STRICT_IMAGE_ALT_CHARS_FOR_TOOL_EXEC = 15;
+  var RELAXED_IMAGE_ALT_CHARS_FOR_TOOL_EXEC = 5;
+  var RELAXED_IMAGE_TIER_GATE_CHARS_FOR_TOOL_EXEC = 6000;
+  var RELAXED_IMAGE_TIER_BUDGET_CHARS_FOR_TOOL_EXEC = 1500;
+  var STRICT_IMAGE_TIER_BUDGET_CHARS_FOR_TOOL_EXEC = 8000;
+  var MAX_IMAGE_ALT_CHARS_FOR_TOOL_EXEC = 200;
+  var MAX_IMAGE_SRC_CHARS_FOR_TOOL_EXEC = 200;
+  // ' alt="" src=""' around the two values.
+  var IMAGE_ATTR_OVERHEAD_CHARS_FOR_TOOL_EXEC = 14;
+  // Marks a placeholder as carrying a resolved alt/src pair while the rest of the pipeline runs.
+  // Removed before the payload is measured, so it never reaches the output.
+  var IMAGE_CANDIDATE_ATTR_FOR_TOOL_EXEC = 'data-abchat-img-candidate';
+
   // Adapted from buildCleanHtmlPayloadForFlattenedContent in tools/flattenedContent.js.
   // Each inner function below has a counterpart in flattenedContent.js; keep them in sync.
   function flattenFetchedHtmlForToolExec(htmlStr, baseUrl) {
@@ -8482,6 +8503,47 @@ self.onmessage = function (e) {
       });
     }
 
+    // Sync with: getDescriptiveImageAltForFlattenedContent in tools/flattenedContent.js
+    function getDescriptiveImageAltForFetch(img) {
+      var rawAlt = img && img.getAttribute ? (img.getAttribute('alt') || '') : '';
+      // Angle brackets are not escaped inside serialized attribute values, so they would break the
+      // self-closing collapse below and leak a stray closing tag into the output.
+      var normalizedAlt = rawAlt.replace(/[<>]/g, '').replace(/\s+/g, ' ').trim();
+      // The relaxed floor gates candidacy; which tier a candidate lands in is decided later, once
+      // the payload size is known. An empty or near-empty alt never qualifies at any size: an image
+      // the model cannot identify is exactly the one it should not be embedding.
+      if (normalizedAlt.length < RELAXED_IMAGE_ALT_CHARS_FOR_TOOL_EXEC) return '';
+      if (/^\S+\.(?:jpe?g|png|gif|webp|svg|avif|bmp|ico)$/i.test(normalizedAlt)) return '';
+      return normalizedAlt.slice(0, MAX_IMAGE_ALT_CHARS_FOR_TOOL_EXEC);
+    }
+
+    // Sync with: getFirstSrcsetCandidateForFlattenedContent in tools/flattenedContent.js
+    function getFirstSrcsetCandidateForFetch(srcsetValue) {
+      if (!srcsetValue || typeof srcsetValue !== 'string') return '';
+      // Split on ", " rather than "," so commas inside a URL (Cloudinary-style transforms) survive,
+      // then take the URL token ahead of the width/density descriptor.
+      var firstCandidate = srcsetValue.split(/,\s+/)[0] || '';
+      return (firstCandidate.trim().split(/\s+/)[0] || '').trim();
+    }
+
+    // Sync with: getEmbeddableImageSrcForFlattenedContent in tools/flattenedContent.js
+    function getEmbeddableImageSrcForFetch(img) {
+      if (!img || !img.getAttribute || !baseUrl) return '';
+      var rawSrc = (img.getAttribute('src') || '').trim();
+      // Lazy loaders park a blur/spacer data URI in src and put the real image in srcset.
+      if (!rawSrc || rawSrc.indexOf('data:') === 0) {
+        rawSrc = getFirstSrcsetCandidateForFetch(img.getAttribute('srcset'));
+      }
+      if (!rawSrc) return '';
+      var parsedSrc;
+      try { parsedSrc = new URL(rawSrc, baseUrl); } catch (e) { return ''; }
+      if (parsedSrc.protocol !== 'http:' && parsedSrc.protocol !== 'https:') return '';
+      // Long URLs are almost always signed or tracking-laden; skipping them caps the per-image cost
+      // and keeps most credential-bearing URLs out of the prompt.
+      if (parsedSrc.href.length > MAX_IMAGE_SRC_CHARS_FOR_TOOL_EXEC) return '';
+      return parsedSrc.href;
+    }
+
     // Sync with: getImageTypeForFlattenedContent in tools/flattenedContent.js
     function getImageTypeForFetch(img) {
       var src = img && img.getAttribute ? (img.getAttribute('src') || '') : '';
@@ -8499,9 +8561,13 @@ self.onmessage = function (e) {
       return 'unknown';
     }
 
+    // Returns a Map of placeholder element to its resolved { alt, src }. Nothing is stamped here:
+    // the tier a candidate qualifies for depends on the size of the finished payload, which is not
+    // known until the rest of the pipeline has run.
     // Sync with: replaceImagesWithPlaceholderForFlattenedContent in tools/flattenedContent.js
     function replaceImagesForFetch(root) {
-      if (!root || !root.querySelectorAll || !doc || !doc.createElement) return;
+      var candidates = new Map();
+      if (!root || !root.querySelectorAll || !doc || !doc.createElement) return candidates;
       root.querySelectorAll('img').forEach(function (img) {
         if (!img || !img.replaceWith) return;
         var type = getImageTypeForFetch(img);
@@ -8510,6 +8576,15 @@ self.onmessage = function (e) {
           placeholder = doc.createElement('img_' + type);
         } catch (e) {
           placeholder = doc.createElement('img_unknown');
+        }
+        // alt and src travel together: the src is only actionable when the alt says what it depicts.
+        var alt = getDescriptiveImageAltForFetch(img);
+        if (alt) {
+          var embeddableSrc = getEmbeddableImageSrcForFetch(img);
+          if (embeddableSrc) {
+            placeholder.setAttribute(IMAGE_CANDIDATE_ATTR_FOR_TOOL_EXEC, '');
+            candidates.set(placeholder, { alt: alt, src: embeddableSrc });
+          }
         }
         img.replaceWith(placeholder);
       });
@@ -8523,6 +8598,63 @@ self.onmessage = function (e) {
         }
         svg.replaceWith(placeholder);
       });
+      return candidates;
+    }
+
+    // Stamps alt/src onto the surviving image placeholders, strict tier first, each tier bounded by
+    // its own byte budget. Order comes from the finished tree rather than from insertion order,
+    // because flattenNestedWrappers moves nodes when it unwraps a parent. Selection is deterministic
+    // for a given payload, which matters: the live-window collapse in contextBuilder only skips a
+    // repeated tool result when it is byte-identical to the previous one.
+    // Attribute values are entity-escaped on serialization, and image URLs are full of query-string
+    // ampersands, each of which serializes to five characters. Charging the raw length would let a
+    // tier overshoot its budget by thousands of characters on a URL-heavy page.
+    // Sync with: getSerializedAttrValueLengthForFlattenedContent in tools/flattenedContent.js
+    function getSerializedAttrValueLengthForFetch(value) {
+      return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').length;
+    }
+
+    // Sync with: applyImagePlaceholderAttributesForFlattenedContent in tools/flattenedContent.js
+    function applyImagePlaceholderAttributesForFetch(root, candidates) {
+      if (!root || !root.querySelectorAll) return;
+      var survivors = Array.from(root.querySelectorAll('[' + IMAGE_CANDIDATE_ATTR_FOR_TOOL_EXEC + ']'));
+      survivors.forEach(function (el) { el.removeAttribute(IMAGE_CANDIDATE_ATTR_FOR_TOOL_EXEC); });
+      if (!survivors.length) return;
+
+      var baseLength = serializeCleanRootForFetch(root).length;
+      var relaxedTierOpen = baseLength <= RELAXED_IMAGE_TIER_GATE_CHARS_FOR_TOOL_EXEC;
+      var strictSpent = 0;
+      var relaxedSpent = 0;
+
+      survivors.forEach(function (el) {
+        var candidate = candidates.get(el);
+        if (!candidate) return;
+        var cost = getSerializedAttrValueLengthForFetch(candidate.alt)
+          + getSerializedAttrValueLengthForFetch(candidate.src)
+          + IMAGE_ATTR_OVERHEAD_CHARS_FOR_TOOL_EXEC;
+        if (candidate.alt.length >= STRICT_IMAGE_ALT_CHARS_FOR_TOOL_EXEC) {
+          if (strictSpent + cost > STRICT_IMAGE_TIER_BUDGET_CHARS_FOR_TOOL_EXEC) return;
+          strictSpent += cost;
+        } else {
+          if (!relaxedTierOpen) return;
+          if (relaxedSpent + cost > RELAXED_IMAGE_TIER_BUDGET_CHARS_FOR_TOOL_EXEC) return;
+          relaxedSpent += cost;
+        }
+        el.setAttribute('alt', candidate.alt);
+        el.setAttribute('src', candidate.src);
+      });
+    }
+
+    // The single definition of the finished payload string, used both to measure the payload before
+    // image attributes are stamped and to produce the returned result.
+    // Sync with: serializeCleanRootForFlattenedContent in tools/flattenedContent.js
+    function serializeCleanRootForFetch(root) {
+      var rawHtml = root.innerHTML;
+      if (!rawHtml || typeof rawHtml !== 'string') return '';
+      // Image placeholders are unknown elements, so they serialize with a closing tag; collapse the
+      // empty pair to a single tag.
+      var collapsed = rawHtml.replace(/<(img_[a-z0-9]+)((?:\s[^>]*)?)><\/\1>/gi, '<$1$2>');
+      return stripInvisibleCharsForFetch(collapsed).replace(/\s+/g, ' ').trim();
     }
 
     // Sync with: stripAttributesForFlattenedContent in tools/flattenedContent.js
@@ -8545,7 +8677,11 @@ self.onmessage = function (e) {
       allNodes.forEach(function (node) {
         if (!node || !node.attributes) return;
         var tag = node.tagName ? node.tagName.toLowerCase() : '';
-        var allowed = allowedByTag[tag] || new Set();
+        // Image placeholders carry a generated tag name (img_jpg, img_png, ...), so they cannot be
+        // keyed in the table above; without this they would lose the alt/src just set on them.
+        var allowed = tag.indexOf('img_') === 0
+          ? new Set(['alt', 'src', IMAGE_CANDIDATE_ATTR_FOR_TOOL_EXEC])
+          : (allowedByTag[tag] || new Set());
         Array.from(node.attributes).forEach(function (attr) {
           var name = (attr.name || '').toLowerCase();
           if (name !== 'hidden' && !allowed.has(name)) node.removeAttribute(attr.name);
@@ -8690,16 +8826,18 @@ self.onmessage = function (e) {
     resolveRelativeUrlsForFetch(clonedForFetch);
     clonedForFetch = normalizeCustomElementsForFetch(clonedForFetch) || clonedForFetch;
     normalizeFormElementsForFetch(clonedForFetch);
-    replaceImagesForFetch(clonedForFetch);
+    var imageCandidatesForFetch = replaceImagesForFetch(clonedForFetch);
     stripAttributesForFetch(clonedForFetch);
     flattenNestedWrappersForFetch(clonedForFetch);
     truncateOverloadedChildrenForFetch(clonedForFetch);
     removeEmptyTagsForFetch(clonedForFetch);
 
-    var rawHtmlForFetch = clonedForFetch.innerHTML;
-    if (!rawHtmlForFetch || typeof rawHtmlForFetch !== 'string') return '';
+    if (imageCandidatesForFetch && imageCandidatesForFetch.size) {
+      applyImagePlaceholderAttributesForFetch(clonedForFetch, imageCandidatesForFetch);
+    }
 
-    var cleanedForFetch = stripInvisibleCharsForFetch(rawHtmlForFetch).replace(/\s+/g, ' ').trim();
+    var cleanedForFetch = serializeCleanRootForFetch(clonedForFetch);
+    if (!cleanedForFetch) return '';
     var formattedForFetch = formatFormElementsForFetch(cleanedForFetch);
 
     return 'Note: The following content is a flattened, simplified representation of the page DOM. It is not an exact copy of the source HTML.\n\n' +
