@@ -250,6 +250,133 @@
     });
   }
 
+  function getDocxFormatForFileParsing() {
+    return (globalScopeForFileParsing.ABChatAgent || {}).docxFormat || null;
+  }
+
+  // Read the source document's own formatting straight from the OOXML parts. mammoth is a
+  // semantic converter: it drops table borders entirely and reports a run's size only when
+  // that size is direct formatting, so the style cascade that most real documents rely on is
+  // invisible to it. Failure is non-fatal; the structural read falls back to plain mammoth.
+  function readDocxFormatProfileForFileParsing(arrayBufferForFileParsing) {
+    var docxFormatForFileParsing = getDocxFormatForFileParsing();
+    if (!docxFormatForFileParsing) return Promise.resolve(null);
+    try {
+      loadLibraryForFileParsing('lib/jszip.min.js', 'jszip');
+    } catch (loadErrForFileParsing) {
+      return Promise.resolve(null);
+    }
+    if (!globalScopeForFileParsing.JSZip || typeof globalScopeForFileParsing.JSZip.loadAsync !== 'function') {
+      return Promise.resolve(null);
+    }
+    return globalScopeForFileParsing.JSZip.loadAsync(arrayBufferForFileParsing).then(function (zipForFileParsing) {
+      function readZipPartForFileParsing(pathForFileParsing) {
+        var entryForFileParsing = zipForFileParsing.file(pathForFileParsing);
+        return entryForFileParsing ? entryForFileParsing.async('string') : Promise.resolve('');
+      }
+      return Promise.all([
+        readZipPartForFileParsing('word/document.xml'),
+        readZipPartForFileParsing('word/styles.xml'),
+        readZipPartForFileParsing('word/theme/theme1.xml')
+      ]).then(function (partsForFileParsing) {
+        return docxFormatForFileParsing.analyzeParts({
+          documentXml: partsForFileParsing[0],
+          stylesXml: partsForFileParsing[1],
+          themeXml: partsForFileParsing[2]
+        });
+      });
+    }).catch(function () {
+      return null;
+    });
+  }
+
+  // Stamp each run with a synthetic character style id naming its resolved (size, family).
+  // Runs that already carry a character style are left alone: their style id is what maps
+  // them to <strong>/<em> and overwriting it would silently drop that formatting.
+  function stampRunFormatsForFileParsing(documentNodeForFileParsing, profileForFileParsing, planForFileParsing) {
+    var docxFormatForFileParsing = getDocxFormatForFileParsing();
+    var styleFormatsForFileParsing = profileForFileParsing.styleFormats || {};
+    function normalizeFamilyForFileParsing(valueForFileParsing) {
+      if (docxFormatForFileParsing && typeof docxFormatForFileParsing.normalizeFontFamily === 'function') {
+        return docxFormatForFileParsing.normalizeFontFamily(valueForFileParsing);
+      }
+      return String(valueForFileParsing || '').trim();
+    }
+    function visitForFileParsing(nodeForFileParsing, paragraphStyleIdForFileParsing) {
+      if (!nodeForFileParsing || typeof nodeForFileParsing !== 'object') return;
+      var nextParagraphStyleIdForFileParsing = paragraphStyleIdForFileParsing;
+      if (nodeForFileParsing.type === 'paragraph') {
+        nextParagraphStyleIdForFileParsing = nodeForFileParsing.styleId || '';
+      }
+      if (nodeForFileParsing.type === 'run' && !nodeForFileParsing.styleId && !nodeForFileParsing.styleName) {
+        var paragraphFormatForFileParsing = nextParagraphStyleIdForFileParsing
+          ? styleFormatsForFileParsing[nextParagraphStyleIdForFileParsing]
+          : null;
+        var sizePtForFileParsing = Number(nodeForFileParsing.fontSize)
+          || (paragraphFormatForFileParsing && paragraphFormatForFileParsing.fontSizePt)
+          || profileForFileParsing.defaultFontSizePt
+          || 0;
+        var familyForFileParsing = normalizeFamilyForFileParsing(nodeForFileParsing.font)
+          || (paragraphFormatForFileParsing && paragraphFormatForFileParsing.fontFamily)
+          || profileForFileParsing.defaultFontFamily
+          || '';
+        var syntheticStyleIdForFileParsing = planForFileParsing.styleIdFor(sizePtForFileParsing, familyForFileParsing);
+        if (syntheticStyleIdForFileParsing) nodeForFileParsing.styleId = syntheticStyleIdForFileParsing;
+      }
+      var childrenForFileParsing = nodeForFileParsing.children;
+      if (!Array.isArray(childrenForFileParsing)) return;
+      for (var iForFileParsing = 0; iForFileParsing < childrenForFileParsing.length; iForFileParsing++) {
+        visitForFileParsing(childrenForFileParsing[iForFileParsing], nextParagraphStyleIdForFileParsing);
+      }
+    }
+    visitForFileParsing(documentNodeForFileParsing, '');
+  }
+
+  function escapeHtmlAttributeForFileParsing(valueForFileParsing) {
+    return String(valueForFileParsing == null ? '' : valueForFileParsing)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function annotateDocxStructureHtmlForFileParsing(htmlForFileParsing, profileForFileParsing, planForFileParsing) {
+    var docxFormatForFileParsing = getDocxFormatForFileParsing();
+    if (!docxFormatForFileParsing) return htmlForFileParsing;
+    var annotatedForFileParsing = String(htmlForFileParsing || '');
+
+    annotatedForFileParsing = annotatedForFileParsing.replace(/ class="abchat-fmt-(\d+)"/g, function (wholeForFileParsing, indexForFileParsing) {
+      var cssForFileParsing = planForFileParsing ? planForFileParsing.cssByClassIndex[Number(indexForFileParsing)] : '';
+      return cssForFileParsing ? ' style="' + escapeHtmlAttributeForFileParsing(cssForFileParsing) + '"' : '';
+    });
+
+    // mammoth emits one bare <table> per w:tbl in document order, which is the order the
+    // table formats were collected in. A count mismatch means the two sequences cannot be
+    // paired, so no table is annotated rather than annotating the wrong ones.
+    var tableFormatsForFileParsing = profileForFileParsing.tables || [];
+    var emittedTableCountForFileParsing = (annotatedForFileParsing.match(/<table>/g) || []).length;
+    if (tableFormatsForFileParsing.length === emittedTableCountForFileParsing && emittedTableCountForFileParsing > 0) {
+      var tableCursorForFileParsing = 0;
+      annotatedForFileParsing = annotatedForFileParsing.replace(/<table>/g, function () {
+        var tableFormatForFileParsing = tableFormatsForFileParsing[tableCursorForFileParsing];
+        tableCursorForFileParsing++;
+        if (!tableFormatForFileParsing) return '<table>';
+        if (!tableFormatForFileParsing.bordered) return '<table border="0">';
+        var borderCssForFileParsing = docxFormatForFileParsing.buildTableBorderCss(tableFormatForFileParsing);
+        return borderCssForFileParsing
+          ? '<table style="' + escapeHtmlAttributeForFileParsing(borderCssForFileParsing) + '">'
+          : '<table>';
+      });
+    }
+
+    var defaultsCssForFileParsing = docxFormatForFileParsing.buildDocumentDefaultsCss(profileForFileParsing);
+    if (defaultsCssForFileParsing) {
+      annotatedForFileParsing = '<div data-doc-defaults="' + escapeHtmlAttributeForFileParsing(defaultsCssForFileParsing) + '"></div>'
+        + annotatedForFileParsing;
+    }
+    return annotatedForFileParsing;
+  }
+
   function parseDocxStructureForFileParsing(arrayBufferForFileParsing, blobIdForFileParsing) {
     loadLibraryForFileParsing('lib/mammoth.min.js', 'mammoth');
     if (!globalScopeForFileParsing.mammoth || typeof globalScopeForFileParsing.mammoth.convertToHtml !== 'function') {
@@ -271,20 +398,44 @@
         return { src: srcForFileParsing };
       });
     }
-    return globalScopeForFileParsing.mammoth
-      .convertToHtml({ arrayBuffer: arrayBufferForFileParsing }, optionsForDocxStructure)
-      .then(function (resultForFileParsing) {
-        var htmlForFileParsing = String((resultForFileParsing && resultForFileParsing.value) || '')
-          .replace(/<img\b(?![^>]*\babchat-img:)[^>]*>/gi, '');
-        var truncatedForFileParsing = false;
-        // read_document_structure hands this HTML straight to the model, so it is bounded by the
-        // inline budget rather than the (much larger) storage one.
-        if (htmlForFileParsing.length > MAX_INLINE_TEXT_CHARS_FOR_FILE_PARSING) {
-          htmlForFileParsing = htmlForFileParsing.slice(0, MAX_INLINE_TEXT_CHARS_FOR_FILE_PARSING);
-          truncatedForFileParsing = true;
-        }
-        return { html: htmlForFileParsing, truncated: truncatedForFileParsing };
-      });
+    return readDocxFormatProfileForFileParsing(arrayBufferForFileParsing).then(function (profileForFileParsing) {
+      var docxFormatForFileParsing = getDocxFormatForFileParsing();
+      var planForFileParsing = (profileForFileParsing && docxFormatForFileParsing)
+        ? docxFormatForFileParsing.buildFormatClassPlan(profileForFileParsing)
+        : null;
+      if (planForFileParsing && planForFileParsing.styleMap.length) {
+        optionsForDocxStructure.styleMap = planForFileParsing.styleMap;
+        optionsForDocxStructure.transformDocument = function (documentForDocxStructure) {
+          try {
+            stampRunFormatsForFileParsing(documentForDocxStructure, profileForFileParsing, planForFileParsing);
+          } catch (stampErrForFileParsing) {
+            // An unstamped document still converts; it just carries no size annotations.
+          }
+          return documentForDocxStructure;
+        };
+      }
+      return globalScopeForFileParsing.mammoth
+        .convertToHtml({ arrayBuffer: arrayBufferForFileParsing }, optionsForDocxStructure)
+        .then(function (resultForFileParsing) {
+          var htmlForFileParsing = String((resultForFileParsing && resultForFileParsing.value) || '')
+            .replace(/<img\b(?![^>]*\babchat-img:)[^>]*>/gi, '');
+          if (profileForFileParsing) {
+            try {
+              htmlForFileParsing = annotateDocxStructureHtmlForFileParsing(htmlForFileParsing, profileForFileParsing, planForFileParsing);
+            } catch (annotateErrForFileParsing) {
+              // Keep the unannotated HTML rather than failing the whole structural read.
+            }
+          }
+          var truncatedForFileParsing = false;
+          // read_document_structure hands this HTML straight to the model, so it is bounded by the
+          // inline budget rather than the (much larger) storage one.
+          if (htmlForFileParsing.length > MAX_INLINE_TEXT_CHARS_FOR_FILE_PARSING) {
+            htmlForFileParsing = htmlForFileParsing.slice(0, MAX_INLINE_TEXT_CHARS_FOR_FILE_PARSING);
+            truncatedForFileParsing = true;
+          }
+          return { html: htmlForFileParsing, truncated: truncatedForFileParsing };
+        });
+    });
   }
 
   // Re-extract every embedded image from a DOCX in mammoth's image-walk order, the same

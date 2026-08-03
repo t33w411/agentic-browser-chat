@@ -36,6 +36,27 @@
     main: true, figure: true, figcaption: true, blockquote: true, pre: true, address: true,
     li: true, dd: true, dt: true, h1: true, h2: true, h3: true, h4: true, h5: true, h6: true
   };
+  var MIN_FONT_SIZE_PT_FOR_DOCUMENT_GENERATION = 1;
+  var MAX_FONT_SIZE_PT_FOR_DOCUMENT_GENERATION = 400;
+  var MAX_BORDER_WIDTH_PT_FOR_DOCUMENT_GENERATION = 12;
+  var TABLE_BORDER_EDGES_FOR_DOCUMENT_GENERATION = ['top', 'left', 'bottom', 'right', 'insideH', 'insideV'];
+  var DEFAULT_TABLE_BORDER_FOR_DOCUMENT_GENERATION = { widthPt: 0.5, color: 'D9D9D9' };
+  var DEFAULT_PAGE_WIDTH_PT_FOR_DOCUMENT_GENERATION = 612;   // US Letter, the long-standing default
+  var DEFAULT_PAGE_HEIGHT_PT_FOR_DOCUMENT_GENERATION = 792;
+  var DEFAULT_DOCX_MARGIN_PT_FOR_DOCUMENT_GENERATION = 72;
+  var DEFAULT_PDF_MARGIN_PT_FOR_DOCUMENT_GENERATION = 54;
+  var DEFAULT_PDF_BODY_SIZE_PT_FOR_DOCUMENT_GENERATION = 11;
+  var CSS_NAMED_COLORS_FOR_DOCUMENT_GENERATION = {
+    black: '000000', white: 'FFFFFF', gray: '808080', grey: '808080', silver: 'C0C0C0',
+    red: 'FF0000', green: '008000', blue: '0000FF', yellow: 'FFFF00', navy: '000080',
+    maroon: '800000', olive: '808000', teal: '008080', purple: '800080', lime: '00FF00',
+    aqua: '00FFFF', fuchsia: 'FF00FF'
+  };
+  // Word maps a font to one of three PDF base-14 families; anything unrecognized keeps the
+  // sans default. Matching the exact face is impossible without embedding it, so the goal is
+  // only to land in the right family so the regenerated page reads like the original.
+  var PDF_SERIF_FAMILY_HINTS_FOR_DOCUMENT_GENERATION = /times|georgia|garamond|cambria|book|serif|palatino|minion|constantia|baskerville/i;
+  var PDF_MONO_FAMILY_HINTS_FOR_DOCUMENT_GENERATION = /courier|consolas|mono|menlo|monaco|inconsolata/i;
 
   function escapeXmlForDocumentGeneration(valueForDocumentGeneration) {
     return String(valueForDocumentGeneration == null ? '' : valueForDocumentGeneration)
@@ -44,6 +65,178 @@
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&apos;');
+  }
+
+  // read_document_structure reports a source document's resolved formatting as CSS on the
+  // elements it produces, so create_document reads the same CSS back. Only the properties
+  // below are honored; everything else in a style attribute is ignored.
+  function parseInlineStyleForDocumentGeneration(styleTextForDocumentGeneration) {
+    var declarationsForStyle = {};
+    String(styleTextForDocumentGeneration || '').split(';').forEach(function (pieceForStyle) {
+      var separatorIndexForStyle = pieceForStyle.indexOf(':');
+      if (separatorIndexForStyle < 0) return;
+      var propertyForStyle = pieceForStyle.slice(0, separatorIndexForStyle).trim().toLowerCase();
+      var valueForStyle = pieceForStyle.slice(separatorIndexForStyle + 1).trim();
+      if (propertyForStyle && valueForStyle) declarationsForStyle[propertyForStyle] = valueForStyle;
+    });
+    return declarationsForStyle;
+  }
+
+  function elementStyleForDocumentGeneration(elementForDocumentGeneration) {
+    if (!elementForDocumentGeneration || typeof elementForDocumentGeneration.getAttribute !== 'function') return {};
+    return parseInlineStyleForDocumentGeneration(elementForDocumentGeneration.getAttribute('style'));
+  }
+
+  function parseLengthPtForDocumentGeneration(valueForDocumentGeneration) {
+    var rawForLength = String(valueForDocumentGeneration == null ? '' : valueForDocumentGeneration).trim().toLowerCase();
+    var matchForLength = rawForLength.match(/^(-?\d*\.?\d+)\s*(pt|px|in|cm|mm|pc|em|rem)?$/);
+    if (!matchForLength) return 0;
+    var amountForLength = parseFloat(matchForLength[1]);
+    if (!Number.isFinite(amountForLength)) return 0;
+    var unitForLength = matchForLength[2] || 'pt';
+    var factorForLength = 1;
+    if (unitForLength === 'px') factorForLength = 0.75;
+    else if (unitForLength === 'in') factorForLength = 72;
+    else if (unitForLength === 'cm') factorForLength = 28.3465;
+    else if (unitForLength === 'mm') factorForLength = 2.83465;
+    else if (unitForLength === 'pc') factorForLength = 12;
+    else if (unitForLength === 'em' || unitForLength === 'rem') factorForLength = 12;
+    return Math.round(amountForLength * factorForLength * 10) / 10;
+  }
+
+  function parseFontSizePtForDocumentGeneration(valueForDocumentGeneration) {
+    var sizeForFont = parseLengthPtForDocumentGeneration(valueForDocumentGeneration);
+    if (sizeForFont < MIN_FONT_SIZE_PT_FOR_DOCUMENT_GENERATION || sizeForFont > MAX_FONT_SIZE_PT_FOR_DOCUMENT_GENERATION) return 0;
+    return sizeForFont;
+  }
+
+  function parseFontFamilyForDocumentGeneration(valueForDocumentGeneration) {
+    var firstFamilyForFont = String(valueForDocumentGeneration == null ? '' : valueForDocumentGeneration).split(',')[0];
+    return firstFamilyForFont.replace(/["'<>;]/g, '').trim().slice(0, 64);
+  }
+
+  function parseCssColorForDocumentGeneration(valueForDocumentGeneration) {
+    var rawForColor = String(valueForDocumentGeneration || '').trim().toLowerCase();
+    if (!rawForColor) return '';
+    if (/^#[0-9a-f]{6}$/.test(rawForColor)) return rawForColor.slice(1).toUpperCase();
+    if (/^#[0-9a-f]{3}$/.test(rawForColor)) {
+      return (rawForColor.charAt(1) + rawForColor.charAt(1)
+        + rawForColor.charAt(2) + rawForColor.charAt(2)
+        + rawForColor.charAt(3) + rawForColor.charAt(3)).toUpperCase();
+    }
+    if (/^[0-9a-f]{6}$/.test(rawForColor)) return rawForColor.toUpperCase();
+    return CSS_NAMED_COLORS_FOR_DOCUMENT_GENERATION[rawForColor] || '';
+  }
+
+  // Returns null for an explicitly absent border ("none"), and an edge object otherwise.
+  function parseBorderValueForDocumentGeneration(valueForDocumentGeneration) {
+    var rawForBorder = String(valueForDocumentGeneration || '').trim();
+    if (!rawForBorder) return null;
+    var tokensForBorder = rawForBorder.split(/\s+/);
+    var widthPtForBorder = 0;
+    var colorForBorder = '';
+    var explicitlyNoneForBorder = false;
+    var sawStyleForBorder = false;
+    tokensForBorder.forEach(function (tokenForBorder) {
+      var lowerTokenForBorder = tokenForBorder.toLowerCase();
+      if (lowerTokenForBorder === 'none' || lowerTokenForBorder === 'hidden') { explicitlyNoneForBorder = true; return; }
+      if (lowerTokenForBorder === 'thin') { widthPtForBorder = widthPtForBorder || 0.5; sawStyleForBorder = true; return; }
+      if (lowerTokenForBorder === 'medium') { widthPtForBorder = widthPtForBorder || 1; sawStyleForBorder = true; return; }
+      if (lowerTokenForBorder === 'thick') { widthPtForBorder = widthPtForBorder || 2; sawStyleForBorder = true; return; }
+      if (/^(solid|dashed|dotted|double|groove|ridge|inset|outset)$/.test(lowerTokenForBorder)) { sawStyleForBorder = true; return; }
+      var lengthForBorder = parseLengthPtForDocumentGeneration(lowerTokenForBorder);
+      if (lengthForBorder > 0) { widthPtForBorder = lengthForBorder; return; }
+      if (lengthForBorder === 0 && /^0(\.0+)?\s*(pt|px|in|cm|mm|pc)?$/.test(lowerTokenForBorder)) { explicitlyNoneForBorder = true; return; }
+      var parsedColorForBorder = parseCssColorForDocumentGeneration(tokenForBorder);
+      if (parsedColorForBorder) colorForBorder = parsedColorForBorder;
+    });
+    if (explicitlyNoneForBorder && !widthPtForBorder) return null;
+    if (!widthPtForBorder && !sawStyleForBorder && !colorForBorder) return null;
+    return {
+      widthPt: Math.min(MAX_BORDER_WIDTH_PT_FOR_DOCUMENT_GENERATION, widthPtForBorder || 0.5),
+      color: colorForBorder || '000000'
+    };
+  }
+
+  // The `border` shorthand on a table sets all six Word edges (frame plus interior grid),
+  // because that is what the structural read emits when the source table's six edges agree.
+  // Per-side properties then override the frame, and the two custom properties override the
+  // interior lines, which standard CSS has no way to address on the table element itself.
+  function tableBorderSpecFromStyleForDocumentGeneration(declarationsForDocumentGeneration) {
+    var hasAnyBorderPropertyForSpec = false;
+    var edgesForSpec = {};
+    TABLE_BORDER_EDGES_FOR_DOCUMENT_GENERATION.forEach(function (edgeNameForSpec) {
+      edgesForSpec[edgeNameForSpec] = null;
+    });
+    if (Object.prototype.hasOwnProperty.call(declarationsForDocumentGeneration, 'border')) {
+      hasAnyBorderPropertyForSpec = true;
+      var shorthandEdgeForSpec = parseBorderValueForDocumentGeneration(declarationsForDocumentGeneration.border);
+      TABLE_BORDER_EDGES_FOR_DOCUMENT_GENERATION.forEach(function (edgeNameForSpec) {
+        edgesForSpec[edgeNameForSpec] = shorthandEdgeForSpec;
+      });
+    }
+    [['border-top', 'top'], ['border-right', 'right'], ['border-bottom', 'bottom'], ['border-left', 'left'],
+     ['--border-inside-h', 'insideH'], ['--border-inside-v', 'insideV']].forEach(function (pairForSpec) {
+      if (!Object.prototype.hasOwnProperty.call(declarationsForDocumentGeneration, pairForSpec[0])) return;
+      hasAnyBorderPropertyForSpec = true;
+      edgesForSpec[pairForSpec[1]] = parseBorderValueForDocumentGeneration(declarationsForDocumentGeneration[pairForSpec[0]]);
+    });
+    if (!hasAnyBorderPropertyForSpec) return undefined;
+    var anyEdgeForSpec = TABLE_BORDER_EDGES_FOR_DOCUMENT_GENERATION.some(function (edgeNameForSpec) {
+      return !!edgesForSpec[edgeNameForSpec];
+    });
+    return anyEdgeForSpec ? edgesForSpec : null;
+  }
+
+  function uniformTableBorderSpecForDocumentGeneration(edgeForDocumentGeneration) {
+    var edgesForUniform = {};
+    TABLE_BORDER_EDGES_FOR_DOCUMENT_GENERATION.forEach(function (edgeNameForUniform) {
+      edgesForUniform[edgeNameForUniform] = edgeForDocumentGeneration;
+    });
+    return edgesForUniform;
+  }
+
+  function normalizeDocumentDefaultsForDocumentGeneration(rawDefaultsForDocumentGeneration) {
+    var declarationsForDefaults = rawDefaultsForDocumentGeneration || {};
+    var pageWidthPtForDefaults = parseLengthPtForDocumentGeneration(declarationsForDefaults['page-width']);
+    var pageHeightPtForDefaults = parseLengthPtForDocumentGeneration(declarationsForDefaults['page-height']);
+    var marginsForDefaults = null;
+    if (declarationsForDefaults.margin) {
+      var marginPartsForDefaults = String(declarationsForDefaults.margin).trim().split(/\s+/).map(parseLengthPtForDocumentGeneration);
+      if (marginPartsForDefaults.length === 1) {
+        marginsForDefaults = { top: marginPartsForDefaults[0], right: marginPartsForDefaults[0], bottom: marginPartsForDefaults[0], left: marginPartsForDefaults[0] };
+      } else if (marginPartsForDefaults.length === 2) {
+        marginsForDefaults = { top: marginPartsForDefaults[0], right: marginPartsForDefaults[1], bottom: marginPartsForDefaults[0], left: marginPartsForDefaults[1] };
+      } else if (marginPartsForDefaults.length >= 4) {
+        marginsForDefaults = { top: marginPartsForDefaults[0], right: marginPartsForDefaults[1], bottom: marginPartsForDefaults[2], left: marginPartsForDefaults[3] };
+      }
+      if (marginsForDefaults) {
+        ['top', 'right', 'bottom', 'left'].forEach(function (sideForDefaults) {
+          if (!(marginsForDefaults[sideForDefaults] > 0)) marginsForDefaults[sideForDefaults] = 0;
+        });
+      }
+    }
+    var normalizedForDefaults = {
+      fontSizePt: parseFontSizePtForDocumentGeneration(declarationsForDefaults['font-size']),
+      fontFamily: parseFontFamilyForDocumentGeneration(declarationsForDefaults['font-family']),
+      pageWidthPt: (pageWidthPtForDefaults >= 72 && pageWidthPtForDefaults <= 5000) ? pageWidthPtForDefaults : 0,
+      pageHeightPt: (pageHeightPtForDefaults >= 72 && pageHeightPtForDefaults <= 5000) ? pageHeightPtForDefaults : 0,
+      margins: marginsForDefaults
+    };
+    if (!normalizedForDefaults.fontSizePt && !normalizedForDefaults.fontFamily
+      && !normalizedForDefaults.pageWidthPt && !normalizedForDefaults.margins) {
+      return null;
+    }
+    return normalizedForDefaults;
+  }
+
+  function readDocumentDefaultsFromBodyForDocumentGeneration(bodyForDocumentGeneration) {
+    if (!bodyForDocumentGeneration || typeof bodyForDocumentGeneration.querySelector !== 'function') return null;
+    var holderForDefaults = bodyForDocumentGeneration.querySelector('[data-doc-defaults]');
+    if (!holderForDefaults) return null;
+    return normalizeDocumentDefaultsForDocumentGeneration(
+      parseInlineStyleForDocumentGeneration(holderForDefaults.getAttribute('data-doc-defaults'))
+    );
   }
 
   function sanitizeSheetNameForDocumentGeneration(nameForDocumentGeneration, fallbackForDocumentGeneration) {
@@ -180,7 +373,7 @@
     };
   }
 
-  function htmlInlineRunsFromNodesForDocumentGeneration(topNodesForDocumentGeneration) {
+  function htmlInlineRunsFromNodesForDocumentGeneration(topNodesForDocumentGeneration, baseFlagsForDocumentGeneration) {
     var runsForDocumentGeneration = [];
     function appendChildRunForDocumentGeneration(childForInline, flagsForDocumentGeneration) {
       if (childForInline.nodeType === 3) {
@@ -190,7 +383,9 @@
             text: textForInline,
             bold: flagsForDocumentGeneration.bold,
             italic: flagsForDocumentGeneration.italic,
-            href: flagsForDocumentGeneration.href
+            href: flagsForDocumentGeneration.href,
+            sizePt: flagsForDocumentGeneration.sizePt,
+            font: flagsForDocumentGeneration.font
           });
         }
         return;
@@ -208,8 +403,19 @@
       var nextFlagsForInline = {
         bold: flagsForDocumentGeneration.bold,
         italic: flagsForDocumentGeneration.italic,
-        href: flagsForDocumentGeneration.href
+        href: flagsForDocumentGeneration.href,
+        sizePt: flagsForDocumentGeneration.sizePt,
+        font: flagsForDocumentGeneration.font
       };
+      var inlineStyleForInline = elementStyleForDocumentGeneration(childForInline);
+      if (inlineStyleForInline['font-size']) {
+        var inlineSizeForInline = parseFontSizePtForDocumentGeneration(inlineStyleForInline['font-size']);
+        if (inlineSizeForInline) nextFlagsForInline.sizePt = inlineSizeForInline;
+      }
+      if (inlineStyleForInline['font-family']) {
+        var inlineFamilyForInline = parseFontFamilyForDocumentGeneration(inlineStyleForInline['font-family']);
+        if (inlineFamilyForInline) nextFlagsForInline.font = inlineFamilyForInline;
+      }
       if (tagForInline === 'strong' || tagForInline === 'b') nextFlagsForInline.bold = true;
       else if (tagForInline === 'em' || tagForInline === 'i') nextFlagsForInline.italic = true;
       else if (tagForInline === 'a') {
@@ -224,29 +430,61 @@
         appendChildRunForDocumentGeneration(childNodesForDocumentGeneration[iForInline], flagsForDocumentGeneration);
       }
     }
+    var safeBaseFlagsForInline = baseFlagsForDocumentGeneration || {};
+    var rootFlagsForInline = {
+      bold: !!safeBaseFlagsForInline.bold,
+      italic: !!safeBaseFlagsForInline.italic,
+      href: safeBaseFlagsForInline.href || '',
+      sizePt: safeBaseFlagsForInline.sizePt || 0,
+      font: safeBaseFlagsForInline.font || ''
+    };
     for (var iTopForInline = 0; iTopForInline < topNodesForDocumentGeneration.length; iTopForInline++) {
-      appendChildRunForDocumentGeneration(topNodesForDocumentGeneration[iTopForInline], { bold: false, italic: false, href: '' });
+      appendChildRunForDocumentGeneration(topNodesForDocumentGeneration[iTopForInline], rootFlagsForInline);
     }
     return runsForDocumentGeneration.filter(function (runForFilter) {
       return runForFilter.text && runForFilter.text.length > 0;
     });
   }
 
-  function htmlInlineRunsForDocumentGeneration(elementForDocumentGeneration) {
-    return htmlInlineRunsFromNodesForDocumentGeneration(elementForDocumentGeneration.childNodes || []);
+  // A block element's own font-size/font-family becomes the starting point for its runs, so
+  // <p style="font-size:14pt">text</p> and <p><span style="font-size:14pt">text</span></p>
+  // produce the same document.
+  function blockRunFlagsForDocumentGeneration(elementForDocumentGeneration) {
+    var declarationsForBlock = elementStyleForDocumentGeneration(elementForDocumentGeneration);
+    return {
+      sizePt: parseFontSizePtForDocumentGeneration(declarationsForBlock['font-size']),
+      font: parseFontFamilyForDocumentGeneration(declarationsForBlock['font-family'])
+    };
+  }
+
+  function htmlInlineRunsForDocumentGeneration(elementForDocumentGeneration, baseFlagsForDocumentGeneration) {
+    return htmlInlineRunsFromNodesForDocumentGeneration(
+      elementForDocumentGeneration.childNodes || [],
+      baseFlagsForDocumentGeneration || blockRunFlagsForDocumentGeneration(elementForDocumentGeneration)
+    );
   }
 
   // Split a table cell into one runs array per block-level child (the <p> blocks mammoth
   // emits become real separate <w:p> paragraphs in the cell). Inline/text content not wrapped
   // in a block is grouped into its own paragraph. Always returns at least one paragraph so an
   // empty cell still emits a valid (empty) paragraph.
+  function mergeRunFlagsForDocumentGeneration(baseFlagsForMerge, overrideFlagsForMerge) {
+    var safeBaseForMerge = baseFlagsForMerge || {};
+    var safeOverrideForMerge = overrideFlagsForMerge || {};
+    return {
+      sizePt: safeOverrideForMerge.sizePt || safeBaseForMerge.sizePt || 0,
+      font: safeOverrideForMerge.font || safeBaseForMerge.font || ''
+    };
+  }
+
   function cellParagraphsFromElementForDocumentGeneration(cellElForDocumentGeneration) {
     var paragraphsForCell = [];
     var looseNodesForCell = [];
     var childNodesForCell = cellElForDocumentGeneration.childNodes || [];
+    var cellFlagsForCell = blockRunFlagsForDocumentGeneration(cellElForDocumentGeneration);
     function flushLooseForCell() {
       if (!looseNodesForCell.length) return;
-      var looseRunsForCell = htmlInlineRunsFromNodesForDocumentGeneration(looseNodesForCell);
+      var looseRunsForCell = htmlInlineRunsFromNodesForDocumentGeneration(looseNodesForCell, cellFlagsForCell);
       looseNodesForCell = [];
       var hasContentForCell = looseRunsForCell.some(function (runForCell) {
         return runForCell.text && runForCell.text !== '\n' && runForCell.text.trim().length > 0;
@@ -258,7 +496,10 @@
       if (childForCell.nodeType === 1
         && INLINE_BLOCK_BOUNDARY_TAGS_FOR_DOCUMENT_GENERATION[String(childForCell.tagName || '').toLowerCase()] === true) {
         flushLooseForCell();
-        var blockRunsForCell = htmlInlineRunsForDocumentGeneration(childForCell);
+        var blockRunsForCell = htmlInlineRunsForDocumentGeneration(
+          childForCell,
+          mergeRunFlagsForDocumentGeneration(cellFlagsForCell, blockRunFlagsForDocumentGeneration(childForCell))
+        );
         if (blockRunsForCell.length) paragraphsForCell.push(blockRunsForCell);
         continue;
       }
@@ -502,7 +743,8 @@
     var parsedDocForDocumentGeneration = new DOMParser().parseFromString(rawHtmlForDocumentGeneration, 'text/html');
     var bodyForDocumentGeneration = parsedDocForDocumentGeneration && parsedDocForDocumentGeneration.body;
     var blocksForDocumentGeneration = [];
-    if (!bodyForDocumentGeneration) return blocksForDocumentGeneration;
+    if (!bodyForDocumentGeneration) return { blocks: blocksForDocumentGeneration, docDefaults: null };
+    var docDefaultsForDocumentGeneration = readDocumentDefaultsFromBodyForDocumentGeneration(bodyForDocumentGeneration);
     var embeddedImageCountForDocumentGeneration = 0;
 
     function processSentinelImgForDocumentGeneration(imgElForDocumentGeneration) {
@@ -543,10 +785,14 @@
       var itemsForDocumentGeneration = [];
       var nestedListsForDocumentGeneration = [];
       var listChildrenForDocumentGeneration = listElForDocumentGeneration.children || [];
+      var listFlagsForDocumentGeneration = blockRunFlagsForDocumentGeneration(listElForDocumentGeneration);
       for (var liIndexForDocumentGeneration = 0; liIndexForDocumentGeneration < listChildrenForDocumentGeneration.length; liIndexForDocumentGeneration++) {
         var liForDocumentGeneration = listChildrenForDocumentGeneration[liIndexForDocumentGeneration];
         if (String(liForDocumentGeneration.tagName || '').toLowerCase() !== 'li') continue;
-        itemsForDocumentGeneration.push(htmlInlineRunsForDocumentGeneration(liForDocumentGeneration));
+        itemsForDocumentGeneration.push(htmlInlineRunsForDocumentGeneration(
+          liForDocumentGeneration,
+          mergeRunFlagsForDocumentGeneration(listFlagsForDocumentGeneration, blockRunFlagsForDocumentGeneration(liForDocumentGeneration))
+        ));
         var liChildrenForDocumentGeneration = liForDocumentGeneration.children || [];
         for (var liChildIndexForDocumentGeneration = 0; liChildIndexForDocumentGeneration < liChildrenForDocumentGeneration.length; liChildIndexForDocumentGeneration++) {
           var liChildForDocumentGeneration = liChildrenForDocumentGeneration[liChildIndexForDocumentGeneration];
@@ -602,7 +848,9 @@
       if (rowsForDocumentGeneration.length) {
         // Borders are the model's call: it marks a layout table with border="0" or
         // role="presentation"/"none", and a bordered data table with border="1".
-        // Left unspecified, tables are bordered by default.
+        // Left unspecified, tables are bordered by default. A style attribute carrying
+        // border properties is more specific than either and wins, so a table read out of a
+        // source document keeps that document's own line weight and colour.
         var borderedForTableBlock;
         var roleAttrForTableBlock = String(tableElForDocumentGeneration.getAttribute('role') || '').toLowerCase();
         var borderAttrForTableBlock = tableElForDocumentGeneration.getAttribute('border');
@@ -611,11 +859,14 @@
         } else if (borderAttrForTableBlock !== null) {
           borderedForTableBlock = String(borderAttrForTableBlock).trim() !== '0';
         }
+        var borderSpecForTableBlock = tableBorderSpecFromStyleForDocumentGeneration(elementStyleForDocumentGeneration(tableElForDocumentGeneration));
+        if (borderSpecForTableBlock !== undefined) borderedForTableBlock = !!borderSpecForTableBlock;
         blocksForDocumentGeneration.push({
           type: 'table',
           rows: rowsForDocumentGeneration,
           header: hasHeaderForDocumentGeneration,
-          bordered: borderedForTableBlock
+          bordered: borderedForTableBlock,
+          borderSpec: borderSpecForTableBlock || null
         });
       }
     }
@@ -657,7 +908,10 @@
     }
 
     walkBlockForDocumentGeneration(bodyForDocumentGeneration);
-    return blocksForDocumentGeneration.slice(0, MAX_DOCX_BLOCKS_FOR_DOCUMENT_GENERATION);
+    return {
+      blocks: blocksForDocumentGeneration.slice(0, MAX_DOCX_BLOCKS_FOR_DOCUMENT_GENERATION),
+      docDefaults: docDefaultsForDocumentGeneration
+    };
   }
 
   function makeDocxRelCollectorForDocumentGeneration() {
@@ -742,7 +996,24 @@
       '</w:numbering>';
   }
 
-  function buildDocxStylesXmlForDocumentGeneration() {
+  function docxSectionPropertiesXmlForDocumentGeneration(docDefaultsForDocumentGeneration) {
+    var defaultsForSection = docDefaultsForDocumentGeneration || {};
+    var marginsForSection = defaultsForSection.margins || null;
+    function twipsForSection(pointsForSection, fallbackPointsForSection) {
+      var resolvedPointsForSection = (pointsForSection > 0) ? pointsForSection : fallbackPointsForSection;
+      return Math.round(resolvedPointsForSection * 20);
+    }
+    var pageWidthTwipsForSection = twipsForSection(defaultsForSection.pageWidthPt, DEFAULT_PAGE_WIDTH_PT_FOR_DOCUMENT_GENERATION);
+    var pageHeightTwipsForSection = twipsForSection(defaultsForSection.pageHeightPt, DEFAULT_PAGE_HEIGHT_PT_FOR_DOCUMENT_GENERATION);
+    return '<w:sectPr><w:pgSz w:w="' + pageWidthTwipsForSection + '" w:h="' + pageHeightTwipsForSection + '"/>' +
+      '<w:pgMar w:top="' + twipsForSection(marginsForSection && marginsForSection.top, DEFAULT_DOCX_MARGIN_PT_FOR_DOCUMENT_GENERATION) +
+      '" w:right="' + twipsForSection(marginsForSection && marginsForSection.right, DEFAULT_DOCX_MARGIN_PT_FOR_DOCUMENT_GENERATION) +
+      '" w:bottom="' + twipsForSection(marginsForSection && marginsForSection.bottom, DEFAULT_DOCX_MARGIN_PT_FOR_DOCUMENT_GENERATION) +
+      '" w:left="' + twipsForSection(marginsForSection && marginsForSection.left, DEFAULT_DOCX_MARGIN_PT_FOR_DOCUMENT_GENERATION) +
+      '" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>';
+  }
+
+  function buildDocxStylesXmlForDocumentGeneration(docDefaultsForDocumentGeneration) {
     // Heading sizes in half-points: 16/14/12/11/10/10 pt. mammoth's default style map
     // matches heading paragraphs by styleId (Heading1-6), so those ids must be exact;
     // the w:name keeps the styles correct for Word's own outline/navigation.
@@ -758,27 +1029,68 @@
         '<w:rPr><w:b/><w:sz w:val="' + headingSizesForDocumentGeneration[headingLevelForStyles - 1] + '"/></w:rPr>' +
         '</w:style>';
     }
+    // The document default font rides w:docDefaults so every paragraph inherits it without a
+    // per-run w:rFonts/w:sz, which keeps the body small and lets a run-level size still win.
+    var defaultsForStyles = docDefaultsForDocumentGeneration || {};
+    var defaultRunPropsForStyles = '';
+    if (defaultsForStyles.fontFamily) {
+      var escapedDefaultFontForStyles = escapeXmlForDocumentGeneration(defaultsForStyles.fontFamily);
+      defaultRunPropsForStyles += '<w:rFonts w:ascii="' + escapedDefaultFontForStyles + '" w:hAnsi="' + escapedDefaultFontForStyles
+        + '" w:cs="' + escapedDefaultFontForStyles + '"/>';
+    }
+    if (defaultsForStyles.fontSizePt) {
+      var defaultHalfPointsForStyles = Math.max(2, Math.min(MAX_FONT_SIZE_PT_FOR_DOCUMENT_GENERATION * 2, Math.round(defaultsForStyles.fontSizePt * 2)));
+      defaultRunPropsForStyles += '<w:sz w:val="' + defaultHalfPointsForStyles + '"/><w:szCs w:val="' + defaultHalfPointsForStyles + '"/>';
+    }
+    var docDefaultsXmlForStyles = defaultRunPropsForStyles
+      ? '<w:docDefaults><w:rPrDefault><w:rPr>' + defaultRunPropsForStyles + '</w:rPr></w:rPrDefault></w:docDefaults>'
+      : '';
     return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
       '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      docDefaultsXmlForStyles +
       '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>' +
       headingStylesForDocumentGeneration +
       '</w:styles>';
   }
 
-  function docxRunsXmlForDocumentGeneration(contentForDocumentGeneration, baseRunPropsForDocumentGeneration, relCollectorForDocumentGeneration) {
+  // w:rPr children must appear in schema order (rFonts, b, i, color, sz, szCs, u), which is
+  // why the properties are assembled here rather than appended by each caller in turn.
+  function docxRunPropsXmlForDocumentGeneration(runForDocumentGeneration, baseOptionsForDocumentGeneration, isLinkForDocumentGeneration) {
+    var safeRunForProps = runForDocumentGeneration || {};
+    var safeBaseForProps = baseOptionsForDocumentGeneration || {};
+    var fontForProps = safeRunForProps.font || safeBaseForProps.font || '';
+    var sizePtForProps = Number(safeRunForProps.sizePt) || Number(safeBaseForProps.sizePt) || 0;
+    var propsInnerForProps = '';
+    if (fontForProps) {
+      var escapedFontForProps = escapeXmlForDocumentGeneration(fontForProps);
+      propsInnerForProps += '<w:rFonts w:ascii="' + escapedFontForProps + '" w:hAnsi="' + escapedFontForProps
+        + '" w:cs="' + escapedFontForProps + '"/>';
+    }
+    if (safeRunForProps.bold || safeBaseForProps.bold) propsInnerForProps += '<w:b/>';
+    if (safeRunForProps.italic) propsInnerForProps += '<w:i/>';
+    if (isLinkForDocumentGeneration) propsInnerForProps += '<w:color w:val="0563C1"/>';
+    if (sizePtForProps) {
+      var halfPointsForProps = Math.max(2, Math.min(MAX_FONT_SIZE_PT_FOR_DOCUMENT_GENERATION * 2, Math.round(sizePtForProps * 2)));
+      propsInnerForProps += '<w:sz w:val="' + halfPointsForProps + '"/><w:szCs w:val="' + halfPointsForProps + '"/>';
+    }
+    if (isLinkForDocumentGeneration) propsInnerForProps += '<w:u w:val="single"/>';
+    return propsInnerForProps ? '<w:rPr>' + propsInnerForProps + '</w:rPr>' : '';
+  }
+
+  function docxRunsXmlForDocumentGeneration(contentForDocumentGeneration, baseOptionsForDocumentGeneration, relCollectorForDocumentGeneration) {
     var runsForDocumentGeneration = Array.isArray(contentForDocumentGeneration)
       ? contentForDocumentGeneration
       : [{ text: String(contentForDocumentGeneration == null ? '' : contentForDocumentGeneration) }];
     if (runsForDocumentGeneration.length === 0) runsForDocumentGeneration = [{ text: '' }];
     return runsForDocumentGeneration.map(function (runForDocumentGeneration) {
       var safeRunForDocumentGeneration = runForDocumentGeneration || {};
-      var runPropsInnerForDocumentGeneration = baseRunPropsForDocumentGeneration || '';
-      if (safeRunForDocumentGeneration.bold) runPropsInnerForDocumentGeneration += '<w:b/>';
-      if (safeRunForDocumentGeneration.italic) runPropsInnerForDocumentGeneration += '<w:i/>';
       var hrefForRunForDocumentGeneration = (typeof safeRunForDocumentGeneration.href === 'string' && safeRunForDocumentGeneration.href) ? safeRunForDocumentGeneration.href : '';
       var isLinkForDocumentGeneration = hrefForRunForDocumentGeneration && relCollectorForDocumentGeneration;
-      if (isLinkForDocumentGeneration) runPropsInnerForDocumentGeneration += '<w:color w:val="0563C1"/><w:u w:val="single"/>';
-      var runPropsXmlForDocumentGeneration = runPropsInnerForDocumentGeneration ? '<w:rPr>' + runPropsInnerForDocumentGeneration + '</w:rPr>' : '';
+      var runPropsXmlForDocumentGeneration = docxRunPropsXmlForDocumentGeneration(
+        safeRunForDocumentGeneration,
+        baseOptionsForDocumentGeneration,
+        isLinkForDocumentGeneration
+      );
       var textLinesForDocumentGeneration = String(safeRunForDocumentGeneration.text == null ? '' : safeRunForDocumentGeneration.text).split(/\r?\n/);
       var textXmlForDocumentGeneration = textLinesForDocumentGeneration.map(function (lineForRunForDocumentGeneration, lineIndexForRunForDocumentGeneration) {
         return (lineIndexForRunForDocumentGeneration > 0 ? '<w:br/>' : '') + '<w:t xml:space="preserve">' + escapeXmlForDocumentGeneration(lineForRunForDocumentGeneration) + '</w:t>';
@@ -795,21 +1107,23 @@
   function docxParagraphForDocumentGeneration(contentForDocumentGeneration, optionsForDocumentGeneration, relCollectorForDocumentGeneration) {
     var optsForDocumentGeneration = optionsForDocumentGeneration || {};
     var paragraphPropsInnerForDocumentGeneration = '';
-    var baseRunPropsForDocumentGeneration = '';
     if (optsForDocumentGeneration.headingLevel) {
       // Use a real Word heading style so the level survives the docx -> HTML -> docx
       // round-trip (mammoth maps Heading1-6 back to h1-h6). The bold/size/spacing live
-      // in styles.xml; per-run bold/italic still emit normally via the runs below.
+      // in styles.xml; per-run bold/italic still emit normally via the runs below, and a
+      // run carrying its own size overrides the style's, which is what an explicit
+      // font-size read out of a source heading has to do.
       paragraphPropsInnerForDocumentGeneration += '<w:pStyle w:val="Heading' + optsForDocumentGeneration.headingLevel + '"/>';
-    }
-    if (optsForDocumentGeneration.bold) {
-      baseRunPropsForDocumentGeneration += '<w:b/>';
     }
     if (optsForDocumentGeneration.numPr) {
       paragraphPropsInnerForDocumentGeneration += '<w:numPr><w:ilvl w:val="' + optsForDocumentGeneration.numPr.ilvl + '"/><w:numId w:val="' + optsForDocumentGeneration.numPr.numId + '"/></w:numPr>';
     }
     var paragraphPropsXmlForDocumentGeneration = paragraphPropsInnerForDocumentGeneration ? '<w:pPr>' + paragraphPropsInnerForDocumentGeneration + '</w:pPr>' : '';
-    var runsXmlForDocumentGeneration = docxRunsXmlForDocumentGeneration(contentForDocumentGeneration, baseRunPropsForDocumentGeneration, relCollectorForDocumentGeneration);
+    var runsXmlForDocumentGeneration = docxRunsXmlForDocumentGeneration(
+      contentForDocumentGeneration,
+      { bold: !!optsForDocumentGeneration.bold },
+      relCollectorForDocumentGeneration
+    );
     return '<w:p>' + paragraphPropsXmlForDocumentGeneration + runsXmlForDocumentGeneration + '</w:p>';
   }
 
@@ -975,7 +1289,33 @@
     return !blockForDocumentGeneration || blockForDocumentGeneration.bordered !== false;
   }
 
-  function docxTableForDocumentGeneration(rowsForDocumentGeneration, hasHeaderForDocumentGeneration, relCollectorForDocumentGeneration, showBordersForDocumentGeneration) {
+  // Resolve a table block to its six Word border edges. An explicit spec (from CSS border
+  // properties) wins; otherwise a bordered table gets the house default and a borderless one
+  // gets nil edges, which is what layout tables need.
+  function tableBorderSpecForBlockForDocumentGeneration(blockForDocumentGeneration) {
+    var blockForSpec = blockForDocumentGeneration || {};
+    if (blockForSpec.borderSpec) return blockForSpec.borderSpec;
+    if (!tableShouldShowBordersForDocumentGeneration(blockForSpec)) return null;
+    return uniformTableBorderSpecForDocumentGeneration(DEFAULT_TABLE_BORDER_FOR_DOCUMENT_GENERATION);
+  }
+
+  function docxTableBordersXmlForDocumentGeneration(borderSpecForDocumentGeneration) {
+    var edgesXmlForBorders = '';
+    TABLE_BORDER_EDGES_FOR_DOCUMENT_GENERATION.forEach(function (edgeNameForBorders) {
+      var edgeForBorders = borderSpecForDocumentGeneration ? borderSpecForDocumentGeneration[edgeNameForBorders] : null;
+      if (!edgeForBorders) {
+        edgesXmlForBorders += '<w:' + edgeNameForBorders + ' w:val="nil"/>';
+        return;
+      }
+      // w:sz on a border is eighths of a point, and Word clamps it to 2..96 (0.25pt..12pt).
+      var eighthsForBorders = Math.max(2, Math.min(96, Math.round(Number(edgeForBorders.widthPt || 0.5) * 8)));
+      edgesXmlForBorders += '<w:' + edgeNameForBorders + ' w:val="single" w:sz="' + eighthsForBorders
+        + '" w:space="0" w:color="' + (edgeForBorders.color || '000000') + '"/>';
+    });
+    return '<w:tblBorders>' + edgesXmlForBorders + '</w:tblBorders>';
+  }
+
+  function docxTableForDocumentGeneration(rowsForDocumentGeneration, hasHeaderForDocumentGeneration, relCollectorForDocumentGeneration, borderSpecForDocumentGeneration) {
     var gridForDocumentGeneration = expandTableGridForDocumentGeneration(rowsForDocumentGeneration);
     if (gridForDocumentGeneration.colCount === 0 || gridForDocumentGeneration.rows.length === 0) return '';
     var colCountForTable = gridForDocumentGeneration.colCount;
@@ -1011,19 +1351,7 @@
       }).join('');
       return '<w:tr>' + cellsXmlForTable + '</w:tr>';
     }).join('');
-    var tblBordersXmlForTable = showBordersForDocumentGeneration
-      ? '<w:tblBorders>' +
-        '<w:top w:val="single" w:sz="4" w:space="0" w:color="D9D9D9"/>' +
-        '<w:left w:val="single" w:sz="4" w:space="0" w:color="D9D9D9"/>' +
-        '<w:bottom w:val="single" w:sz="4" w:space="0" w:color="D9D9D9"/>' +
-        '<w:right w:val="single" w:sz="4" w:space="0" w:color="D9D9D9"/>' +
-        '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="D9D9D9"/>' +
-        '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="D9D9D9"/>' +
-        '</w:tblBorders>'
-      : '<w:tblBorders>' +
-        '<w:top w:val="nil"/><w:left w:val="nil"/><w:bottom w:val="nil"/>' +
-        '<w:right w:val="nil"/><w:insideH w:val="nil"/><w:insideV w:val="nil"/>' +
-        '</w:tblBorders>';
+    var tblBordersXmlForTable = docxTableBordersXmlForDocumentGeneration(borderSpecForDocumentGeneration);
     return '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>' + tblBordersXmlForTable +
       '</w:tblPr><w:tblGrid>' + gridColXmlForTable + '</w:tblGrid>' +
       rowXmlForDocumentGeneration + '</w:tbl>';
@@ -1071,7 +1399,7 @@
           blockForDocumentGeneration.rows,
           !!blockForDocumentGeneration.header,
           relCollectorForDocumentGeneration,
-          tableShouldShowBordersForDocumentGeneration(blockForDocumentGeneration)
+          tableBorderSpecForBlockForDocumentGeneration(blockForDocumentGeneration)
         );
       }
       if (blockForDocumentGeneration.type === 'heading') {
@@ -1130,6 +1458,9 @@
     var imagesForDocumentGeneration = builtBodyForDocumentGeneration.images || [];
     var hasNumberingForDocumentGeneration = numberingForDocumentGeneration.length > 0;
     var hasHeadingForDocumentGeneration = builtBodyForDocumentGeneration.hasHeading === true;
+    var docDefaultsForDocumentGeneration = inputForDocumentGeneration.docDefaults || null;
+    var needsStylesForDocumentGeneration = hasHeadingForDocumentGeneration
+      || !!(docDefaultsForDocumentGeneration && (docDefaultsForDocumentGeneration.fontSizePt || docDefaultsForDocumentGeneration.fontFamily));
     var hasImagesForDocumentGeneration = imagesForDocumentGeneration.length > 0;
     var imageNamespacesForDocumentGeneration = hasImagesForDocumentGeneration
       ? ' xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"' +
@@ -1139,7 +1470,7 @@
     var documentXmlForDocumentGeneration = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
       '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"' + imageNamespacesForDocumentGeneration + '>' +
       '<w:body>' + builtBodyForDocumentGeneration.body +
-      '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>' +
+      docxSectionPropertiesXmlForDocumentGeneration(docDefaultsForDocumentGeneration) +
       '</w:body></w:document>';
 
     var imageDefaultsXmlForDocumentGeneration = '';
@@ -1163,7 +1494,7 @@
       imageDefaultsXmlForDocumentGeneration +
       '<Override PartName="/word/document.xml" ContentType="' + DOCX_MIME_FOR_DOCUMENT_GENERATION + '.main+xml"/>' +
       (hasNumberingForDocumentGeneration ? '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>' : '') +
-      (hasHeadingForDocumentGeneration ? '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>' : '') +
+      (needsStylesForDocumentGeneration ? '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>' : '') +
       '</Types>'
     );
     zipForDocumentGeneration.folder('_rels').file('.rels',
@@ -1183,7 +1514,7 @@
     if (hasNumberingForDocumentGeneration) {
       documentRelationshipsForDocumentGeneration += '<Relationship Id="rIdNumbering" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>';
     }
-    if (hasHeadingForDocumentGeneration) {
+    if (needsStylesForDocumentGeneration) {
       documentRelationshipsForDocumentGeneration += '<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>';
     }
     for (var imageRelIndexForDocumentGeneration = 0; imageRelIndexForDocumentGeneration < imagesForDocumentGeneration.length; imageRelIndexForDocumentGeneration++) {
@@ -1206,8 +1537,8 @@
     if (hasNumberingForDocumentGeneration) {
       wordFolderForDocumentGeneration.file('numbering.xml', buildDocxNumberingXmlForDocumentGeneration(numberingForDocumentGeneration));
     }
-    if (hasHeadingForDocumentGeneration) {
-      wordFolderForDocumentGeneration.file('styles.xml', buildDocxStylesXmlForDocumentGeneration());
+    if (needsStylesForDocumentGeneration) {
+      wordFolderForDocumentGeneration.file('styles.xml', buildDocxStylesXmlForDocumentGeneration(docDefaultsForDocumentGeneration));
     }
     if (hasImagesForDocumentGeneration) {
       imagesForDocumentGeneration.forEach(function (imageEntryForDocumentGeneration) {
@@ -1282,6 +1613,9 @@
   function pdfLinesFromBlocksForDocumentGeneration(inputForDocumentGeneration) {
     var blocksForDocumentGeneration = normalizeBlocksForDocumentGeneration(inputForDocumentGeneration, 'PDF creation requires blocks, html, or content.');
     var linesForDocumentGeneration = [];
+    var docDefaultsForPdfLines = inputForDocumentGeneration.docDefaults || null;
+    var bodySizeForPdfLines = (docDefaultsForPdfLines && docDefaultsForPdfLines.fontSizePt)
+      || DEFAULT_PDF_BODY_SIZE_PT_FOR_DOCUMENT_GENERATION;
     blocksForDocumentGeneration.forEach(function (blockForDocumentGeneration) {
       if (!blockForDocumentGeneration || typeof blockForDocumentGeneration !== 'object') return;
       if (blockForDocumentGeneration.type === 'image') {
@@ -1305,7 +1639,7 @@
           linesForDocumentGeneration.push({
             type: 'table',
             rows: rowsForPdfTable,
-            bordered: tableShouldShowBordersForDocumentGeneration(blockForDocumentGeneration),
+            borderSpec: tableBorderSpecForBlockForDocumentGeneration(blockForDocumentGeneration),
             headerRow: !!blockForDocumentGeneration.header,
             gapAfter: 10
           });
@@ -1325,20 +1659,39 @@
         listItemsForPdf.forEach(function (itemForPdf, itemIndexForPdf) {
           var prefixForPdf = orderedForPdf ? ((itemIndexForPdf + 1) + '. ') : '• ';
           var itemRunsForPdf = Array.isArray(itemForPdf) ? itemForPdf.slice() : [{ text: String(itemForPdf == null ? '' : itemForPdf) }];
-          linesForDocumentGeneration.push({ runs: itemRunsForPdf, size: 11, gapAfter: 4, indent: indentForPdf, prefix: prefixForPdf });
+          linesForDocumentGeneration.push({ runs: itemRunsForPdf, size: bodySizeForPdfLines, gapAfter: 4, indent: indentForPdf, prefix: prefixForPdf });
         });
         return;
       }
       if (blockForDocumentGeneration.type === 'bullet') {
         var bulletItemsForPdf = Array.isArray(blockForDocumentGeneration.items) ? blockForDocumentGeneration.items : [String(blockForDocumentGeneration.text || '')];
         bulletItemsForPdf.forEach(function (bulletItemForPdf) {
-          linesForDocumentGeneration.push({ runs: [{ text: String(bulletItemForPdf == null ? '' : bulletItemForPdf) }], size: 11, gapAfter: 4, indent: 18, prefix: '• ' });
+          linesForDocumentGeneration.push({ runs: [{ text: String(bulletItemForPdf == null ? '' : bulletItemForPdf) }], size: bodySizeForPdfLines, gapAfter: 4, indent: 18, prefix: '• ' });
         });
         return;
       }
-      linesForDocumentGeneration.push({ runs: pdfRunsFromBlockForDocumentGeneration(blockForDocumentGeneration), size: 11, gapAfter: 4 });
+      linesForDocumentGeneration.push({ runs: pdfRunsFromBlockForDocumentGeneration(blockForDocumentGeneration), size: bodySizeForPdfLines, gapAfter: 4 });
     });
     return linesForDocumentGeneration.slice(0, MAX_PDF_LINES_FOR_DOCUMENT_GENERATION);
+  }
+
+  // PDF's base-14 fonts cover three families. A named font is matched to the closest of them
+  // so a serif source document does not come back set in a sans face; the exact face cannot
+  // be reproduced without embedding it.
+  function pdfFamilyClassForDocumentGeneration(fontNameForDocumentGeneration, defaultClassForDocumentGeneration) {
+    var nameForFamily = String(fontNameForDocumentGeneration || '').trim();
+    if (!nameForFamily) return defaultClassForDocumentGeneration || 'sans';
+    if (PDF_MONO_FAMILY_HINTS_FOR_DOCUMENT_GENERATION.test(nameForFamily)) return 'mono';
+    if (PDF_SERIF_FAMILY_HINTS_FOR_DOCUMENT_GENERATION.test(nameForFamily)) return 'serif';
+    return 'sans';
+  }
+
+  function pdfStrokeColorForDocumentGeneration(hexColorForDocumentGeneration) {
+    var hexForStroke = String(hexColorForDocumentGeneration || '000000');
+    if (!/^[0-9A-Fa-f]{6}$/.test(hexForStroke)) hexForStroke = '000000';
+    return [0, 2, 4].map(function (offsetForStroke) {
+      return (parseInt(hexForStroke.substr(offsetForStroke, 2), 16) / 255).toFixed(3);
+    }).join(' ');
   }
 
   function estimatePdfTextWidthForDocumentGeneration(valueForDocumentGeneration, fontSizeForDocumentGeneration) {
@@ -1404,12 +1757,20 @@
     var currentPageAnnotsForPdf = [];
     var currentPageImagesForPdf = [];
     var imageObjectsForPdf = [];
-    var yForPdf = 742;
-    var leftForPdf = 54;
-    var bottomForPdf = 54;
-    var pageWidthForPdf = 612;
-    var tableWidthForPdf = pageWidthForPdf - (leftForPdf * 2);
+    var docDefaultsForPdf = inputForDocumentGeneration.docDefaults || null;
+    var pageMarginsForPdf = (docDefaultsForPdf && docDefaultsForPdf.margins) || null;
+    var pageWidthForPdf = (docDefaultsForPdf && docDefaultsForPdf.pageWidthPt) || DEFAULT_PAGE_WIDTH_PT_FOR_DOCUMENT_GENERATION;
+    var pageHeightForPdf = (docDefaultsForPdf && docDefaultsForPdf.pageHeightPt) || DEFAULT_PAGE_HEIGHT_PT_FOR_DOCUMENT_GENERATION;
+    var leftForPdf = (pageMarginsForPdf && pageMarginsForPdf.left) || DEFAULT_PDF_MARGIN_PT_FOR_DOCUMENT_GENERATION;
+    var rightMarginForPdf = (pageMarginsForPdf && pageMarginsForPdf.right) || DEFAULT_PDF_MARGIN_PT_FOR_DOCUMENT_GENERATION;
+    var bottomForPdf = (pageMarginsForPdf && pageMarginsForPdf.bottom) || DEFAULT_PDF_MARGIN_PT_FOR_DOCUMENT_GENERATION;
+    // 50pt rather than the 54pt side margin: this is the long-standing top offset, kept so
+    // documents with no declared page setup render exactly as before.
+    var topStartForPdf = pageHeightForPdf - ((pageMarginsForPdf && pageMarginsForPdf.top) || 50);
+    var tableWidthForPdf = Math.max(72, pageWidthForPdf - leftForPdf - rightMarginForPdf);
     var rightLimitForPdf = leftForPdf + tableWidthForPdf;
+    var baseFontClassForPdf = pdfFamilyClassForDocumentGeneration(docDefaultsForPdf && docDefaultsForPdf.fontFamily, 'sans');
+    var yForPdf = topStartForPdf;
 
     function startNewPdfPageForDocumentGeneration() {
       pagesForPdf.push(currentPageForPdf);
@@ -1418,7 +1779,7 @@
       currentPageForPdf = [];
       currentPageAnnotsForPdf = [];
       currentPageImagesForPdf = [];
-      yForPdf = 742;
+      yForPdf = topStartForPdf;
     }
 
     function ensurePdfSpaceForDocumentGeneration(heightForPdf) {
@@ -1443,23 +1804,29 @@
     }
 
     function fontKeyForRunForPdf(runForPdf) {
-      if (runForPdf.bold && runForPdf.italic) return 'F4';
-      if (runForPdf.bold) return 'F2';
-      if (runForPdf.italic) return 'F3';
-      return 'F1';
+      var familyClassForRun = pdfFamilyClassForDocumentGeneration(runForPdf.font, baseFontClassForPdf);
+      var familyOffsetForRun = familyClassForRun === 'serif' ? 4 : (familyClassForRun === 'mono' ? 8 : 0);
+      var styleIndexForRun = (runForPdf.bold && runForPdf.italic) ? 4 : (runForPdf.bold ? 2 : (runForPdf.italic ? 3 : 1));
+      return 'F' + (familyOffsetForRun + styleIndexForRun);
     }
 
-    function addPdfRectForDocumentGeneration(xForPdf, yValueForPdf, widthForPdf, heightForPdf) {
+    // Each edge is stroked inside its own q/Q so its width and colour cannot leak into the
+    // next drawing operation.
+    function addPdfBorderLineForDocumentGeneration(x1ForBorder, y1ForBorder, x2ForBorder, y2ForBorder, edgeForBorder) {
+      if (!edgeForBorder) return;
+      var rgbForBorder = pdfStrokeColorForDocumentGeneration(edgeForBorder.color);
       currentPageForPdf.push({
         kind: 'path',
-        command: xForPdf.toFixed(2) + ' ' + yValueForPdf.toFixed(2) + ' ' + widthForPdf.toFixed(2) + ' ' + heightForPdf.toFixed(2) + ' re S'
+        command: 'q ' + Math.max(0.1, Number(edgeForBorder.widthPt) || 0.5).toFixed(2) + ' w ' + rgbForBorder + ' RG '
+          + x1ForBorder.toFixed(2) + ' ' + y1ForBorder.toFixed(2) + ' m '
+          + x2ForBorder.toFixed(2) + ' ' + y2ForBorder.toFixed(2) + ' l S Q'
       });
     }
 
     function addPdfImageForDocumentGeneration(jpegBytesForImg, wPxForImg, hPxForImg) {
       var naturalWPtForImg = Math.max(1, (Number(wPxForImg) || 1) * PDF_PX_TO_PT_FOR_DOCUMENT_GENERATION);
       var naturalHPtForImg = Math.max(1, (Number(hPxForImg) || 1) * PDF_PX_TO_PT_FOR_DOCUMENT_GENERATION);
-      var usableHeightForImg = 742 - bottomForPdf;
+      var usableHeightForImg = topStartForPdf - bottomForPdf;
       var scaleForImg = Math.min(1, tableWidthForPdf / naturalWPtForImg, usableHeightForImg / naturalHPtForImg);
       var dispWForImg = naturalWPtForImg * scaleForImg;
       var dispHForImg = naturalHPtForImg * scaleForImg;
@@ -1475,9 +1842,10 @@
       yForPdf = yBottomForImg;
     }
 
-    function addPdfTableForDocumentGeneration(rowsForPdfTable, borderedForTable, headerRowForTable) {
+    function addPdfTableForDocumentGeneration(rowsForPdfTable, borderSpecForTable, headerRowForTable) {
       var rowsForTable = normalizeRowsForDocumentGeneration(rowsForPdfTable).slice(0, 80);
       if (!rowsForTable.length) return;
+      var lastRowIndexForTable = rowsForTable.length - 1;
       var fontSizeForTable = 8.5;
       var lineHeightForTable = 10.5;
       var paddingForTable = 3.5;
@@ -1507,8 +1875,23 @@
         var xForTable = leftForPdf;
         for (var colIndexForTable = 0; colIndexForTable < colWidthsForTable.length; colIndexForTable++) {
           var colWidthForTable = colWidthsForTable[colIndexForTable];
-          if (borderedForTable) {
-            addPdfRectForDocumentGeneration(xForTable, rowBottomForTable, colWidthForTable, rowHeightForTable);
+          if (borderSpecForTable) {
+            // Only the top and left of each cell are drawn, plus the closing bottom and right
+            // of the last row and column, so a shared gridline is never stroked twice (which
+            // would show as a heavier line where two different widths overlap).
+            var isLastRowForTable = rowIndexForTable === lastRowIndexForTable;
+            var isLastColForTable = colIndexForTable === colWidthsForTable.length - 1;
+            var xRightForTable = xForTable + colWidthForTable;
+            addPdfBorderLineForDocumentGeneration(xForTable, rowTopForTable, xRightForTable, rowTopForTable,
+              rowIndexForTable === 0 ? borderSpecForTable.top : borderSpecForTable.insideH);
+            addPdfBorderLineForDocumentGeneration(xForTable, rowTopForTable, xForTable, rowBottomForTable,
+              colIndexForTable === 0 ? borderSpecForTable.left : borderSpecForTable.insideV);
+            if (isLastRowForTable) {
+              addPdfBorderLineForDocumentGeneration(xForTable, rowBottomForTable, xRightForTable, rowBottomForTable, borderSpecForTable.bottom);
+            }
+            if (isLastColForTable) {
+              addPdfBorderLineForDocumentGeneration(xRightForTable, rowTopForTable, xRightForTable, rowBottomForTable, borderSpecForTable.right);
+            }
           }
           var linesForCellForTable = wrappedCellsForTable[colIndexForTable];
           for (var lineIndexForCell = 0; lineIndexForCell < linesForCellForTable.length; lineIndexForCell++) {
@@ -1517,7 +1900,7 @@
               fontSizeForTable,
               xForTable + paddingForTable,
               rowTopForTable - paddingForTable - fontSizeForTable - (lineIndexForCell * lineHeightForTable),
-              (headerRowForTable && rowIndexForTable === 0) ? 'F2' : 'F1'
+              fontKeyForRunForPdf({ bold: !!(headerRowForTable && rowIndexForTable === 0) })
             );
           }
           xForTable += colWidthForTable;
@@ -1528,26 +1911,33 @@
 
     function renderRunsLineForPdf(runsForPdf, sizeForPdf, indentForPdf, prefixForPdf) {
       var startXForPdf = leftForPdf + (indentForPdf || 0);
-      var lineHeightForPdf = Math.max(14, sizeForPdf + 4);
+      // A run may carry its own size (read out of a source document), so the line box is
+      // sized by the largest run on the line while each segment still draws at its own size.
+      var maxRunSizeForPdf = (runsForPdf || []).reduce(function (maxForPdf, runForPdf) {
+        var runSizeForPdf = Number(runForPdf && runForPdf.sizePt) || 0;
+        return runSizeForPdf > maxForPdf ? runSizeForPdf : maxForPdf;
+      }, sizeForPdf);
+      var lineHeightForPdf = Math.max(14, maxRunSizeForPdf + 4);
       // yForPdf enters as the top of the line box; the baseline sits one ascent below it, so
       // glyphs grow down from the cursor rather than up. This keeps text from poking above the
       // cursor into a preceding image or table (the bottom-edge handoff), while inter-line
       // spacing is preserved because the entry offset is undone in the final advance.
-      var ascentForPdf = sizeForPdf * PDF_FONT_ASCENT_RATIO_FOR_DOCUMENT_GENERATION;
+      var ascentForPdf = maxRunSizeForPdf * PDF_FONT_ASCENT_RATIO_FOR_DOCUMENT_GENERATION;
       // Tokenize into alternating word / whitespace pieces, tagged with font and link, so
       // wrapping can break on words while drawing preserves the original spacing.
       var tokensForPdf = [];
-      if (prefixForPdf) tokensForPdf.push({ text: prefixForPdf, fontKey: 'F1', href: '', space: false });
+      if (prefixForPdf) tokensForPdf.push({ text: prefixForPdf, fontKey: fontKeyForRunForPdf({}), href: '', size: sizeForPdf, space: false });
       (runsForPdf || []).forEach(function (runForPdf) {
         var safeRunForPdf = runForPdf || {};
         var fontKeyForToken = fontKeyForRunForPdf(safeRunForPdf);
+        var sizeForToken = Number(safeRunForPdf.sizePt) || sizeForPdf;
         var hrefForToken = (typeof safeRunForPdf.href === 'string' && safeRunForPdf.href) ? safeRunForPdf.href : '';
         String(safeRunForPdf.text == null ? '' : safeRunForPdf.text).split(/(\n)/).forEach(function (partForPdf) {
           if (partForPdf === '\n') { tokensForPdf.push({ newline: true }); return; }
           if (partForPdf === '') return;
           partForPdf.split(/(\s+)/).forEach(function (pieceForPdf) {
             if (pieceForPdf === '') return;
-            tokensForPdf.push({ text: pieceForPdf, fontKey: fontKeyForToken, href: hrefForToken, space: /^\s+$/.test(pieceForPdf) });
+            tokensForPdf.push({ text: pieceForPdf, fontKey: fontKeyForToken, href: hrefForToken, size: sizeForToken, space: /^\s+$/.test(pieceForPdf) });
           });
         });
       });
@@ -1562,15 +1952,16 @@
       // width estimate. The estimate is then used only to choose wrap points and the start x
       // of the next segment after a font/link change.
       var segTextForPdf = '';
-      var segFontKeyForPdf = 'F1';
+      var segFontKeyForPdf = fontKeyForRunForPdf({});
       var segHrefForPdf = '';
+      var segSizeForPdf = sizeForPdf;
       var segStartXForPdf = xCursorForPdf;
 
       function flushLinkForPdf() {
         if (activeLinkForPdf) {
           currentPageAnnotsForPdf.push({
             href: activeLinkForPdf.href,
-            rect: [activeLinkForPdf.x1, yForPdf - 2, activeLinkForPdf.x2, yForPdf + sizeForPdf + 2]
+            rect: [activeLinkForPdf.x1, yForPdf - 2, activeLinkForPdf.x2, yForPdf + maxRunSizeForPdf + 2]
           });
           activeLinkForPdf = null;
         }
@@ -1579,7 +1970,7 @@
         if (segTextForPdf === '') return;
         if (segHrefForPdf) {
           addPdfRawForDocumentGeneration('0 0 1 rg');
-          addPdfTextForDocumentGeneration(segTextForPdf, sizeForPdf, segStartXForPdf, yForPdf, segFontKeyForPdf);
+          addPdfTextForDocumentGeneration(segTextForPdf, segSizeForPdf, segStartXForPdf, yForPdf, segFontKeyForPdf);
           addPdfRawForDocumentGeneration('0 0 0 rg');
           if (activeLinkForPdf && activeLinkForPdf.href === segHrefForPdf) {
             activeLinkForPdf.x2 = xCursorForPdf;
@@ -1589,7 +1980,7 @@
           }
         } else {
           flushLinkForPdf();
-          addPdfTextForDocumentGeneration(segTextForPdf, sizeForPdf, segStartXForPdf, yForPdf, segFontKeyForPdf);
+          addPdfTextForDocumentGeneration(segTextForPdf, segSizeForPdf, segStartXForPdf, yForPdf, segFontKeyForPdf);
         }
         segTextForPdf = '';
       }
@@ -1604,7 +1995,7 @@
 
       tokensForPdf.forEach(function (tokenForPdf) {
         if (tokenForPdf.newline) { moveToNextLineForPdf(); return; }
-        var widthForToken = estimatePdfTextWidthForDocumentGeneration(tokenForPdf.text, sizeForPdf);
+        var widthForToken = estimatePdfTextWidthForDocumentGeneration(tokenForPdf.text, tokenForPdf.size || sizeForPdf);
         if (!tokenForPdf.space && xCursorForPdf + widthForToken > rightLimitForPdf && xCursorForPdf > startXForPdf) {
           moveToNextLineForPdf();
         }
@@ -1612,13 +2003,15 @@
         if (tokenForPdf.space && segTextForPdf === '' && xCursorForPdf === startXForPdf) {
           return;
         }
-        if (segTextForPdf !== '' && (tokenForPdf.fontKey !== segFontKeyForPdf || tokenForPdf.href !== segHrefForPdf)) {
+        if (segTextForPdf !== '' && (tokenForPdf.fontKey !== segFontKeyForPdf
+          || tokenForPdf.href !== segHrefForPdf || (tokenForPdf.size || sizeForPdf) !== segSizeForPdf)) {
           flushSegForPdf();
         }
         if (segTextForPdf === '') {
           segStartXForPdf = xCursorForPdf;
           segFontKeyForPdf = tokenForPdf.fontKey;
           segHrefForPdf = tokenForPdf.href;
+          segSizeForPdf = tokenForPdf.size || sizeForPdf;
         }
         segTextForPdf += tokenForPdf.text;
         xCursorForPdf += widthForToken;
@@ -1632,7 +2025,7 @@
 
     logicalLinesForPdf.forEach(function (lineForPdf) {
       if (lineForPdf && lineForPdf.type === 'table') {
-        addPdfTableForDocumentGeneration(lineForPdf.rows, lineForPdf.bordered, lineForPdf.headerRow);
+        addPdfTableForDocumentGeneration(lineForPdf.rows, lineForPdf.borderSpec, lineForPdf.headerRow);
         yForPdf -= Number(lineForPdf.gapAfter) || 0;
         return;
       }
@@ -1641,7 +2034,7 @@
         yForPdf -= Number(lineForPdf.gapAfter) || 0;
         return;
       }
-      renderRunsLineForPdf(lineForPdf.runs, Number(lineForPdf.size) || 11, lineForPdf.indent, lineForPdf.prefix);
+      renderRunsLineForPdf(lineForPdf.runs, Number(lineForPdf.size) || DEFAULT_PDF_BODY_SIZE_PT_FOR_DOCUMENT_GENERATION, lineForPdf.indent, lineForPdf.prefix);
       yForPdf -= Number(lineForPdf.gapAfter) || 0;
     });
     if (currentPageForPdf.length || pagesForPdf.length === 0) {
@@ -1658,10 +2051,17 @@
 
     var catalogIdForPdf = addObjectForPdf('');
     var pagesIdForPdf = addObjectForPdf('');
-    var fontIdForPdf = addObjectForPdf('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
-    var boldFontIdForPdf = addObjectForPdf('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>');
-    var obliqueFontIdForPdf = addObjectForPdf('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Oblique >>');
-    var boldObliqueFontIdForPdf = addObjectForPdf('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-BoldOblique >>');
+    // F1-F4 sans, F5-F8 serif, F9-F12 mono, in regular/bold/italic/bold-italic order. All
+    // twelve are base-14 fonts, so they cost one tiny object each and need no embedding.
+    var PDF_BASE_FONTS_FOR_PDF = [
+      'Helvetica', 'Helvetica-Bold', 'Helvetica-Oblique', 'Helvetica-BoldOblique',
+      'Times-Roman', 'Times-Bold', 'Times-Italic', 'Times-BoldItalic',
+      'Courier', 'Courier-Bold', 'Courier-Oblique', 'Courier-BoldOblique'
+    ];
+    var fontResourceEntriesForPdf = PDF_BASE_FONTS_FOR_PDF.map(function (baseFontNameForPdf, fontIndexForPdf) {
+      var fontObjIdForPdf = addObjectForPdf('<< /Type /Font /Subtype /Type1 /BaseFont /' + baseFontNameForPdf + ' >>');
+      return '/F' + (fontIndexForPdf + 1) + ' ' + fontObjIdForPdf + ' 0 R';
+    }).join(' ');
     var pageIdsForPdf = [];
 
     // Each embedded image is one Image XObject (DCTDecode/JPEG, DeviceRGB). The binary stream is
@@ -1696,7 +2096,10 @@
           return '/' + nameForXobj + ' ' + imageNameToObjIdForPdf[nameForXobj] + ' 0 R';
         }).join(' ') + ' >>';
       }
-      var pageIdForPdf = addObjectForPdf('<< /Type /Page /Parent ' + pagesIdForPdf + ' 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 ' + fontIdForPdf + ' 0 R /F2 ' + boldFontIdForPdf + ' 0 R /F3 ' + obliqueFontIdForPdf + ' 0 R /F4 ' + boldObliqueFontIdForPdf + ' 0 R >>' + xobjectEntryForPdf + ' >> /Contents ' + contentIdForPdf + ' 0 R' + annotsEntryForPdf + ' >>');
+      var pageIdForPdf = addObjectForPdf('<< /Type /Page /Parent ' + pagesIdForPdf +
+        ' 0 R /MediaBox [0 0 ' + pageWidthForPdf.toFixed(2) + ' ' + pageHeightForPdf.toFixed(2) + ']' +
+        ' /Resources << /Font << ' + fontResourceEntriesForPdf + ' >>' + xobjectEntryForPdf +
+        ' >> /Contents ' + contentIdForPdf + ' 0 R' + annotsEntryForPdf + ' >>');
       pageIdsForPdf.push(pageIdForPdf);
     });
 
@@ -1959,10 +2362,13 @@
     if (formatForPrepare === 'pdf') {
       var dropTrackerForPdfPrepare = makeImageDropTrackerForDocumentGeneration();
       return buildPdfImageResolverForDocumentGeneration(inputForPrepare.html, depsForPrepare).then(function (pdfResolverForPrepare) {
-        var pdfBlocksForPrepare = htmlToBlocksForDocumentGeneration(inputForPrepare.html, pdfResolverForPrepare, dropTrackerForPdfPrepare);
-        return rasterizePdfImageBlocksForDocumentGeneration(pdfBlocksForPrepare, dropTrackerForPdfPrepare).then(function (rasterizedBlocksForPrepare) {
+        var pdfParsedForPrepare = htmlToBlocksForDocumentGeneration(inputForPrepare.html, pdfResolverForPrepare, dropTrackerForPdfPrepare);
+        return rasterizePdfImageBlocksForDocumentGeneration(pdfParsedForPrepare.blocks, dropTrackerForPdfPrepare).then(function (rasterizedBlocksForPrepare) {
           return {
-            input: Object.assign({}, inputForPrepare, { blocks: rasterizedBlocksForPrepare }),
+            input: Object.assign({}, inputForPrepare, {
+              blocks: rasterizedBlocksForPrepare,
+              docDefaults: pdfParsedForPrepare.docDefaults
+            }),
             note: dropTrackerForPdfPrepare.note()
           };
         });
@@ -1972,9 +2378,12 @@
     // tracking any that cannot be embedded so the result can note them.
     var dropTrackerForPrepare = makeImageDropTrackerForDocumentGeneration();
     return buildDocxImageResolverForDocumentGeneration(inputForPrepare.html, depsForPrepare).then(function (resolverForPrepare) {
-      var docxBlocksForPrepare = htmlToBlocksForDocumentGeneration(inputForPrepare.html, resolverForPrepare, dropTrackerForPrepare);
+      var docxParsedForPrepare = htmlToBlocksForDocumentGeneration(inputForPrepare.html, resolverForPrepare, dropTrackerForPrepare);
       return {
-        input: Object.assign({}, inputForPrepare, { blocks: docxBlocksForPrepare }),
+        input: Object.assign({}, inputForPrepare, {
+          blocks: docxParsedForPrepare.blocks,
+          docDefaults: docxParsedForPrepare.docDefaults
+        }),
         note: dropTrackerForPrepare.note()
       };
     });

@@ -5,6 +5,7 @@ importScripts(
   "./apiLoggerImpl.js",
   "./pageActionLoggerImpl.js",
   "../shared/messages.js",
+  "../agent/docxFormat.js",
   "../agent/fileParsing.js",
   "../shared/toolRegistry.js",
   "../shared/domainConfig.js",
