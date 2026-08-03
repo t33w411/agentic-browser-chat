@@ -563,6 +563,7 @@
           : [],
         incomplete: Boolean(safeMessageForPanelRuntime.incomplete),
         systemNotice: Boolean(safeMessageForPanelRuntime.systemNotice),
+        displayOnly: Boolean(safeMessageForPanelRuntime.displayOnly),
         createdAt: typeof safeMessageForPanelRuntime.createdAt === 'string' ? safeMessageForPanelRuntime.createdAt : '',
         _persistedToDb: safeMessageForPanelRuntime._persistedToDb === false ? false : true
       };

@@ -187,6 +187,49 @@
     return "";
   }
 
+  // A display-only message is one the agent loop persists purely so the panel can render a
+  // generated artifact (an image as "![Generated image](__blob:N__)", a document as
+  // "[name](#abchat-docblob-N)"). It is not a conversational turn: it carries no reasoning and the
+  // model never wrote it. Emitting it as an assistant message leaves a model turn as the LAST
+  // message whenever the loop iterates again, which Google AI Studio rejects outright
+  // ("Requests ending with a model turn are not supported."). Fold its marker into the tool result
+  // that produced it instead, so the model still sees the blob reference it needs for
+  // generate_image source_blob_id and eval blob_ids, and the request keeps ending on a tool result.
+  function foldDisplayMarkerIntoToolMessageForContextBuilder(toolMessageForFold, markerTextForFold) {
+    var markerForFold = String(markerTextForFold || "").trim();
+    if (!toolMessageForFold || !markerForFold) return;
+    var contentForFold = typeof toolMessageForFold.content === "string"
+      ? toolMessageForFold.content
+      : String(toolMessageForFold.content == null ? "" : toolMessageForFold.content);
+    try {
+      var parsedForFold = JSON.parse(contentForFold);
+      if (parsedForFold && typeof parsedForFold === "object" && !Array.isArray(parsedForFold)) {
+        var shownForFold = Array.isArray(parsedForFold.displayed_to_user) ? parsedForFold.displayed_to_user : [];
+        shownForFold.push(markerForFold);
+        parsedForFold.displayed_to_user = shownForFold;
+        toolMessageForFold.content = JSON.stringify(parsedForFold);
+        return;
+      }
+    } catch (foldErrForContextBuilder) { /* not a JSON result: fall through to the text suffix */ }
+    toolMessageForFold.content = contentForFold + "\nDisplayed to the user: " + markerForFold;
+  }
+
+  // Locates the emitted tool message a display-only message belongs to: the one answering its
+  // tool_call_id, else the most recent tool message (the loop emits artifacts right after the
+  // round that produced them). Returns null when there is none to fold into, which happens only
+  // when compaction cut the window between the tool result and its artifact message.
+  function findToolMessageForDisplayMarkerForContextBuilder(apiMessagesForFind, toolCallIdForFind) {
+    var wantedIdForFind = toolCallIdForFind != null ? String(toolCallIdForFind) : "";
+    var lastToolMessageForFind = null;
+    for (var fForFind = apiMessagesForFind.length - 1; fForFind >= 0; fForFind--) {
+      var candidateForFind = apiMessagesForFind[fForFind];
+      if (!candidateForFind || candidateForFind.role !== "tool") continue;
+      if (!lastToolMessageForFind) lastToolMessageForFind = candidateForFind;
+      if (wantedIdForFind && String(candidateForFind.tool_call_id) === wantedIdForFind) return candidateForFind;
+    }
+    return wantedIdForFind ? null : lastToolMessageForFind;
+  }
+
   // Appended (in place of the repeated payload) when an attachment is identical to one already
   // emitted earlier in the SAME build. Because the build loop only iterates the post-compaction
   // window, the earlier copy is guaranteed to still be present above, so "shown above" is truthful
@@ -760,6 +803,20 @@
         ? await buildUserContentForContextBuilder(msg, seenAttachmentsRegistryForBuild)
         : getMessageBaseTextForContextBuilder(msg);
       if (!text && !msg.tool_calls && !msg.tool_call_id) continue;
+
+      if (msg.displayOnly) {
+        if (!text) continue;
+        var artifactToolMessageForBuild = findToolMessageForDisplayMarkerForContextBuilder(apiMessages, msg.tool_call_id);
+        if (artifactToolMessageForBuild) {
+          foldDisplayMarkerIntoToolMessageForContextBuilder(artifactToolMessageForBuild, text);
+          continue;
+        }
+        // No tool result left to fold into (compaction cut between the two): emit it as an
+        // ordinary assistant message rather than lose the blob reference. The send-time guard in
+        // the agent loop stops it from being the request's final message.
+        apiMessages.push({ role: "assistant", content: text });
+        continue;
+      }
 
       if (msg.tool_calls) {
         if (Array.isArray(msg.tool_calls)) {

@@ -267,6 +267,7 @@
         : [],
       incomplete: Boolean(inputForPanelDataRepo.incomplete),
       systemNotice: Boolean(inputForPanelDataRepo.systemNotice),
+      displayOnly: Boolean(inputForPanelDataRepo.displayOnly),
       createdAt: normalizeChatTimestampForPanelDataRepo(inputForPanelDataRepo.createdAt, fallbackTimestampForPanelDataRepo || getIsoNowForPanelDataRepo())
     };
   }

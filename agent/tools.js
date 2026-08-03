@@ -462,7 +462,7 @@
       type: 'function',
       function: {
         name: 'generate_image',
-        description: 'Generate an image from a text prompt using an image generation model. The image is automatically displayed inline in the chat. To iterate on a previously generated image, find its blob ID in the context (shown as __blob:N__ in the assistant message) and pass that N as source_blob_id, then describe only the changes in prompt. If source_blob_id is provided but the blob is not found or is not a valid image, the tool silently falls back to a text-only generation using the prompt alone rather than returning an error. Returns { ok, dataUrl, prompt }. When ok is true the image has already been shown to the user.',
+        description: 'Generate an image from a text prompt using an image generation model. The image is automatically displayed inline in the chat. To iterate on a previously generated image, find its blob ID in the context (shown as __blob:N__ in the displayed_to_user field of the result of the call that generated it) and pass that N as source_blob_id, then describe only the changes in prompt. If source_blob_id is provided but the blob is not found or is not a valid image, the tool silently falls back to a text-only generation using the prompt alone rather than returning an error. Returns { ok, dataUrl, prompt }. When ok is true the image has already been shown to the user.',
         parameters: {
           type: 'object',
           properties: {

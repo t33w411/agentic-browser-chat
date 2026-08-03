@@ -37,6 +37,7 @@
   var MAX_CONCURRENT_RUNS_FOR_AGENT_RUN = 3;
   var MIN_TOOL_DISPLAY_MS_FOR_AGENT_RUN = 3000;
   var TOOL_RESULT_API_MAX_CHARS_FOR_AGENT_RUN = 512000;
+  var ERROR_NOTICE_MAX_CHARS_FOR_AGENT_RUN = 500;
 
   var AGENT_NEUTRAL_COMPLETION_FOR_AGENT_RUN = 'I took some actions. Let me know if it looks right or needs more.';
   var AGENT_FALLBACK_RESPONSES_FOR_AGENT_RUN = [
@@ -65,6 +66,26 @@
       return opForMutCheck === 'create' || opForMutCheck === 'update' || opForMutCheck === 'delete';
     }
     return false;
+  }
+
+  // Appended when the assembled request would otherwise end on an assistant message. Google AI
+  // Studio rejects those outright ("Requests ending with a model turn are not supported."), while
+  // OpenAI- and Anthropic-backed models silently treat them as a prefill, so the same message list
+  // works on one provider and 400s on another.
+  var CONTINUATION_TURN_TEXT_FOR_AGENT_RUN = 'Continue.';
+
+  // Enforced immediately before every completion call. Anything the loop appends after a tool
+  // result (a display-only artifact message, a canned notice, a salvaged partial) can leave a
+  // model turn last; ending on a user turn is accepted by every provider. Only a trailing
+  // assistant message WITHOUT tool_calls is patched: an assistant message carrying tool_calls must
+  // be answered by tool messages, and appending a user turn there would break a different rule.
+  function ensureRequestDoesNotEndWithModelTurnForAgentRun(messagesForGuard) {
+    if (!Array.isArray(messagesForGuard) || messagesForGuard.length === 0) return messagesForGuard;
+    var lastForGuard = messagesForGuard[messagesForGuard.length - 1];
+    if (!lastForGuard || lastForGuard.role !== 'assistant') return messagesForGuard;
+    if (Array.isArray(lastForGuard.tool_calls) && lastForGuard.tool_calls.length > 0) return messagesForGuard;
+    messagesForGuard.push({ role: 'user', content: CONTINUATION_TURN_TEXT_FOR_AGENT_RUN });
+    return messagesForGuard;
   }
 
   // chatId -> { controller, toolsDoneAt, textDebounceTimer, pendingText }
@@ -429,6 +450,28 @@
       return '';
     }
 
+    // A notice that explains why a run ended (a provider error, a failure cap, a blocked hook)
+    // must survive the end of the stream. The stream_system_notice event only appends a DOM node,
+    // and the stream_end handler re-renders the chat from the database, so an emit-only notice is
+    // painted over milliseconds after it appears and the run looks like it simply stopped.
+    // Persisting it as a systemNotice message keeps it in the timeline; contextBuilder skips
+    // systemNotice messages, so it never re-enters the model's context.
+    async function emitAndPersistSystemNoticeForRun(noticeTextForRun) {
+      var trimmedNoticeForRun = String(noticeTextForRun || '').trim();
+      if (!trimmedNoticeForRun) return;
+      emitForAgentRun('stream_system_notice', chatId, { text: trimmedNoticeForRun });
+      try {
+        var noticeRecordForRun = await repoForRun.createMessage(chatId, {
+          role: 'assistant',
+          content: trimmedNoticeForRun,
+          md: trimmedNoticeForRun,
+          systemNotice: true
+        }, { touchChat: false });
+        if (noticeRecordForRun) messagesForRun.push(noticeRecordForRun);
+        persistedSystemNoticeCountForRun++;
+      } catch (noticePersistErrForRun) { /* the emitted notice is still on screen for this tab */ }
+    }
+
     function markRunStoppedForRun() {
       if (logStopReasonForRun) return;
       var agentRunStopForMark = (globalThis.ABChatShared || {}).agentRunStop;
@@ -494,6 +537,7 @@
     var logStopReasonForRun = null;
     var lastToolTimeoutMsForRun = ITER_TOOL_STD_TIMEOUT_MS_FOR_AGENT_RUN;
     var hasAppendedRenderableAssistantMessageForRun = false;
+    var persistedSystemNoticeCountForRun = 0;
     // Set true once any tool call this turn returned a non-error result (reads included); only used
     // to suppress the alarming "empty response" note.
     var hadSuccessfulToolCallForRun = false;
@@ -606,7 +650,7 @@
         var userPromptResultForRun = await dispatchHookForRun('UserPromptSubmit', { userText: turnContextForRun.userText, chatId: chatId });
         if (userPromptResultForRun && userPromptResultForRun.block) {
           userPromptBlockedForRun = true;
-          emitForAgentRun('stream_system_notice', chatId, { text: userPromptResultForRun.block.reason });
+          await emitAndPersistSystemNoticeForRun(userPromptResultForRun.block.reason);
         }
       }
 
@@ -649,6 +693,8 @@
           apiMessages.push({ role: 'system', content: pendingSystemNotesForRun.join('\n\n') });
           pendingSystemNotesForRun = [];
         }
+
+        ensureRequestDoesNotEndWithModelTurnForAgentRun(apiMessages);
 
         if (turnContextForRun) turnContextForRun.iterIndex = iterCount - 1;
 
@@ -764,7 +810,7 @@
             continue;
           }
           if (!hadSuccessfulToolCallForRun) {
-            emitForAgentRun('stream_system_notice', chatId, { text: 'The model returned an empty response.' });
+            await emitAndPersistSystemNoticeForRun('The model returned an empty response.');
           }
           break;
         }
@@ -808,7 +854,7 @@
           assistantMessage: assistantMsg, toolCalls: toolCallsForLoop || [], isFinalReply: !hasToolCalls, chatId: chatId
         });
         if (postModelResponseResultForRun && postModelResponseResultForRun.block) {
-          emitForAgentRun('stream_system_notice', chatId, { text: postModelResponseResultForRun.block.reason });
+          await emitAndPersistSystemNoticeForRun(postModelResponseResultForRun.block.reason);
           break;
         }
         if (postModelResponseResultForRun && postModelResponseResultForRun.continueWithSystemNote) continue;
@@ -816,7 +862,7 @@
         if (!hasToolCalls) {
           var stopResultForRun = await dispatchHookForRun('Stop', { assistantMessage: assistantMsg, toolCalls: [], isFinalReply: true, chatId: chatId });
           if (stopResultForRun && stopResultForRun.block) {
-            emitForAgentRun('stream_system_notice', chatId, { text: stopResultForRun.block.reason });
+            await emitAndPersistSystemNoticeForRun(stopResultForRun.block.reason);
             break;
           }
           if (stopResultForRun && stopResultForRun.continueWithSystemNote) continue;
@@ -1031,7 +1077,15 @@
               if (countedImageUsageCostForRun <= 0 && imageGenCostForRun > 0) {
                 sideCallCostForRun += imageGenCostForRun;
               }
-              var imgMsgPersisted = await repoForRun.createMessage(chatId, { role: 'assistant', content: '', md: '![Generated image](__blob:' + blobIdForImage + '__)' }, { touchChat: false });
+              var imgMsgPersisted = await repoForRun.createMessage(chatId, {
+                role: 'assistant',
+                content: '',
+                md: '![Generated image](__blob:' + blobIdForImage + '__)',
+                // Rendering-only: contextBuilder folds this marker into the generate_image tool
+                // result rather than sending it as its own model turn.
+                displayOnly: true,
+                tool_call_id: toolCallsForLoop[gi].id
+              }, { touchChat: false });
               if (imgMsgPersisted) messagesForRun.push(imgMsgPersisted);
               hasAppendedRenderableAssistantMessageForRun = true;
               emitForAgentRun('stream_message_persisted', chatId, null);
@@ -1059,7 +1113,15 @@
             }
             if (blobRecordForDoc && blobRecordForDoc.id != null) {
               var blobIdForDoc = Number(blobRecordForDoc.id);
-              var docMsgPersisted = await repoForRun.createMessage(chatId, { role: 'assistant', content: '', md: '[' + filenameForDoc.replace(/[\[\]]/g, '') + '](#abchat-docblob-' + blobIdForDoc + ')' }, { touchChat: false });
+              var docMsgPersisted = await repoForRun.createMessage(chatId, {
+                role: 'assistant',
+                content: '',
+                md: '[' + filenameForDoc.replace(/[\[\]]/g, '') + '](#abchat-docblob-' + blobIdForDoc + ')',
+                // Rendering-only: contextBuilder folds this marker into the tool result that
+                // generated the document rather than sending it as its own model turn.
+                displayOnly: true,
+                tool_call_id: toolCallsForLoop[gdi].id
+              }, { touchChat: false });
               if (docMsgPersisted) messagesForRun.push(docMsgPersisted);
               hasAppendedRenderableAssistantMessageForRun = true;
               emitForAgentRun('stream_message_persisted', chatId, null);
@@ -1098,11 +1160,11 @@
           }
         }
         if (identicalFailingRoundCountForRun >= MAX_IDENTICAL_FAILING_ROUNDS_FOR_AGENT_RUN) {
-          emitForAgentRun('stream_system_notice', chatId, { text: 'Agent stopped: the same tool call failed ' + identicalFailingRoundCountForRun + ' times in a row with identical arguments. Retrying without changing the call will not help; review the error above and try a different approach.' });
+          await emitAndPersistSystemNoticeForRun('Agent stopped: the same tool call failed ' + identicalFailingRoundCountForRun + ' times in a row with identical arguments. Retrying without changing the call will not help; review the error above and try a different approach.');
           break;
         }
         if (consecutiveEmptyItersForRun >= MAX_CONSECUTIVE_ALL_FAILURE_ITERS_FOR_AGENT_RUN) {
-          emitForAgentRun('stream_system_notice', chatId, { text: 'Agent stopped: ' + MAX_CONSECUTIVE_ALL_FAILURE_ITERS_FOR_AGENT_RUN + ' consecutive rounds of tool calls all returned errors. Review the results above and try a different approach.' });
+          await emitAndPersistSystemNoticeForRun('Agent stopped: ' + MAX_CONSECUTIVE_ALL_FAILURE_ITERS_FOR_AGENT_RUN + ' consecutive rounds of tool calls all returned errors. Review the results above and try a different approach.');
           break;
         }
 
@@ -1164,7 +1226,12 @@
             ? (navigator.onLine ? 'Request failed. The server may be temporarily unreachable.' : 'No internet connection.')
             : rawErrMsgForRun;
         }
-        emitForAgentRun('stream_system_notice', chatId, { text: 'Error: ' + friendlyErrForRun });
+        // Provider errors carry the whole upstream response body, which is unreadable in a chat
+        // bubble; the full text is preserved on the API log record either way.
+        if (friendlyErrForRun.length > ERROR_NOTICE_MAX_CHARS_FOR_AGENT_RUN) {
+          friendlyErrForRun = friendlyErrForRun.slice(0, ERROR_NOTICE_MAX_CHARS_FOR_AGENT_RUN) + '...';
+        }
+        await emitAndPersistSystemNoticeForRun('Error: ' + friendlyErrForRun);
       }
     } finally {
       if (runStateForRun.cdpLeaseHeld && cdpClientForRun && typeof cdpClientForRun.release === 'function') {
@@ -1217,7 +1284,9 @@
           usage: logUsageForRun
         }).catch(function () {});
       }
-      if (!hasAppendedRenderableAssistantMessageForRun && !logStopReasonForRun) {
+      // A persisted notice already explains why the run ended, so the generic apology would only
+      // repeat it less accurately.
+      if (!hasAppendedRenderableAssistantMessageForRun && !logStopReasonForRun && persistedSystemNoticeCountForRun === 0) {
         var fallbackTextForRun = hadSuccessfulMutatingToolCallForRun
           ? AGENT_NEUTRAL_COMPLETION_FOR_AGENT_RUN
           : AGENT_FALLBACK_RESPONSES_FOR_AGENT_RUN[Math.floor(Math.random() * AGENT_FALLBACK_RESPONSES_FOR_AGENT_RUN.length)];
