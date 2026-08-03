@@ -182,6 +182,24 @@
     webFetchCache:   'url'
   }).upgrade(backfillChatAttachmentFlagsForDb);
 
+  // Indexes contentHash so an already-parsed file can be found without scanning the table.
+  // attachmentBlobs rows carry whole documents, so a scan would deserialize megabytes per row
+  // and cost more than the duplicate parse it is trying to avoid.
+  //
+  // Add-index-only, with no upgrade function: existing rows keep an undefined contentHash and
+  // are simply never reused. They cannot be backfilled, because everything except DOCX keeps
+  // only the extracted text and the source bytes are already gone.
+  db.version(6).stores({
+    chats:           '++id, title, createdAt, updatedAt, isPinned',
+    messages:        '++id, chatId, role, createdAt, [chatId+createdAt]',
+    notes:           '++id, title, noteType, sourceChatId, createdAt, updatedAt',
+    noteVersions:    '++id, noteId, savedAt',
+    tasks:           '++id, title, dueAt, isCompleted, createdAt, updatedAt',
+    questions:       '++id, title, intervalStage, dueAt, isPaused, createdAt, updatedAt',
+    attachmentBlobs: '++id, createdAt, contentHash',
+    webFetchCache:   'url'
+  });
+
   ns.db = db;
   ns.messageHasAttachment = messageHasAttachmentForDb;
   globalScopeForDb.ABChatShared = ns;

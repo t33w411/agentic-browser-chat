@@ -77,6 +77,7 @@
     deleteQuestions:              function (ids)                                      { return sendDbOpForPanelDataRepo('deleteQuestions',              [ids]); },
     createAttachmentBlob:         function (input)                                    { return sendDbOpForPanelDataRepo('createAttachmentBlob',         [input]); },
     getAttachmentBlob:            function (id)                                       { return sendDbOpForPanelDataRepo('getAttachmentBlob',            [id]); },
+    findAttachmentBlobByContentHash: function (hash, criteria)                        { return sendDbOpForPanelDataRepo('findAttachmentBlobByContentHash', [hash, criteria]); },
     deleteAttachmentBlob:         function (id)                                       { return sendDbOpForPanelDataRepo('deleteAttachmentBlob',         [id]); },
     deleteAttachmentBlobIfUnreferenced:
                                   function (id, protectedBlobIds)                     { return sendDbOpForPanelDataRepo('deleteAttachmentBlobIfUnreferenced', [id, protectedBlobIds]); },

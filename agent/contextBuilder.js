@@ -347,6 +347,26 @@
     return outForAttrs;
   }
 
+  // Tells the model exactly what it is holding and how to get the rest. The last sentence is the
+  // point of the whole notice: an excerpt reads identically to a complete document, so without it
+  // the model will confidently report that something is absent from a file it has only partly seen.
+  function buildFileExcerptNoticeForContextBuilder(excerptNoteForNotice, blobIdForNotice) {
+    var shownForNotice = String(excerptNoteForNotice || "").trim() || "part of this file";
+    // Participle rather than a copula, so the phrasing agrees with both note forms ("pages 1-142
+    // of 310" and "the first N of M characters").
+    var noticeForNotice = "[Excerpt only: " + shownForNotice + " shown above.";
+    if (Number.isFinite(blobIdForNotice)) {
+      noticeForNotice += " The full text is stored: read any other part with the read tool using"
+        + ' type:"attachment", id:' + blobIdForNotice + ", and an offset, or pass blob_ids:["
+        + blobIdForNotice + "] to eval to process the whole document at once.";
+    } else {
+      noticeForNotice += " The rest of the file is not available in this conversation.";
+    }
+    noticeForNotice += " Do not assume the file ends here, and do not state that something is"
+      + " missing from it based on this excerpt alone.]";
+    return noticeForNotice;
+  }
+
   async function buildUserContentForContextBuilder(msg, seenAttachmentsRegistryForContextBuilder) {
     var contextFragmentsForContextBuilder = [];
     var imagePartsForContextBuilder = [];
@@ -416,18 +436,37 @@
 
       if (chipTypeForContextBuilder === "file") {
         var parsedTextForContextBuilder = "";
-        if (blobForContextBuilder && typeof blobForContextBuilder.textContent === "string") {
+        // A long file is stored whole but inlined as an excerpt: sending the entire document costs
+        // its full token count on every request of every run, while the parts not shown here stay
+        // reachable through read(type:"attachment") paging and eval's blob_ids. Older blobs have no
+        // excerpt and fall back to their (already capped) stored text.
+        var fileExcerptedForContextBuilder = false;
+        var fileExcerptNoteForContextBuilder = "";
+        if (blobForContextBuilder && blobForContextBuilder.inlineTruncated
+          && typeof blobForContextBuilder.inlineText === "string" && blobForContextBuilder.inlineText) {
+          parsedTextForContextBuilder = blobForContextBuilder.inlineText.trim();
+          fileExcerptedForContextBuilder = true;
+          fileExcerptNoteForContextBuilder = String(blobForContextBuilder.inlineNote || "").trim();
+        } else if (blobForContextBuilder && typeof blobForContextBuilder.textContent === "string") {
           parsedTextForContextBuilder = blobForContextBuilder.textContent.trim();
         }
         if (!parsedTextForContextBuilder && chipContentForContextBuilder) {
           parsedTextForContextBuilder = chipContentForContextBuilder;
+          fileExcerptedForContextBuilder = false;
         }
         // Surface the blob id (as the blob_id attribute) so the agent can pass it to eval's blob_ids
         // to process the file's contents in the sandbox without re-pasting the text.
         var fileAttrsForContextBuilder = buildXmlAttrsForContextBuilder([
           ["name", chipLabelForContextBuilder],
-          ["blob_id", Number.isFinite(chipRefIdForContextBuilder) ? chipRefIdForContextBuilder : ""]
+          ["blob_id", Number.isFinite(chipRefIdForContextBuilder) ? chipRefIdForContextBuilder : ""],
+          ["excerpt", fileExcerptedForContextBuilder ? "true" : ""]
         ]);
+        if (fileExcerptedForContextBuilder && parsedTextForContextBuilder) {
+          parsedTextForContextBuilder += "\n\n" + buildFileExcerptNoticeForContextBuilder(
+            fileExcerptNoteForContextBuilder,
+            chipRefIdForContextBuilder
+          );
+        }
         if (parsedTextForContextBuilder && markAttachmentSeenForContextBuilder(seenAttachmentsRegistryForContextBuilder, "file" + ATTACH_DEDUP_SEP_FOR_CONTEXT_BUILDER + parsedTextForContextBuilder)) {
           contextFragmentsForContextBuilder.push("<file" + fileAttrsForContextBuilder + ">" + DUP_FILE_NOTE_FOR_CONTEXT_BUILDER + "</file>");
           continue;

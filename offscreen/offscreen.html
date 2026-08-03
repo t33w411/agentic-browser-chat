@@ -18,6 +18,14 @@
   <script src="../lib/jszip.min.js"></script>
   <script src="../lib/xlsx.min.js"></script>
   <script src="../agent/apiLogger.js"></script>
+
+  <!-- Scanned-PDF transcription. Hosted here rather than in the service worker because it is a
+       network-bound job that can run for minutes, which a service worker's idle timer does not
+       survive. pdfRaster lazy-loads pdf.js on first use, so the library is not paid for on every
+       run, and pdfOcr logs through the apiLogger loaded above. -->
+  <script src="pdfRaster.js"></script>
+  <script src="pdfOcr.js"></script>
+
   <script src="../agent/tools.js"></script>
   <script src="../agent/documentGeneration.js"></script>
   <script src="../agent/cdpClient.js"></script>

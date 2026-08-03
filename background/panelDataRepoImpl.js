@@ -208,7 +208,23 @@
       mimeType: String(inputForPanelDataRepo.mimeType || ''),
       size: Number.isFinite(Number(inputForPanelDataRepo.size)) ? Number(inputForPanelDataRepo.size) : 0,
       dataUrl: String(inputForPanelDataRepo.dataUrl || ''),
+      // textContent is the whole extracted document. inlineText is the excerpt the context layer
+      // sends; when inlineTruncated is set, the rest is still here in textContent and is reachable
+      // through read(type:"attachment") paging or eval's blob_ids. Blobs written before excerpts
+      // existed have an empty inlineText, and readers fall back to textContent.
       textContent: String(inputForPanelDataRepo.textContent || ''),
+      inlineText: String(inputForPanelDataRepo.inlineText || ''),
+      inlineTruncated: Boolean(inputForPanelDataRepo.inlineTruncated),
+      inlineNote: String(inputForPanelDataRepo.inlineNote || ''),
+      // Whether textContent itself is short of the document, as opposed to inlineTruncated, which
+      // is only about the excerpt. Recorded so a reused row can report the same thing the original
+      // attach did instead of quietly presenting a cut document as whole.
+      truncated: Boolean(inputForPanelDataRepo.truncated),
+      truncationNote: String(inputForPanelDataRepo.truncationNote || ''),
+      // SHA-256 of the source bytes, present only when this row is safe to reuse for a later
+      // attachment of the same file. Empty means "parse again": either the bytes were never
+      // hashed, or the parse left content it could not recover and must not be served forever.
+      contentHash: String(inputForPanelDataRepo.contentHash || ''),
       createdAt: normalizeTimestampForPanelDataRepo(inputForPanelDataRepo.createdAt, getIsoNowForPanelDataRepo())
     };
   }
@@ -651,6 +667,32 @@
     var recordForPanelDataRepo = normalizeAttachmentBlobRecordForPanelDataRepo(blobInputForPanelDataRepo);
     var blobIdForPanelDataRepo = await dbForPanelDataRepo.attachmentBlobs.add(recordForPanelDataRepo);
     return dbForPanelDataRepo.attachmentBlobs.get(blobIdForPanelDataRepo);
+  }
+
+  // Finds an existing blob holding exactly these bytes, so attaching the same file twice does not
+  // parse it (or pay to transcribe it) twice. Reuse is safe because blob rows are never mutated
+  // after creation and deletion is decided by the reference set, not by whoever created the row.
+  //
+  // Name and mimeType have to match as well. The bytes decide what the text is, but the row also
+  // carries the file's identity, and reusing a row named report.pdf for a file the user attached
+  // as report-final.pdf would show one name on the chip and report another to the model.
+  async function findAttachmentBlobByContentHashForPanelDataRepo(contentHashForPanelDataRepo, criteriaForPanelDataRepo) {
+    var dbForPanelDataRepo = requireDbForPanelDataRepo();
+    var hashForPanelDataRepo = String(contentHashForPanelDataRepo || '');
+    if (!hashForPanelDataRepo) return null;
+    var criteriaObjForPanelDataRepo = criteriaForPanelDataRepo || {};
+    var matchesForPanelDataRepo = await dbForPanelDataRepo.attachmentBlobs
+      .where('contentHash')
+      .equals(hashForPanelDataRepo)
+      .toArray();
+    for (var iForPanelDataRepo = 0; iForPanelDataRepo < matchesForPanelDataRepo.length; iForPanelDataRepo++) {
+      var candidateForPanelDataRepo = matchesForPanelDataRepo[iForPanelDataRepo];
+      if (String(candidateForPanelDataRepo.name || '') !== String(criteriaObjForPanelDataRepo.name || '')) continue;
+      if (String(candidateForPanelDataRepo.mimeType || '') !== String(criteriaObjForPanelDataRepo.mimeType || '')) continue;
+      if (String(candidateForPanelDataRepo.kind || '') !== String(criteriaObjForPanelDataRepo.kind || '')) continue;
+      return candidateForPanelDataRepo;
+    }
+    return null;
   }
 
   async function getAttachmentBlobForPanelDataRepo(blobIdForPanelDataRepo) {
@@ -1223,6 +1265,7 @@
     deleteQuestions:              deleteQuestionsForPanelDataRepo,
     createAttachmentBlob:         createAttachmentBlobForPanelDataRepo,
     getAttachmentBlob:            getAttachmentBlobForPanelDataRepo,
+    findAttachmentBlobByContentHash: findAttachmentBlobByContentHashForPanelDataRepo,
     deleteAttachmentBlob:         deleteAttachmentBlobForPanelDataRepo,
     deleteAttachmentBlobIfUnreferenced: deleteAttachmentBlobIfUnreferencedForPanelDataRepo,
     getNote:                      getNoteForPanelDataRepo,

@@ -40,6 +40,7 @@
   var _exposedSetPopoutPositionsForPanelRuntime = null;
   var _exposedReclampPanelPositionForPanelRuntime = null;
   var _exposedHandleRemoteStreamEventForPanelRuntime = null;
+  var _exposedHandlePdfOcrJobEventForPanelRuntime = null;
   var _exposedRunDelegatedPageToolForPanelRuntime = null;
   var _exposedSetReducedPaneForPanelRuntime = null;
   var _exposedSetChatSubTabForPanelRuntime = null;
@@ -4944,6 +4945,7 @@
       const blobIdForRemove = Number(chipNodeForPanelRuntime.dataset.attachRefId);
       const canReclaimBlobForRemove = isBlobChipForRemove && Number.isFinite(blobIdForRemove) && blobIdForRemove > 0;
 
+      cancelPdfOcrJobsForChipForPanelRuntime(chipNodeForPanelRuntime);
       chipNodeForPanelRuntime.remove();
       const draftWriteForRemove = saveDraftForPanelRuntime();
       if (!canReclaimBlobForRemove) return;
@@ -10298,6 +10300,10 @@
         }
       }
       apContentEl.innerHTML = '';
+      // A file blob now holds the whole extracted document, which can be far more text than a
+      // <pre> should be asked to lay out. Bound what gets painted; Copy and Download below still
+      // hand over the complete content.
+      const previewBodyForPanelRuntime = clampPreviewTextForPanelRuntime(String(normalizedPayloadForPanelRuntime.content || ''));
       if (normalizedPayloadForPanelRuntime.previewType === 'image' && normalizedPayloadForPanelRuntime.dataUrl) {
         const imageNodeForPanelRuntime = document.createElement('img');
         imageNodeForPanelRuntime.className = 'ap-image-preview';
@@ -10308,7 +10314,7 @@
         const preNodeForPanelRuntime = document.createElement('pre');
         preNodeForPanelRuntime.className = 'ap-code-preview';
         const codeNodeForPanelRuntime = document.createElement('code');
-        codeNodeForPanelRuntime.textContent = String(normalizedPayloadForPanelRuntime.content || '');
+        codeNodeForPanelRuntime.textContent = previewBodyForPanelRuntime;
         preNodeForPanelRuntime.appendChild(codeNodeForPanelRuntime);
         apContentEl.appendChild(preNodeForPanelRuntime);
       } else if (normalizedPayloadForPanelRuntime.previewType === 'text') {
@@ -10316,14 +10322,26 @@
         textNodeForPanelRuntime.className = 'ap-plain-text';
         textNodeForPanelRuntime.style.whiteSpace = 'pre-wrap';
         textNodeForPanelRuntime.style.wordBreak = 'break-word';
-        textNodeForPanelRuntime.textContent = String(normalizedPayloadForPanelRuntime.content || '');
+        textNodeForPanelRuntime.textContent = previewBodyForPanelRuntime;
         apContentEl.appendChild(textNodeForPanelRuntime);
       } else {
-        apContentEl.innerHTML = renderNoteMarkdown(String(normalizedPayloadForPanelRuntime.content || ''));
+        apContentEl.innerHTML = renderNoteMarkdown(previewBodyForPanelRuntime);
         hydrateRenderedMarkdownForPanelRuntime(apContentEl);
       }
       configureAttachPreviewFooterForPanelRuntime(name, normalizedPayloadForPanelRuntime);
       overlay.classList.remove('hidden');
+    }
+
+    // Matches the old parsed-text cap, so the heaviest preview the panel can be asked to render is
+    // no worse than before file blobs started keeping the whole document.
+    const MAX_PREVIEW_RENDER_CHARS_FOR_PANEL_RUNTIME = 200000;
+
+    function clampPreviewTextForPanelRuntime(textForClamp) {
+      if (textForClamp.length <= MAX_PREVIEW_RENDER_CHARS_FOR_PANEL_RUNTIME) return textForClamp;
+      return textForClamp.slice(0, MAX_PREVIEW_RENDER_CHARS_FOR_PANEL_RUNTIME).replace(/\s+$/, '')
+        + '\n\n[Preview shows the first ' + MAX_PREVIEW_RENDER_CHARS_FOR_PANEL_RUNTIME.toLocaleString('en-US')
+        + ' of ' + textForClamp.length.toLocaleString('en-US')
+        + ' characters. Use Copy or Download for the whole file.]';
     }
 
     function configureAttachPreviewFooterForPanelRuntime(nameForFooter, payloadForFooter) {
@@ -12876,7 +12894,7 @@
       const latency = latencyMsForLogRow ? (latencyMsForLogRow / 1000).toFixed(2) + 's' : '';
       const preview = statusMetaForLogRow.preview;
       const reqType = log.requestType || log.type || '';
-      const reqTypeLabels = { chat: 'Chat', 'inline-chat': 'Inline', title: 'Title', compaction: 'Compact', web_search: 'Search', generate_image: 'Image', 'web-fetch-vision': 'Vision', 'web-fetch-summary': 'Summarize', 'tab-read': 'Tab', 'screenshot-vision': 'Vision', 'image-vision': 'Vision', 'quiz-generate': 'Quiz', 'quiz-fix': 'Quiz Fix', 'quiz-review': 'Quiz Review' };
+      const reqTypeLabels = { chat: 'Chat', 'inline-chat': 'Inline', title: 'Title', compaction: 'Compact', web_search: 'Search', generate_image: 'Image', 'web-fetch-vision': 'Vision', 'web-fetch-summary': 'Summarize', 'tab-read': 'Tab', 'screenshot-vision': 'Vision', 'image-vision': 'Vision', 'quiz-generate': 'Quiz', 'quiz-fix': 'Quiz Fix', 'quiz-review': 'Quiz Review', 'pdf-page-ocr': 'PDF OCR', 'pdf-document-ocr': 'PDF OCR' };
       const reqTypeLabel = reqTypeLabels[reqType] || escapeHtmlForPanelRuntime(reqType);
       const reqTypeBadge = reqType ? `<span class="log-request-type-badge">${reqTypeLabel}</span>` : '';
       const selectedForLogRow = apiSelectedLogIdsForPanelRuntime.has(log.id) ? ' checked' : '';
@@ -13008,7 +13026,7 @@
       const reqTypeRaw = log.requestType || log.type || '';
       const isChatLogDetailForPanelRuntime = reqTypeRaw === 'chat';
       const hasChatTurnsForPanelRuntime = isChatLogDetailForPanelRuntime && Array.isArray(log.turns) && log.turns.length > 0;
-      const reqTypeDisplayMap = { chat: 'Chat', 'inline-chat': 'Inline Chat', title: 'Title Generation', compaction: 'Compaction', web_search: 'Web Search', generate_image: 'Image Generation', 'web-fetch-vision': 'Web Fetch Vision', 'web-fetch-summary': 'Web Fetch Summary', 'tab-read': 'Tab Read', 'screenshot-vision': 'Screenshot Vision', 'image-vision': 'Image Vision', 'quiz-generate': 'Quiz Generation', 'quiz-fix': 'Quiz Question Fix', 'quiz-review': 'Quiz Self-Containment Review' };
+      const reqTypeDisplayMap = { chat: 'Chat', 'inline-chat': 'Inline Chat', title: 'Title Generation', compaction: 'Compaction', web_search: 'Web Search', generate_image: 'Image Generation', 'web-fetch-vision': 'Web Fetch Vision', 'web-fetch-summary': 'Web Fetch Summary', 'tab-read': 'Tab Read', 'screenshot-vision': 'Screenshot Vision', 'image-vision': 'Image Vision', 'quiz-generate': 'Quiz Generation', 'quiz-fix': 'Quiz Question Fix', 'quiz-review': 'Quiz Self-Containment Review', 'pdf-page-ocr': 'Scanned PDF Page Transcription', 'pdf-document-ocr': 'Scanned PDF Document OCR' };
       const reqTypeDisplay = reqTypeDisplayMap[reqTypeRaw] || reqTypeRaw;
       let html = `<div class="log-detail-meta">` +
         `<div class="log-detail-row"><span class="log-detail-label">Status</span><span class="log-status-badge ${statusMetaForLogDetail.cssClass}">${escapeHtmlForPanelRuntime(statusMetaForLogDetail.label)}</span></div>` +
@@ -15801,6 +15819,118 @@
       }
     }
 
+    /* ============================================================
+      SCANNED PDF TRANSCRIPTION JOBS
+
+      A PDF whose pages carry no text is transcribed by an OCR model, which takes long enough
+      that the parse cannot answer on the request channel it arrived on: the service worker is
+      terminated while it waits and the channel closes under the panel. The worker instead
+      answers with a job id and the result arrives later as its own message.
+    ============================================================ */
+    const pdfOcrJobsForPanelRuntime = new Map();
+    // Past the job's own budget and past the service worker's abandon timer, so this only fires
+    // when the delivery route itself is gone, never ahead of a job that is still working.
+    const PDF_OCR_JOB_ABANDON_MS_FOR_PANEL_RUNTIME = 1020000;
+
+    function describePdfOcrProgressForPanelRuntime(progressForOcrProgress) {
+      const stageForOcrProgress = String(progressForOcrProgress && progressForOcrProgress.stage || '');
+      const doneForOcrProgress = Number(progressForOcrProgress && progressForOcrProgress.done || 0);
+      const totalForOcrProgress = Number(progressForOcrProgress && progressForOcrProgress.total || 0);
+      if (stageForOcrProgress === 'document') return 'Reading scanned pages...';
+      if (stageForOcrProgress === 'render') {
+        return totalForOcrProgress
+          ? ('Rendering page ' + Math.min(doneForOcrProgress + 1, totalForOcrProgress) + ' of ' + totalForOcrProgress + '...')
+          : 'Rendering pages...';
+      }
+      if (stageForOcrProgress === 'transcribe') {
+        return totalForOcrProgress
+          ? ('Reading page ' + Math.min(doneForOcrProgress + 1, totalForOcrProgress) + ' of ' + totalForOcrProgress + '...')
+          : 'Reading pages...';
+      }
+      return 'Reading scanned pages...';
+    }
+
+    function handlePdfOcrJobEventForPanelRuntime(jobIdForOcrEvent, eventForOcrEvent, payloadForOcrEvent) {
+      const jobForOcrEvent = pdfOcrJobsForPanelRuntime.get(String(jobIdForOcrEvent || ''));
+      if (!jobForOcrEvent) return;
+      if (eventForOcrEvent === 'progress') {
+        if (jobForOcrEvent.chipNode && jobForOcrEvent.chipNode.isConnected) {
+          setInputChipStatusForPanelRuntime(
+            jobForOcrEvent.chipNode,
+            'loading',
+            describePdfOcrProgressForPanelRuntime(payloadForOcrEvent)
+          );
+        }
+        return;
+      }
+      if (eventForOcrEvent !== 'done') return;
+      pdfOcrJobsForPanelRuntime.delete(String(jobIdForOcrEvent || ''));
+      jobForOcrEvent.resolve(payloadForOcrEvent || { ok: false, error: 'Could not parse file.' });
+    }
+
+    // Removing the chip while its file is still being transcribed has to stop the job: it is
+    // spending real money on a document the user has just discarded.
+    function cancelPdfOcrJobsForChipForPanelRuntime(chipNodeForCancel) {
+      if (!chipNodeForCancel) return;
+      pdfOcrJobsForPanelRuntime.forEach(function (jobForCancel, jobIdForCancel) {
+        if (jobForCancel.chipNode !== chipNodeForCancel) return;
+        pdfOcrJobsForPanelRuntime.delete(jobIdForCancel);
+        sendRuntimeMessageForPanelRuntime({
+          action: getSharedActionsForPanelRuntime().pdfOcrJobCancel || 'pdfOcrJobCancel',
+          jobId: jobIdForCancel
+        });
+        jobForCancel.resolve({ ok: false, cancelled: true, error: 'Attachment removed.' });
+      });
+    }
+
+    // Sends the file for parsing and returns the parse result, whether it came back on this
+    // channel, from an already-stored copy of the same file, or later as a job.
+    //
+    // blobIdentityForParse is the row this caller would write. It is stated rather than inferred
+    // on the other side so the duplicate lookup and the eventual insert cannot disagree about
+    // what identifies the file.
+    async function parseUploadedFileForPanelRuntime(fileForParse, arrayBufferForParse, chipNodeForParse, blobIdentityForParse) {
+      const sharedActionsForParse = getSharedActionsForPanelRuntime();
+      const identityForParse = blobIdentityForParse || {};
+      const responseForParse = await sendRuntimeMessageForPanelRuntime({
+        action: sharedActionsForParse.parseUploadedFile || 'parseUploadedFile',
+        fileName: String(fileForParse.name || ''),
+        mimeType: String(fileForParse.type || ''),
+        size: Number(fileForParse.size || 0),
+        blobName: String(identityForParse.name || ''),
+        blobMimeType: String(identityForParse.mimeType || ''),
+        blobKind: String(identityForParse.kind || 'file'),
+        buffer: Array.from(new Uint8Array(arrayBufferForParse))
+      });
+      if (!responseForParse || !responseForParse.ok || !responseForParse.deferred) return responseForParse;
+
+      const jobIdForParse = String(responseForParse.jobId || '');
+      if (!jobIdForParse) return { ok: false, error: 'Could not parse file.' };
+      if (chipNodeForParse) {
+        setInputChipStatusForPanelRuntime(chipNodeForParse, 'loading', 'Reading scanned pages...');
+      }
+      return new Promise(function (resolveForParse) {
+        // The job reports back through the tab, so a tab that goes away mid-job takes the only
+        // route the answer had. Without this the chip would spin for the rest of the session.
+        const abandonTimerForParse = setTimeout(function () {
+          if (!pdfOcrJobsForPanelRuntime.has(jobIdForParse)) return;
+          pdfOcrJobsForPanelRuntime.delete(jobIdForParse);
+          resolveForParse({ ok: false, error: 'Reading the scanned pages took too long.' });
+        }, PDF_OCR_JOB_ABANDON_MS_FOR_PANEL_RUNTIME);
+        pdfOcrJobsForPanelRuntime.set(jobIdForParse, {
+          chipNode: chipNodeForParse || null,
+          resolve: function (resultForParse) {
+            clearTimeout(abandonTimerForParse);
+            resolveForParse(
+              resultForParse && resultForParse.ok
+                ? Object.assign({}, resultForParse, { mimeType: String(responseForParse.mimeType || fileForParse.type || '') })
+                : resultForParse
+            );
+          }
+        });
+      });
+    }
+
     async function attachFileForPanelRuntime(fileForPanelRuntime, chipNodeForPanelRuntime) {
       if (!fileForPanelRuntime) return;
       if (Number(fileForPanelRuntime.size || 0) > MAX_ATTACHMENT_BYTES_FOR_PANEL_RUNTIME) {
@@ -15818,16 +15948,17 @@
         return;
       }
       const arrayBufferForPanelRuntime = await fileToArrayBufferForPanelRuntime(fileForPanelRuntime);
-      const sharedActionsForPanelRuntime = getSharedActionsForPanelRuntime();
-      const actionForPanelRuntime = sharedActionsForPanelRuntime.parseUploadedFile || 'parseUploadedFile';
-      const parseResponseForPanelRuntime = await sendRuntimeMessageForPanelRuntime({
-        action: actionForPanelRuntime,
-        fileName: String(fileForPanelRuntime.name || ''),
-        mimeType: String(fileForPanelRuntime.type || ''),
-        size: Number(fileForPanelRuntime.size || 0),
-        buffer: Array.from(new Uint8Array(arrayBufferForPanelRuntime))
-      });
+      const resolvedMimeTypeForPanelRuntime = String(fileForPanelRuntime.type || 'application/octet-stream');
+      const blobNameForPanelRuntime = String(fileForPanelRuntime.name || 'File');
+      const parseResponseForPanelRuntime = await parseUploadedFileForPanelRuntime(
+        fileForPanelRuntime,
+        arrayBufferForPanelRuntime,
+        chipNodeForPanelRuntime,
+        { name: blobNameForPanelRuntime, mimeType: resolvedMimeTypeForPanelRuntime, kind: 'file' }
+      );
       if (!parseResponseForPanelRuntime || !parseResponseForPanelRuntime.ok) {
+        // A cancelled job means the chip is already gone; there is nothing left to report on.
+        if (parseResponseForPanelRuntime && parseResponseForPanelRuntime.cancelled) return;
         const parseErrMsgForPanelRuntime = parseResponseForPanelRuntime && parseResponseForPanelRuntime.error
           ? parseResponseForPanelRuntime.error
           : 'Could not parse file.';
@@ -15837,24 +15968,36 @@
         appendSystemMsgToContainerForPanelRuntime(parseErrMsgForPanelRuntime);
         return;
       }
-      const extractedTextForPanelRuntime = String(parseResponseForPanelRuntime.text || '');
-      const resolvedMimeTypeForPanelRuntime = String(parseResponseForPanelRuntime.mimeType || fileForPanelRuntime.type || 'application/octet-stream');
-      // Retain raw bytes for DOCX only, so the model can later re-read the file as
-      // structured HTML (read_document_structure) when a task needs its layout.
-      // Other formats keep just the extracted text to avoid storing large blobs.
-      const isDocxAttachmentForPanelRuntime = resolvedMimeTypeForPanelRuntime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-        || getFileExtensionForPanelRuntime(fileForPanelRuntime.name || '') === 'docx';
-      const fileBlobInputForPanelRuntime = {
-        name: String(fileForPanelRuntime.name || 'File'),
-        kind: 'file',
-        mimeType: resolvedMimeTypeForPanelRuntime,
-        size: Number(fileForPanelRuntime.size || 0),
-        textContent: extractedTextForPanelRuntime
-      };
-      if (isDocxAttachmentForPanelRuntime) {
-        fileBlobInputForPanelRuntime.dataUrl = arrayBufferToDataUrlForPanelRuntime(arrayBufferForPanelRuntime, resolvedMimeTypeForPanelRuntime);
+      // An identical file already in the table is referenced rather than stored a second time.
+      // Blob rows are never mutated after creation and deletion is decided by the reference set,
+      // so a shared row is as safe as a private one.
+      let blobIdForPanelRuntime = Number(parseResponseForPanelRuntime.reusedBlobId) || 0;
+      if (!blobIdForPanelRuntime) {
+        const extractedTextForPanelRuntime = String(parseResponseForPanelRuntime.text || '');
+        // Retain raw bytes for DOCX only, so the model can later re-read the file as
+        // structured HTML (read_document_structure) when a task needs its layout.
+        // Other formats keep just the extracted text to avoid storing large blobs.
+        const isDocxAttachmentForPanelRuntime = resolvedMimeTypeForPanelRuntime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+          || getFileExtensionForPanelRuntime(fileForPanelRuntime.name || '') === 'docx';
+        const fileBlobInputForPanelRuntime = {
+          name: blobNameForPanelRuntime,
+          kind: 'file',
+          mimeType: resolvedMimeTypeForPanelRuntime,
+          size: Number(fileForPanelRuntime.size || 0),
+          textContent: extractedTextForPanelRuntime,
+          inlineText: String(parseResponseForPanelRuntime.inlineText || ''),
+          inlineTruncated: Boolean(parseResponseForPanelRuntime.inlineTruncated),
+          inlineNote: String(parseResponseForPanelRuntime.inlineNote || ''),
+          truncated: Boolean(parseResponseForPanelRuntime.truncated),
+          truncationNote: String(parseResponseForPanelRuntime.truncationNote || ''),
+          contentHash: String(parseResponseForPanelRuntime.contentHash || '')
+        };
+        if (isDocxAttachmentForPanelRuntime) {
+          fileBlobInputForPanelRuntime.dataUrl = arrayBufferToDataUrlForPanelRuntime(arrayBufferForPanelRuntime, resolvedMimeTypeForPanelRuntime);
+        }
+        const persistedBlobForPanelRuntime = await createAttachmentBlobForPanelRuntime(fileBlobInputForPanelRuntime);
+        blobIdForPanelRuntime = Number(persistedBlobForPanelRuntime.id) || 0;
       }
-      const persistedBlobForPanelRuntime = await createAttachmentBlobForPanelRuntime(fileBlobInputForPanelRuntime);
       const targetChipForPanelRuntime = chipNodeForPanelRuntime || addInputChipForPanelRuntime({
         type: 'file',
         label: String(fileForPanelRuntime.name || 'File')
@@ -15862,12 +16005,48 @@
       if (!targetChipForPanelRuntime) return;
       targetChipForPanelRuntime.dataset.attachType = 'file';
       targetChipForPanelRuntime.dataset.attachName = String(fileForPanelRuntime.name || 'File');
-      targetChipForPanelRuntime.dataset.attachRefId = String(Number(persistedBlobForPanelRuntime.id) || '');
+      targetChipForPanelRuntime.dataset.attachRefId = String(blobIdForPanelRuntime || '');
       targetChipForPanelRuntime.dataset.attachMimeType = resolvedMimeTypeForPanelRuntime;
       targetChipForPanelRuntime.dataset.attachSize = String(Number(fileForPanelRuntime.size || 0));
       targetChipForPanelRuntime.dataset.attachKind = 'file';
       targetChipForPanelRuntime.dataset.attachContent = '';
       setInputChipStatusForPanelRuntime(targetChipForPanelRuntime, '', '');
+      // Partial content must never be silent: an answer drawn from an excerpt looks exactly like
+      // an answer drawn from the whole document. Say what is inlined, and that the rest is not
+      // lost, so the user can judge an answer that may have missed something.
+      announceAttachmentTruncationForPanelRuntime(
+        targetChipForPanelRuntime,
+        String(fileForPanelRuntime.name || 'File'),
+        parseResponseForPanelRuntime
+      );
+    }
+
+    // Composes the two truncation signals a parsed file can carry: inlineTruncated means only an
+    // excerpt goes into context but the whole document is stored and readable on demand, while
+    // truncated means the document exceeded what the extension stores and the tail is genuinely
+    // gone. Returns '' when neither applies, which is the common case.
+    function describeAttachmentTruncationForPanelRuntime(fileNameForTruncation, parseResponseForTruncation) {
+      if (!parseResponseForTruncation) return '';
+      const displayNameForTruncation = String(fileNameForTruncation || 'This file');
+      if (parseResponseForTruncation.truncated) {
+        const storedNoteForTruncation = String(parseResponseForTruncation.truncationNote || '').trim();
+        return displayNameForTruncation + ' is larger than the extension can store, so only '
+          + (storedNoteForTruncation || 'part of it') + ' was kept. The rest was discarded.';
+      }
+      if (parseResponseForTruncation.inlineTruncated) {
+        const inlineNoteForTruncation = String(parseResponseForTruncation.inlineNote || '').trim();
+        return displayNameForTruncation + ' is long, so only ' + (inlineNoteForTruncation || 'part of it')
+          + ' is included directly in the conversation. The whole file is saved and the assistant can '
+          + 'read any other part of it on request.';
+      }
+      return '';
+    }
+
+    function announceAttachmentTruncationForPanelRuntime(chipNodeForTruncation, fileNameForTruncation, parseResponseForTruncation) {
+      const messageForTruncation = describeAttachmentTruncationForPanelRuntime(fileNameForTruncation, parseResponseForTruncation);
+      if (!messageForTruncation) return;
+      if (chipNodeForTruncation) chipNodeForTruncation.title = messageForTruncation;
+      appendSystemMsgToContainerForPanelRuntime(messageForTruncation);
     }
 
     function showNoteAttachErrorForPanelRuntime(attachmentsWrapForPanelRuntime, msgForPanelRuntime, isPopoutForPanelRuntime) {
@@ -15936,17 +16115,17 @@
             renderAttachmentChipForPanelRuntime(attachmentsWrapForPanelRuntime, { name: String(fileForPanelRuntime.name || 'image'), refId: Number(persistedBlobForNoteImage.id) }, 'image');
           }
         } else {
-          const sharedActionsForNoteAttach = getSharedActionsForPanelRuntime();
-          const parseActionForNoteAttach = sharedActionsForNoteAttach.parseUploadedFile || 'parseUploadedFile';
-          const parseResponseForNoteAttach = await sendRuntimeMessageForPanelRuntime({
-            action: parseActionForNoteAttach,
-            fileName: String(fileForPanelRuntime.name || ''),
-            mimeType: String(fileForPanelRuntime.type || ''),
-            size: Number(fileForPanelRuntime.size || 0),
-            buffer: Array.from(new Uint8Array(arrayBufferForNoteAttach))
-          });
+          const noteFileMimeTypeForNoteAttach = String(fileForPanelRuntime.type || '');
+          const noteBlobNameForNoteAttach = String(fileForPanelRuntime.name || 'file');
+          const parseResponseForNoteAttach = await parseUploadedFileForPanelRuntime(
+            fileForPanelRuntime,
+            arrayBufferForNoteAttach,
+            null,
+            { name: noteBlobNameForNoteAttach, mimeType: noteFileMimeTypeForNoteAttach, kind: 'file' }
+          );
           if (!parseResponseForNoteAttach || !parseResponseForNoteAttach.ok) {
             pendingChipForNoteAttach.remove();
+            if (parseResponseForNoteAttach && parseResponseForNoteAttach.cancelled) return;
             showNoteAttachErrorForPanelRuntime(
               attachmentsWrapForPanelRuntime,
               parseResponseForNoteAttach && parseResponseForNoteAttach.error ? String(parseResponseForNoteAttach.error) : 'Could not read file.',
@@ -15954,28 +16133,44 @@
             );
             return;
           }
-          const extractedTextForNoteAttach = String(parseResponseForNoteAttach.text || '');
-          const noteFileMimeTypeForNoteAttach = String(fileForPanelRuntime.type || '');
-          // Retain raw bytes for DOCX only, matching the chat attachment path, so the
-          // model can later re-read a note's DOCX as structured HTML when needed.
-          const isDocxNoteAttachForPanelRuntime = noteFileMimeTypeForNoteAttach === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-            || getFileExtensionForPanelRuntime(fileForPanelRuntime.name || '') === 'docx';
-          const noteFileBlobInputForPanelRuntime = {
-            name: String(fileForPanelRuntime.name || 'file'),
-            kind: 'file',
-            mimeType: noteFileMimeTypeForNoteAttach,
-            size: Number(fileForPanelRuntime.size || 0),
-            textContent: extractedTextForNoteAttach
-          };
-          if (isDocxNoteAttachForPanelRuntime) {
-            noteFileBlobInputForPanelRuntime.dataUrl = arrayBufferToDataUrlForPanelRuntime(arrayBufferForNoteAttach, noteFileMimeTypeForNoteAttach);
+          let noteBlobIdForNoteAttach = Number(parseResponseForNoteAttach.reusedBlobId) || 0;
+          if (!noteBlobIdForNoteAttach) {
+            const extractedTextForNoteAttach = String(parseResponseForNoteAttach.text || '');
+            // Retain raw bytes for DOCX only, matching the chat attachment path, so the
+            // model can later re-read a note's DOCX as structured HTML when needed.
+            const isDocxNoteAttachForPanelRuntime = noteFileMimeTypeForNoteAttach === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+              || getFileExtensionForPanelRuntime(fileForPanelRuntime.name || '') === 'docx';
+            const noteFileBlobInputForPanelRuntime = {
+              name: noteBlobNameForNoteAttach,
+              kind: 'file',
+              mimeType: noteFileMimeTypeForNoteAttach,
+              size: Number(fileForPanelRuntime.size || 0),
+              textContent: extractedTextForNoteAttach,
+              inlineText: String(parseResponseForNoteAttach.inlineText || ''),
+              inlineTruncated: Boolean(parseResponseForNoteAttach.inlineTruncated),
+              inlineNote: String(parseResponseForNoteAttach.inlineNote || ''),
+              truncated: Boolean(parseResponseForNoteAttach.truncated),
+              truncationNote: String(parseResponseForNoteAttach.truncationNote || ''),
+              contentHash: String(parseResponseForNoteAttach.contentHash || '')
+            };
+            if (isDocxNoteAttachForPanelRuntime) {
+              noteFileBlobInputForPanelRuntime.dataUrl = arrayBufferToDataUrlForPanelRuntime(arrayBufferForNoteAttach, noteFileMimeTypeForNoteAttach);
+            }
+            const persistedBlobForNoteFile = await createAttachmentBlobForPanelRuntime(noteFileBlobInputForPanelRuntime);
+            noteBlobIdForNoteAttach = Number(persistedBlobForNoteFile.id) || 0;
           }
-          const persistedBlobForNoteFile = await createAttachmentBlobForPanelRuntime(noteFileBlobInputForPanelRuntime);
           pendingChipForNoteAttach.remove();
+          // A note has no transcript to write a system message into, so the same disclosure goes
+          // out as a toast.
+          const noteTruncationMsgForPanelRuntime = describeAttachmentTruncationForPanelRuntime(
+            String(fileForPanelRuntime.name || 'This file'),
+            parseResponseForNoteAttach
+          );
+          if (noteTruncationMsgForPanelRuntime) showFilePickerToastForPanelRuntime(noteTruncationMsgForPanelRuntime);
           if (isPopoutForPanelRuntime && popoutForPanelRuntime) {
-            renderAttachmentChipForPopoutForPanelRuntime(popoutForPanelRuntime, attachmentsWrapForPanelRuntime, { name: String(fileForPanelRuntime.name || 'file'), refId: Number(persistedBlobForNoteFile.id) }, 'file');
+            renderAttachmentChipForPopoutForPanelRuntime(popoutForPanelRuntime, attachmentsWrapForPanelRuntime, { name: String(fileForPanelRuntime.name || 'file'), refId: noteBlobIdForNoteAttach }, 'file');
           } else {
-            renderAttachmentChipForPanelRuntime(attachmentsWrapForPanelRuntime, { name: String(fileForPanelRuntime.name || 'file'), refId: Number(persistedBlobForNoteFile.id) }, 'file');
+            renderAttachmentChipForPanelRuntime(attachmentsWrapForPanelRuntime, { name: String(fileForPanelRuntime.name || 'file'), refId: noteBlobIdForNoteAttach }, 'file');
           }
         }
       } catch (errorForNoteAttach) {
@@ -18668,6 +18863,7 @@
     _exposedSetPopoutPositionsForPanelRuntime = setPopoutPositionsForMirrorForPanelRuntime;
     _exposedReclampPanelPositionForPanelRuntime = reclampPanelPositionForPanelRuntime;
     _exposedHandleRemoteStreamEventForPanelRuntime = handleRemoteStreamEventForPanelRuntime;
+    _exposedHandlePdfOcrJobEventForPanelRuntime = handlePdfOcrJobEventForPanelRuntime;
     _exposedRunDelegatedPageToolForPanelRuntime = runDelegatedPageToolForPanelRuntime;
     _exposedSetReducedPaneForPanelRuntime = setReducedPaneForMirrorForPanelRuntime;
     _exposedSetChatSubTabForPanelRuntime = setChatSubTabForMirrorForPanelRuntime;
@@ -18799,6 +18995,11 @@
     handleRemoteStreamEvent: function handleRemoteStreamEventRelayForPanelRuntime(eventForRelay, chatIdForRelay, payloadForRelay) {
       if (_exposedHandleRemoteStreamEventForPanelRuntime) {
         _exposedHandleRemoteStreamEventForPanelRuntime(eventForRelay, chatIdForRelay, payloadForRelay);
+      }
+    },
+    handlePdfOcrJobEvent: function handlePdfOcrJobEventRelayForPanelRuntime(jobIdForRelay, eventForRelay, payloadForRelay) {
+      if (_exposedHandlePdfOcrJobEventForPanelRuntime) {
+        _exposedHandlePdfOcrJobEventForPanelRuntime(jobIdForRelay, eventForRelay, payloadForRelay);
       }
     },
     runDelegatedPageTool: function runDelegatedPageToolRelayForPanelRuntime(toolForRelay, argsForRelay) {

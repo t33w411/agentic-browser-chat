@@ -502,6 +502,18 @@
       return true;
     }
 
+    if (messageForContentMain.action === (actionsForContentMain.pdfOcrJobDeliver || "pdfOcrJobDeliver")) {
+      var panelRuntimeNsForPdfOcr = contentNamespaceForContentMain.ui && contentNamespaceForContentMain.ui.panelRuntime;
+      if (panelRuntimeNsForPdfOcr && typeof panelRuntimeNsForPdfOcr.handlePdfOcrJobEvent === 'function') {
+        panelRuntimeNsForPdfOcr.handlePdfOcrJobEvent(
+          messageForContentMain.jobId,
+          messageForContentMain.event,
+          messageForContentMain.payload
+        );
+      }
+      return false;
+    }
+
     if (messageForContentMain.action === (actionsForContentMain.streamReceiverDeliver || "streamReceiverDeliver")) {
       var panelRuntimeNsForStreamReceive = contentNamespaceForContentMain.ui && contentNamespaceForContentMain.ui.panelRuntime;
       if (panelRuntimeNsForStreamReceive && typeof panelRuntimeNsForStreamReceive.handleRemoteStreamEvent === 'function') {

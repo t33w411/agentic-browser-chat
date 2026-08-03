@@ -38,6 +38,15 @@
     parseUploadedFile: "parseUploadedFile",
     parseAttachmentStructure: "parseAttachmentStructure",
     extractDocxImages: "extractDocxImages",
+    // Scanned-PDF transcription, run as a job in the offscreen document. The pages of a PDF
+    // that yielded no extractable text are transcribed by an OCR or vision model, which takes
+    // long enough that hosting it in the service worker gets the worker killed mid-flight.
+    // SW → offscreen: start / cancel. offscreen → SW: progress and completion, which the SW
+    // relays to the initiating tab as pdfOcrJobDeliver.
+    pdfOcrJobRun: "pdfOcrJobRun",
+    pdfOcrJobCancel: "pdfOcrJobCancel",
+    pdfOcrJobEvent: "pdfOcrJobEvent",
+    pdfOcrJobDeliver: "pdfOcrJobDeliver",
     addImageToChat: "addImageToChat",
     addSelectionToChat: "addSelectionToChat",
     saveSelectionToClips: "saveSelectionToClips",

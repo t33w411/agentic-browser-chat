@@ -2656,10 +2656,32 @@ async function handleAgentWebFetchForServiceWorker(msgForFetch, sendResponseForF
       var mimeForParseFetch = mimeTypeBaseForFetch !== 'application/octet-stream'
         ? mimeTypeBaseForFetch
         : ('application/' + urlExtForFetch);
+      // A fetched PDF can be a scan just as an attached one can, so it takes the same page-aware
+      // path. Cancellation is threaded through because transcription can run several requests,
+      // and the parsed result (transcriptions included) is cached under the URL, so a repeat
+      // fetch of the same document does not pay for the vision calls again.
+      var canTranscribePdfForFetch = String(mimeForParseFetch || '').toLowerCase() === 'application/pdf'
+        && typeof fileParsingForServiceWorker.parsePdfPages === 'function'
+        && typeof fileParsingForServiceWorker.joinPdfPages === 'function'
+        && typeof fileParsingForServiceWorker.normalizeParsedText === 'function';
+      // A fetched document is never stored, so there is no blob to page: whatever comes back here
+      // is all the model will ever see of it. That makes the small inline budget the right cap,
+      // and it is why this path truncates rather than keeping the whole text like an attachment.
+      var docMaxCharsForFetch = Number(fileParsingForServiceWorker.maxInlineTextChars) || 200000;
       try {
-        var docParseResultForFetch = await fileParsingForServiceWorker.parseFileBuffer(
-          fileNameForDocFetch, mimeForParseFetch, docBufForFetch
-        );
+        var docParseResultForFetch = canTranscribePdfForFetch
+          ? await parsePdfWithPageTranscriptionForServiceWorker(
+            docBufForFetch,
+            requestRecordForFetch ? requestRecordForFetch.signal : null,
+            docMaxCharsForFetch
+          )
+          : await fileParsingForServiceWorker.parseFileBuffer(
+            fileNameForDocFetch, mimeForParseFetch, docBufForFetch, { maxChars: docMaxCharsForFetch }
+          );
+        if (requestRecordForFetch && requestRecordForFetch.signal.aborted) {
+          sendResponseForFetch({ ok: false, cancelled: true, error: 'Cancelled' });
+          return;
+        }
         var docResponseForCache = {
           ok: true,
           url: finalUrlForFetch || urlForFetch,
@@ -2668,6 +2690,7 @@ async function handleAgentWebFetchForServiceWorker(msgForFetch, sendResponseForF
           fileName: fileNameForDocFetch,
           text: docParseResultForFetch && docParseResultForFetch.text ? docParseResultForFetch.text : '',
           truncated: Boolean(docParseResultForFetch && docParseResultForFetch.truncated),
+          truncationNote: (docParseResultForFetch && docParseResultForFetch.truncationNote) || '',
           size: docBufForFetch.byteLength
         };
         if (methodForFetch === 'GET') {
@@ -2829,6 +2852,439 @@ async function playReminderBeepViaOffscreenForServiceWorker() {
   if (!ensured) return;
   chrome.runtime.sendMessage({ action: 'playReminderBeep' }, function () {
     if (chrome.runtime.lastError) { /* offscreen not ready yet */ }
+  });
+}
+
+// --- Scanned PDF transcription (dispatch) ---
+//
+// A scanned PDF carries no text objects at all, so text extraction returns empty pages and the
+// model silently receives a file with no content. Those pages are transcribed by an OCR or vision
+// model, and the transcription replaces the page's text before the pages are joined. Born-digital
+// PDFs never reach this path, so the common case costs nothing.
+//
+// The transcription itself runs in the offscreen document. Only the dispatch lives here, because
+// transcription is a network-bound job that can run for minutes and a service worker's idle timer
+// is reset by events and extension API calls, never by a pending fetch: a job hosted here is
+// terminated mid-flight and its caller sees the message channel close. Nothing about a running job
+// is kept in this worker's memory for the same reason. Everything needed to finish is carried in
+// the job's own completion message, which is itself what wakes the worker back up.
+
+// Under this many non-whitespace characters a page has no usable text of its own. Set above zero
+// because a scanned page often still carries a text-layer page number or a stamped header.
+const PDF_OCR_MIN_PAGE_CHARS_FOR_SERVICE_WORKER = 48;
+const PDF_OCR_JOB_START_MAX_RETRIES_FOR_SERVICE_WORKER = 8;
+const PDF_OCR_JOB_START_RETRY_DELAY_MS_FOR_SERVICE_WORKER = 250;
+// Comfortably past the job's own budget, so this only fires when the job itself has vanished.
+const PDF_OCR_JOB_ABANDON_MS_FOR_SERVICE_WORKER = 960000;
+
+let pdfOcrJobSeqForServiceWorker = 0;
+// Jobs whose result is awaited inside this worker rather than delivered to a tab (web_fetch).
+// These do need the worker to survive, which is what the keepalive below is for.
+const pdfOcrJobWaitersForServiceWorker = new Map();
+
+function arrayBufferToBase64ForServiceWorker(arrayBufferForBase64) {
+  var bytesForBase64 = new Uint8Array(arrayBufferForBase64);
+  var binaryForBase64 = '';
+  var CHUNK_FOR_BASE64 = 0x8000;
+  for (var iForBase64 = 0; iForBase64 < bytesForBase64.length; iForBase64 += CHUNK_FOR_BASE64) {
+    binaryForBase64 += String.fromCharCode.apply(null, bytesForBase64.subarray(iForBase64, iForBase64 + CHUNK_FOR_BASE64));
+  }
+  return btoa(binaryForBase64);
+}
+
+function sendOffscreenMessageForServiceWorker(payloadForOffscreenMessage) {
+  return new Promise(function (resolveForOffscreenMessage) {
+    try {
+      chrome.runtime.sendMessage(payloadForOffscreenMessage, function (responseForOffscreenMessage) {
+        if (chrome.runtime.lastError) {
+          resolveForOffscreenMessage(null);
+          return;
+        }
+        resolveForOffscreenMessage(responseForOffscreenMessage || null);
+      });
+    } catch (errForOffscreenMessage) {
+      resolveForOffscreenMessage(null);
+    }
+  });
+}
+
+function getStoredApiKeyForServiceWorker() {
+  return new Promise(function (resolveForKey) {
+    try {
+      chrome.storage.local.get(['abchat_api_key'], function (resultForKey) {
+        resolveForKey((resultForKey && resultForKey.abchat_api_key) ? String(resultForKey.abchat_api_key) : '');
+      });
+    } catch (errForKey) {
+      resolveForKey('');
+    }
+  });
+}
+
+// Keeps this worker alive across an await that no extension event punctuates. Only the web_fetch
+// path needs it: that caller is a tool call waiting on an open message channel, so the worker has
+// to still be here when the job finishes. The attachment path deliberately does not take one.
+let swKeepAliveRefCountForServiceWorker = 0;
+let swKeepAliveTimerForServiceWorker = null;
+const SW_KEEPALIVE_INTERVAL_MS_FOR_SERVICE_WORKER = 20000;
+
+function acquireServiceWorkerKeepAliveForServiceWorker() {
+  swKeepAliveRefCountForServiceWorker += 1;
+  if (swKeepAliveTimerForServiceWorker) return;
+  swKeepAliveTimerForServiceWorker = setInterval(function () {
+    // Any extension API call resets the idle timer; this is the cheapest one that does.
+    try {
+      chrome.runtime.getPlatformInfo(function () { void chrome.runtime.lastError; });
+    } catch (errForKeepAlive) { /* nothing to do */ }
+  }, SW_KEEPALIVE_INTERVAL_MS_FOR_SERVICE_WORKER);
+}
+
+function releaseServiceWorkerKeepAliveForServiceWorker() {
+  swKeepAliveRefCountForServiceWorker = Math.max(0, swKeepAliveRefCountForServiceWorker - 1);
+  if (swKeepAliveRefCountForServiceWorker > 0) return;
+  if (swKeepAliveTimerForServiceWorker) {
+    clearInterval(swKeepAliveTimerForServiceWorker);
+    swKeepAliveTimerForServiceWorker = null;
+  }
+}
+
+// SHA-256 of the source bytes, used to recognise a file that has already been parsed. Computed
+// here rather than in the panel because the panel runs in the page's context, and on a plain
+// http:// page that is not a secure context, where crypto.subtle does not exist. digest() does
+// not detach the buffer, so the caller keeps its bytes.
+async function computeContentHashForServiceWorker(arrayBufferForHash) {
+  try {
+    const digestForHash = await crypto.subtle.digest('SHA-256', arrayBufferForHash);
+    const bytesForHash = new Uint8Array(digestForHash);
+    let hexForHash = '';
+    for (let iForHash = 0; iForHash < bytesForHash.length; iForHash++) {
+      hexForHash += bytesForHash[iForHash].toString(16).padStart(2, '0');
+    }
+    return hexForHash;
+  } catch (errForHash) {
+    // Without a hash this file is simply parsed as if it were new.
+    return '';
+  }
+}
+
+async function findReusableAttachmentBlobForServiceWorker(contentHashForReuse, criteriaForReuse) {
+  if (!contentHashForReuse) return null;
+  const repoForReuse = globalThis.ABChatShared && globalThis.ABChatShared.panelDataRepo;
+  if (!repoForReuse || typeof repoForReuse.findAttachmentBlobByContentHash !== 'function') return null;
+  try {
+    return await repoForReuse.findAttachmentBlobByContentHash(contentHashForReuse, criteriaForReuse);
+  } catch (errForReuse) {
+    return null;
+  }
+}
+
+function isEmptyPdfPageForServiceWorker(pageForEmptyCheck) {
+  return String(pageForEmptyCheck && pageForEmptyCheck.text ? pageForEmptyCheck.text : '')
+    .replace(/\s/g, '').length < PDF_OCR_MIN_PAGE_CHARS_FOR_SERVICE_WORKER;
+}
+
+function newPdfOcrJobIdForServiceWorker() {
+  pdfOcrJobSeqForServiceWorker += 1;
+  return 'pdfocr-' + Date.now() + '-' + pdfOcrJobSeqForServiceWorker;
+}
+
+// Right after the offscreen document is created its scripts are still loading, so the first send
+// can land before pdfOcr.js has registered its listener and would be silently dropped. Retry on a
+// missing ack rather than shipping the encoded PDF once and hoping.
+function deliverPdfOcrJobForServiceWorker(payloadForDeliver, attemptForDeliver) {
+  chrome.runtime.sendMessage(payloadForDeliver, function (responseForDeliver) {
+    const ackedForDeliver = !chrome.runtime.lastError && responseForDeliver && responseForDeliver.ok === true;
+    if (ackedForDeliver) return;
+    if (attemptForDeliver < PDF_OCR_JOB_START_MAX_RETRIES_FOR_SERVICE_WORKER) {
+      setTimeout(function () {
+        deliverPdfOcrJobForServiceWorker(payloadForDeliver, attemptForDeliver + 1);
+      }, PDF_OCR_JOB_START_RETRY_DELAY_MS_FOR_SERVICE_WORKER);
+      return;
+    }
+    // Never acked. Synthesize the completion the job would have sent so the caller is not left
+    // waiting on a job that was never running.
+    handlePdfOcrJobEventForServiceWorker({
+      jobId: payloadForDeliver.jobId,
+      tabId: payloadForDeliver.tabId,
+      event: 'done',
+      payload: {
+        pages: payloadForDeliver.pages,
+        wholeDocumentText: '',
+        notice: '',
+        engine: '',
+        blankPages: [],
+        transcribedCount: 0,
+        targetCount: 0,
+        error: 'The transcription job could not be started.'
+      }
+    });
+  });
+}
+
+async function startPdfOcrJobForServiceWorker(paramsForJobStart) {
+  const ensuredForJobStart = await ensureOffscreenDocumentForServiceWorker();
+  if (!ensuredForJobStart) {
+    handlePdfOcrJobEventForServiceWorker({
+      jobId: paramsForJobStart.jobId,
+      tabId: paramsForJobStart.tabId,
+      event: 'done',
+      payload: {
+        pages: paramsForJobStart.pages,
+        wholeDocumentText: '',
+        notice: '',
+        engine: '',
+        blankPages: [],
+        transcribedCount: 0,
+        targetCount: 0,
+        error: 'Transcription is unavailable in this browser.'
+      }
+    });
+    return;
+  }
+  acquireOffscreenKeepAliveForServiceWorker();
+  deliverPdfOcrJobForServiceWorker({
+    action: actionsForServiceWorker.pdfOcrJobRun || 'pdfOcrJobRun',
+    jobId: paramsForJobStart.jobId,
+    tabId: paramsForJobStart.tabId,
+    fileName: paramsForJobStart.fileName || 'document.pdf',
+    pdfBase64: paramsForJobStart.pdfBase64,
+    pages: paramsForJobStart.pages,
+    apiKey: paramsForJobStart.apiKey,
+    contentHash: paramsForJobStart.contentHash || ''
+  }, 0);
+}
+
+function cancelPdfOcrJobForServiceWorker(jobIdForCancel) {
+  sendOffscreenMessageForServiceWorker({
+    action: actionsForServiceWorker.pdfOcrJobCancel || 'pdfOcrJobCancel',
+    jobId: jobIdForCancel
+  });
+}
+
+// Turns a finished job back into the shape a plain parse produces. Pages that are still empty are
+// told why: a bare page marker reads as "this page held nothing" and invites the model to answer
+// as though the content did not exist.
+function finalizePdfOcrResultForServiceWorker(payloadForFinalize, contextForFinalize) {
+  const pagesForFinalize = Array.isArray(payloadForFinalize.pages) ? payloadForFinalize.pages : [];
+  const blankSetForFinalize = new Set(
+    (Array.isArray(payloadForFinalize.blankPages) ? payloadForFinalize.blankPages : []).map(Number)
+  );
+  // A parse that lost content must not be remembered as this file's answer: reusing it would
+  // serve the same gaps forever, including to a later attach that would have succeeded (an API
+  // key has since been configured, a transient failure has passed). A blank page is not a gap.
+  let completeForFinalize = true;
+  for (let iForFinalize = 0; iForFinalize < pagesForFinalize.length; iForFinalize++) {
+    const pageForFinalize = pagesForFinalize[iForFinalize];
+    if (!isEmptyPdfPageForServiceWorker(pageForFinalize)) continue;
+    if (blankSetForFinalize.has(Number(pageForFinalize.page))) {
+      pageForFinalize.text = '[This page is blank.]';
+      continue;
+    }
+    completeForFinalize = false;
+    if (!contextForFinalize.hadApiKey) {
+      pageForFinalize.text = '[This page has no extractable text (it is most likely a scan or an image). '
+        + 'It could not be transcribed because no API key is configured.]';
+    } else if (payloadForFinalize.cancelled) {
+      pageForFinalize.text = '[This page has no extractable text (it is most likely a scan or an image). '
+        + 'Transcription was cancelled before it ran.]';
+    } else {
+      pageForFinalize.text = '[This page has no extractable text (it is most likely a scan or an image) '
+        + 'and could not be transcribed.]';
+    }
+  }
+
+  // The whole-document engine returns text whose page boundaries did not survive parsing, so it
+  // replaces the joined pages outright rather than being forced back into page markers.
+  let joinedForFinalize = payloadForFinalize.wholeDocumentText
+    ? String(payloadForFinalize.wholeDocumentText)
+    : fileParsingForServiceWorker.joinPdfPages(pagesForFinalize);
+  if (payloadForFinalize.notice) {
+    joinedForFinalize = payloadForFinalize.notice + '\n\n' + joinedForFinalize;
+  }
+
+  const normalizedForFinalize = fileParsingForServiceWorker.normalizeParsedText(
+    joinedForFinalize,
+    contextForFinalize.maxChars
+  );
+  return {
+    text: normalizedForFinalize.text,
+    truncated: normalizedForFinalize.truncated,
+    truncationNote: normalizedForFinalize.note,
+    totalChars: normalizedForFinalize.totalChars,
+    format: 'pdf',
+    complete: completeForFinalize && !payloadForFinalize.error
+  };
+}
+
+// The single shape every parse answers in, however it got there. contentHash is only passed on
+// when the parse recovered everything it was going to: an empty hash means the row it produces
+// is not reusable and the next attach of this file parses it again.
+function buildParseResponseForServiceWorker(resultForResponse, contentHashForResponse, mimeTypeForResponse) {
+  const textForResponse = resultForResponse && resultForResponse.text ? resultForResponse.text : '';
+  const excerptForResponse = typeof fileParsingForServiceWorker.buildInlineExcerpt === 'function'
+    ? fileParsingForServiceWorker.buildInlineExcerpt(textForResponse)
+    : { text: textForResponse, truncated: false, note: '' };
+  return {
+    ok: true,
+    text: textForResponse,
+    truncated: Boolean(resultForResponse && resultForResponse.truncated),
+    truncationNote: (resultForResponse && resultForResponse.truncationNote) || '',
+    inlineText: excerptForResponse.text,
+    inlineTruncated: Boolean(excerptForResponse.truncated),
+    inlineNote: excerptForResponse.note || '',
+    format: (resultForResponse && resultForResponse.format) || '',
+    mimeType: String(mimeTypeForResponse || ''),
+    contentHash: (resultForResponse && resultForResponse.complete === false) ? '' : String(contentHashForResponse || '')
+  };
+}
+
+// Both job events arrive here: progress is relayed as-is, completion is finalized and delivered.
+// A job with a tabId belongs to an attachment chip in that tab; one without is awaited in-worker.
+function handlePdfOcrJobEventForServiceWorker(messageForJobEvent) {
+  const jobIdForJobEvent = String(messageForJobEvent.jobId || '');
+  const eventForJobEvent = String(messageForJobEvent.event || '');
+  const payloadForJobEvent = messageForJobEvent.payload || {};
+  const waiterForJobEvent = pdfOcrJobWaitersForServiceWorker.get(jobIdForJobEvent);
+
+  if (waiterForJobEvent) {
+    if (eventForJobEvent !== 'done') return;
+    pdfOcrJobWaitersForServiceWorker.delete(jobIdForJobEvent);
+    releaseOffscreenKeepAliveForServiceWorker();
+    waiterForJobEvent.resolve(payloadForJobEvent);
+    return;
+  }
+
+  const tabIdForJobEvent = typeof messageForJobEvent.tabId === 'number' ? messageForJobEvent.tabId : null;
+  if (tabIdForJobEvent === null) return;
+
+  const deliverActionForJobEvent = actionsForServiceWorker.pdfOcrJobDeliver || 'pdfOcrJobDeliver';
+  if (eventForJobEvent === 'progress') {
+    try {
+      chrome.tabs.sendMessage(
+        tabIdForJobEvent,
+        { action: deliverActionForJobEvent, jobId: jobIdForJobEvent, event: 'progress', payload: payloadForJobEvent },
+        function () { void chrome.runtime.lastError; }
+      );
+    } catch (errForJobEvent) { /* the tab may be gone; the completion delivery reports that */ }
+    return;
+  }
+  if (eventForJobEvent !== 'done') return;
+
+  releaseOffscreenKeepAliveForServiceWorker();
+  let resultForJobEvent = null;
+  try {
+    resultForJobEvent = finalizePdfOcrResultForServiceWorker(payloadForJobEvent, {
+      hadApiKey: true,
+      maxChars: Number(fileParsingForServiceWorker.maxStoredTextChars) || undefined
+    });
+  } catch (errForJobEvent) {
+    resultForJobEvent = null;
+  }
+  if (!resultForJobEvent) {
+    try {
+      chrome.tabs.sendMessage(
+        tabIdForJobEvent,
+        {
+          action: deliverActionForJobEvent,
+          jobId: jobIdForJobEvent,
+          event: 'done',
+          payload: { ok: false, error: payloadForJobEvent.error || 'File parsing failed.' }
+        },
+        function () { void chrome.runtime.lastError; }
+      );
+    } catch (errForJobEvent) {}
+    return;
+  }
+
+  const deliveredPayloadForJobEvent = buildParseResponseForServiceWorker(
+    resultForJobEvent,
+    messageForJobEvent.contentHash,
+    payloadForJobEvent.mimeType
+  );
+  deliveredPayloadForJobEvent.engine = payloadForJobEvent.engine || '';
+  deliveredPayloadForJobEvent.transcribedCount = Number(payloadForJobEvent.transcribedCount || 0);
+  deliveredPayloadForJobEvent.targetCount = Number(payloadForJobEvent.targetCount || 0);
+  deliveredPayloadForJobEvent.cancelled = Boolean(payloadForJobEvent.cancelled);
+  deliveredPayloadForJobEvent.timedOut = Boolean(payloadForJobEvent.timedOut);
+  try {
+    chrome.tabs.sendMessage(
+      tabIdForJobEvent,
+      {
+        action: deliverActionForJobEvent,
+        jobId: jobIdForJobEvent,
+        event: 'done',
+        payload: deliveredPayloadForJobEvent
+      },
+      function () { void chrome.runtime.lastError; }
+    );
+  } catch (errForJobEvent) { /* the tab is gone; the parse result has nowhere to go */ }
+}
+
+// Runs a transcription job and waits for it here, for callers that have no tab to deliver to and
+// an open channel to answer on (web_fetch). The keepalive is what makes the wait survivable.
+function runPdfOcrJobAndWaitForServiceWorker(paramsForWait) {
+  return new Promise(function (resolveForWait) {
+    const jobIdForWait = newPdfOcrJobIdForServiceWorker();
+    // The job carries its own budget, but that lives in a document this worker does not control:
+    // if the offscreen document is torn down mid-job, no completion is ever sent. Without this the
+    // caller would wait forever on a job that no longer exists.
+    const abandonTimerForWait = setTimeout(function () {
+      if (!pdfOcrJobWaitersForServiceWorker.has(jobIdForWait)) return;
+      pdfOcrJobWaitersForServiceWorker.delete(jobIdForWait);
+      releaseOffscreenKeepAliveForServiceWorker();
+      cancelPdfOcrJobForServiceWorker(jobIdForWait);
+      resolveForWait({ pages: paramsForWait.pages, wholeDocumentText: '', notice: '', blankPages: [] });
+    }, PDF_OCR_JOB_ABANDON_MS_FOR_SERVICE_WORKER);
+    pdfOcrJobWaitersForServiceWorker.set(jobIdForWait, {
+      resolve: function (payloadForWait) {
+        clearTimeout(abandonTimerForWait);
+        resolveForWait(payloadForWait);
+      }
+    });
+    acquireServiceWorkerKeepAliveForServiceWorker();
+    if (paramsForWait.signal) {
+      paramsForWait.signal.addEventListener('abort', function () {
+        cancelPdfOcrJobForServiceWorker(jobIdForWait);
+      }, { once: true });
+    }
+    startPdfOcrJobForServiceWorker({
+      jobId: jobIdForWait,
+      tabId: null,
+      fileName: paramsForWait.fileName,
+      pdfBase64: paramsForWait.pdfBase64,
+      pages: paramsForWait.pages,
+      apiKey: paramsForWait.apiKey
+    });
+  }).finally(function () {
+    releaseServiceWorkerKeepAliveForServiceWorker();
+  });
+}
+
+// Parses a PDF page by page, transcribing any page that produced no extractable text, then joins
+// and caps the result exactly as parseFileBuffer would. Returns the same shape as the plain parse
+// so the caller cannot tell the two apart. Used by callers that must answer synchronously;
+// the attachment path defers instead, so the panel is not left holding a channel open.
+async function parsePdfWithPageTranscriptionForServiceWorker(arrayBufferForPdfParse, signalForPdfParse, maxCharsForPdfParse) {
+  const pagesForPdfParse = await fileParsingForServiceWorker.parsePdfPages(arrayBufferForPdfParse);
+  const hasEmptyForPdfParse = pagesForPdfParse.some(isEmptyPdfPageForServiceWorker);
+  let apiKeyForPdfParse = '';
+  let jobPayloadForPdfParse = { pages: pagesForPdfParse, wholeDocumentText: '', notice: '', blankPages: [] };
+
+  if (hasEmptyForPdfParse && !(signalForPdfParse && signalForPdfParse.aborted)) {
+    apiKeyForPdfParse = await getStoredApiKeyForServiceWorker();
+    if (apiKeyForPdfParse) {
+      jobPayloadForPdfParse = await runPdfOcrJobAndWaitForServiceWorker({
+        fileName: 'document.pdf',
+        pdfBase64: arrayBufferToBase64ForServiceWorker(arrayBufferForPdfParse),
+        pages: pagesForPdfParse,
+        apiKey: apiKeyForPdfParse,
+        signal: signalForPdfParse
+      });
+    }
+  }
+
+  return finalizePdfOcrResultForServiceWorker(jobPayloadForPdfParse, {
+    hadApiKey: Boolean(apiKeyForPdfParse),
+    maxChars: maxCharsForPdfParse
   });
 }
 
@@ -3311,6 +3767,23 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
       offscreenRunInitiatorTabsForServiceWorker.delete(chatIdForOsb);
       releaseOffscreenKeepAliveForServiceWorker();
     }
+    return false;
+  }
+
+  // Progress and completion from a scanned-PDF transcription job running in the offscreen
+  // document. This worker may well have been terminated while the job ran; this message is what
+  // wakes it, and the message carries everything needed to finish, so there is nothing to restore.
+  if (messageForServiceWorker.action === (actionsForServiceWorker.pdfOcrJobEvent || "pdfOcrJobEvent")) {
+    handlePdfOcrJobEventForServiceWorker(messageForServiceWorker);
+    return false;
+  }
+
+  // The panel cancels by broadcasting, which the offscreen document also receives directly. This
+  // exists so the cancel is still delivered if that broadcast is answered here first, and so it
+  // does not fall through to the unsupported-message branch.
+  if (messageForServiceWorker.action === (actionsForServiceWorker.pdfOcrJobCancel || "pdfOcrJobCancel")) {
+    cancelPdfOcrJobForServiceWorker(String(messageForServiceWorker.jobId || ""));
+    sendResponseForServiceWorker({ ok: true });
     return false;
   }
 
@@ -3890,21 +4363,113 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
       sendResponseForServiceWorker({ ok: false, error: "File parser is unavailable." });
       return false;
     }
-    Promise.resolve(
-      fileParsingForServiceWorker.parseFileBuffer(
-        messageForServiceWorker.fileName || "",
-        messageForServiceWorker.mimeType || "",
-        parseBufferForServiceWorker
-      )
-    )
-      .then(function (parseResultForServiceWorker) {
-        sendResponseForServiceWorker({
-          ok: true,
-          text: parseResultForServiceWorker && parseResultForServiceWorker.text ? parseResultForServiceWorker.text : "",
-          truncated: Boolean(parseResultForServiceWorker && parseResultForServiceWorker.truncated),
-          format: parseResultForServiceWorker && parseResultForServiceWorker.format ? parseResultForServiceWorker.format : "",
-          mimeType: String(messageForServiceWorker.mimeType || "")
+    // Attached PDFs take the page-aware path so a scan is transcribed rather than arriving empty.
+    // Every other format, and PDFs fetched by web_fetch, stay on the plain parse.
+    var isPdfUploadForServiceWorker = String(messageForServiceWorker.mimeType || "").toLowerCase() === "application/pdf"
+      || /\.pdf$/i.test(String(messageForServiceWorker.fileName || ""));
+    var canTranscribePdfForServiceWorker = isPdfUploadForServiceWorker
+      && typeof fileParsingForServiceWorker.parsePdfPages === "function"
+      && typeof fileParsingForServiceWorker.joinPdfPages === "function"
+      && typeof fileParsingForServiceWorker.normalizeParsedText === "function";
+    var senderTabIdForServiceWorker = senderForServiceWorker
+      && senderForServiceWorker.tab
+      && typeof senderForServiceWorker.tab.id === "number"
+      ? senderForServiceWorker.tab.id
+      : null;
+    // The panel states the row it would write rather than this end re-deriving it, so the lookup
+    // and the eventual insert cannot disagree about what identifies the file.
+    var blobCriteriaForServiceWorker = {
+      name: String(messageForServiceWorker.blobName || ""),
+      mimeType: String(messageForServiceWorker.blobMimeType || ""),
+      kind: String(messageForServiceWorker.blobKind || "file")
+    };
+
+    (async function () {
+      // Attaching a file that is already stored costs nothing: no parse, and for a scan no
+      // transcription bill. Bytes decide, so a hit is the same document by definition.
+      var contentHashForUpload = await computeContentHashForServiceWorker(parseBufferForServiceWorker);
+      if (contentHashForUpload) {
+        var reusableForUpload = await findReusableAttachmentBlobForServiceWorker(
+          contentHashForUpload,
+          blobCriteriaForServiceWorker
+        );
+        if (reusableForUpload && Number(reusableForUpload.id)) {
+          return { reuse: reusableForUpload };
+        }
+      }
+
+      // A PDF that needs transcription is answered by a job, not on this channel: transcription
+      // runs for as long as the pages and the network take, and this worker cannot be relied on
+      // to still be here at the end of it. The panel gets a job id now and the parsed text later.
+      if (canTranscribePdfForServiceWorker && senderTabIdForServiceWorker !== null) {
+        var pagesForUploadOcr = await fileParsingForServiceWorker.parsePdfPages(parseBufferForServiceWorker);
+        var needsOcrForUpload = pagesForUploadOcr.some(isEmptyPdfPageForServiceWorker);
+        var apiKeyForUpload = needsOcrForUpload ? await getStoredApiKeyForServiceWorker() : "";
+        if (!needsOcrForUpload || !apiKeyForUpload) {
+          // Nothing to transcribe, or nothing to transcribe with. Finish on this channel.
+          return {
+            result: finalizePdfOcrResultForServiceWorker(
+              { pages: pagesForUploadOcr, wholeDocumentText: "", notice: "", blankPages: [] },
+              { hadApiKey: Boolean(apiKeyForUpload), maxChars: undefined }
+            ),
+            contentHash: contentHashForUpload
+          };
+        }
+        var jobIdForUpload = newPdfOcrJobIdForServiceWorker();
+        startPdfOcrJobForServiceWorker({
+          jobId: jobIdForUpload,
+          tabId: senderTabIdForServiceWorker,
+          fileName: messageForServiceWorker.fileName || "document.pdf",
+          pdfBase64: arrayBufferToBase64ForServiceWorker(parseBufferForServiceWorker),
+          pages: pagesForUploadOcr,
+          apiKey: apiKeyForUpload,
+          contentHash: contentHashForUpload
         });
+        return { deferred: true, jobId: jobIdForUpload, pageCount: pagesForUploadOcr.length };
+      }
+
+      var parseResultForServiceWorker = canTranscribePdfForServiceWorker
+        ? await parsePdfWithPageTranscriptionForServiceWorker(parseBufferForServiceWorker)
+        : await fileParsingForServiceWorker.parseFileBuffer(
+          messageForServiceWorker.fileName || "",
+          messageForServiceWorker.mimeType || "",
+          parseBufferForServiceWorker
+        );
+      return { result: parseResultForServiceWorker, contentHash: contentHashForUpload };
+    })()
+      .then(function (outcomeForUpload) {
+        if (outcomeForUpload && outcomeForUpload.reuse) {
+          // The panel references the stored row instead of writing a second copy, so the text
+          // itself does not have to travel back at all.
+          var rowForUpload = outcomeForUpload.reuse;
+          sendResponseForServiceWorker({
+            ok: true,
+            reused: true,
+            reusedBlobId: Number(rowForUpload.id),
+            truncated: Boolean(rowForUpload.truncated),
+            truncationNote: String(rowForUpload.truncationNote || ""),
+            inlineTruncated: Boolean(rowForUpload.inlineTruncated),
+            inlineNote: String(rowForUpload.inlineNote || ""),
+            format: "",
+            mimeType: String(messageForServiceWorker.mimeType || "")
+          });
+          return;
+        }
+        if (outcomeForUpload && outcomeForUpload.deferred) {
+          sendResponseForServiceWorker({
+            ok: true,
+            deferred: true,
+            jobId: outcomeForUpload.jobId,
+            pageCount: outcomeForUpload.pageCount,
+            mimeType: String(messageForServiceWorker.mimeType || "")
+          });
+          return;
+        }
+        sendResponseForServiceWorker(buildParseResponseForServiceWorker(
+          outcomeForUpload.result,
+          outcomeForUpload.contentHash,
+          messageForServiceWorker.mimeType
+        ));
       })
       .catch(function (errorForServiceWorker) {
         sendResponseForServiceWorker({
