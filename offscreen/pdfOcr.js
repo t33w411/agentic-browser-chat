@@ -75,6 +75,115 @@
     } catch (errForPdfOcr) { /* logging must never break the call */ }
   }
 
+  function recordJobProgressForPdfOcr(jobForPdfOcr, progressForPdfOcr) {
+    var diagnosticsForPdfOcr = jobForPdfOcr.diagnostics;
+    if (!diagnosticsForPdfOcr) return;
+    var nowForPdfOcr = Date.now();
+    var stageForPdfOcr = String(progressForPdfOcr && progressForPdfOcr.stage || '');
+    if (stageForPdfOcr && diagnosticsForPdfOcr.currentStage !== stageForPdfOcr) {
+      if (diagnosticsForPdfOcr.currentStage && diagnosticsForPdfOcr.stageStartedAt) {
+        diagnosticsForPdfOcr.stageTimingsMs[diagnosticsForPdfOcr.currentStage] =
+          (diagnosticsForPdfOcr.stageTimingsMs[diagnosticsForPdfOcr.currentStage] || 0)
+          + (nowForPdfOcr - diagnosticsForPdfOcr.stageStartedAt);
+      }
+      diagnosticsForPdfOcr.currentStage = stageForPdfOcr;
+      diagnosticsForPdfOcr.stageStartedAt = nowForPdfOcr;
+    }
+    diagnosticsForPdfOcr.stageDone = Number(progressForPdfOcr && progressForPdfOcr.done || 0);
+    diagnosticsForPdfOcr.stageTotal = Number(progressForPdfOcr && progressForPdfOcr.total || 0);
+    if (stageForPdfOcr === 'render') diagnosticsForPdfOcr.renderedCount = diagnosticsForPdfOcr.stageDone;
+    if (stageForPdfOcr === 'transcribe') diagnosticsForPdfOcr.transcribedAttemptCount = diagnosticsForPdfOcr.stageDone;
+  }
+
+  function finishJobStageTimingForPdfOcr(jobForPdfOcr) {
+    var diagnosticsForPdfOcr = jobForPdfOcr.diagnostics;
+    if (!diagnosticsForPdfOcr || !diagnosticsForPdfOcr.currentStage || !diagnosticsForPdfOcr.stageStartedAt) return;
+    diagnosticsForPdfOcr.stageTimingsMs[diagnosticsForPdfOcr.currentStage] =
+      (diagnosticsForPdfOcr.stageTimingsMs[diagnosticsForPdfOcr.currentStage] || 0)
+      + (Date.now() - diagnosticsForPdfOcr.stageStartedAt);
+    diagnosticsForPdfOcr.stageStartedAt = 0;
+  }
+
+  function getJobCompletionReasonForPdfOcr(jobForPdfOcr, resultForPdfOcr, errorForPdfOcr) {
+    if (jobForPdfOcr.cancelled) return 'cancelled';
+    if (jobForPdfOcr.timedOut) return 'timed_out';
+    if (errorForPdfOcr || (resultForPdfOcr && resultForPdfOcr.error)) return 'error';
+    var targetCountForPdfOcr = Number(resultForPdfOcr && resultForPdfOcr.targetCount || 0);
+    var transcribedCountForPdfOcr = Number(resultForPdfOcr && resultForPdfOcr.transcribedCount || 0);
+    var blankCountForPdfOcr = Array.isArray(resultForPdfOcr && resultForPdfOcr.blankPages)
+      ? resultForPdfOcr.blankPages.length
+      : 0;
+    var renderErrorsForPdfOcr = Array.isArray(resultForPdfOcr && resultForPdfOcr.renderErrors)
+      ? resultForPdfOcr.renderErrors
+      : [];
+    if (renderErrorsForPdfOcr.length || transcribedCountForPdfOcr + blankCountForPdfOcr < targetCountForPdfOcr) {
+      return transcribedCountForPdfOcr > 0 ? 'partial' : 'failed';
+    }
+    return 'success';
+  }
+
+  function writeJobLogForPdfOcr(jobForPdfOcr, resultForPdfOcr, errorForPdfOcr) {
+    finishJobStageTimingForPdfOcr(jobForPdfOcr);
+    var diagnosticsForPdfOcr = jobForPdfOcr.diagnostics || {};
+    var resultForJobLog = resultForPdfOcr || {};
+    var reasonForJobLog = getJobCompletionReasonForPdfOcr(jobForPdfOcr, resultForJobLog, errorForPdfOcr);
+    var resultRenderErrorsForJobLog = Array.isArray(resultForJobLog.renderErrors)
+      ? resultForJobLog.renderErrors
+      : [];
+    var diagnosticRenderErrorsForJobLog = Array.isArray(diagnosticsForPdfOcr.renderErrors)
+      ? diagnosticsForPdfOcr.renderErrors
+      : [];
+    var renderErrorsForJobLog = resultRenderErrorsForJobLog.length
+      ? resultRenderErrorsForJobLog
+      : diagnosticRenderErrorsForJobLog;
+    var errorMessageForJobLog = '';
+    if (errorForPdfOcr) {
+      errorMessageForJobLog = (errorForPdfOcr && errorForPdfOcr.message) || 'PDF OCR failed.';
+    } else if (resultForJobLog.error) {
+      errorMessageForJobLog = String(resultForJobLog.error);
+    } else if (reasonForJobLog === 'timed_out') {
+      errorMessageForJobLog = 'The PDF OCR job exceeded its 15-minute limit.';
+    } else if (renderErrorsForJobLog.length) {
+      errorMessageForJobLog = String(renderErrorsForJobLog[0].error || 'PDF page rendering failed.');
+    } else if (reasonForJobLog === 'failed' || reasonForJobLog === 'partial') {
+      errorMessageForJobLog = 'Not every scanned page could be transcribed.';
+    }
+    var engineForJobLog = String(resultForJobLog.engine || diagnosticsForPdfOcr.engine || '');
+    var modelForJobLog = engineForJobLog === 'mistral-ocr'
+      ? PDF_OCR_DOC_MODEL_FOR_PDF_OCR
+      : (engineForJobLog === 'page-vision' ? PDF_OCR_PAGE_MODEL_FOR_PDF_OCR : '');
+    var targetCountForJobLog = Number(resultForJobLog.targetCount || diagnosticsForPdfOcr.targetCount || 0);
+    var transcribedCountForJobLog = Number(resultForJobLog.transcribedCount || 0);
+    writeOcrLogForPdfOcr({
+      requestType: 'pdf-ocr-job',
+      startTime: jobForPdfOcr.startTime,
+      model: modelForJobLog,
+      status: reasonForJobLog === 'success' ? 'success'
+        : (reasonForJobLog === 'cancelled' ? 'cancelled' : 'error'),
+      errorMessage: errorMessageForJobLog,
+      requestMessages: [],
+      apiParams: {
+        jobId: jobForPdfOcr.jobId,
+        fileName: jobForPdfOcr.fileName,
+        engine: engineForJobLog,
+        completionReason: reasonForJobLog,
+        pageCount: Array.isArray(jobForPdfOcr.pages) ? jobForPdfOcr.pages.length : 0,
+        targetPageCount: targetCountForJobLog,
+        renderedPageCount: Number(diagnosticsForPdfOcr.renderedCount || 0),
+        transcriptionAttemptCount: Number(diagnosticsForPdfOcr.transcribedAttemptCount || 0),
+        successfulTranscriptionCount: Number(diagnosticsForPdfOcr.successfulTranscriptionCount || 0),
+        transcribedPageCount: transcribedCountForJobLog,
+        currentStage: String(diagnosticsForPdfOcr.currentStage || ''),
+        stageDone: Number(diagnosticsForPdfOcr.stageDone || 0),
+        stageTotal: Number(diagnosticsForPdfOcr.stageTotal || 0),
+        stageTimingsMs: diagnosticsForPdfOcr.stageTimingsMs || {},
+        renderErrors: renderErrorsForJobLog
+      },
+      responseContent: 'OCR ' + reasonForJobLog + ': transcribed '
+        + transcribedCountForJobLog + ' of ' + targetCountForJobLog + ' scanned page(s).'
+    });
+  }
+
   function base64ToUint8ArrayForPdfOcr(base64ForPdfOcr) {
     var binaryForPdfOcr = atob(String(base64ForPdfOcr || ''));
     var bytesForPdfOcr = new Uint8Array(binaryForPdfOcr.length);
@@ -423,12 +532,90 @@
 
   async function transcribePagesWithVisionForPdfOcr(optionsForPdfOcr) {
     var targetPagesForPdfOcr = optionsForPdfOcr.emptyPages.slice(0, PDF_OCR_MAX_PAGES_FOR_PDF_OCR);
-    if (!targetPagesForPdfOcr.length) return { transcripts: {}, blankPages: [] };
+    if (!targetPagesForPdfOcr.length) return { transcripts: {}, blankPages: [], renderErrors: [] };
+
+    var transcriptsForPdfOcr = {};
+    var blankPagesForPdfOcr = [];
+    var renderErrorsForPdfOcr = [];
+    var pendingImagesForPdfOcr = [];
+    var waitingWorkersForPdfOcr = [];
+    var queueClosedForPdfOcr = false;
+    var renderFinishedForPdfOcr = false;
+    var transcribableCountForPdfOcr = 0;
+    var completedForPdfOcr = 0;
+    var workerErrorsForPdfOcr = [];
+
+    function enqueueImageForPdfOcr(imageForPdfOcr) {
+      if (queueClosedForPdfOcr) return;
+      if (waitingWorkersForPdfOcr.length) {
+        waitingWorkersForPdfOcr.shift()(imageForPdfOcr);
+        return;
+      }
+      pendingImagesForPdfOcr.push(imageForPdfOcr);
+    }
+
+    function dequeueImageForPdfOcr() {
+      if (pendingImagesForPdfOcr.length) {
+        return Promise.resolve(pendingImagesForPdfOcr.shift());
+      }
+      if (queueClosedForPdfOcr) return Promise.resolve(null);
+      return new Promise(function (resolveForPdfOcr) {
+        waitingWorkersForPdfOcr.push(resolveForPdfOcr);
+      });
+    }
+
+    function closeImageQueueForPdfOcr() {
+      queueClosedForPdfOcr = true;
+      while (waitingWorkersForPdfOcr.length) {
+        waitingWorkersForPdfOcr.shift()(null);
+      }
+    }
+
+    async function runWorkerForPdfOcr() {
+      while (true) {
+        var imageForPdfOcr = await dequeueImageForPdfOcr();
+        if (!imageForPdfOcr) return;
+        if (optionsForPdfOcr.signal && optionsForPdfOcr.signal.aborted) return;
+
+        var pageNumberForPdfOcr = Number(imageForPdfOcr.page);
+        var transcriptForPdfOcr = '';
+        try {
+          transcriptForPdfOcr = await transcribePageImageForPdfOcr(
+            imageForPdfOcr.dataUrl,
+            optionsForPdfOcr.apiKey,
+            optionsForPdfOcr.signal
+          );
+        } catch (workerErrorForPdfOcr) {
+          if (!(optionsForPdfOcr.signal && optionsForPdfOcr.signal.aborted)) {
+            workerErrorsForPdfOcr.push(workerErrorForPdfOcr);
+          }
+        }
+        if (transcriptForPdfOcr) transcriptsForPdfOcr[pageNumberForPdfOcr] = transcriptForPdfOcr;
+        if (typeof optionsForPdfOcr.onTranscript === 'function') {
+          optionsForPdfOcr.onTranscript(pageNumberForPdfOcr, Boolean(transcriptForPdfOcr));
+        }
+        completedForPdfOcr += 1;
+        if (renderFinishedForPdfOcr) {
+          optionsForPdfOcr.onProgress({
+            stage: 'transcribe',
+            done: completedForPdfOcr,
+            total: transcribableCountForPdfOcr
+          });
+        }
+      }
+    }
+
+    // Workers wait for the sequential rasterizer to produce pages. Each usable page enters
+    // vision immediately, so rendering later pages overlaps up to three network requests.
+    var workerCountForPdfOcr = Math.min(PDF_OCR_CONCURRENCY_FOR_PDF_OCR, targetPagesForPdfOcr.length);
+    var workersForPdfOcr = [];
+    for (var wForPdfOcr = 0; wForPdfOcr < workerCountForPdfOcr; wForPdfOcr++) {
+      workersForPdfOcr.push(runWorkerForPdfOcr());
+    }
 
     optionsForPdfOcr.onProgress({ stage: 'render', done: 0, total: targetPagesForPdfOcr.length });
-    var renderedForPdfOcr = [];
     try {
-      renderedForPdfOcr = await nsForPdfOcr.pdfRaster.rasterizePages(
+      await nsForPdfOcr.pdfRaster.rasterizePages(
         optionsForPdfOcr.bytes,
         targetPagesForPdfOcr,
         {
@@ -436,60 +623,56 @@
           signal: optionsForPdfOcr.signal,
           onPage: function (doneForPdfOcr, totalForPdfOcr) {
             optionsForPdfOcr.onProgress({ stage: 'render', done: doneForPdfOcr, total: totalForPdfOcr });
+          },
+          onPageResult: function (imageForPdfOcr) {
+            var pageNumberForPdfOcr = Number(imageForPdfOcr && imageForPdfOcr.page);
+            if (imageForPdfOcr && imageForPdfOcr.blank) {
+              blankPagesForPdfOcr.push(pageNumberForPdfOcr);
+            }
+            if (imageForPdfOcr && imageForPdfOcr.error) {
+              renderErrorsForPdfOcr.push({
+                page: pageNumberForPdfOcr || 0,
+                error: String(imageForPdfOcr.error)
+              });
+            }
+            if (imageForPdfOcr && imageForPdfOcr.dataUrl && !imageForPdfOcr.blank) {
+              transcribableCountForPdfOcr += 1;
+              enqueueImageForPdfOcr(imageForPdfOcr);
+            }
+            if (typeof optionsForPdfOcr.onPageResult === 'function') {
+              optionsForPdfOcr.onPageResult(imageForPdfOcr);
+            }
           }
         }
       );
     } catch (rasterErrForPdfOcr) {
-      return { transcripts: {}, blankPages: [], error: (rasterErrForPdfOcr && rasterErrForPdfOcr.message) || 'Page rendering failed.' };
+      renderFinishedForPdfOcr = true;
+      closeImageQueueForPdfOcr();
+      await Promise.all(workersForPdfOcr);
+      var rasterErrorMessageForPdfOcr = (rasterErrForPdfOcr && rasterErrForPdfOcr.message) || 'Page rendering failed.';
+      return {
+        transcripts: {},
+        blankPages: [],
+        renderErrors: [{ page: 0, error: rasterErrorMessageForPdfOcr }],
+        error: rasterErrorMessageForPdfOcr
+      };
     }
 
-    var imagesByPageForPdfOcr = {};
-    var blankPagesForPdfOcr = [];
-    for (var iForPdfOcr = 0; iForPdfOcr < renderedForPdfOcr.length; iForPdfOcr++) {
-      var imageForPdfOcr = renderedForPdfOcr[iForPdfOcr];
-      imagesByPageForPdfOcr[Number(imageForPdfOcr.page)] = imageForPdfOcr;
-      if (imageForPdfOcr.blank) blankPagesForPdfOcr.push(Number(imageForPdfOcr.page));
-    }
-
-    var transcribableForPdfOcr = targetPagesForPdfOcr.filter(function (pageNumberForPdfOcr) {
-      var candidateForPdfOcr = imagesByPageForPdfOcr[pageNumberForPdfOcr];
-      return candidateForPdfOcr && candidateForPdfOcr.dataUrl && !candidateForPdfOcr.blank;
+    renderFinishedForPdfOcr = true;
+    closeImageQueueForPdfOcr();
+    optionsForPdfOcr.onProgress({
+      stage: 'transcribe',
+      done: completedForPdfOcr,
+      total: transcribableCountForPdfOcr
     });
-
-    var transcriptsForPdfOcr = {};
-    var completedForPdfOcr = 0;
-    optionsForPdfOcr.onProgress({ stage: 'transcribe', done: 0, total: transcribableForPdfOcr.length });
-
-    // Bounded concurrency: fast enough that attaching a scan does not feel stalled, without
-    // opening one request per page of a long document at once.
-    var nextIndexForPdfOcr = 0;
-    async function runWorkerForPdfOcr() {
-      while (nextIndexForPdfOcr < transcribableForPdfOcr.length) {
-        if (optionsForPdfOcr.signal && optionsForPdfOcr.signal.aborted) return;
-        var pageNumberForPdfOcr = transcribableForPdfOcr[nextIndexForPdfOcr];
-        nextIndexForPdfOcr += 1;
-        var transcriptForPdfOcr = await transcribePageImageForPdfOcr(
-          imagesByPageForPdfOcr[pageNumberForPdfOcr].dataUrl,
-          optionsForPdfOcr.apiKey,
-          optionsForPdfOcr.signal
-        );
-        if (transcriptForPdfOcr) transcriptsForPdfOcr[pageNumberForPdfOcr] = transcriptForPdfOcr;
-        completedForPdfOcr += 1;
-        optionsForPdfOcr.onProgress({
-          stage: 'transcribe',
-          done: completedForPdfOcr,
-          total: transcribableForPdfOcr.length
-        });
-      }
-    }
-    var workerCountForPdfOcr = Math.min(PDF_OCR_CONCURRENCY_FOR_PDF_OCR, transcribableForPdfOcr.length);
-    var workersForPdfOcr = [];
-    for (var wForPdfOcr = 0; wForPdfOcr < workerCountForPdfOcr; wForPdfOcr++) {
-      workersForPdfOcr.push(runWorkerForPdfOcr());
-    }
     await Promise.all(workersForPdfOcr);
+    if (workerErrorsForPdfOcr.length) throw workerErrorsForPdfOcr[0];
 
-    return { transcripts: transcriptsForPdfOcr, blankPages: blankPagesForPdfOcr };
+    return {
+      transcripts: transcriptsForPdfOcr,
+      blankPages: blankPagesForPdfOcr,
+      renderErrors: renderErrorsForPdfOcr
+    };
   }
 
   /* ============================================================
@@ -525,14 +708,17 @@
       notice: '',
       engine: '',
       blankPages: [],
+      renderErrors: [],
       transcribedCount: 0,
       targetCount: emptyPagesForPdfOcr.length
     };
+    if (jobForPdfOcr.diagnostics) jobForPdfOcr.diagnostics.targetCount = emptyPagesForPdfOcr.length;
 
     if (!emptyPagesForPdfOcr.length) return resultForPdfOcr;
 
     var bytesForPdfOcr = base64ToUint8ArrayForPdfOcr(jobForPdfOcr.pdfBase64);
     function onProgressForPdfOcr(progressForPdfOcr) {
+      recordJobProgressForPdfOcr(jobForPdfOcr, progressForPdfOcr);
       emitJobEventForPdfOcr(jobForPdfOcr, 'progress', progressForPdfOcr);
     }
 
@@ -545,6 +731,7 @@
       && bytesForPdfOcr.length <= PDF_OCR_DOC_MAX_BYTES_FOR_PDF_OCR;
 
     if (isWholeScanForPdfOcr) {
+      if (jobForPdfOcr.diagnostics) jobForPdfOcr.diagnostics.engine = 'mistral-ocr';
       onProgressForPdfOcr({ stage: 'document', done: 0, total: pagesForPdfOcr.length });
       var partsForPdfOcr = await transcribeWholeDocumentForPdfOcr({
         base64: jobForPdfOcr.pdfBase64,
@@ -576,15 +763,29 @@
       // document of empty pages.
     }
 
+    if (jobForPdfOcr.diagnostics) jobForPdfOcr.diagnostics.engine = 'page-vision';
     var visionResultForPdfOcr = await transcribePagesWithVisionForPdfOcr({
       bytes: bytesForPdfOcr,
       emptyPages: emptyPagesForPdfOcr,
       apiKey: jobForPdfOcr.apiKey,
       signal: jobForPdfOcr.controller.signal,
-      onProgress: onProgressForPdfOcr
+      onProgress: onProgressForPdfOcr,
+      onPageResult: function (imageForPdfOcr) {
+        if (!jobForPdfOcr.diagnostics || !imageForPdfOcr || !imageForPdfOcr.error) return;
+        jobForPdfOcr.diagnostics.renderErrors.push({
+          page: Number(imageForPdfOcr.page) || 0,
+          error: String(imageForPdfOcr.error)
+        });
+      },
+      onTranscript: function (pageNumberForPdfOcr, succeededForPdfOcr) {
+        if (!jobForPdfOcr.diagnostics || !succeededForPdfOcr) return;
+        jobForPdfOcr.diagnostics.successfulTranscriptionCount += 1;
+      }
     });
     resultForPdfOcr.engine = 'page-vision';
     resultForPdfOcr.blankPages = visionResultForPdfOcr.blankPages || [];
+    resultForPdfOcr.renderErrors = visionResultForPdfOcr.renderErrors || [];
+    resultForPdfOcr.error = visionResultForPdfOcr.error || '';
     for (var jForPdfOcr = 0; jForPdfOcr < pagesForPdfOcr.length; jForPdfOcr++) {
       var pageRecordForPdfOcr = pagesForPdfOcr[jForPdfOcr];
       var transcriptForPageForPdfOcr = visionResultForPdfOcr.transcripts[Number(pageRecordForPdfOcr.page)];
@@ -607,20 +808,95 @@
       fileName: messageForPdfOcr.fileName || 'document.pdf',
       apiKey: messageForPdfOcr.apiKey || '',
       contentHash: String(messageForPdfOcr.contentHash || ''),
-      controller: new AbortController()
+      controller: new AbortController(),
+      startTime: Date.now(),
+      diagnostics: {
+        engine: '',
+        targetCount: 0,
+        currentStage: '',
+        stageStartedAt: 0,
+        stageDone: 0,
+        stageTotal: 0,
+        renderedCount: 0,
+        transcribedAttemptCount: 0,
+        successfulTranscriptionCount: 0,
+        renderErrors: [],
+        stageTimingsMs: {}
+      }
     };
     activeJobsForPdfOcr.set(jobIdForPdfOcr, jobForPdfOcr);
 
     // A job that never finishes would hold its caller open forever; the budget is the outer
-    // bound that the per-request timeouts cannot provide on their own.
-    var budgetTimerForPdfOcr = setTimeout(function () {
-      jobForPdfOcr.timedOut = true;
-      jobForPdfOcr.controller.abort();
-    }, PDF_OCR_JOB_BUDGET_MS_FOR_PDF_OCR);
+    // bound that the per-request and page-render timeouts cannot provide on their own. Race the
+    // work rather than only aborting it: a third-party promise that ignores abort must not keep
+    // the caller waiting past the budget.
+    var budgetTimerForPdfOcr = null;
+    var budgetPromiseForPdfOcr = new Promise(function (resolveForBudget) {
+      budgetTimerForPdfOcr = setTimeout(function () {
+        if (!jobForPdfOcr.cancelled) jobForPdfOcr.timedOut = true;
+        jobForPdfOcr.controller.abort();
+        resolveForBudget({ type: 'timeout' });
+      }, PDF_OCR_JOB_BUDGET_MS_FOR_PDF_OCR);
+    });
+    var runPromiseForPdfOcr = runJobForPdfOcr(jobForPdfOcr).then(
+      function (resultForPdfOcr) {
+        return { type: 'result', result: resultForPdfOcr };
+      },
+      function (errorForPdfOcr) {
+        return { type: 'error', error: errorForPdfOcr };
+      }
+    );
 
-    runJobForPdfOcr(jobForPdfOcr).then(function (resultForPdfOcr) {
+    Promise.race([runPromiseForPdfOcr, budgetPromiseForPdfOcr]).then(function (outcomeForPdfOcr) {
       clearTimeout(budgetTimerForPdfOcr);
       activeJobsForPdfOcr.delete(jobIdForPdfOcr);
+      if (outcomeForPdfOcr.type === 'timeout') {
+        var timeoutResultForPdfOcr = {
+          pages: jobForPdfOcr.pages,
+          wholeDocumentText: '',
+          notice: '',
+          engine: jobForPdfOcr.diagnostics.engine || '',
+          blankPages: [],
+          renderErrors: jobForPdfOcr.diagnostics.renderErrors.slice(),
+          transcribedCount: 0,
+          targetCount: Number(jobForPdfOcr.diagnostics.targetCount || 0),
+          error: jobForPdfOcr.cancelled
+            ? 'PDF OCR was cancelled.'
+            : 'The PDF OCR job exceeded its 15-minute limit.'
+        };
+        writeJobLogForPdfOcr(jobForPdfOcr, timeoutResultForPdfOcr, null);
+        emitJobEventForPdfOcr(jobForPdfOcr, 'done', {
+          pages: timeoutResultForPdfOcr.pages,
+          wholeDocumentText: '',
+          notice: '',
+          engine: timeoutResultForPdfOcr.engine,
+          blankPages: [],
+          transcribedCount: 0,
+          targetCount: timeoutResultForPdfOcr.targetCount,
+          error: timeoutResultForPdfOcr.error,
+          cancelled: Boolean(jobForPdfOcr.cancelled),
+          timedOut: Boolean(jobForPdfOcr.timedOut)
+        });
+        return;
+      }
+      if (outcomeForPdfOcr.type === 'error') {
+        writeJobLogForPdfOcr(jobForPdfOcr, null, outcomeForPdfOcr.error);
+        emitJobEventForPdfOcr(jobForPdfOcr, 'done', {
+          pages: jobForPdfOcr.pages,
+          wholeDocumentText: '',
+          notice: '',
+          engine: '',
+          blankPages: [],
+          transcribedCount: 0,
+          targetCount: Number(jobForPdfOcr.diagnostics.targetCount || 0),
+          error: (outcomeForPdfOcr.error && outcomeForPdfOcr.error.message) || 'Transcription failed.',
+          cancelled: Boolean(jobForPdfOcr.cancelled),
+          timedOut: Boolean(jobForPdfOcr.timedOut)
+        });
+        return;
+      }
+      var resultForPdfOcr = outcomeForPdfOcr.result;
+      writeJobLogForPdfOcr(jobForPdfOcr, resultForPdfOcr, null);
       emitJobEventForPdfOcr(jobForPdfOcr, 'done', {
         pages: resultForPdfOcr.pages,
         wholeDocumentText: resultForPdfOcr.wholeDocumentText,
@@ -629,23 +905,6 @@
         blankPages: resultForPdfOcr.blankPages,
         transcribedCount: resultForPdfOcr.transcribedCount,
         targetCount: resultForPdfOcr.targetCount,
-        cancelled: Boolean(jobForPdfOcr.cancelled),
-        timedOut: Boolean(jobForPdfOcr.timedOut)
-      });
-    }).catch(function (errForPdfOcr) {
-      clearTimeout(budgetTimerForPdfOcr);
-      activeJobsForPdfOcr.delete(jobIdForPdfOcr);
-      // The pages carried in are still the caller's best available answer, so a failure
-      // returns them untranscribed rather than losing the extracted text as well.
-      emitJobEventForPdfOcr(jobForPdfOcr, 'done', {
-        pages: jobForPdfOcr.pages,
-        wholeDocumentText: '',
-        notice: '',
-        engine: '',
-        blankPages: [],
-        transcribedCount: 0,
-        targetCount: 0,
-        error: (errForPdfOcr && errForPdfOcr.message) || 'Transcription failed.',
         cancelled: Boolean(jobForPdfOcr.cancelled),
         timedOut: Boolean(jobForPdfOcr.timedOut)
       });

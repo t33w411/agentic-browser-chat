@@ -1422,9 +1422,9 @@
 
       // Disable the main chat input while libraries are initialising.
       const chatTaForGate = root.querySelector('.chat-textarea');
-      const sendBtnForGate = root.querySelector('.send-btn');
       if (chatTaForGate) chatTaForGate.disabled = true;
-      if (sendBtnForGate) sendBtnForGate.disabled = true;
+      libsReadyForPanelRuntime = false;
+      refreshSendAvailabilityForPanelRuntime();
 
       // Eagerly initialise mermaid so it is ready before the first render,
       // rather than lazily on the first diagram encountered.
@@ -1434,7 +1434,8 @@
         .then(function () {
           libsOverlayForPanelRuntime.classList.add('libs-ready');
           if (chatTaForGate) chatTaForGate.disabled = false;
-          if (sendBtnForGate) sendBtnForGate.disabled = false;
+          libsReadyForPanelRuntime = true;
+          refreshSendAvailabilityForPanelRuntime();
           // Remove the overlay from the DOM after the CSS fade completes.
           setTimeout(function () {
             if (libsOverlayForPanelRuntime && libsOverlayForPanelRuntime.parentNode) {
@@ -4836,6 +4837,137 @@
       if (resolvedStatusForPanelRuntime !== 'loading') {
         saveDraftForPanelRuntime();
       }
+      refreshSendAvailabilityForPanelRuntime();
+    }
+
+    /* ============================================================
+      IN-FLIGHT ATTACHMENT GATING
+
+      A chip is 'loading' while its source is still being turned into content: a file parse
+      (including scanned-PDF OCR, which runs for minutes), an image encode, a tab read, a
+      screenshot capture. collectInputChips drops loading chips, so a send that goes out now
+      carries the message without the attachment and without saying so. Hold the send until
+      every chip has settled instead. Errored chips are not held: they are already dropped
+      with their own toast, and waiting on one would never end.
+    ============================================================ */
+    // Defaults to true so that a panel where the libs gate never activates (no overlay in the
+    // markup) is not left with a permanently disabled send button. The gate clears it when it
+    // actually takes over, and sets it again once the libraries are up.
+    var libsReadyForPanelRuntime = true;
+
+    function getLoadingInputChipsForPanelRuntime() {
+      const rowForLoadingChips = root.querySelector('.input-chips-row');
+      if (!rowForLoadingChips) return [];
+      return Array.from(rowForLoadingChips.querySelectorAll('.ic[data-attach-status="loading"]'));
+    }
+
+    function describeBusyAttachmentsForPanelRuntime(countForBusy) {
+      return countForBusy === 1
+        ? 'An attachment is still being processed. Wait for it to finish, or remove it to send now.'
+        : countForBusy + ' attachments are still being processed. Wait for them to finish, or remove them to send now.';
+    }
+
+    function showBusyAttachmentsToastForPanelRuntime(countForBusy) {
+      const toastForBusy = ABChatContent && ABChatContent.ui && ABChatContent.ui.toast;
+      if (!toastForBusy || typeof toastForBusy.show !== 'function') return;
+      toastForBusy.show(describeBusyAttachmentsForPanelRuntime(countForBusy), { durationMs: 4500 });
+    }
+
+    // Single owner of the send button's disabled state. Three conditions write to it (the libs
+    // gate, the run-in-flight swap to cancel, an unsettled chip), so they resolve here rather
+    // than assigning it independently and clearing one another.
+    function refreshSendAvailabilityForPanelRuntime() {
+      const sendBtnForAvailability = root.querySelector('.send-btn');
+      if (!sendBtnForAvailability) return;
+      // Never disable the cancel affordance: that would strand a run the user cannot stop.
+      if (String(sendBtnForAvailability.dataset.action || '') === 'cancel-send') {
+        sendBtnForAvailability.disabled = false;
+        return;
+      }
+      const busyCountForAvailability = getLoadingInputChipsForPanelRuntime().length;
+      sendBtnForAvailability.disabled = !libsReadyForPanelRuntime || busyCountForAvailability > 0;
+      sendBtnForAvailability.title = busyCountForAvailability > 0
+        ? describeBusyAttachmentsForPanelRuntime(busyCountForAvailability)
+        : '';
+    }
+
+    // The note attach flow shows its own placeholder chip while the file is parsed and swaps in
+    // the real chip only once the content exists, so a save during that window would persist the
+    // note without the attachment. The placeholder carries no remove control, so the wording
+    // points at waiting rather than at removing.
+    function getPendingNoteAttachChipsForPanelRuntime(attachmentsWrapForPending) {
+      if (!attachmentsWrapForPending) return [];
+      return Array.from(attachmentsWrapForPending.querySelectorAll('.note-attach-pending-chip'));
+    }
+
+    function describeBusyNoteAttachmentsForPanelRuntime(countForBusy) {
+      return countForBusy === 1
+        ? 'An attachment is still being processed. Saving is available once it finishes.'
+        : countForBusy + ' attachments are still being processed. Saving is available once they finish.';
+    }
+
+    function showBusyNoteAttachmentsToastForPanelRuntime(countForBusy) {
+      const toastForBusy = ABChatContent && ABChatContent.ui && ABChatContent.ui.toast;
+      if (!toastForBusy || typeof toastForBusy.show !== 'function') return;
+      toastForBusy.show(describeBusyNoteAttachmentsForPanelRuntime(countForBusy), { durationMs: 4500 });
+    }
+
+    function applyNoteSaveAvailabilityForPanelRuntime(saveButtonForAvailability, attachmentsWrapForAvailability) {
+      if (!saveButtonForAvailability) return;
+      const busyCountForAvailability = getPendingNoteAttachChipsForPanelRuntime(attachmentsWrapForAvailability).length;
+      saveButtonForAvailability.disabled = busyCountForAvailability > 0;
+      saveButtonForAvailability.title = busyCountForAvailability > 0
+        ? describeBusyNoteAttachmentsForPanelRuntime(busyCountForAvailability)
+        : '';
+    }
+
+    function removeNoteAttachPendingChipForPanelRuntime(pendingChipForRemove) {
+      if (pendingChipForRemove && pendingChipForRemove.parentNode) pendingChipForRemove.remove();
+      refreshNoteSaveAvailabilityForPanelRuntime();
+    }
+
+    // The attachments wrap is wiped and rebuilt whenever its surface changes what it is showing:
+    // a note switch, a new note, a discarded draft, a popout re-render, a closed popout. A parse
+    // already in flight knows nothing about that and keeps running, so its result has to be
+    // matched back to the surface it was started from. The placeholder chip is that token: every
+    // one of those rebuilds removes it, so a chip still in the document means the surface is
+    // still showing the note the user attached to. Without this the finished attachment lands on
+    // whichever note happens to be open by then.
+    function isNoteAttachTargetStillOpenForPanelRuntime(pendingChipForTarget) {
+      return Boolean(pendingChipForTarget && pendingChipForTarget.isConnected);
+    }
+
+    function showAbandonedNoteAttachToastForPanelRuntime(fileNameForAbandoned) {
+      showFilePickerToastForPanelRuntime(
+        '"' + String(fileNameForAbandoned || 'File') + '" was not attached: the note changed while the file was being read.'
+      );
+    }
+
+    // The blob was written before we learned the target was gone, and nothing points at it now.
+    // Not an unconditional delete: createAttachmentBlob can hand back a row an existing record
+    // already shares, so the repo decides against the full reference set.
+    function discardUnusedNoteAttachBlobForPanelRuntime(blobIdForDiscard) {
+      const numericIdForDiscard = Number(blobIdForDiscard);
+      if (!Number.isFinite(numericIdForDiscard) || numericIdForDiscard <= 0) return;
+      const repoForDiscard = getPanelDataRepoForPanelRuntime();
+      if (!repoForDiscard || typeof repoForDiscard.deleteAttachmentBlobIfUnreferenced !== 'function') return;
+      repoForDiscard
+        .deleteAttachmentBlobIfUnreferenced(numericIdForDiscard, getPendingBlobIdsForPanelRuntime())
+        .catch(function () {});
+    }
+
+    // Covers the main editor and every open popout: a file can be parsing in any of them at once.
+    function refreshNoteSaveAvailabilityForPanelRuntime() {
+      applyNoteSaveAvailabilityForPanelRuntime(
+        root.querySelector('#note-editor-form [data-action="save-note"]'),
+        root.getElementById('ne-attachments')
+      );
+      root.querySelectorAll('.note-popout').forEach(function (popoutForAvailability) {
+        applyNoteSaveAvailabilityForPanelRuntime(
+          popoutForAvailability.querySelector('.note-popout-save-btn'),
+          popoutForAvailability.querySelector('.note-popout-attachments')
+        );
+      });
     }
 
     function extractChipDomainForPanelRuntime(url) {
@@ -4919,6 +5051,7 @@
         saveButtonForChip +
         ' <span class="ic-remove" data-action="remove-ic">' + ic.x10 + '</span>';
       rowForPanelRuntime.appendChild(chipForPanelRuntime);
+      // Sets the chip's status and refreshes send availability off the back of it.
       setInputChipStatusForPanelRuntime(
         chipForPanelRuntime,
         chipDataForPanelRuntime.status || '',
@@ -4948,6 +5081,7 @@
 
       cancelPdfOcrJobsForChipForPanelRuntime(chipNodeForPanelRuntime);
       chipNodeForPanelRuntime.remove();
+      refreshSendAvailabilityForPanelRuntime();
       const draftWriteForRemove = saveDraftForPanelRuntime();
       if (!canReclaimBlobForRemove) return;
 
@@ -7557,6 +7691,9 @@
       normalizedDraftForPanelRuntime.attachments.forEach(function (attachForMain) {
         if (attachForMain) renderAttachmentChipForPanelRuntime(attachmentsWrapForPanelRuntime, attachForMain);
       });
+      // The wipe above takes any in-flight placeholder chip with it, so the save gate has to be
+      // recomputed here or the button stays disabled with nothing on screen to explain it.
+      refreshNoteSaveAvailabilityForPanelRuntime();
       noteFormForPanelRuntime.classList.toggle('in-edit-mode', Boolean(keepEditModeForPanelRuntime));
       syncNoteSectionsForPanelRuntime(
         root.getElementById('ne-tags-section'),
@@ -7782,6 +7919,9 @@
       attachmentsForPopout.forEach(function (attachForPopout) {
         if (attachForPopout) renderAttachmentChipForPopoutForPanelRuntime(popoutForPanelRuntime, attachmentsWrapForPanelRuntime, attachForPopout);
       });
+      // The wipe above takes any in-flight placeholder chip with it, so the save gate has to be
+      // recomputed here or the button stays disabled with nothing on screen to explain it.
+      refreshNoteSaveAvailabilityForPanelRuntime();
       updateNotePopoutPreviewForPanelRuntime(popoutForPanelRuntime);
       clearNoteConflictNoticeForPanelRuntime(popoutForPanelRuntime);
       setNoteBaseSnapshotForPanelRuntime(popoutForPanelRuntime, noteDataForPanelRuntime, noteDataForPanelRuntime.updatedAt);
@@ -8058,6 +8198,12 @@
         S.activeNoteId = null;
         writePanelStateSyncForPanelRuntime({ activeNoteId: null });
         showNoteForm(false);
+        // The form is hidden, not rebuilt, so its attachment chips would otherwise outlive the
+        // note they belong to: a file still parsing would finish and attach itself to a record
+        // that no longer exists. Clearing them here is what tells that parse to discard.
+        const attWrapForDelete = root.getElementById('ne-attachments');
+        if (attWrapForDelete) attWrapForDelete.querySelectorAll('.ic').forEach(function (chipForDelete) { chipForDelete.remove(); });
+        refreshNoteSaveAvailabilityForPanelRuntime();
         S.inNoteView = false;
         setReducedPaneForPanelRuntime('notes', 'list');
       }
@@ -8399,6 +8545,14 @@
         const updatedNoteDataForPanelRuntime = collectNoteDataFromPopoutForPanelRuntime(popoutForPanelRuntime);
         if (!updatedNoteDataForPanelRuntime) return;
         if (!updatedNoteDataForPanelRuntime.title.trim() && !updatedNoteDataForPanelRuntime.body.trim()) return;
+        // An attachment still parsing is not yet a chip, so saving now would drop it silently.
+        const busyAttachForPopoutSave = getPendingNoteAttachChipsForPanelRuntime(
+          popoutForPanelRuntime.querySelector('.note-popout-attachments')
+        );
+        if (busyAttachForPopoutSave.length > 0) {
+          showBusyNoteAttachmentsToastForPanelRuntime(busyAttachForPopoutSave.length);
+          return;
+        }
         const panelDataRepoForPanelRuntime = getPanelDataRepoForPanelRuntime();
         let persistedNoteForPanelRuntime = null;
         if (panelDataRepoForPanelRuntime && typeof panelDataRepoForPanelRuntime.updateNote === 'function') {
@@ -8913,6 +9067,7 @@
             if (tagsWrap) tagsWrap.querySelectorAll('.tag-pill').forEach(function(p) { p.remove(); });
             const attWrap = root.getElementById('ne-attachments');
             if (attWrap) attWrap.querySelectorAll('.ic').forEach(function(c) { c.remove(); });
+            refreshNoteSaveAvailabilityForPanelRuntime();
           }
         );
       }
@@ -8944,6 +9099,7 @@
       // Clear attachments
       const att = root.getElementById('ne-attachments');
       if (att) att.querySelectorAll('.ic').forEach(c => c.remove());
+      refreshNoteSaveAvailabilityForPanelRuntime();
       // New note starts in edit mode (nothing to preview yet)
       const form = root.getElementById('note-editor-form');
       if (!form) return;
@@ -8998,6 +9154,12 @@
       const titleIsEmpty = !titleElForSave || !titleElForSave.value.trim();
       const bodyIsEmpty  = !bodyElForSave  || !bodyElForSave.value.trim();
       if (titleIsEmpty && bodyIsEmpty) return;
+      // An attachment still parsing is not yet a chip, so saving now would drop it silently.
+      const busyAttachForMainSave = getPendingNoteAttachChipsForPanelRuntime(root.getElementById('ne-attachments'));
+      if (busyAttachForMainSave.length > 0) {
+        showBusyNoteAttachmentsToastForPanelRuntime(busyAttachForMainSave.length);
+        return;
+      }
       await saveMainNoteForPanelRuntime(false);
     }
 
@@ -11791,6 +11953,9 @@
           sendBtnForUI.title = "";
           sendBtnForUI.innerHTML = ic.send14;
         }
+        // Resolves disabled/title against the libs gate and any still-processing chip. The swap
+        // above only decides which of the two roles the button is in.
+        refreshSendAvailabilityForPanelRuntime();
       }
       if (chatTaForUI) chatTaForUI.disabled = sending;
       // Voice input cannot start while a run is in flight for the active chat.
@@ -12704,6 +12869,7 @@
         return;
       }
       chipsRowForPanelRuntime.innerHTML = '';
+      refreshSendAvailabilityForPanelRuntime();
     }
 
     // Snapshot the current page's title/url for attaching to a user message. Returns null when the
@@ -12895,7 +13061,7 @@
       const latency = latencyMsForLogRow ? (latencyMsForLogRow / 1000).toFixed(2) + 's' : '';
       const preview = statusMetaForLogRow.preview;
       const reqType = log.requestType || log.type || '';
-      const reqTypeLabels = { chat: 'Chat', 'inline-chat': 'Inline', title: 'Title', compaction: 'Compact', web_search: 'Search', generate_image: 'Image', 'web-fetch-vision': 'Vision', 'web-fetch-summary': 'Summarize', 'tab-read': 'Tab', 'screenshot-vision': 'Vision', 'image-vision': 'Vision', 'quiz-generate': 'Quiz', 'quiz-fix': 'Quiz Fix', 'quiz-review': 'Quiz Review', 'pdf-page-ocr': 'PDF OCR', 'pdf-document-ocr': 'PDF OCR' };
+      const reqTypeLabels = { chat: 'Chat', 'inline-chat': 'Inline', title: 'Title', compaction: 'Compact', web_search: 'Search', generate_image: 'Image', 'web-fetch-vision': 'Vision', 'web-fetch-summary': 'Summarize', 'tab-read': 'Tab', 'screenshot-vision': 'Vision', 'image-vision': 'Vision', 'quiz-generate': 'Quiz', 'quiz-fix': 'Quiz Fix', 'quiz-review': 'Quiz Review', 'pdf-page-ocr': 'PDF OCR', 'pdf-document-ocr': 'PDF OCR', 'pdf-ocr-job': 'PDF Job' };
       const reqTypeLabel = reqTypeLabels[reqType] || escapeHtmlForPanelRuntime(reqType);
       const reqTypeBadge = reqType ? `<span class="log-request-type-badge">${reqTypeLabel}</span>` : '';
       const selectedForLogRow = apiSelectedLogIdsForPanelRuntime.has(log.id) ? ' checked' : '';
@@ -13027,7 +13193,7 @@
       const reqTypeRaw = log.requestType || log.type || '';
       const isChatLogDetailForPanelRuntime = reqTypeRaw === 'chat';
       const hasChatTurnsForPanelRuntime = isChatLogDetailForPanelRuntime && Array.isArray(log.turns) && log.turns.length > 0;
-      const reqTypeDisplayMap = { chat: 'Chat', 'inline-chat': 'Inline Chat', title: 'Title Generation', compaction: 'Compaction', web_search: 'Web Search', generate_image: 'Image Generation', 'web-fetch-vision': 'Web Fetch Vision', 'web-fetch-summary': 'Web Fetch Summary', 'tab-read': 'Tab Read', 'screenshot-vision': 'Screenshot Vision', 'image-vision': 'Image Vision', 'quiz-generate': 'Quiz Generation', 'quiz-fix': 'Quiz Question Fix', 'quiz-review': 'Quiz Self-Containment Review', 'pdf-page-ocr': 'Scanned PDF Page Transcription', 'pdf-document-ocr': 'Scanned PDF Document OCR' };
+      const reqTypeDisplayMap = { chat: 'Chat', 'inline-chat': 'Inline Chat', title: 'Title Generation', compaction: 'Compaction', web_search: 'Web Search', generate_image: 'Image Generation', 'web-fetch-vision': 'Web Fetch Vision', 'web-fetch-summary': 'Web Fetch Summary', 'tab-read': 'Tab Read', 'screenshot-vision': 'Screenshot Vision', 'image-vision': 'Image Vision', 'quiz-generate': 'Quiz Generation', 'quiz-fix': 'Quiz Question Fix', 'quiz-review': 'Quiz Self-Containment Review', 'pdf-page-ocr': 'Scanned PDF Page Transcription', 'pdf-document-ocr': 'Scanned PDF Document OCR', 'pdf-ocr-job': 'Scanned PDF OCR Job' };
       const reqTypeDisplay = reqTypeDisplayMap[reqTypeRaw] || reqTypeRaw;
       let html = `<div class="log-detail-meta">` +
         `<div class="log-detail-row"><span class="log-detail-label">Status</span><span class="log-status-badge ${statusMetaForLogDetail.cssClass}">${escapeHtmlForPanelRuntime(statusMetaForLogDetail.label)}</span></div>` +
@@ -14256,6 +14422,17 @@
         ? ''
         : chatTaForSend.value.trim();
       if (!isResendForPanelRuntime && !text) return;
+
+      // Before any side effect. The disabled send button covers the click path, but Enter calls
+      // straight in here, and the button's state can lag a chip that just started loading.
+      // A resend collects no chips, so composer state is not its concern.
+      if (!isResendForPanelRuntime) {
+        const busyChipsForSend = getLoadingInputChipsForPanelRuntime();
+        if (busyChipsForSend.length > 0) {
+          showBusyAttachmentsToastForPanelRuntime(busyChipsForSend.length);
+          return;
+        }
+      }
 
       // Capture model before any selectChat call can reset it
       const userSelectedModelForSend = (modelSelectForSend && modelSelectForSend.value) ? modelSelectForSend.value : DEFAULT_MODEL_FOR_PANEL_RUNTIME;
@@ -16089,7 +16266,8 @@
       const addBtnSelectorForPending = isPopoutForPanelRuntime ? '.note-popout-attach-add' : '.ne-attach-add';
       const addBtnForPending = attachmentsWrapForPanelRuntime.querySelector(addBtnSelectorForPending);
       const pendingChipForNoteAttach = document.createElement('span');
-      pendingChipForNoteAttach.className = 'ic m-chip-' + (isImageForNoteAttach ? 'image' : 'file');
+      pendingChipForNoteAttach.className = 'ic m-chip-' + (isImageForNoteAttach ? 'image' : 'file') + ' note-attach-pending-chip';
+      pendingChipForNoteAttach.dataset.attachStatus = 'loading';
       pendingChipForNoteAttach.style.opacity = '0.5';
       pendingChipForNoteAttach.innerHTML = getAttachIconSvgForPanelRuntime(isImageForNoteAttach ? 'image' : 'file') + ' ' + escHtml(truncateChipLabelForPanelRuntime(fileForPanelRuntime.name || 'file'));
       if (addBtnForPending) {
@@ -16097,9 +16275,15 @@
       } else {
         attachmentsWrapForPanelRuntime.appendChild(pendingChipForNoteAttach);
       }
+      refreshNoteSaveAvailabilityForPanelRuntime();
 
       try {
         const arrayBufferForNoteAttach = await fileToArrayBufferForPanelRuntime(fileForPanelRuntime);
+        // Checked before the blob is written, so a surface abandoned during the read costs nothing.
+        if (!isNoteAttachTargetStillOpenForPanelRuntime(pendingChipForNoteAttach)) {
+          showAbandonedNoteAttachToastForPanelRuntime(fileForPanelRuntime.name);
+          return;
+        }
         if (isImageForNoteAttach) {
           const dataUrlForNoteAttach = arrayBufferToDataUrlForPanelRuntime(arrayBufferForNoteAttach, mimeTypeForNoteAttach);
           const persistedBlobForNoteImage = await createAttachmentBlobForPanelRuntime({
@@ -16109,7 +16293,12 @@
             size: Number(fileForPanelRuntime.size || 0),
             dataUrl: dataUrlForNoteAttach
           });
-          pendingChipForNoteAttach.remove();
+          if (!isNoteAttachTargetStillOpenForPanelRuntime(pendingChipForNoteAttach)) {
+            discardUnusedNoteAttachBlobForPanelRuntime(persistedBlobForNoteImage && persistedBlobForNoteImage.id);
+            showAbandonedNoteAttachToastForPanelRuntime(fileForPanelRuntime.name);
+            return;
+          }
+          removeNoteAttachPendingChipForPanelRuntime(pendingChipForNoteAttach);
           if (isPopoutForPanelRuntime && popoutForPanelRuntime) {
             renderAttachmentChipForPopoutForPanelRuntime(popoutForPanelRuntime, attachmentsWrapForPanelRuntime, { name: String(fileForPanelRuntime.name || 'image'), refId: Number(persistedBlobForNoteImage.id) }, 'image');
           } else {
@@ -16125,16 +16314,36 @@
             { name: noteBlobNameForNoteAttach, mimeType: noteFileMimeTypeForNoteAttach, kind: 'file' }
           );
           if (!parseResponseForNoteAttach || !parseResponseForNoteAttach.ok) {
-            pendingChipForNoteAttach.remove();
+            // An error chip belongs to the surface that asked for the file. Once that surface has
+            // moved on, the same failure is reported as a toast instead, so another note's editor
+            // does not sprout an error about a file it was never given.
+            const targetOpenForParseFail = isNoteAttachTargetStillOpenForPanelRuntime(pendingChipForNoteAttach);
+            removeNoteAttachPendingChipForPanelRuntime(pendingChipForNoteAttach);
             if (parseResponseForNoteAttach && parseResponseForNoteAttach.cancelled) return;
+            const parseErrorForNoteAttach = parseResponseForNoteAttach && parseResponseForNoteAttach.error
+              ? String(parseResponseForNoteAttach.error)
+              : 'Could not read file.';
+            if (!targetOpenForParseFail) {
+              showFilePickerToastForPanelRuntime(parseErrorForNoteAttach);
+              return;
+            }
             showNoteAttachErrorForPanelRuntime(
               attachmentsWrapForPanelRuntime,
-              parseResponseForNoteAttach && parseResponseForNoteAttach.error ? String(parseResponseForNoteAttach.error) : 'Could not read file.',
+              parseErrorForNoteAttach,
               isPopoutForPanelRuntime
             );
             return;
           }
           let noteBlobIdForNoteAttach = Number(parseResponseForNoteAttach.reusedBlobId) || 0;
+          // A scanned PDF spends minutes in OCR above, which is the widest window for the surface
+          // to have moved on. Checked before the blob write so an abandoned parse costs nothing.
+          // A reused id is offered for reclaim rather than deleted: the row is shared with whoever
+          // stored it first, and the repo is what decides whether anything still points at it.
+          if (!isNoteAttachTargetStillOpenForPanelRuntime(pendingChipForNoteAttach)) {
+            discardUnusedNoteAttachBlobForPanelRuntime(noteBlobIdForNoteAttach);
+            showAbandonedNoteAttachToastForPanelRuntime(fileForPanelRuntime.name);
+            return;
+          }
           if (!noteBlobIdForNoteAttach) {
             const extractedTextForNoteAttach = String(parseResponseForNoteAttach.text || '');
             // Retain raw bytes for DOCX only, matching the chat attachment path, so the
@@ -16159,8 +16368,13 @@
             }
             const persistedBlobForNoteFile = await createAttachmentBlobForPanelRuntime(noteFileBlobInputForPanelRuntime);
             noteBlobIdForNoteAttach = Number(persistedBlobForNoteFile.id) || 0;
+            if (!isNoteAttachTargetStillOpenForPanelRuntime(pendingChipForNoteAttach)) {
+              discardUnusedNoteAttachBlobForPanelRuntime(noteBlobIdForNoteAttach);
+              showAbandonedNoteAttachToastForPanelRuntime(fileForPanelRuntime.name);
+              return;
+            }
           }
-          pendingChipForNoteAttach.remove();
+          removeNoteAttachPendingChipForPanelRuntime(pendingChipForNoteAttach);
           // A note has no transcript to write a system message into, so the same disclosure goes
           // out as a toast.
           const noteTruncationMsgForPanelRuntime = describeAttachmentTruncationForPanelRuntime(
@@ -16175,7 +16389,12 @@
           }
         }
       } catch (errorForNoteAttach) {
-        if (pendingChipForNoteAttach.parentNode) pendingChipForNoteAttach.remove();
+        const targetOpenForCatch = isNoteAttachTargetStillOpenForPanelRuntime(pendingChipForNoteAttach);
+        removeNoteAttachPendingChipForPanelRuntime(pendingChipForNoteAttach);
+        if (!targetOpenForCatch) {
+          showFilePickerToastForPanelRuntime('Could not read file.');
+          return;
+        }
         showNoteAttachErrorForPanelRuntime(attachmentsWrapForPanelRuntime, 'Could not read file.', isPopoutForPanelRuntime);
       }
     }

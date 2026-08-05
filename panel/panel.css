@@ -1514,6 +1514,10 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
   transition: background 0.1s; flex-shrink: 0;
 }
 .send-btn:hover { background: var(--abchat-accent-hover); }
+/* Blocked while the libraries load or an attachment is still being processed. The hover
+   override matters: without it the button lights up under the cursor as though it were live. */
+.send-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.send-btn:disabled:hover { background: var(--abchat-accent); }
 .send-btn[data-action="cancel-send"] { background: #b91c1c; }
 .send-btn[data-action="cancel-send"]:hover { background: #991b1b; }
 
@@ -2288,6 +2292,13 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
   padding: 6px 14px; cursor: pointer; transition: background 0.1s;
 }
 .btn-primary:hover { background: var(--abchat-accent-hover); border-color: var(--abchat-accent-hover); }
+/* Note Save, blocked while an attachment is still parsing. Scoped rather than applied to every
+   .btn-primary, because the settings footer already dims its own disabled Save and the two would
+   compound. The hover override keeps a blocked button from lighting up as though it were live. */
+.ne-edit-btns .btn-primary:disabled,
+.note-popout-save-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.ne-edit-btns .btn-primary:disabled:hover,
+.note-popout-save-btn:disabled:hover { background: var(--abchat-accent); border-color: var(--abchat-accent); }
 .btn-ghost {
   border: 1px solid var(--abchat-border-med); border-radius: var(--abchat-r-sm);
   background: transparent; color: var(--abchat-text-secondary);

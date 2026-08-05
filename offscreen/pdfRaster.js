@@ -19,6 +19,9 @@
   var PDF_RASTER_MAX_SCALE_FOR_PDF_RASTER = 3;
   var PDF_RASTER_JPEG_QUALITY_FOR_PDF_RASTER = 0.72;
   var PDF_RASTER_BLANK_PROBE_EDGE_FOR_PDF_RASTER = 48;
+  var PDF_RASTER_LIBRARY_TIMEOUT_MS_FOR_PDF_RASTER = 15000;
+  var PDF_RASTER_DOCUMENT_TIMEOUT_MS_FOR_PDF_RASTER = 60000;
+  var PDF_RASTER_PAGE_TIMEOUT_MS_FOR_PDF_RASTER = 60000;
   // Luminance spread below this across the whole page reads as an empty sheet. Kept low so a
   // page holding only a line or two of faint text still registers as content worth transcribing.
   var PDF_RASTER_BLANK_LUMA_SPREAD_FOR_PDF_RASTER = 10;
@@ -52,6 +55,54 @@
       pdfLibraryPromiseForPdfRaster = null;
     });
     return pdfLibraryPromiseForPdfRaster;
+  }
+
+  function awaitWithDeadlineForPdfRaster(promiseForDeadline, optionsForDeadline) {
+    var optsForDeadline = optionsForDeadline || {};
+    var signalForDeadline = optsForDeadline.signal || null;
+    var timeoutMsForDeadline = Number(optsForDeadline.timeoutMs) || 0;
+    return new Promise(function (resolveForDeadline, rejectForDeadline) {
+      var settledForDeadline = false;
+      var timerForDeadline = null;
+
+      function cleanupForDeadline() {
+        if (timerForDeadline) clearTimeout(timerForDeadline);
+        if (signalForDeadline) signalForDeadline.removeEventListener('abort', onAbortForDeadline);
+      }
+      function cancelForDeadline() {
+        if (typeof optsForDeadline.cancel !== 'function') return;
+        try { optsForDeadline.cancel(); } catch (errForCancel) {}
+      }
+      function resolveOnceForDeadline(valueForDeadline) {
+        if (settledForDeadline) return;
+        settledForDeadline = true;
+        cleanupForDeadline();
+        resolveForDeadline(valueForDeadline);
+      }
+      function rejectOnceForDeadline(errorForDeadline) {
+        if (settledForDeadline) return;
+        settledForDeadline = true;
+        cleanupForDeadline();
+        rejectForDeadline(errorForDeadline);
+      }
+      function onAbortForDeadline() {
+        cancelForDeadline();
+        rejectOnceForDeadline(new Error(optsForDeadline.cancelMessage || 'PDF rendering was cancelled.'));
+      }
+
+      if (signalForDeadline && signalForDeadline.aborted) {
+        onAbortForDeadline();
+        return;
+      }
+      if (signalForDeadline) signalForDeadline.addEventListener('abort', onAbortForDeadline, { once: true });
+      if (timeoutMsForDeadline > 0) {
+        timerForDeadline = setTimeout(function () {
+          cancelForDeadline();
+          rejectOnceForDeadline(new Error(optsForDeadline.timeoutMessage || 'PDF rendering timed out.'));
+        }, timeoutMsForDeadline);
+      }
+      Promise.resolve(promiseForDeadline).then(resolveOnceForDeadline, rejectOnceForDeadline);
+    });
   }
 
   // Downsample the rendered page into a small probe canvas and measure the luminance spread.
@@ -89,8 +140,15 @@
     }
   }
 
-  function renderSinglePageForPdfRaster(pdfForPdfRaster, pageNumberForPdfRaster, maxEdgeForPdfRaster) {
-    return pdfForPdfRaster.getPage(pageNumberForPdfRaster).then(function (pageForPdfRaster) {
+  function renderSinglePageForPdfRaster(pdfForPdfRaster, pageNumberForPdfRaster, maxEdgeForPdfRaster, signalForPdfRaster) {
+    return awaitWithDeadlineForPdfRaster(
+      pdfForPdfRaster.getPage(pageNumberForPdfRaster),
+      {
+        signal: signalForPdfRaster,
+        timeoutMs: PDF_RASTER_PAGE_TIMEOUT_MS_FOR_PDF_RASTER,
+        timeoutMessage: 'Loading PDF page ' + pageNumberForPdfRaster + ' timed out.'
+      }
+    ).then(function (pageForPdfRaster) {
       var baseViewportForPdfRaster = pageForPdfRaster.getViewport({ scale: 1 });
       var longestEdgeForPdfRaster = Math.max(baseViewportForPdfRaster.width, baseViewportForPdfRaster.height) || 1;
       var scaleForPdfRaster = Math.min(
@@ -108,18 +166,36 @@
       contextForPdfRaster.fillStyle = '#ffffff';
       contextForPdfRaster.fillRect(0, 0, canvasForPdfRaster.width, canvasForPdfRaster.height);
 
-      return pageForPdfRaster.render({
+      var renderTaskForPdfRaster = pageForPdfRaster.render({
         canvasContext: contextForPdfRaster,
-        viewport: viewportForPdfRaster
-      }).promise.then(function () {
+        viewport: viewportForPdfRaster,
+        // Display rendering schedules chunks through requestAnimationFrame. An offscreen
+        // document is hidden, so Chrome may suspend those callbacks indefinitely. Print intent
+        // runs the same canvas renderer without requestAnimationFrame.
+        intent: 'print'
+      });
+      return awaitWithDeadlineForPdfRaster(
+        renderTaskForPdfRaster.promise,
+        {
+          signal: signalForPdfRaster,
+          timeoutMs: PDF_RASTER_PAGE_TIMEOUT_MS_FOR_PDF_RASTER,
+          timeoutMessage: 'Rendering PDF page ' + pageNumberForPdfRaster + ' timed out.',
+          cancel: function () {
+            if (renderTaskForPdfRaster && typeof renderTaskForPdfRaster.cancel === 'function') {
+              renderTaskForPdfRaster.cancel();
+            }
+          }
+        }
+      ).then(function () {
         var blankForPdfRaster = isRenderedPageBlankForPdfRaster(canvasForPdfRaster);
         var dataUrlForPdfRaster = blankForPdfRaster
           ? ''
           : canvasForPdfRaster.toDataURL('image/jpeg', PDF_RASTER_JPEG_QUALITY_FOR_PDF_RASTER);
+        return { page: pageNumberForPdfRaster, dataUrl: dataUrlForPdfRaster, blank: blankForPdfRaster };
+      }).finally(function () {
         if (typeof pageForPdfRaster.cleanup === 'function') pageForPdfRaster.cleanup();
         canvasForPdfRaster.width = 0;
         canvasForPdfRaster.height = 0;
-        return { page: pageNumberForPdfRaster, dataUrl: dataUrlForPdfRaster, blank: blankForPdfRaster };
       });
     });
   }
@@ -141,10 +217,35 @@
       maxEdgeForPdfRaster = PDF_RASTER_DEFAULT_MAX_EDGE_FOR_PDF_RASTER;
     }
 
-    return loadPdfLibraryForPdfRaster().then(function (pdfjsLibForPdfRaster) {
+    return awaitWithDeadlineForPdfRaster(
+      loadPdfLibraryForPdfRaster(),
+      {
+        signal: signalForPdfRaster,
+        timeoutMs: PDF_RASTER_LIBRARY_TIMEOUT_MS_FOR_PDF_RASTER,
+        timeoutMessage: 'Loading the PDF rendering library timed out.',
+        cancel: function () {
+          pdfLibraryPromiseForPdfRaster = null;
+        }
+      }
+    ).then(function (pdfjsLibForPdfRaster) {
       // pdf.js transfers the view it is handed to its worker, detaching the caller's buffer.
       // Hand it a private copy so the caller keeps its bytes for the whole-document engine.
-      return pdfjsLibForPdfRaster.getDocument({ data: new Uint8Array(bytesForPdfRaster) }).promise;
+      var loadingTaskForPdfRaster = pdfjsLibForPdfRaster.getDocument({
+        data: new Uint8Array(bytesForPdfRaster)
+      });
+      return awaitWithDeadlineForPdfRaster(
+        loadingTaskForPdfRaster.promise,
+        {
+          signal: signalForPdfRaster,
+          timeoutMs: PDF_RASTER_DOCUMENT_TIMEOUT_MS_FOR_PDF_RASTER,
+          timeoutMessage: 'Loading the PDF for rendering timed out.',
+          cancel: function () {
+            if (loadingTaskForPdfRaster && typeof loadingTaskForPdfRaster.destroy === 'function') {
+              loadingTaskForPdfRaster.destroy();
+            }
+          }
+        }
+      );
     }).then(function (pdfForPdfRaster) {
       var imagesForPdfRaster = [];
 
@@ -157,7 +258,12 @@
         if (pageNumberForPdfRaster > pdfForPdfRaster.numPages) {
           return renderNextForPdfRaster(indexForPdfRaster + 1);
         }
-        return renderSinglePageForPdfRaster(pdfForPdfRaster, pageNumberForPdfRaster, maxEdgeForPdfRaster)
+        return renderSinglePageForPdfRaster(
+          pdfForPdfRaster,
+          pageNumberForPdfRaster,
+          maxEdgeForPdfRaster,
+          signalForPdfRaster
+        )
           .then(function (imageForPdfRaster) {
             imagesForPdfRaster.push(imageForPdfRaster);
           })
@@ -170,6 +276,11 @@
             });
           })
           .then(function () {
+            if (typeof optsForPdfRaster.onPageResult === 'function') {
+              try {
+                optsForPdfRaster.onPageResult(imagesForPdfRaster[imagesForPdfRaster.length - 1]);
+              } catch (errForPageResult) { /* diagnostics are best effort */ }
+            }
             if (typeof optsForPdfRaster.onPage === 'function') {
               try {
                 optsForPdfRaster.onPage(indexForPdfRaster + 1, requestedForPdfRaster.length);
@@ -180,8 +291,16 @@
       }
 
       return renderNextForPdfRaster(0).then(function () {
-        if (typeof pdfForPdfRaster.destroy === 'function') pdfForPdfRaster.destroy();
         return imagesForPdfRaster;
+      }).finally(function () {
+        if (typeof pdfForPdfRaster.destroy === 'function') {
+          try {
+            var destroyResultForPdfRaster = pdfForPdfRaster.destroy();
+            if (destroyResultForPdfRaster && typeof destroyResultForPdfRaster.catch === 'function') {
+              destroyResultForPdfRaster.catch(function () {});
+            }
+          } catch (errForDestroy) {}
+        }
       });
     });
   }
