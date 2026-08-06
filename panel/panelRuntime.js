@@ -4694,7 +4694,7 @@
         group.className = 'mp-group';
         const groupLabel = document.createElement('div');
         groupLabel.className = 'mp-group-label';
-        groupLabel.textContent = getProviderLabel(providerKey);
+        groupLabel.textContent = getProviderLabel(providerKey, models);
         group.appendChild(groupLabel);
         models.forEach(function (m) {
           const btn = document.createElement('button');
@@ -4703,7 +4703,7 @@
           btn.dataset.action = 'select-model';
           btn.dataset.modelId = m.id;
           btn.dataset.reasoningDefaultOn = m.reasoningDefaultOn ? '1' : '0';
-          const displayNameForItem = getDisplayName(m, providerKey);
+          const displayNameForItem = getDisplayName(m, providerKey, models);
           const namePart = escHtml(displayNameForItem);
           const tierForBtn = getModelTierForPanelRuntime(m);
           btn.dataset.searchText = (String(displayNameForItem) + ' ' + String(m.id) + ' ' + (tierForBtn ? tierForBtn.label : '')).toLowerCase();
@@ -11212,6 +11212,10 @@
     ];
 
     const IMAGE_MODEL_PROVIDER_ORDER_FOR_PANEL_RUNTIME = ['openai', 'google', 'stability', 'fal-ai', 'black-forest-labs'];
+    // Display order for the chat model picker's provider groups, not an allowlist: a provider absent
+    // from this list is still shown, appended after the listed ones in alphabetical key order, so a
+    // vendor OpenRouter onboards later needs no code change to appear.
+    const CHAT_MODEL_PROVIDER_ORDER_FOR_PANEL_RUNTIME = ['google', 'openai', 'openrouter', 'meta-llama', 'meta', 'anthropic', 'qwen', 'xai', 'x-ai', 'z-ai', 'deepseek', 'mistralai', 'moonshotai', 'minimax', 'microsoft', 'amazon', 'nvidia', 'perplexity', 'cohere', 'poolside'];
 
     const FALLBACK_MODELS_FOR_PANEL_RUNTIME = {
       google: [
@@ -11230,8 +11234,47 @@
     var loadedGlobalDefaultModelForPanelRuntime = '';
     var loadedImageModelsForPanelRuntime = [];
     var loadedChatModelsForPanelRuntime = [];
-    const MODEL_CACHE_KEY_FOR_PANEL_RUNTIME = 'abchat_model_cache_v11';
+    const MODEL_CACHE_KEY_FOR_PANEL_RUNTIME = 'abchat_model_cache_v13';
     const ROUTER_EXCEPTION_MODEL_IDS_FOR_PANEL_RUNTIME = ['openrouter/auto', 'openrouter/free'];
+    // OpenRouter variant suffixes this extension cannot drive. ':batch' queues the request and
+    // returns within 24 hours, which is useless for an interactive streaming agent, and the id
+    // suffix is the only signal for it: a batch variant is otherwise a byte-identical clone of
+    // its base model at half price, so it sorts above the real model in every provider group.
+    // Keep this a blocklist, not an allowlist of suffixes: ':free' and ':thinking' are legitimate.
+    const BLOCKED_MODEL_VARIANT_SUFFIXES_FOR_PANEL_RUNTIME = [':batch'];
+    const BLOCKED_MODEL_NAME_MARKERS_FOR_PANEL_RUNTIME = ['(batch)'];
+    // ':free' variants cost nothing, so they cannot clear the completion-cost floor that keeps
+    // underpowered paid models out of the picker. Exempt them explicitly instead.
+    const FREE_MODEL_VARIANT_SUFFIX_FOR_PANEL_RUNTIME = ':free';
+
+    function isBlockedModelVariantForPanelRuntime(modelForBlockCheck) {
+      const idForBlockCheck = String((modelForBlockCheck && modelForBlockCheck.id) || '').toLowerCase();
+      const nameForBlockCheck = String((modelForBlockCheck && modelForBlockCheck.name) || '').toLowerCase();
+      const hasBlockedSuffix = BLOCKED_MODEL_VARIANT_SUFFIXES_FOR_PANEL_RUNTIME.some(function (suffixForBlockCheck) {
+        return idForBlockCheck.endsWith(suffixForBlockCheck);
+      });
+      if (hasBlockedSuffix) return true;
+      return BLOCKED_MODEL_NAME_MARKERS_FOR_PANEL_RUNTIME.some(function (markerForBlockCheck) {
+        return nameForBlockCheck.indexOf(markerForBlockCheck) !== -1;
+      });
+    }
+
+    function isFreeModelVariantForPanelRuntime(modelForFreeCheck) {
+      const idForFreeCheck = String((modelForFreeCheck && modelForFreeCheck.id) || '').toLowerCase();
+      return idForFreeCheck.endsWith(FREE_MODEL_VARIANT_SUFFIX_FOR_PANEL_RUNTIME);
+    }
+
+    // OpenRouter puts floating aliases ("~anthropic/claude-opus-latest") in a '~' vendor namespace.
+    // Each carries its own self-referential canonical_slug, so there is no field that ties one back
+    // to the pinned model it tracks and no way to detect it as a duplicate; the '~' prefix is the
+    // only signal. Rejected here rather than at display time so relaxing the provider ordering to
+    // admit unknown vendors cannot readmit them, and so they never enter the model cache.
+    const ALIAS_PROVIDER_ID_PREFIX_FOR_PANEL_RUNTIME = '~';
+
+    function isAliasProviderModelForPanelRuntime(modelForAliasCheck) {
+      const idForAliasCheck = String((modelForAliasCheck && modelForAliasCheck.id) || '');
+      return idForAliasCheck.indexOf(ALIAS_PROVIDER_ID_PREFIX_FOR_PANEL_RUNTIME) === 0;
+    }
     const THEME_KEY_FOR_PANEL_RUNTIME = 'abchat_theme';
     const TRANSPARENCY_KEY_FOR_PANEL_RUNTIME = 'abchat_panel_transparency';
     const HEADER_BTN_KEY_FOR_PANEL_RUNTIME = 'abchat_header_btn';
@@ -11306,6 +11349,8 @@
     function filterChatModelsForPanelRuntime(rawModels) {
       const filtered = rawModels.filter(function (m) {
         const modelId = typeof m.id === 'string' ? m.id : '';
+        if (isBlockedModelVariantForPanelRuntime(m)) return false;
+        if (isAliasProviderModelForPanelRuntime(m)) return false;
         if (ROUTER_EXCEPTION_MODEL_IDS_FOR_PANEL_RUNTIME.includes(modelId)) return true;
         const hasTools = Array.isArray(m.supported_parameters) && m.supported_parameters.includes('tools');
         const arch = m.architecture || {};
@@ -11332,12 +11377,15 @@
         return { id: m.id, name: m.name || m.id, completionCostPerMillion: costPerMillion, promptCostPerMillion: promptCostPerMillion, contextLength: contextLength, canReason: canReason, reasoningMandatory: reasoningMandatory, reasoningDefaultOn: reasoningDefaultOn, reasoningDefaultEffort: reasoningDefaultEffort, created: m.created || 0 };
       }).filter(function (m) {
         if (ROUTER_EXCEPTION_MODEL_IDS_FOR_PANEL_RUNTIME.includes(m.id)) return true;
+        if (isFreeModelVariantForPanelRuntime(m)) return true;
         return m.completionCostPerMillion !== null && m.completionCostPerMillion >= 1;
       });
     }
 
     function filterImageModelsForPanelRuntime(rawModels) {
       return rawModels.filter(function (m) {
+        if (isBlockedModelVariantForPanelRuntime(m)) return false;
+        if (isAliasProviderModelForPanelRuntime(m)) return false;
         const arch = m.architecture || {};
         const outputModalities = Array.isArray(arch.output_modalities) ? arch.output_modalities.filter(Boolean) : [];
         const inputModalities = Array.isArray(arch.input_modalities) ? arch.input_modalities.filter(Boolean) : [];
@@ -11437,9 +11485,40 @@
       return providerKey || 'other';
     }
 
-    function getModelProviderLabelForPanelRuntime(providerKey) {
+    // OpenRouter ships the vendor's own casing as a "Vendor: Model" prefix on the model name, which
+    // beats anything derivable from the id ("Thinking Machines" vs a capitalized "Thinkingmachines").
+    // Two guards keep it honest: every model in the group must agree on the prefix, and the prefix
+    // must match the provider key once case and punctuation are dropped, so a model whose name
+    // happens to contain a colon can never rename its whole group. Returns '' when unusable.
+    function deriveProviderLabelFromModelNamesForPanelRuntime(providerKeyForDerive, modelsForDerive) {
+      if (!Array.isArray(modelsForDerive) || modelsForDerive.length === 0) return '';
+      const normalizeForDerive = function (textForDerive) {
+        return String(textForDerive || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      };
+      const normalizedKeyForDerive = normalizeForDerive(providerKeyForDerive);
+      if (!normalizedKeyForDerive) return '';
+      let agreedPrefixForDerive = '';
+      for (let idxForDerive = 0; idxForDerive < modelsForDerive.length; idxForDerive++) {
+        const modelForDerive = modelsForDerive[idxForDerive];
+        const nameForDerive = String((modelForDerive && modelForDerive.name) || '');
+        const separatorIdxForDerive = nameForDerive.indexOf(': ');
+        if (separatorIdxForDerive <= 0) return '';
+        const prefixForDerive = nameForDerive.slice(0, separatorIdxForDerive).trim();
+        if (!prefixForDerive || prefixForDerive.length > 40) return '';
+        if (!agreedPrefixForDerive) {
+          agreedPrefixForDerive = prefixForDerive;
+        } else if (agreedPrefixForDerive !== prefixForDerive) {
+          return '';
+        }
+      }
+      if (normalizeForDerive(agreedPrefixForDerive) !== normalizedKeyForDerive) return '';
+      return agreedPrefixForDerive;
+    }
+
+    function getModelProviderLabelForPanelRuntime(providerKey, modelsForProviderLabel) {
       const providerLabelsForPanelRuntime = {
         openai: 'OpenAI',
+        openrouter: 'OpenRouter',
         anthropic: 'Anthropic',
         google: 'Google',
         meta: 'Meta',
@@ -11456,6 +11535,8 @@
         perplexity: 'Perplexity'
       };
       if (providerLabelsForPanelRuntime[providerKey]) return providerLabelsForPanelRuntime[providerKey];
+      const derivedLabelForPanelRuntime = deriveProviderLabelFromModelNamesForPanelRuntime(providerKey, modelsForProviderLabel);
+      if (derivedLabelForPanelRuntime) return derivedLabelForPanelRuntime;
       const labelWords = String(providerKey || 'other')
         .split(/[-_]+/)
         .filter(Boolean)
@@ -11493,9 +11574,13 @@
       return { label: 'Expensive', cls: 'mp-tier-expensive' };
     }
 
-    function getModelDisplayNameForPanelRuntime(modelForDisplay, providerKeyForDisplay) {
+    // modelsForProviderLabel is the whole provider group, so the prefix stripped here is the same
+    // label the group header resolves to. Without it a derived header ("Thinking Machines") would
+    // not match a row's own prefix and every row would repeat the vendor name under the header.
+    function getModelDisplayNameForPanelRuntime(modelForDisplay, providerKeyForDisplay, modelsForProviderLabel) {
       const rawModelNameForDisplay = String((modelForDisplay && modelForDisplay.name) || (modelForDisplay && modelForDisplay.id) || '');
-      const providerLabelForDisplay = getModelProviderLabelForPanelRuntime(providerKeyForDisplay);
+      const groupForDisplayLabel = Array.isArray(modelsForProviderLabel) ? modelsForProviderLabel : [modelForDisplay];
+      const providerLabelForDisplay = getModelProviderLabelForPanelRuntime(providerKeyForDisplay, groupForDisplayLabel);
       const providerPrefixForDisplay = providerLabelForDisplay + ': ';
       if (rawModelNameForDisplay.indexOf(providerPrefixForDisplay) === 0) {
         const trimmedNameForDisplay = rawModelNameForDisplay.slice(providerPrefixForDisplay.length).trim();
@@ -11514,12 +11599,12 @@
         if (!Array.isArray(modelsByProvider[providerKeyForModel])) modelsByProvider[providerKeyForModel] = [];
         modelsByProvider[providerKeyForModel].push(modelForGrouping);
       });
-      const allowedProviderOrderForPanelRuntime = ['google', 'openai', 'openrouter', 'meta-llama', 'meta', 'anthropic', 'qwen', 'xai', 'x-ai', 'z-ai', 'deepseek', 'mistralai', 'moonshotai', 'minimax', 'microsoft', 'amazon', 'nvidia', 'perplexity'];
-      const providerKeys = Object.keys(modelsByProvider)
-        .filter(function (k) { return allowedProviderOrderForPanelRuntime.includes(k); })
-        .sort(function (a, b) {
-          return allowedProviderOrderForPanelRuntime.indexOf(a) - allowedProviderOrderForPanelRuntime.indexOf(b);
-        });
+      const knownProviderKeysForPanelRuntime = CHAT_MODEL_PROVIDER_ORDER_FOR_PANEL_RUNTIME
+        .filter(function (k) { return Array.isArray(modelsByProvider[k]) && modelsByProvider[k].length > 0; });
+      const otherProviderKeysForPanelRuntime = Object.keys(modelsByProvider)
+        .filter(function (k) { return !CHAT_MODEL_PROVIDER_ORDER_FOR_PANEL_RUNTIME.includes(k); })
+        .sort();
+      const providerKeys = knownProviderKeysForPanelRuntime.concat(otherProviderKeysForPanelRuntime);
 
       const allPickedIds = new Set();
       const pickedByProvider = {};
@@ -11542,13 +11627,13 @@
           const pickedForGroup = pickedByProvider[providerKeyForGroup];
           if (!pickedForGroup || pickedForGroup.length === 0) return;
           const optgroupForModels = document.createElement('optgroup');
-          optgroupForModels.label = getModelProviderLabelForPanelRuntime(providerKeyForGroup);
+          optgroupForModels.label = getModelProviderLabelForPanelRuntime(providerKeyForGroup, pickedForGroup);
           pickedForGroup.forEach(function (m) {
             const opt = document.createElement('option');
             opt.value = m.id;
             const tierForOption = getModelTierForPanelRuntime(m);
             const tierSuffixForOption = tierForOption ? ' -- [' + tierForOption.label + ']' : '';
-            const modelDisplayNameForOption = getModelDisplayNameForPanelRuntime(m, providerKeyForGroup);
+            const modelDisplayNameForOption = getModelDisplayNameForPanelRuntime(m, providerKeyForGroup, pickedForGroup);
             opt.textContent = modelDisplayNameForOption + tierSuffixForOption;
             if (m.id === effectiveSelected) opt.selected = true;
             optgroupForModels.appendChild(opt);
@@ -11617,13 +11702,13 @@
         const group = byProviderForImage[providerKey];
         group.sort(function (a, b) { return Number(b.created || 0) - Number(a.created || 0); });
         const optgroupForImage = document.createElement('optgroup');
-        optgroupForImage.label = getModelProviderLabelForPanelRuntime(providerKey);
+        optgroupForImage.label = getModelProviderLabelForPanelRuntime(providerKey, group);
         group.forEach(function (m) {
           const opt = document.createElement('option');
           opt.value = m.id;
           const tierForImageOption = getImageModelTierForPanelRuntime(m);
           const tierSuffixForImageOption = tierForImageOption ? ' -- [' + tierForImageOption.label + ']' : '';
-          opt.textContent = getModelDisplayNameForPanelRuntime(m, providerKey) + tierSuffixForImageOption;
+          opt.textContent = getModelDisplayNameForPanelRuntime(m, providerKey, group) + tierSuffixForImageOption;
           if (m.id === effectiveSelected) opt.selected = true;
           optgroupForImage.appendChild(opt);
         });
