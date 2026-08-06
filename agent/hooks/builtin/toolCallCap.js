@@ -6,7 +6,7 @@
     return;
   }
 
-  const MAX_TOTAL_TOOL_CALLS_PER_SEND_FOR_TOOL_CALL_CAP = 40;
+  const MAX_TOTAL_TOOL_CALLS_PER_SEND_FOR_TOOL_CALL_CAP = 60;
 
   nsForToolCallCap.hooks.register('PostModelResponse', {
     name: 'tool-call-cap',
@@ -19,6 +19,8 @@
       if (toolCallsForCap.length > MAX_TOTAL_TOOL_CALLS_PER_SEND_FOR_TOOL_CALL_CAP) {
         return {
           block: {
+            code: 'tool-call-limit',
+            limit: MAX_TOTAL_TOOL_CALLS_PER_SEND_FOR_TOOL_CALL_CAP,
             reason: 'Session tool-call limit reached (' + MAX_TOTAL_TOOL_CALLS_PER_SEND_FOR_TOOL_CALL_CAP
               + ' total). Stopping to prevent runaway execution.'
           }

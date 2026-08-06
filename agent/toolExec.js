@@ -3155,10 +3155,19 @@
   // so banding the changed anchors pulls the transformed toolbar in even though its own buttons carry
   // stable labels and are tagged neither new nor changed. Always considers offscreen candidates so
   // the acted element is captured wherever it sits.
+  var POST_ACTION_MAX_ITEMS_FOR_TOOL_EXEC = 40;
   function buildCenteredObserveSnapshotForToolExec(argsForCentered, candidatesForCentered, maxItemsForCentered, snapshotIdForCentered, totalCandForCentered) {
     var centerElForCentered = argsForCentered.center_el;
     var preSigForCentered = argsForCentered.pre_sig_map || null;
     var SMALL_BAND_RADIUS_FOR_CENTERED = 6;
+    var scopeDialogElsForCentered = openDialogElementsForObserve();
+    function isWithinOpenDialogForCentered(elForWithin) {
+      for (var dIdxForWithin = 0; dIdxForWithin < scopeDialogElsForCentered.length; dIdxForWithin++) {
+        var dlgForWithin = scopeDialogElsForCentered[dIdxForWithin];
+        if (dlgForWithin && dlgForWithin.contains && dlgForWithin.contains(elForWithin)) return true;
+      }
+      return false;
+    }
 
     var visibleForCentered = 0, inViewportForCentered = 0, coveredForCentered = 0;
     var eligibleForCentered = [];
@@ -3171,7 +3180,11 @@
       visibleForCentered++;
       var inVpForCentered = isElementInViewportForPageQuery(elForCentered);
       if (inVpForCentered) inViewportForCentered++;
-      if (isElementCoveredForObserve(elForCentered)) { coveredForCentered++; continue; }
+      var isCoveredForCentered = isElementCoveredForObserve(elForCentered);
+      if (isCoveredForCentered) {
+        coveredForCentered++;
+        if (!isWithinOpenDialogForCentered(elForCentered)) continue;
+      }
       var isNewForCentered = false, isChangedForCentered = false;
       if (preSigForCentered) {
         if (!preSigForCentered.has(elForCentered)) isNewForCentered = true;
@@ -3180,7 +3193,7 @@
       if (elForCentered === centerElForCentered) centerIndexForCentered = eligibleForCentered.length;
       eligibleForCentered.push({
         el: elForCentered, category: candForCentered.category, inVp: inVpForCentered,
-        isNew: isNewForCentered, isChanged: isChangedForCentered
+        isNew: isNewForCentered, isChanged: isChangedForCentered, covered: isCoveredForCentered
       });
     }
 
@@ -3224,7 +3237,8 @@
     var itemsForCentered = [];
     for (var sForCentered = 0; sForCentered < chosenIndicesForCentered.length; sForCentered++) {
       var entryForCentered = eligibleForCentered[chosenIndicesForCentered[sForCentered]];
-      var itemForCentered = registerObserveItemForToolExec(entryForCentered.el, entryForCentered.category, entryForCentered.inVp, itemsForCentered);
+      var itemForCentered = registerObserveItemForToolExec(
+        entryForCentered.el, entryForCentered.category, entryForCentered.inVp, itemsForCentered, entryForCentered.covered);
       if (entryForCentered.isNew) itemForCentered.new = true;
       else if (entryForCentered.isChanged) itemForCentered.changed = true;
     }
@@ -4135,6 +4149,249 @@
     return { ok: false, error: (resForDrag && resForDrag.error) ? resForDrag.error : 'Drag failed.' };
   }
 
+  var MAX_REF_FILL_FIELDS_FOR_TOOL_EXEC = 10;
+  var MAX_FILL_ERROR_VALUE_CHARS_FOR_TOOL_EXEC = 80;
+
+  function getRefFillScopeForToolExec(elForScope) {
+    if (!elForScope || typeof elForScope.closest !== 'function') return null;
+    return elForScope.closest('[role="dialog"], [role="alertdialog"], [aria-modal="true"]')
+      || elForScope.closest('form, [role="form"]')
+      || elForScope.closest('fieldset')
+      || null;
+  }
+
+  function validateRefFillTargetForToolExec(elForValidate, modeForValidate, valueForValidate) {
+    if (!elForValidate || !elForValidate.isConnected) return 'The field is no longer on the page.';
+    if (elForValidate.disabled || (elForValidate.getAttribute && elForValidate.getAttribute('aria-disabled') === 'true')) {
+      return 'Disabled fields are blocked.';
+    }
+    if (elForValidate.readOnly || (elForValidate.hasAttribute && elForValidate.hasAttribute('readonly'))) {
+      return 'Readonly fields are blocked.';
+    }
+    if (!isVisibleForPageFillForm(elForValidate)) return 'Fields that are not visible are blocked.';
+    var sensitiveReasonForValidate = getSensitiveReasonForPageFillForm(elForValidate);
+    if (sensitiveReasonForValidate) return sensitiveReasonForValidate;
+
+    var tagForValidate = elForValidate.tagName ? elForValidate.tagName.toLowerCase() : '';
+    var roleForValidate = (elForValidate.getAttribute && elForValidate.getAttribute('role')) || '';
+    if (modeForValidate === 'text') {
+      if (resolveCategoryForPageQuery(elForValidate) !== 'form_fields') {
+        return 'This ref is not a fillable form field.';
+      }
+      if (tagForValidate === 'select' || roleForValidate === 'combobox') {
+        return 'Dropdown fields require option, not text.';
+      }
+      if (roleForValidate === 'checkbox' || roleForValidate === 'radio'
+          || roleForValidate === 'switch' || roleForValidate === 'spinbutton'
+          || roleForValidate === 'slider') {
+        return 'This custom ' + roleForValidate + ' cannot be filled with text; use its normal page_act click or key action separately.';
+      }
+      var inputTypeForValidate = tagForValidate === 'input'
+        ? (elForValidate.getAttribute('type') || 'text').toLowerCase()
+        : '';
+      if (inputTypeForValidate === 'checkbox' || inputTypeForValidate === 'radio') {
+        return 'Checkboxes and radios must be changed with page_act action "click", outside a fill batch.';
+      }
+      var formatErrorForValidate = validateTypedInputValueForPageFillForm(inputTypeForValidate, valueForValidate);
+      if (formatErrorForValidate) return formatErrorForValidate;
+      return '';
+    }
+
+    var categoryForValidate = resolveCategoryForPageQuery(elForValidate);
+    var hasListboxPopupForValidate = elForValidate.getAttribute
+      && elForValidate.getAttribute('aria-haspopup') === 'listbox';
+    var isSelectLikeForValidate = tagForValidate === 'select' || roleForValidate === 'combobox'
+      || hasListboxPopupForValidate || looksLikeWidgetForPageQuery(elForValidate);
+    if (!isSelectLikeForValidate
+        || (categoryForValidate !== 'form_fields' && categoryForValidate !== 'buttons')) {
+      return 'This ref is not a selectable field.';
+    }
+    return '';
+  }
+
+  // Echo a rejected fill value back in the error so the model can see what it actually sent,
+  // bounded so a runaway multi-thousand-character value cannot bloat the error itself.
+  function quoteFillValueForToolExec(valueForQuote) {
+    var textForQuote = String(valueForQuote == null ? '' : valueForQuote).replace(/\s+/g, ' ');
+    if (textForQuote.length > MAX_FILL_ERROR_VALUE_CHARS_FOR_TOOL_EXEC) {
+      textForQuote = textForQuote.slice(0, MAX_FILL_ERROR_VALUE_CHARS_FOR_TOOL_EXEC)
+        + '... (' + String(valueForQuote).length + ' chars)';
+    }
+    return '"' + textForQuote + '"';
+  }
+
+  function prepareRefFillBatchForToolExec(fieldsForPrepare) {
+    if (!Array.isArray(fieldsForPrepare)) return { ok: false, error: 'page_act fill requires fields to be an array.' };
+    if (fieldsForPrepare.length === 0) return { ok: false, error: 'page_act fill requires at least one field.' };
+    if (fieldsForPrepare.length > MAX_REF_FILL_FIELDS_FOR_TOOL_EXEC) {
+      return { ok: false, error: 'page_act fill supports at most ' + MAX_REF_FILL_FIELDS_FOR_TOOL_EXEC + ' fields per call.' };
+    }
+
+    var preparedForFill = [];
+    var seenRefsForFill = {};
+    var sharedScopeForFill = null;
+    var hasSharedScopeForFill = false;
+    for (var iForPrepare = 0; iForPrepare < fieldsForPrepare.length; iForPrepare++) {
+      var fieldForPrepare = fieldsForPrepare[iForPrepare];
+      if (!fieldForPrepare || typeof fieldForPrepare !== 'object' || Array.isArray(fieldForPrepare)) {
+        return { ok: false, error: 'page_act fill field ' + (iForPrepare + 1) + ' must be an object.' };
+      }
+      var refForPrepare = Number(fieldForPrepare.ref);
+      if (!Number.isInteger(refForPrepare) || refForPrepare <= 0) {
+        return { ok: false, error: 'page_act fill field ' + (iForPrepare + 1) + ' requires a positive integer ref.' };
+      }
+      if (seenRefsForFill[String(refForPrepare)]) {
+        return { ok: false, error: 'page_act fill cannot include ref ' + refForPrepare + ' more than once.' };
+      }
+      seenRefsForFill[String(refForPrepare)] = true;
+
+      // "Exactly one of text or option" is decided by which value is USABLE, not by which key
+      // is present. Models routinely pad every declared property with an empty string, and a
+      // blank option is independently meaningless, so an empty option counts as absent. An
+      // empty text does NOT: on its own it is the documented way to clear a field. Only when
+      // both keys arrive blank is the intent unreadable, and only two non-empty values are a
+      // genuine conflict.
+      var hasTextKeyForPrepare = typeof fieldForPrepare.text === 'string';
+      var hasOptionKeyForPrepare = typeof fieldForPrepare.option === 'string';
+      var optionIsBlankForPrepare = hasOptionKeyForPrepare && fieldForPrepare.option.trim() === '';
+      var usableOptionForPrepare = hasOptionKeyForPrepare && !optionIsBlankForPrepare;
+      var usableTextForPrepare = hasTextKeyForPrepare
+        && !(fieldForPrepare.text === '' && hasOptionKeyForPrepare);
+      var fieldLabelForPrepare = 'page_act fill field ' + (iForPrepare + 1) + ' (ref ' + refForPrepare + ')';
+      if (usableTextForPrepare && usableOptionForPrepare) {
+        return {
+          ok: false,
+          error: fieldLabelForPrepare + ' sent both text ('
+            + quoteFillValueForToolExec(fieldForPrepare.text) + ') and option ('
+            + quoteFillValueForToolExec(fieldForPrepare.option) + '), so the intended action is ambiguous. '
+            + 'Send exactly one: text to type into a text field, or option with the visible label to pick in a '
+            + 'dropdown. Omit the key you are not using instead of sending it as an empty string.'
+        };
+      }
+      if (!usableTextForPrepare && !usableOptionForPrepare) {
+        return {
+          ok: false,
+          error: fieldLabelForPrepare + ' has no value to fill: text is '
+            + (hasTextKeyForPrepare ? 'empty' : 'missing') + ' and option is '
+            + (hasOptionKeyForPrepare ? 'empty' : 'missing') + '. Send text with the value to type '
+            + '(text alone, set to an empty string, clears the field), or option with the visible label to '
+            + 'pick in a dropdown. Omit the key you are not using instead of sending it as an empty string.'
+        };
+      }
+
+      var resolvedForPrepare = resolveObserveRefForToolExec(refForPrepare);
+      if (!resolvedForPrepare.ok) {
+        return {
+          ok: false,
+          stale_ref: true,
+          error: 'Ref ' + refForPrepare + ' is not actionable from the latest snapshot. No fields were changed; use the fresh snapshot and retry.'
+        };
+      }
+      var modeForPrepare = usableOptionForPrepare ? 'option' : 'text';
+      var valueForPrepare = usableOptionForPrepare ? fieldForPrepare.option : fieldForPrepare.text;
+      var validationErrorForPrepare = validateRefFillTargetForToolExec(
+        resolvedForPrepare.el, modeForPrepare, valueForPrepare);
+      if (validationErrorForPrepare) {
+        return {
+          ok: false,
+          error: fieldLabelForPrepare + ' was rejected before any fields were changed: '
+            + validationErrorForPrepare
+        };
+      }
+
+      var scopeForPrepare = getRefFillScopeForToolExec(resolvedForPrepare.el);
+      if (iForPrepare === 0) {
+        sharedScopeForFill = scopeForPrepare;
+        hasSharedScopeForFill = !!scopeForPrepare;
+      } else if ((hasSharedScopeForFill || scopeForPrepare) && scopeForPrepare !== sharedScopeForFill) {
+        return {
+          ok: false,
+          error: 'page_act fill fields must belong to the same form or dialog. No fields were changed.'
+        };
+      }
+      preparedForFill.push({
+        ref: refForPrepare,
+        mode: modeForPrepare,
+        value: valueForPrepare,
+        resolved: resolvedForPrepare
+      });
+    }
+    if (preparedForFill.length > 1 && !hasSharedScopeForFill) {
+      return {
+        ok: false,
+        error: 'page_act fill could not confirm that these fields share one form or dialog. No fields were changed; use individual type/select actions.'
+      };
+    }
+    return { ok: true, fields: preparedForFill };
+  }
+
+  async function performRefFillBatchForToolExec(preparedFieldsForFill, contextForFill) {
+    var resultsForFill = [];
+    var changedCountForFill = 0;
+    var stoppedForFill = false;
+    var lastSuccessfulRefForFill = null;
+    var consentRequiredForFill = false;
+    for (var iForFill = 0; iForFill < preparedFieldsForFill.length; iForFill++) {
+      var preparedForFill = preparedFieldsForFill[iForFill];
+      if (stoppedForFill) {
+        resultsForFill.push({
+          ref: preparedForFill.ref,
+          status: 'skipped',
+          error: 'Not attempted because an earlier field in this batch failed.'
+        });
+        continue;
+      }
+
+      var liveForFill = resolveObserveRefForToolExec(preparedForFill.ref);
+      if (!liveForFill.ok) {
+        resultsForFill.push({
+          ref: preparedForFill.ref,
+          status: 'failed',
+          stale_ref: true,
+          error: 'The field became stale while the batch was running. Re-read the returned snapshot before continuing.'
+        });
+        stoppedForFill = true;
+        continue;
+      }
+
+      var actionResultForFill = preparedForFill.mode === 'text'
+        ? await performRefTypeForToolExec(
+            liveForFill.el, liveForFill.descriptor, { text: preparedForFill.value }, contextForFill)
+        : await performRefSelectForToolExec(
+            liveForFill.el, liveForFill.descriptor, { option: preparedForFill.value }, contextForFill);
+      if (actionResultForFill && actionResultForFill.ok !== false) {
+        resultsForFill.push({
+          ref: preparedForFill.ref,
+          status: 'changed',
+          effect: actionResultForFill.summary || (preparedForFill.mode === 'text' ? 'typed into field' : 'selected option')
+        });
+        changedCountForFill++;
+        lastSuccessfulRefForFill = preparedForFill.ref;
+      } else {
+        consentRequiredForFill = !!(actionResultForFill && actionResultForFill.consent_required);
+        resultsForFill.push({
+          ref: preparedForFill.ref,
+          status: consentRequiredForFill ? 'blocked' : 'failed',
+          error: (actionResultForFill && actionResultForFill.error) || 'The field could not be changed.'
+        });
+        stoppedForFill = true;
+      }
+    }
+
+    var allChangedForFill = changedCountForFill === preparedFieldsForFill.length;
+    return {
+      ok: allChangedForFill,
+      partial: changedCountForFill > 0 && !allChangedForFill,
+      consent_required: consentRequiredForFill,
+      summary: allChangedForFill
+        ? 'filled ' + changedCountForFill + ' fields'
+        : 'filled ' + changedCountForFill + ' of ' + preparedFieldsForFill.length + ' fields',
+      error: allChangedForFill ? '' : 'The fill batch stopped at the first field that could not be changed.',
+      field_results: resultsForFill,
+      last_successful_ref: lastSuccessfulRefForFill
+    };
+  }
+
   // ================= page-action DOM telemetry (L2 + L3) =================
   //
   // Always-on capture around page_act so a failed or surprising action can be reconstructed from
@@ -4163,6 +4420,26 @@
     else if (/^[A-Za-z0-9]+$/.test(sForShape)) clsForShape = 'alnum';
     else if (/\s/.test(sForShape)) clsForShape = 'mixed';
     return '<masked len=' + sForShape.length + ' ' + clsForShape + '>';
+  }
+
+  function sanitizePageActArgsForTelemetryForToolExec(argsForSanitize) {
+    if (!argsForSanitize || String(argsForSanitize.action || '').toLowerCase() !== 'fill'
+        || !Array.isArray(argsForSanitize.fields)) {
+      return argsForSanitize || {};
+    }
+    var sanitizedForTelemetry = Object.assign({}, argsForSanitize);
+    sanitizedForTelemetry.fields = argsForSanitize.fields.map(function (fieldForSanitize) {
+      if (!fieldForSanitize || typeof fieldForSanitize !== 'object') return fieldForSanitize;
+      var sanitizedFieldForTelemetry = { ref: fieldForSanitize.ref };
+      if (typeof fieldForSanitize.text === 'string') {
+        sanitizedFieldForTelemetry.text = maskShapeForPageActionTelemetry(fieldForSanitize.text);
+      }
+      if (typeof fieldForSanitize.option === 'string') {
+        sanitizedFieldForTelemetry.option = fieldForSanitize.option;
+      }
+      return sanitizedFieldForTelemetry;
+    });
+    return sanitizedForTelemetry;
   }
 
   // Value treatment per the privacy posture: passwords omitted entirely; payment fields omitted;
@@ -4397,27 +4674,54 @@
   }
 
   async function pageActRefToolForToolExec(argsForAct, contextForAct) {
-    var telemetryForAct = createPageActionTelemetryCollectorForToolExec('page_act', argsForAct || {}, contextForAct);
+    var telemetryForAct = createPageActionTelemetryCollectorForToolExec(
+      'page_act', sanitizePageActArgsForTelemetryForToolExec(argsForAct || {}), contextForAct);
     function returnActForToolExec(resultForReturn) {
       finishPageActionTelemetryForToolExec(telemetryForAct, resultForReturn);
       return resultForReturn;
     }
     argsForAct = argsForAct || {};
     var actionForAct = (typeof argsForAct.action === 'string') ? argsForAct.action.trim().toLowerCase() : '';
-    var VALID_ACTIONS_FOR_ACT = { click: 1, type: 1, select: 1, hover: 1, scroll: 1, press: 1, drag: 1 };
+    var VALID_ACTIONS_FOR_ACT = { click: 1, type: 1, select: 1, fill: 1, hover: 1, scroll: 1, press: 1, drag: 1 };
     if (!VALID_ACTIONS_FOR_ACT[actionForAct]) {
-      return returnActForToolExec({ ok: false, error: 'page_act: unknown action "' + actionForAct + '". Use one of: click, type, select, hover, scroll, press, drag.' });
+      return returnActForToolExec({ ok: false, error: 'page_act: unknown action "' + actionForAct + '". Use one of: click, type, select, fill, hover, scroll, press, drag.' });
     }
     if (typeof document === 'undefined' || !document.body) return returnActForToolExec({ ok: false, error: 'No document body available.' });
 
+    var preparedFillBatchForAct = null;
+    if (actionForAct === 'fill') {
+      preparedFillBatchForAct = prepareRefFillBatchForToolExec(argsForAct.fields);
+      telemetryForAct.resolveOutcome = preparedFillBatchForAct.ok
+        ? 'ok'
+        : (preparedFillBatchForAct.stale_ref ? 'stale' : 'rejected');
+      if (!preparedFillBatchForAct.ok) {
+        var freshForFillError = finalizeObserveSnapshotForToolExec(buildObserveSnapshotForToolExec({
+          max_items: POST_ACTION_MAX_ITEMS_FOR_TOOL_EXEC
+        }));
+        var fillErrorResultForAct = {
+          ok: false,
+          action: 'fill',
+          error: preparedFillBatchForAct.error,
+          snapshotId: freshForFillError.snapshotId,
+          page: freshForFillError.page,
+          counts: freshForFillError.counts
+        };
+        if (preparedFillBatchForAct.stale_ref) fillErrorResultForAct.stale_ref = true;
+        if (freshForFillError.items) fillErrorResultForAct.items = freshForFillError.items;
+        if (freshForFillError.text != null) fillErrorResultForAct.text = freshForFillError.text;
+        return returnActForToolExec(fillErrorResultForAct);
+      }
+    }
+
     // press acts on whatever holds focus; scroll may be a page scroll; both can omit a ref.
     // Models often pass ref:0 to mean "no ref" for page scroll; treat 0 like omit for scroll only.
-    // drag resolves its own two refs. Every other action targets a single ref.
+    // drag resolves its own two refs; fill resolves its fields array. Every other action targets one ref.
     var effectiveRefForAct = argsForAct.ref;
     if (actionForAct === 'scroll' && (effectiveRefForAct === 0 || effectiveRefForAct === '0')) {
       effectiveRefForAct = null;
     }
-    var refOptionalForAct = (actionForAct === 'press') || (actionForAct === 'scroll' && effectiveRefForAct == null) || (actionForAct === 'drag');
+    var refOptionalForAct = (actionForAct === 'press') || (actionForAct === 'scroll' && effectiveRefForAct == null)
+      || actionForAct === 'drag' || actionForAct === 'fill';
     var resolvedForAct = null;
     if (!refOptionalForAct) {
       if (effectiveRefForAct == null) {
@@ -4428,7 +4732,9 @@
         ? 'ok'
         : (resolvedForAct.not_shown ? 'not_shown' : (resolvedForAct.unknown ? 'unknown' : 'stale'));
       if (!resolvedForAct.ok) {
-        var freshForStale = finalizeObserveSnapshotForToolExec(buildObserveSnapshotForToolExec({}));
+        var freshForStale = finalizeObserveSnapshotForToolExec(buildObserveSnapshotForToolExec({
+          max_items: POST_ACTION_MAX_ITEMS_FOR_TOOL_EXEC
+        }));
         var reasonForStale = resolvedForAct.not_shown
           ? 'Ref ' + effectiveRefForAct + ' was not one of the refs returned to you in the latest page_observe or page_read find_text result, so it cannot be acted on. Do not guess or offset a ref: act only on a ref that appeared in the most recent result.'
           : resolvedForAct.unknown
@@ -4450,8 +4756,11 @@
     var preDialogsForAct = [];
     try { preDialogsForAct = snapshotOpenDialogsForPageQuery(); } catch (ePreDialogsForAct) { preDialogsForAct = []; }
     var preUrlForAct = (typeof location !== 'undefined') ? location.href : '';
-    var elForAct = resolvedForAct ? resolvedForAct.el : null;
-    var descriptorForAct = resolvedForAct ? resolvedForAct.descriptor : null;
+    var firstPreparedForAct = preparedFillBatchForAct && preparedFillBatchForAct.fields.length
+      ? preparedFillBatchForAct.fields[0].resolved
+      : null;
+    var elForAct = resolvedForAct ? resolvedForAct.el : (firstPreparedForAct ? firstPreparedForAct.el : null);
+    var descriptorForAct = resolvedForAct ? resolvedForAct.descriptor : (firstPreparedForAct ? firstPreparedForAct.descriptor : null);
     telemetryForAct.actedEl = elForAct;
     var effectForAct = null;
 
@@ -4462,6 +4771,16 @@
         effectForAct = await performRefTypeForToolExec(elForAct, descriptorForAct, argsForAct, contextForAct);
       } else if (actionForAct === 'select') {
         effectForAct = await performRefSelectForToolExec(elForAct, descriptorForAct, argsForAct, contextForAct);
+      } else if (actionForAct === 'fill') {
+        effectForAct = await performRefFillBatchForToolExec(preparedFillBatchForAct.fields, contextForAct);
+        if (effectForAct.last_successful_ref != null) {
+          var centerResolvedForFill = resolveObserveRefForToolExec(effectForAct.last_successful_ref);
+          if (centerResolvedForFill.ok) {
+            elForAct = centerResolvedForFill.el;
+            descriptorForAct = centerResolvedForFill.descriptor;
+            telemetryForAct.actedEl = elForAct;
+          }
+        }
       } else if (actionForAct === 'hover') {
         effectForAct = await performRefTrustedPointerForToolExec('move', descriptorForAct, contextForAct);
       } else if (actionForAct === 'scroll') {
@@ -4485,7 +4804,7 @@
     // travel (e.g. dialog still up right after the click) against the t1 sample taken after settle.
     try { telemetryForAct.t0 = buildVitalsStripForPageActionTelemetry(elForAct); } catch (eT0ForAct) { telemetryForAct.t0 = null; }
 
-    if (effectForAct && effectForAct.consent_required) {
+    if (effectForAct && effectForAct.consent_required && actionForAct !== 'fill') {
       return returnActForToolExec({ ok: false, consent_required: true, error: effectForAct.error || 'This action needs advanced automation; a permission prompt was opened. Approve it, then retry.' });
     }
 
@@ -4515,9 +4834,13 @@
       // a ref, drag, or an acted element that was removed/navigated by the action).
       var canCenterForAct = actedStillConnectedForAct;
       if (canCenterForAct) {
-        postSnapForAct = buildObserveSnapshotForToolExec({ center_el: elForAct, pre_sig_map: preSigForAct });
+        postSnapForAct = buildObserveSnapshotForToolExec({
+          center_el: elForAct,
+          pre_sig_map: preSigForAct,
+          max_items: POST_ACTION_MAX_ITEMS_FOR_TOOL_EXEC
+        });
       } else {
-        postSnapForAct = buildObserveSnapshotForToolExec({});
+        postSnapForAct = buildObserveSnapshotForToolExec({ max_items: POST_ACTION_MAX_ITEMS_FOR_TOOL_EXEC });
         markSnapshotDeltaForToolExec(postSnapForAct, preSigForAct);
       }
       finalizeObserveSnapshotForToolExec(postSnapForAct);
@@ -4559,6 +4882,10 @@
 
     if (postSnapForAct.items) resultForAct.items = postSnapForAct.items;
     if (postSnapForAct.text != null) resultForAct.text = postSnapForAct.text;
+    if (actionForAct === 'fill' && effectForAct && Array.isArray(effectForAct.field_results)) {
+      resultForAct.field_results = effectForAct.field_results;
+      resultForAct.partial = effectForAct.partial === true;
+    }
     if (!okForAct && effectForAct && effectForAct.error) resultForAct.error = effectForAct.error;
     return returnActForToolExec(resultForAct);
   }

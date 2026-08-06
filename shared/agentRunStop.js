@@ -2,7 +2,7 @@
   const globalScopeForAgentRunStop = globalThis;
   const nsForAgentRunStop = globalScopeForAgentRunStop.ABChatShared || {};
 
-  function buildNoticeForAgentRunStop(stopReasonForNotice, toolTimeoutMsForNotice) {
+  function buildNoticeForAgentRunStop(stopReasonForNotice, toolTimeoutMsForNotice, stopLimitForNotice) {
     if (stopReasonForNotice === 'user') {
       return 'Agent stopped: you cancelled the run.';
     }
@@ -21,6 +21,22 @@
     }
     if (stopReasonForNotice === 'cancelled') {
       return 'Agent stopped before completion.';
+    }
+    if (stopReasonForNotice === 'iteration-limit') {
+      var iterationLimitForNotice = Number(stopLimitForNotice) || 60;
+      return 'Agent stopped: reached the ' + iterationLimitForNotice + '-step safety limit before completing the request. Completed actions remain saved; send "continue" to resume the remaining work.';
+    }
+    if (stopReasonForNotice === 'no-progress') {
+      var checkpointLimitForNotice = Number(stopLimitForNotice) || 20;
+      return 'Agent stopped at the ' + checkpointLimitForNotice + '-step checkpoint because recent tool activity was not making enough progress. Completed actions remain saved; review the latest results before continuing.';
+    }
+    if (stopReasonForNotice === 'tool-call-limit') {
+      var toolCallLimitForNotice = Number(stopLimitForNotice) || 60;
+      return 'Agent stopped: reached the ' + toolCallLimitForNotice + '-tool safety limit before completing the request. Completed actions remain saved; send "continue" to resume the remaining work.';
+    }
+    if (stopReasonForNotice === 'repeated-tools') {
+      var repeatedToolRoundsForNotice = Number(stopLimitForNotice) || 4;
+      return 'Agent stopped: the same tool calls were repeated ' + repeatedToolRoundsForNotice + ' rounds in a row without a different step. Completed actions remain saved; review the latest result before continuing.';
     }
     return '';
   }
@@ -42,6 +58,10 @@
     if (stopReasonForStatus === 'tool') return 'timeout-tool';
     if (stopReasonForStatus === 'total') return 'timeout-total';
     if (stopReasonForStatus === 'cancelled') return 'cancelled';
+    if (stopReasonForStatus === 'iteration-limit') return 'limit-iterations';
+    if (stopReasonForStatus === 'no-progress') return 'limit-no-progress';
+    if (stopReasonForStatus === 'tool-call-limit') return 'limit-tools';
+    if (stopReasonForStatus === 'repeated-tools') return 'limit-repetition';
     return existingStatusForStatus || 'success';
   }
 
@@ -54,7 +74,11 @@
       'cancelled-user': 'Stopped by user',
       'timeout-stream': 'Stream timeout',
       'timeout-tool': 'Tool timeout',
-      'timeout-total': 'Turn timeout'
+      'timeout-total': 'Turn timeout',
+      'limit-iterations': 'Step limit',
+      'limit-no-progress': 'No progress',
+      'limit-tools': 'Tool limit',
+      'limit-repetition': 'Repeated tools'
     };
     return labelsForAgentRunStop[statusForLabel] || (statusForLabel || '');
   }
@@ -64,6 +88,7 @@
     if (statusForClass === 'error') return 'log-status-error';
     if (statusForClass === 'cancelled-user') return 'log-status-cancelled-user';
     if (statusForClass && String(statusForClass).indexOf('timeout-') === 0) return 'log-status-timeout';
+    if (statusForClass && String(statusForClass).indexOf('limit-') === 0) return 'log-status-timeout';
     return 'log-status-cancelled';
   }
 
@@ -72,7 +97,7 @@
     if (logForPreview.status === 'error') return logForPreview.errorMessage || 'Error';
     var stopReasonForPreview = logForPreview.stopReason;
     if (stopReasonForPreview) {
-      return buildNoticeForAgentRunStop(stopReasonForPreview, logForPreview.toolTimeoutMs);
+      return buildNoticeForAgentRunStop(stopReasonForPreview, logForPreview.toolTimeoutMs, logForPreview.stopLimit);
     }
     if (logForPreview.status && logForPreview.status !== 'success' && logForPreview.status !== 'success_raw') {
       return getStatusLabelForAgentRunStop(logForPreview.status);

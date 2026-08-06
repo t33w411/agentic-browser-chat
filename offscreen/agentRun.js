@@ -30,9 +30,18 @@
   var ITER_STREAM_TIMEOUT_MS_FOR_AGENT_RUN = 90 * 1000;
   var ITER_TOOL_STD_TIMEOUT_MS_FOR_AGENT_RUN = 90 * 1000;
   var ITER_TOOL_IMAGE_TIMEOUT_MS_FOR_AGENT_RUN = 3 * 60 * 1000;
-  var MAX_TOOL_ITERS_FOR_AGENT_RUN = 20;
+  var SOFT_ITERATION_CHECKPOINT_FOR_AGENT_RUN = 20;
+  var ITERATION_EXTENSION_SIZE_FOR_AGENT_RUN = 20;
+  var ABSOLUTE_MAX_ITERATIONS_FOR_AGENT_RUN = 60;
+  var PROGRESS_WINDOW_ROUNDS_FOR_AGENT_RUN = 5;
+  var MIN_PROGRESS_ROUNDS_FOR_EXTENSION_FOR_AGENT_RUN = 2;
+  var MAX_IDENTICAL_TOOL_ROUNDS_FOR_AGENT_RUN = 4;
   var MAX_CONSECUTIVE_ALL_FAILURE_ITERS_FOR_AGENT_RUN = 8;
   var MAX_IDENTICAL_FAILING_ROUNDS_FOR_AGENT_RUN = 3;
+  var MAX_IDENTICAL_ERROR_ROUNDS_FOR_AGENT_RUN = 4;
+  var IDENTICAL_ERROR_HINT_ROUND_FOR_AGENT_RUN = 2;
+  var IDENTICAL_ERROR_DECAY_ROUNDS_FOR_AGENT_RUN = 2;
+  var IDENTICAL_ERROR_TEXT_MAX_CHARS_FOR_AGENT_RUN = 300;
   var MAX_STREAM_RETRIES_FOR_AGENT_RUN = 3;
   var MAX_CONCURRENT_RUNS_FOR_AGENT_RUN = 3;
   var MIN_TOOL_DISPLAY_MS_FOR_AGENT_RUN = 3000;
@@ -226,6 +235,42 @@
     });
     parts.sort();
     return parts.join('\x01');
+  }
+
+  // Is this tool result a failure? Single definition, shared by the all-failed check, the
+  // mutating-progress scan, and the error signature, so those three cannot disagree about what
+  // counts as an error.
+  function isFailedToolResultForAgentRun(resultForFail) {
+    return !resultForFail || resultForFail.ok === false
+      || (typeof resultForFail === 'object' && typeof resultForFail.error === 'string');
+  }
+
+  // Order-independent signature of the ERRORS a round produced (tool name + error text), plus
+  // the distinct error texts for the corrective note. This catches the degenerate loop the
+  // argument signature above misses: a model that keeps hitting the same rejection while
+  // varying the values it sends, so no two rounds are ever byte-identical. Error text is the
+  // stable part of a failed result (a snapshot or ids around it change every call), so it is
+  // the only part signed.
+  function computeToolErrorSignatureForAgentRun(toolCalls, toolResults) {
+    var partsForErrSig = [];
+    var textsForErrSig = [];
+    for (var iForErrSig = 0; iForErrSig < toolCalls.length; iForErrSig++) {
+      var resultForErrSig = toolResults[iForErrSig];
+      if (!isFailedToolResultForAgentRun(resultForErrSig)) continue;
+      var fnForErrSig = toolCalls[iForErrSig] && toolCalls[iForErrSig].function
+        ? toolCalls[iForErrSig].function : {};
+      var nameForErrSig = fnForErrSig.name || '';
+      var errorForErrSig = resultForErrSig && typeof resultForErrSig.error === 'string'
+        ? resultForErrSig.error : '(no error text)';
+      if (errorForErrSig.length > IDENTICAL_ERROR_TEXT_MAX_CHARS_FOR_AGENT_RUN) {
+        errorForErrSig = errorForErrSig.slice(0, IDENTICAL_ERROR_TEXT_MAX_CHARS_FOR_AGENT_RUN);
+      }
+      partsForErrSig.push(nameForErrSig + '\x00' + errorForErrSig);
+      var labelForErrSig = (nameForErrSig ? nameForErrSig + ': ' : '') + errorForErrSig;
+      if (textsForErrSig.indexOf(labelForErrSig) === -1) textsForErrSig.push(labelForErrSig);
+    }
+    partsForErrSig.sort();
+    return { signature: partsForErrSig.join('\x01'), texts: textsForErrSig };
   }
 
   // Rebind the run's active target tab to newTargetTabId, releasing any CDP lease held on the
@@ -442,10 +487,10 @@
       controllerForRun.abort();
     }, TURN_TOTAL_TIMEOUT_MS_FOR_AGENT_RUN);
 
-    function buildTimeoutNoticeForRun(reasonForNotice, toolTimeoutMsForNotice) {
+    function buildTimeoutNoticeForRun(reasonForNotice, toolTimeoutMsForNotice, stopLimitForNotice) {
       var agentRunStopForNotice = (globalThis.ABChatShared || {}).agentRunStop;
       if (agentRunStopForNotice && typeof agentRunStopForNotice.buildNotice === 'function') {
-        return agentRunStopForNotice.buildNotice(reasonForNotice, toolTimeoutMsForNotice);
+        return agentRunStopForNotice.buildNotice(reasonForNotice, toolTimeoutMsForNotice, stopLimitForNotice);
       }
       return '';
     }
@@ -485,9 +530,17 @@
     }
 
     var iterCount = 0;
+    var currentIterationLimitForRun = SOFT_ITERATION_CHECKPOINT_FOR_AGENT_RUN;
+    var extensionCountForRun = 0;
+    var recentProgressRoundsForRun = [];
+    var lastToolRoundSignatureForRun = null;
+    var identicalToolRoundCountForRun = 0;
     var consecutiveEmptyItersForRun = 0;
     var identicalFailingRoundCountForRun = 0;
     var lastFailingRoundSignatureForRun = null;
+    var lastToolErrorSignatureForRun = null;
+    var identicalErrorRoundCountForRun = 0;
+    var errorFreeRoundsSinceErrorForRun = 0;
     var sideCallCostForRun = 0;
     var turnMainCostAccumForRun = 0;
     var prevTurnMainCostForRun = 0;
@@ -535,6 +588,8 @@
     var logStatusForRun = 'success';
     var logErrorMsgForRun = '';
     var logStopReasonForRun = null;
+    var logStopLimitForRun = null;
+    var stopNoticeAlreadyPersistedForRun = false;
     var lastToolTimeoutMsForRun = ITER_TOOL_STD_TIMEOUT_MS_FOR_AGENT_RUN;
     var hasAppendedRenderableAssistantMessageForRun = false;
     var persistedSystemNoticeCountForRun = 0;
@@ -656,7 +711,32 @@
 
       emitForAgentRun('stream_start', chatId, null);
 
-      while (!userPromptBlockedForRun && iterCount < MAX_TOOL_ITERS_FOR_AGENT_RUN) {
+      while (!userPromptBlockedForRun) {
+        if (iterCount >= currentIterationLimitForRun) {
+          var progressRoundCountForExtension = recentProgressRoundsForRun.filter(Boolean).length;
+          var canExtendForRun = currentIterationLimitForRun < ABSOLUTE_MAX_ITERATIONS_FOR_AGENT_RUN
+            && progressRoundCountForExtension >= MIN_PROGRESS_ROUNDS_FOR_EXTENSION_FOR_AGENT_RUN
+            && identicalToolRoundCountForRun < MAX_IDENTICAL_TOOL_ROUNDS_FOR_AGENT_RUN
+            && consecutiveEmptyItersForRun < MAX_CONSECUTIVE_ALL_FAILURE_ITERS_FOR_AGENT_RUN;
+          if (canExtendForRun) {
+            currentIterationLimitForRun = Math.min(
+              ABSOLUTE_MAX_ITERATIONS_FOR_AGENT_RUN,
+              currentIterationLimitForRun + ITERATION_EXTENSION_SIZE_FOR_AGENT_RUN
+            );
+            extensionCountForRun++;
+            pendingSystemNotesForRun.push(
+              'You reached a bounded execution checkpoint, and recent tool calls show continued progress. '
+              + 'Continue only the unfinished parts of the user\'s request. Do not repeat completed actions. '
+              + 'You now have up to ' + currentIterationLimitForRun + ' total model steps for this run.'
+            );
+          } else {
+            logStopReasonForRun = currentIterationLimitForRun >= ABSOLUTE_MAX_ITERATIONS_FOR_AGENT_RUN
+              ? 'iteration-limit'
+              : 'no-progress';
+            logStopLimitForRun = currentIterationLimitForRun;
+            break;
+          }
+        }
         iterCount++;
         var turnStartTimeForRun = Date.now();
 
@@ -854,7 +934,15 @@
           assistantMessage: assistantMsg, toolCalls: toolCallsForLoop || [], isFinalReply: !hasToolCalls, chatId: chatId
         });
         if (postModelResponseResultForRun && postModelResponseResultForRun.block) {
+          var stopNoticeCountBeforeBlockForRun = persistedSystemNoticeCountForRun;
+          if (postModelResponseResultForRun.block.code === 'tool-call-limit') {
+            logStopReasonForRun = 'tool-call-limit';
+            logStopLimitForRun = Number(postModelResponseResultForRun.block.limit) || null;
+          }
           await emitAndPersistSystemNoticeForRun(postModelResponseResultForRun.block.reason);
+          if (logStopReasonForRun === 'tool-call-limit') {
+            stopNoticeAlreadyPersistedForRun = persistedSystemNoticeCountForRun > stopNoticeCountBeforeBlockForRun;
+          }
           break;
         }
         if (postModelResponseResultForRun && postModelResponseResultForRun.continueWithSystemNote) continue;
@@ -1130,8 +1218,14 @@
         }
         if (controllerForRun.signal.aborted) { markRunStoppedForRun(); break; }
 
-        var allToolsFailedForRun = toolResultsForRun.every(function (r) { return !r || r.ok === false || (typeof r === 'object' && typeof r.error === 'string'); });
+        var allToolsFailedForRun = toolResultsForRun.every(function (r) { return isFailedToolResultForAgentRun(r); });
         var roundSignatureForRun = computeToolRoundSignatureForAgentRun(toolCallsForLoop);
+        if (roundSignatureForRun && roundSignatureForRun === lastToolRoundSignatureForRun) {
+          identicalToolRoundCountForRun++;
+        } else {
+          identicalToolRoundCountForRun = roundSignatureForRun ? 1 : 0;
+          lastToolRoundSignatureForRun = roundSignatureForRun || null;
+        }
         if (allToolsFailedForRun) {
           consecutiveEmptyItersForRun++;
           if (roundSignatureForRun && roundSignatureForRun === lastFailingRoundSignatureForRun) {
@@ -1146,21 +1240,87 @@
           lastFailingRoundSignatureForRun = null;
           hadSuccessfulToolCallForRun = true;
         }
-        if (!hadSuccessfulMutatingToolCallForRun) {
-          for (var muIdxForRun = 0; muIdxForRun < toolCallsForLoop.length; muIdxForRun++) {
-            var muResultForRun = toolResultsForRun[muIdxForRun];
-            var muSucceededForRun = !(!muResultForRun || muResultForRun.ok === false || (typeof muResultForRun === 'object' && typeof muResultForRun.error === 'string'));
-            if (!muSucceededForRun) continue;
-            var muTcForRun = toolCallsForLoop[muIdxForRun];
-            var muNameForRun = muTcForRun && muTcForRun.function && muTcForRun.function.name ? muTcForRun.function.name : '';
-            var muParsedForRun = {};
-            var muRawForRun = muTcForRun && muTcForRun.function && typeof muTcForRun.function.arguments === 'string' ? muTcForRun.function.arguments : '';
-            if (muRawForRun.trim() !== '') { try { muParsedForRun = JSON.parse(muRawForRun); } catch (muParseErrForRun) { muParsedForRun = {}; } }
-            if (isMutatingToolCallForAgentRun(muNameForRun, muParsedForRun)) { hadSuccessfulMutatingToolCallForRun = true; break; }
+        var roundHadSuccessfulMutatingToolCallForRun = false;
+        for (var muIdxForRun = 0; muIdxForRun < toolCallsForLoop.length; muIdxForRun++) {
+          var muResultForRun = toolResultsForRun[muIdxForRun];
+          if (isFailedToolResultForAgentRun(muResultForRun)) continue;
+          var muTcForRun = toolCallsForLoop[muIdxForRun];
+          var muNameForRun = muTcForRun && muTcForRun.function && muTcForRun.function.name ? muTcForRun.function.name : '';
+          var muParsedForRun = {};
+          var muRawForRun = muTcForRun && muTcForRun.function && typeof muTcForRun.function.arguments === 'string' ? muTcForRun.function.arguments : '';
+          if (muRawForRun.trim() !== '') { try { muParsedForRun = JSON.parse(muRawForRun); } catch (muParseErrForRun) { muParsedForRun = {}; } }
+          if (isMutatingToolCallForAgentRun(muNameForRun, muParsedForRun)) {
+            roundHadSuccessfulMutatingToolCallForRun = true;
+            hadSuccessfulMutatingToolCallForRun = true;
+            break;
           }
+        }
+        // Track repetition of the ERROR rather than of the arguments. A single error-free round
+        // deliberately does NOT reset this: a model that alternates a successful read with the
+        // same failing write (re-observing the page between every retry) would otherwise clear
+        // the counter every other round and loop forever. The counter clears on a different
+        // error, on real forward progress on the world (a successful mutating call), or once
+        // enough consecutive clean rounds show the run genuinely moved on.
+        var errorSignatureForRun = computeToolErrorSignatureForAgentRun(toolCallsForLoop, toolResultsForRun);
+        if (errorSignatureForRun.signature) {
+          errorFreeRoundsSinceErrorForRun = 0;
+          if (errorSignatureForRun.signature === lastToolErrorSignatureForRun) {
+            identicalErrorRoundCountForRun++;
+          } else {
+            identicalErrorRoundCountForRun = 1;
+            lastToolErrorSignatureForRun = errorSignatureForRun.signature;
+          }
+          // One corrective nudge before the stop, because the usual cause is a call whose SHAPE
+          // is wrong while the model keeps rewriting the values. Fired here, in the branch that
+          // just incremented the counter, so an error-free round in between cannot repeat it.
+          if (identicalErrorRoundCountForRun === IDENTICAL_ERROR_HINT_ROUND_FOR_AGENT_RUN
+              && IDENTICAL_ERROR_HINT_ROUND_FOR_AGENT_RUN < MAX_IDENTICAL_ERROR_ROUNDS_FOR_AGENT_RUN) {
+            pendingSystemNotesForRun.push(
+              'The last ' + identicalErrorRoundCountForRun + ' rounds of tool calls returned the identical error:\n'
+              + errorSignatureForRun.texts.join('\n') + '\n'
+              + 'Changing the values you pass will not help if the call itself is malformed. Re-read that error '
+              + 'text and the tool\'s parameter descriptions, then fix the STRUCTURE of the call (which parameters '
+              + 'you include and which you omit) or switch to a different tool or approach. Do not send the same '
+              + 'shape of call again. If you cannot resolve it, stop and tell the user what is blocking you.'
+            );
+          }
+        } else {
+          errorFreeRoundsSinceErrorForRun++;
+          if (roundHadSuccessfulMutatingToolCallForRun
+              || errorFreeRoundsSinceErrorForRun >= IDENTICAL_ERROR_DECAY_ROUNDS_FOR_AGENT_RUN) {
+            identicalErrorRoundCountForRun = 0;
+            lastToolErrorSignatureForRun = null;
+          }
+        }
+        var roundMadeProgressForRun = !allToolsFailedForRun
+          && identicalToolRoundCountForRun < MAX_IDENTICAL_TOOL_ROUNDS_FOR_AGENT_RUN
+          && identicalErrorRoundCountForRun < IDENTICAL_ERROR_HINT_ROUND_FOR_AGENT_RUN;
+        recentProgressRoundsForRun.push(roundMadeProgressForRun || roundHadSuccessfulMutatingToolCallForRun);
+        if (recentProgressRoundsForRun.length > PROGRESS_WINDOW_ROUNDS_FOR_AGENT_RUN) {
+          recentProgressRoundsForRun.shift();
+        }
+        if (identicalToolRoundCountForRun >= MAX_IDENTICAL_TOOL_ROUNDS_FOR_AGENT_RUN) {
+          logStopReasonForRun = 'repeated-tools';
+          logStopLimitForRun = identicalToolRoundCountForRun;
+          var stopNoticeCountBeforeRepeatForRun = persistedSystemNoticeCountForRun;
+          await emitAndPersistSystemNoticeForRun(
+            'Agent stopped: the same tool calls were repeated ' + identicalToolRoundCountForRun
+            + ' rounds in a row without a different step. Completed actions remain saved; review the latest result before continuing.'
+          );
+          stopNoticeAlreadyPersistedForRun = persistedSystemNoticeCountForRun > stopNoticeCountBeforeRepeatForRun;
+          break;
         }
         if (identicalFailingRoundCountForRun >= MAX_IDENTICAL_FAILING_ROUNDS_FOR_AGENT_RUN) {
           await emitAndPersistSystemNoticeForRun('Agent stopped: the same tool call failed ' + identicalFailingRoundCountForRun + ' times in a row with identical arguments. Retrying without changing the call will not help; review the error above and try a different approach.');
+          break;
+        }
+        if (identicalErrorRoundCountForRun >= MAX_IDENTICAL_ERROR_ROUNDS_FOR_AGENT_RUN) {
+          await emitAndPersistSystemNoticeForRun(
+            'Agent stopped: the same tool error came back ' + identicalErrorRoundCountForRun
+            + ' rounds in a row despite the arguments changing each time:\n'
+            + errorSignatureForRun.texts.join('\n')
+            + '\nThat points at the call being malformed rather than at the values. Completed actions remain saved.'
+          );
           break;
         }
         if (consecutiveEmptyItersForRun >= MAX_CONSECUTIVE_ALL_FAILURE_ITERS_FOR_AGENT_RUN) {
@@ -1247,8 +1407,8 @@
           ? agentRunStopFinallyForRun.logStatusFromStopReason(logStopReasonForRun, logStatusForRun)
           : 'cancelled';
       }
-      if (logStopReasonForRun) {
-        var stopNoticeTextForRun = buildTimeoutNoticeForRun(logStopReasonForRun, lastToolTimeoutMsForRun);
+      if (logStopReasonForRun && !stopNoticeAlreadyPersistedForRun) {
+        var stopNoticeTextForRun = buildTimeoutNoticeForRun(logStopReasonForRun, lastToolTimeoutMsForRun, logStopLimitForRun);
         if (stopNoticeTextForRun) {
           try {
             var stopNoticeRecordForRun = await repoForRun.createMessage(chatId, {
@@ -1273,6 +1433,8 @@
           totalLatencyMs: Date.now() - logStartTimeForRun,
           status: logStatusForRun,
           stopReason: logStopReasonForRun || undefined,
+          stopLimit: logStopLimitForRun || undefined,
+          extensionCount: extensionCountForRun || undefined,
           toolTimeoutMs: logStopReasonForRun === 'tool' ? lastToolTimeoutMsForRun : undefined,
           errorMessage: logErrorMsgForRun,
           requestMessages: logFirstMessagesForRun,

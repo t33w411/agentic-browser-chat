@@ -183,6 +183,12 @@
           && typeof returnedForHooks.block.reason === 'string'
           && returnedForHooks.block.reason) {
         combinedForHooks.block = { reason: returnedForHooks.block.reason };
+        if (typeof returnedForHooks.block.code === 'string' && returnedForHooks.block.code) {
+          combinedForHooks.block.code = returnedForHooks.block.code;
+        }
+        if (Number.isFinite(returnedForHooks.block.limit)) {
+          combinedForHooks.block.limit = returnedForHooks.block.limit;
+        }
         summaryForHooks.block = true;
         firingsForHooks.push(summaryForHooks);
         break;
