@@ -12637,8 +12637,13 @@
         }
         case 'ls':
           return args.type ? 'Listing ' + args.type + 's' : 'Listing workspace';
-        case 'page_observe':
+        case 'page_observe': {
+          var nameFilterForObserveLt = args.name_filter != null ? String(args.name_filter).trim() : '';
+          if (nameFilterForObserveLt) {
+            return 'Looking for “' + trunc(nameFilterForObserveLt, 24) + '”';
+          }
           return 'Checking page controls';
+        }
         case 'page_act': {
           switch (args.action) {
             case 'click':  return (args.button === 'right' ? 'Right-clicking' : 'Clicking') + quotedRefNameForLiveTurn(args.ref);
@@ -12677,17 +12682,35 @@
             default:           return 'Editing spreadsheet';
           }
         }
-        case 'take_screenshot':
+        case 'take_screenshot': {
+          var shotPromptForLt = args.prompt != null ? String(args.prompt).trim() : '';
+          if (shotPromptForLt) {
+            return 'Looking at “' + trunc(shotPromptForLt, 24) + '”';
+          }
           return 'Taking a visual look';
+        }
         case 'eval':
           return 'Computing';
         case 'web_fetch': {
+          var fetchPromptForLt = args.prompt != null ? String(args.prompt).trim() : '';
+          var fetchHostForLt = '';
           try {
-            var hostname = new URL(args.url).hostname.replace(/^www\./, '');
-            return 'Fetching ' + trunc(hostname, 30);
-          } catch (e) {
-            return 'Fetching URL';
+            fetchHostForLt = new URL(args.url).hostname.replace(/^www\./, '');
+          } catch (e) {}
+          if (fetchHostForLt) {
+            return 'Fetching ' + trunc(fetchHostForLt, 30) +
+              (fetchPromptForLt ? ': “' + trunc(fetchPromptForLt, 24) + '”' : '');
           }
+          return fetchPromptForLt
+            ? 'Fetching: “' + trunc(fetchPromptForLt, 24) + '”'
+            : 'Fetching URL';
+        }
+        case 'read_tab': {
+          var readTabPromptForLt = args.prompt != null ? String(args.prompt).trim() : '';
+          if (readTabPromptForLt) {
+            return 'Reading tab: “' + trunc(readTabPromptForLt, 24) + '”';
+          }
+          return args.tab_id != null ? 'Reading tab #' + args.tab_id : 'Reading tab';
         }
         case 'web_search':
         case 'openrouter:web_search':

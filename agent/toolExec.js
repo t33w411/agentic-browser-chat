@@ -3153,8 +3153,16 @@
   // symmetric band around the acted element PLUS a small band around each changed/new anchor. The
   // toolbar that appears on a selection is DOM-adjacent to the reliably-"changed" select-all control,
   // so banding the changed anchors pulls the transformed toolbar in even though its own buttons carry
-  // stable labels and are tagged neither new nor changed. Always considers offscreen candidates so
-  // the acted element is captured wherever it sits.
+  // stable labels and are tagged neither new nor changed. Eligibility is viewport-scoped exactly as
+  // the default snapshot's is, so `truncated` means the same thing in both. Scoring this window
+  // against every offscreen control on the page instead made it report truncated on nearly every
+  // action, and the tool description reads truncated as "this list is partial, go look the control
+  // up with page_observe", so each action ended up prompting a redundant full re-observe of a page
+  // the model had just been handed. Two things are kept even when offscreen: the acted element, so
+  // the window stays centered on it when the action scrolled it out of view, and anything the action
+  // changed or created, since an offscreen consequence is the whole point of this window. A
+  // truncated:true that survives those rules is honest: more genuinely relevant controls existed
+  // than fit the cap.
   var POST_ACTION_MAX_ITEMS_FOR_TOOL_EXEC = 40;
   function buildCenteredObserveSnapshotForToolExec(argsForCentered, candidatesForCentered, maxItemsForCentered, snapshotIdForCentered, totalCandForCentered) {
     var centerElForCentered = argsForCentered.center_el;
@@ -3180,15 +3188,21 @@
       visibleForCentered++;
       var inVpForCentered = isElementInViewportForPageQuery(elForCentered);
       if (inVpForCentered) inViewportForCentered++;
-      var isCoveredForCentered = isElementCoveredForObserve(elForCentered);
-      if (isCoveredForCentered) {
-        coveredForCentered++;
-        if (!isWithinOpenDialogForCentered(elForCentered)) continue;
-      }
       var isNewForCentered = false, isChangedForCentered = false;
       if (preSigForCentered) {
         if (!preSigForCentered.has(elForCentered)) isNewForCentered = true;
         else if (preSigForCentered.get(elForCentered) !== elementStateSignatureForToolExec(elForCentered)) isChangedForCentered = true;
+      }
+      // Viewport filter, matching the default snapshot, with two carve-outs that are the reason this
+      // window exists: the acted element itself, and anything the action actually changed or created.
+      // A row that toggled below the fold is the result the model needs to see; static offscreen
+      // chrome is not, and counting it only inflated `truncated`.
+      var isConsequenceForCentered = isNewForCentered || isChangedForCentered;
+      if (!inVpForCentered && !isConsequenceForCentered && elForCentered !== centerElForCentered) continue;
+      var isCoveredForCentered = isElementCoveredForObserve(elForCentered);
+      if (isCoveredForCentered) {
+        coveredForCentered++;
+        if (!isWithinOpenDialogForCentered(elForCentered)) continue;
       }
       if (elForCentered === centerElForCentered) centerIndexForCentered = eligibleForCentered.length;
       eligibleForCentered.push({
