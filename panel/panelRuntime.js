@@ -844,6 +844,24 @@
     // stream receiver, so focus restore happens here on stream_end).
     const offscreenInitiatedChatsForPanelRuntime = new Set();
 
+    // Send-initiation locks. The send body is async and reaches its first visible side effect
+    // (message append, setSendingUIState) only after several awaits, so a second Enter or send
+    // click inside that window would otherwise start a fully independent run, clear every
+    // downstream guard it is supposed to hit, and append a duplicate user message. Both keys
+    // are taken synchronously, before the first await: the composer flag covers the entry
+    // window where the chat id is not known yet (a send that creates the chat), and the
+    // per-chat set covers resends and takes over for the composer once the id is resolved.
+    const sendInFlightChatsForPanelRuntime = new Set();
+    let composerSendInFlightForPanelRuntime = false;
+
+    // True while a send for the active chat is being initiated. Read by the two owners of the
+    // composer's enabled state so nothing re-enables it mid-initiation: an attachment finishing
+    // its parse and a stream event for another chat both refresh that state on their own.
+    function isComposerLockedForPanelRuntime() {
+      if (composerSendInFlightForPanelRuntime) return true;
+      return sendInFlightChatsForPanelRuntime.has(Number(S.activeChatId));
+    }
+
     // Ensure the receiver has a live bubble for the given chat. Idempotent.
     // Used by all bubble-mutating events (text, tool_steps, etc.) so they can
     // be applied even if they arrive before / between stream_start handling.
@@ -1774,10 +1792,29 @@
       }
     }
 
+    // The page-side keyboard shield replaces preventDefault with a no-op at document capture so
+    // that no page listener can suppress typing in our inputs. That own-property override is on
+    // the event object itself, so it silences preventDefault for the panel's own handlers too:
+    // Enter-to-send inserted a newline and left the text sitting in the composer. Restoring the
+    // native method as the event crosses into the shadow root puts it back for panel handlers
+    // only, since this runs after every page capture listener, and page bubble listeners never
+    // see these events anyway because isolateKeyboardEventForPanelRuntime stops them at this
+    // same node under the same condition.
+    function restoreKeyboardPreventDefaultForPanelRuntime(eventForPanelRuntime) {
+      if (!shouldIsolateKeyboardEventForPanelRuntime(eventForPanelRuntime)) return;
+      if (!Object.prototype.hasOwnProperty.call(eventForPanelRuntime, 'preventDefault')) return;
+      try {
+        delete eventForPanelRuntime.preventDefault;
+      } catch (errorForRestorePreventDefault) {}
+    }
+
     function bindKeyboardIsolationForPanelRuntime(rootNodeForPanelRuntime) {
       if (!rootNodeForPanelRuntime || !rootNodeForPanelRuntime.addEventListener) return;
       if (isKeyboardIsolationBoundForPanelRuntime) return;
       isKeyboardIsolationBoundForPanelRuntime = true;
+      rootNodeForPanelRuntime.addEventListener('keydown', restoreKeyboardPreventDefaultForPanelRuntime, true);
+      rootNodeForPanelRuntime.addEventListener('keypress', restoreKeyboardPreventDefaultForPanelRuntime, true);
+      rootNodeForPanelRuntime.addEventListener('keyup', restoreKeyboardPreventDefaultForPanelRuntime, true);
       rootNodeForPanelRuntime.addEventListener('keydown', isolateKeyboardEventForPanelRuntime);
       rootNodeForPanelRuntime.addEventListener('keypress', isolateKeyboardEventForPanelRuntime);
       rootNodeForPanelRuntime.addEventListener('keyup', isolateKeyboardEventForPanelRuntime);
@@ -1796,10 +1833,25 @@
       eventForPanelRuntime.stopPropagation();
     }
 
+    // Same restore as for keyboard events: the page-side shield also no-ops preventDefault on
+    // mousedown/mouseup/click that land in our UI (so a page cannot block focus-on-click), which
+    // equally silenced the panel's own calls. The panel drag and the note-popout header drag
+    // both preventDefault on mousedown to stop text selection while dragging.
+    function restorePointerPreventDefaultForPanelRuntime(eventForPanelRuntime) {
+      if (!eventForPanelRuntime) return;
+      if (!Object.prototype.hasOwnProperty.call(eventForPanelRuntime, 'preventDefault')) return;
+      try {
+        delete eventForPanelRuntime.preventDefault;
+      } catch (errorForRestorePointerPreventDefault) {}
+    }
+
     function bindPointerIsolationForPanelRuntime(rootNodeForPanelRuntime) {
       if (!rootNodeForPanelRuntime || !rootNodeForPanelRuntime.addEventListener) return;
       if (isPointerIsolationBoundForPanelRuntime) return;
       isPointerIsolationBoundForPanelRuntime = true;
+      rootNodeForPanelRuntime.addEventListener('mousedown', restorePointerPreventDefaultForPanelRuntime, true);
+      rootNodeForPanelRuntime.addEventListener('mouseup', restorePointerPreventDefaultForPanelRuntime, true);
+      rootNodeForPanelRuntime.addEventListener('click', restorePointerPreventDefaultForPanelRuntime, true);
       rootNodeForPanelRuntime.addEventListener('pointerdown', isolatePointerEventForPanelRuntime);
       rootNodeForPanelRuntime.addEventListener('mousedown', isolatePointerEventForPanelRuntime);
       rootNodeForPanelRuntime.addEventListener('click', isolatePointerEventForPanelRuntime);
@@ -4885,7 +4937,9 @@
         return;
       }
       const busyCountForAvailability = getLoadingInputChipsForPanelRuntime().length;
-      sendBtnForAvailability.disabled = !libsReadyForPanelRuntime || busyCountForAvailability > 0;
+      sendBtnForAvailability.disabled = !libsReadyForPanelRuntime
+        || busyCountForAvailability > 0
+        || isComposerLockedForPanelRuntime();
       sendBtnForAvailability.title = busyCountForAvailability > 0
         ? describeBusyAttachmentsForPanelRuntime(busyCountForAvailability)
         : '';
@@ -12067,7 +12121,7 @@
         // above only decides which of the two roles the button is in.
         refreshSendAvailabilityForPanelRuntime();
       }
-      if (chatTaForUI) chatTaForUI.disabled = sending;
+      if (chatTaForUI) chatTaForUI.disabled = sending || isComposerLockedForPanelRuntime();
       // Voice input cannot start while a run is in flight for the active chat.
       const voiceBtnForUI = root.getElementById('voice-input-btn');
       if (voiceBtnForUI) voiceBtnForUI.disabled = sending;
@@ -13094,11 +13148,15 @@
       const chatForPanelRuntime = CHAT_STORE_FOR_PANEL_RUNTIME[chatIdForPanelRuntime];
       if (!chatForPanelRuntime || !localMessageForPanelRuntime) return localMessageForPanelRuntime;
       if (localMessageForPanelRuntime._persistedToDb === true) return localMessageForPanelRuntime;
+      // Check-then-await: the createMessage round-trip below is long enough for a second caller
+      // to arrive and see the same not-yet-persisted message, so claim it synchronously here.
+      if (localMessageForPanelRuntime._persistInFlight === true) return localMessageForPanelRuntime;
       const panelDataRepoForPanelRuntime = getPanelDataRepoForPanelRuntime();
       if (!panelDataRepoForPanelRuntime || typeof panelDataRepoForPanelRuntime.createMessage !== 'function') {
         return localMessageForPanelRuntime;
       }
       const optsForPanelRuntime = optionsForPanelRuntime || {};
+      localMessageForPanelRuntime._persistInFlight = true;
       try {
         const persistedMessageForPanelRuntime = await panelDataRepoForPanelRuntime.createMessage(
           chatIdForPanelRuntime,
@@ -13112,12 +13170,15 @@
           persistedMessageForPanelRuntime || localMessageForPanelRuntime
         );
         normalizedPersistedMessageForPanelRuntime._persistedToDb = true;
-        const localMessageIndexForPanelRuntime = chatForPanelRuntime.messages.indexOf(localMessageForPanelRuntime);
-        if (localMessageIndexForPanelRuntime >= 0) {
-          chatForPanelRuntime.messages[localMessageIndexForPanelRuntime] = normalizedPersistedMessageForPanelRuntime;
-        }
-        return normalizedPersistedMessageForPanelRuntime;
+        // Mutate the object the caller handed us instead of swapping a clone into its store
+        // slot: every other holder of this reference (a concurrent persist loop's snapshot, a
+        // render closure) would otherwise keep reading _persistedToDb === false and the stale
+        // local id, and write a second DB row for the same message.
+        Object.assign(localMessageForPanelRuntime, normalizedPersistedMessageForPanelRuntime);
+        delete localMessageForPanelRuntime._persistInFlight;
+        return localMessageForPanelRuntime;
       } catch (errorForPanelRuntime) {
+        delete localMessageForPanelRuntime._persistInFlight;
         return localMessageForPanelRuntime;
       }
     }
@@ -13128,7 +13189,8 @@
       const pendingUserMessagesForPanelRuntime = chatForPanelRuntime.messages.filter(function (messageForPanelRuntime) {
         return messageForPanelRuntime
           && messageForPanelRuntime.role === 'user'
-          && messageForPanelRuntime._persistedToDb !== true;
+          && messageForPanelRuntime._persistedToDb !== true
+          && messageForPanelRuntime._persistInFlight !== true;
       });
       for (let pendingMessageIndexForPanelRuntime = 0; pendingMessageIndexForPanelRuntime < pendingUserMessagesForPanelRuntime.length; pendingMessageIndexForPanelRuntime++) {
         await persistLocalMessageToDbForPanelRuntime(
@@ -14543,7 +14605,56 @@
       return partsForSig.join('');
     }
 
+    // Both sides go through setSendingUIState, the existing owner of the composer's enabled
+    // state, which reads the send lock via isComposerLocked. Taking the lock and then asking it
+    // to repaint is what makes the composer look busy during initiation: until the message is
+    // appended nothing else on screen changes, and that silence is what invited the repeat
+    // clicks the lock now refuses. On release it also resolves the handed-off case correctly,
+    // where the composer must stay disabled and the button must stay a cancel affordance.
+    function releaseComposerBusyStateForPanelRuntime(shouldRefocusForComposer) {
+      setSendingUIStateForPanelRuntime();
+      if (!shouldRefocusForComposer) return;
+      const chatTaForComposerRelease = root.querySelector('.chat-textarea');
+      if (chatTaForComposerRelease && !chatTaForComposerRelease.disabled) {
+        try { chatTaForComposerRelease.focus(); } catch (errorForComposerRefocus) {}
+      }
+    }
+
+    // Entry point for every send. The lock and the busy state are taken here, synchronously,
+    // before the async body below gets its first chance to yield.
     async function sendChatForPanelRuntime(optionsForPanelRuntime) {
+      const optsForSendLock = optionsForPanelRuntime || {};
+      const isResendForSendLock = Boolean(optsForSendLock.skipUserAppend);
+      const lockCtxForSendLock = { chatKey: null };
+      if (isResendForSendLock) {
+        const resendChatIdForSendLock = Number(optsForSendLock.chatId);
+        if (!Number.isFinite(resendChatIdForSendLock)) return;
+        if (sendInFlightChatsForPanelRuntime.has(resendChatIdForSendLock)) return;
+        sendInFlightChatsForPanelRuntime.add(resendChatIdForSendLock);
+        lockCtxForSendLock.chatKey = resendChatIdForSendLock;
+      } else {
+        // Mirrors the empty-composer guard in the body below, only to keep an Enter on an
+        // empty composer from cycling the disabled state and blurring the textarea for it.
+        const chatTaForEmptyCheck = root.querySelector('.chat-textarea');
+        if (!chatTaForEmptyCheck || !chatTaForEmptyCheck.value.trim()) return;
+        if (composerSendInFlightForPanelRuntime) return;
+        composerSendInFlightForPanelRuntime = true;
+      }
+      const chatTaForSendLock = root.querySelector('.chat-textarea');
+      const wasComposerFocusedForSendLock = Boolean(chatTaForSendLock) && root.activeElement === chatTaForSendLock;
+      setSendingUIStateForPanelRuntime();
+      try {
+        await runSendChatForPanelRuntime(optionsForPanelRuntime, lockCtxForSendLock);
+      } finally {
+        if (lockCtxForSendLock.chatKey !== null) {
+          sendInFlightChatsForPanelRuntime.delete(lockCtxForSendLock.chatKey);
+        }
+        if (!isResendForSendLock) composerSendInFlightForPanelRuntime = false;
+        releaseComposerBusyStateForPanelRuntime(wasComposerFocusedForSendLock);
+      }
+    }
+
+    async function runSendChatForPanelRuntime(optionsForPanelRuntime, lockCtxForSend) {
       const optsForPanelRuntime = optionsForPanelRuntime || {};
 
       const chatTaForSend = root.querySelector('.chat-textarea');
@@ -14600,6 +14711,14 @@
 
       const chatId = Number(optsForPanelRuntime.chatId || S.activeChatId);
       if (!Number.isFinite(chatId)) return;
+      // Take the per-chat half of the send lock now that the id is known. The composer flag
+      // taken at entry covers only the window before this point, so this is what stops a
+      // resend and a composer send for the same chat from initiating against each other.
+      if (lockCtxForSend && lockCtxForSend.chatKey !== chatId) {
+        if (sendInFlightChatsForPanelRuntime.has(chatId)) return;
+        sendInFlightChatsForPanelRuntime.add(chatId);
+        lockCtxForSend.chatKey = chatId;
+      }
       // Another tab is already streaming this chat — refuse to start a second
       // run that would conflict with the mirrored one.
       if (remoteStreamingChatsForPanelRuntime.has(chatId)) {

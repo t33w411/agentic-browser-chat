@@ -155,6 +155,11 @@
     return false;
   }
 
+  // The override is an own property on the event object, so it silences preventDefault for
+  // every listener downstream, our own panel handlers included. The panel puts the native
+  // method back with a capture-phase listener on its shadow root, which runs after all page
+  // capture listeners and before any panel handler. Keep those two halves together: without
+  // the restore, Enter-to-send inserts a newline instead of submitting.
   function neutralizePreventDefaultForShield(eventForKeyboardShield) {
     try {
       eventForKeyboardShield.preventDefault = function () {};
