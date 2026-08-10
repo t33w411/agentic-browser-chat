@@ -28,6 +28,21 @@
   let panelClosedAtForPanelBoot = 0;
   const SYNC_ON_OPEN_THRESHOLD_MS_FOR_PANEL_BOOT = 10000;
 
+  // A transient hide (the pre-screenshot hide) owns the shadow host until it ends.
+  // The hide deliberately does not touch the shared open intent, so for its duration
+  // the stored state says "open" while this tab's DOM says "closed": the exact
+  // discrepancy every reconcile, activation push and optimistic show exists to heal by
+  // re-opening. Any of them landing inside the window put the panel back on screen
+  // mid-capture, and the screenshot caught it. While the lock is held, visibility
+  // changes are recorded as intent and applied when it ends, and isVisible/isPanelOpen
+  // keep answering with that intent so nothing sees a phantom close.
+  let transientHideActiveForPanelBoot = false;
+  let transientHideDesiredVisibleForPanelBoot = false;
+  let transientHideExpiryTimerForPanelBoot = null;
+  // Safety valve: a capture that never calls endTransientHide (throw, torn-down context,
+  // extension reload mid-flight) must not leave the panel hidden and the lock standing.
+  const TRANSIENT_HIDE_MAX_MS_FOR_PANEL_BOOT = 4000;
+
   // Storage keys must stay in sync with panelStateSync.js (mode, panelAnchor)
   // and the THEME_KEY_FOR_PANEL_RUNTIME constant in panelRuntime.js (theme).
   const PANEL_UI_FIELD_KEY_PREFIX_FOR_PANEL_BOOT = 'abchat_panel_ui_state_field_';
@@ -467,6 +482,14 @@
     if (!shadowHostForPanelBoot) {
       return;
     }
+    // A transient hide is in progress and this is not it: record the intent and leave
+    // the host alone, so the capture keeps a panel-free viewport. The intent write below
+    // still runs, so the shared open state stays truthful while the DOM flip waits.
+    if (transientHideActiveForPanelBoot && !isTransientForPanelBoot) {
+      transientHideDesiredVisibleForPanelBoot = Boolean(isVisibleForPanelBoot);
+      writePanelVisibilityIntentForPanelBoot(isVisibleForPanelBoot, skipSyncForPanelBoot);
+      return;
+    }
     if (!isTransientForPanelBoot) {
       exitOverlayOnlyModeForPanelBoot();
     }
@@ -523,6 +546,54 @@
     }
   }
 
+  function armTransientHideExpiryForPanelBoot() {
+    if (transientHideExpiryTimerForPanelBoot) {
+      clearTimeout(transientHideExpiryTimerForPanelBoot);
+    }
+    transientHideExpiryTimerForPanelBoot = setTimeout(function () {
+      transientHideExpiryTimerForPanelBoot = null;
+      endTransientHideForPanelBoot();
+    }, TRANSIENT_HIDE_MAX_MS_FOR_PANEL_BOOT);
+  }
+
+  // Hide the host for a capture and hold it hidden. Re-entrant: a retry that re-asserts
+  // the hide keeps the recorded intent from the first call and only re-arms the expiry,
+  // so a visibility change recorded between attempts is not lost.
+  function beginTransientHideForPanelBoot() {
+    const shadowHostForBeginForPanelBoot = document.getElementById('abchat-panel-shadow-host');
+    if (!shadowHostForBeginForPanelBoot) return false;
+    if (!transientHideActiveForPanelBoot) {
+      transientHideDesiredVisibleForPanelBoot = shadowHostForBeginForPanelBoot.style.display !== 'none';
+      transientHideActiveForPanelBoot = true;
+    }
+    armTransientHideExpiryForPanelBoot();
+    setPanelVisibleForPanelBoot(false, { skipSync: true, transient: true });
+    return true;
+  }
+
+  // Release the host and settle it on whatever visibility was last asked for. Returns the
+  // applied visibility. A close that landed during the capture is honoured here rather
+  // than being overwritten by an unconditional restore, which is how a panel could end up
+  // visible in a tab whose shared state said closed.
+  function endTransientHideForPanelBoot() {
+    if (!transientHideActiveForPanelBoot) return false;
+    if (transientHideExpiryTimerForPanelBoot) {
+      clearTimeout(transientHideExpiryTimerForPanelBoot);
+      transientHideExpiryTimerForPanelBoot = null;
+    }
+    transientHideActiveForPanelBoot = false;
+    const desiredVisibleForEndForPanelBoot = transientHideDesiredVisibleForPanelBoot;
+    transientHideDesiredVisibleForPanelBoot = false;
+    if (desiredVisibleForEndForPanelBoot) {
+      setPanelVisibleForPanelBoot(true, { skipSync: true, transient: true });
+    } else {
+      // Already hidden, so this only settles the side effects a real close carries
+      // (overlay-only mode, closed-at stamp). The intent was written when it was recorded.
+      setPanelVisibleForPanelBoot(false, { skipSync: true });
+    }
+    return desiredVisibleForEndForPanelBoot;
+  }
+
   function showForInlineChatOnlyForPanelBoot() {
     if (!ensurePanelReadyForPanelBoot()) return;
     const shadowHostForInlineOnlyForPanelBoot = document.getElementById('abchat-panel-shadow-host');
@@ -564,12 +635,20 @@
   contentNamespaceForPanelBoot.ui.panel = {
     ensureReady: ensurePanelReadyForPanelBoot,
     setVisible: setPanelVisibleForPanelBoot,
+    beginTransientHide: beginTransientHideForPanelBoot,
+    endTransientHide: endTransientHideForPanelBoot,
     showForInlineChatOnly: showForInlineChatOnlyForPanelBoot,
     restoreAfterInlineChatOnly: restoreAfterInlineChatOnlyForPanelBoot,
     // Raw "is any panel UI on screen in this tab?". True in overlay-only mode.
     // Use it for questions about the shadow host itself (can an overlay be
     // shown right now, is there extension UI to hide before a screenshot).
+    // During a transient hide this answers with the panel's logical visibility, not
+    // the momentarily hidden host: a caller that read the raw display would see a
+    // close that never happened and act on it (re-show it, tear down the overlay,
+    // report it to the service worker). Code that needs the rendered state, i.e. the
+    // capture's own "is the panel really off screen?" check, must read the DOM.
     isVisible: function isVisibleForPanelBoot() {
+      if (transientHideActiveForPanelBoot) return transientHideDesiredVisibleForPanelBoot;
       const shadowHostForPanelBoot = document.getElementById('abchat-panel-shadow-host');
       return Boolean(shadowHostForPanelBoot && shadowHostForPanelBoot.style.display !== 'none');
     },
@@ -580,6 +659,7 @@
     // Question overlay and tear it down.
     isPanelOpen: function isPanelOpenForPanelBoot() {
       if (inOverlayOnlyModeForPanelBoot) return false;
+      if (transientHideActiveForPanelBoot) return transientHideDesiredVisibleForPanelBoot;
       const shadowHostForPanelBoot = document.getElementById('abchat-panel-shadow-host');
       return Boolean(shadowHostForPanelBoot && shadowHostForPanelBoot.style.display !== 'none');
     },

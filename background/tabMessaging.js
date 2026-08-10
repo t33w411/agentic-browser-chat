@@ -41,6 +41,7 @@
     "utils/dom.js",
     "utils/clipboard.js",
     "ui/toast.js",
+    "content/screenshotCapture.js",
     "lib/mathjax-startup.js",
     "lib/tex-svg.js",
     "lib/marked.min.js",

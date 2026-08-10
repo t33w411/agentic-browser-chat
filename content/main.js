@@ -407,47 +407,16 @@
 
   // Panel-independent screenshot capture, used when the offscreen loop delegates
   // __capture_screenshot__ to a tab whose panel runtime is not initialized (the panel was
-  // never opened here — common right after a navigation). When the panel is mounted/visible
-  // its host is hidden (via the panel controller if available) for the capture and restored
-  // after; when it is not visible there is nothing to hide and the page is captured as-is.
+  // never opened here, common right after a navigation). The routine itself is shared with
+  // the panel's own screenshot attachment path: when the panel is mounted/visible its host
+  // is hidden for the capture and restored after; when it is not visible there is nothing
+  // to hide and the page is captured as-is.
   function captureScreenshotForDelegationForContentMain() {
-    return new Promise(function (resolveForCapture) {
-      var panelControllerForCapture = contentNamespaceForContentMain.ui && contentNamespaceForContentMain.ui.panel;
-      var shadowHostForCapture = document.getElementById('abchat-panel-shadow-host');
-      var canToggleForCapture = panelControllerForCapture && typeof panelControllerForCapture.setVisible === 'function';
-      var isVisibleForCapture = canToggleForCapture && typeof panelControllerForCapture.isVisible === 'function'
-        ? Boolean(panelControllerForCapture.isVisible())
-        : Boolean(shadowHostForCapture && shadowHostForCapture.style.display !== 'none' && shadowHostForCapture.offsetParent !== null);
-
-      function restorePanelForCapture() {
-        if (!isVisibleForCapture) return;
-        if (canToggleForCapture) { try { panelControllerForCapture.setVisible(true, { skipSync: true, transient: true }); } catch (eRestoreForCapture) {} }
-        else if (shadowHostForCapture) { shadowHostForCapture.style.display = 'block'; }
-      }
-      function doCaptureForCapture() {
-        var actionForCapture = (actionsForContentMain.captureVisibleTabScreenshot || 'captureVisibleTabScreenshot');
-        try {
-          chrome.runtime.sendMessage({ action: actionForCapture }, function (respForCapture) {
-            void chrome.runtime.lastError;
-            restorePanelForCapture();
-            if (respForCapture && respForCapture.ok && respForCapture.dataUrl) resolveForCapture(respForCapture);
-            else resolveForCapture(respForCapture || { ok: false, error: 'Screenshot capture failed.' });
-          });
-        } catch (errForCapture) {
-          restorePanelForCapture();
-          resolveForCapture({ ok: false, error: (errForCapture && errForCapture.message) || 'Screenshot capture failed.' });
-        }
-      }
-
-      if (isVisibleForCapture) {
-        if (canToggleForCapture) { try { panelControllerForCapture.setVisible(false, { skipSync: true, transient: true }); } catch (eHideForCapture) {} }
-        else if (shadowHostForCapture) { shadowHostForCapture.style.display = 'none'; }
-        // Let the hide paint before capturing.
-        requestAnimationFrame(function () { requestAnimationFrame(function () { setTimeout(doCaptureForCapture, 80); }); });
-      } else {
-        doCaptureForCapture();
-      }
-    });
+    var captureNsForCapture = contentNamespaceForContentMain.screenshotCapture;
+    if (!captureNsForCapture || typeof captureNsForCapture.captureWithoutPanelUi !== 'function') {
+      return Promise.resolve({ ok: false, error: 'Screenshot capture is unavailable in this tab.' });
+    }
+    return captureNsForCapture.captureWithoutPanelUi();
   }
 
   chrome.runtime.onMessage.addListener((messageForContentMain, senderForContentMain, sendResponseForContentMain) => {

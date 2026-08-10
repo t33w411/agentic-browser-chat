@@ -5496,120 +5496,15 @@
       return { ok: true, content: contentForPanelRuntime };
     }
 
-    function waitForAnimationFramesForPanelRuntime(frameCountForPanelRuntime) {
-      return new Promise(function (resolveForPanelRuntime) {
-        if (typeof requestAnimationFrame !== 'function') {
-          setTimeout(resolveForPanelRuntime, 34);
-          return;
-        }
-        let framesRemainingForPanelRuntime = Number(frameCountForPanelRuntime) || 1;
-        if (!Number.isFinite(framesRemainingForPanelRuntime) || framesRemainingForPanelRuntime < 1) {
-          framesRemainingForPanelRuntime = 1;
-        }
-        function consumeFrameForPanelRuntime() {
-          framesRemainingForPanelRuntime -= 1;
-          if (framesRemainingForPanelRuntime <= 0) {
-            resolveForPanelRuntime();
-            return;
-          }
-          requestAnimationFrame(consumeFrameForPanelRuntime);
-        }
-        requestAnimationFrame(consumeFrameForPanelRuntime);
-      });
-    }
-
-    function waitMsForPanelRuntime(msForPanelRuntime) {
-      return new Promise(function (resolveForPanelRuntime) {
-        setTimeout(resolveForPanelRuntime, Math.max(0, Number(msForPanelRuntime) || 0));
-      });
-    }
-
-    function isPanelUiHiddenForScreenshotForPanelRuntime(panelShadowHostForPanelRuntime) {
-      if (!panelShadowHostForPanelRuntime) return true;
-      if (panelShadowHostForPanelRuntime.hidden) return true;
-      if (panelShadowHostForPanelRuntime.style && panelShadowHostForPanelRuntime.style.display === 'none') return true;
-      if (typeof window.getComputedStyle !== 'function') return false;
-      const computedStyleForPanelRuntime = window.getComputedStyle(panelShadowHostForPanelRuntime);
-      return (
-        computedStyleForPanelRuntime.display === 'none' ||
-        computedStyleForPanelRuntime.visibility === 'hidden' ||
-        computedStyleForPanelRuntime.opacity === '0'
-      );
-    }
-
-    async function waitForPanelUiHiddenConfirmationForPanelRuntime(panelShadowHostForPanelRuntime, maxAttemptsForPanelRuntime) {
-      let attemptsForPanelRuntime = Number(maxAttemptsForPanelRuntime);
-      if (!Number.isFinite(attemptsForPanelRuntime) || attemptsForPanelRuntime < 1) {
-        attemptsForPanelRuntime = 1;
-      }
-      for (let attemptForPanelRuntime = 0; attemptForPanelRuntime < attemptsForPanelRuntime; attemptForPanelRuntime++) {
-        if (isPanelUiHiddenForScreenshotForPanelRuntime(panelShadowHostForPanelRuntime)) {
-          // Confirmation passed, wait additional frames to reduce compositor race captures.
-          await waitForAnimationFramesForPanelRuntime(2);
-          await waitMsForPanelRuntime(60);
-          return true;
-        }
-        await waitForAnimationFramesForPanelRuntime(1);
-        await waitMsForPanelRuntime(25);
-      }
-      return isPanelUiHiddenForScreenshotForPanelRuntime(panelShadowHostForPanelRuntime);
-    }
-
+    // Hides the panel, captures, restores. The whole routine (hide ownership, hidden
+    // confirmation, post-capture verification, retries) is shared with the delegated
+    // capture path in content/main.js.
     async function captureScreenshotWithoutPanelUiForPanelRuntime() {
-      const sharedUiNamespaceForPanelRuntime = (globalThis.ABChatContent || {}).ui || {};
-      const panelControllerForPanelRuntime = sharedUiNamespaceForPanelRuntime.panel || null;
-      const panelShadowHostForPanelRuntime = document.getElementById('abchat-panel-shadow-host');
-      const canTogglePanelForPanelRuntime = panelControllerForPanelRuntime && typeof panelControllerForPanelRuntime.setVisible === 'function';
-      const isPanelVisibleForPanelRuntime = canTogglePanelForPanelRuntime && typeof panelControllerForPanelRuntime.isVisible === 'function'
-        ? Boolean(panelControllerForPanelRuntime.isVisible())
-        : Boolean(panelShadowHostForPanelRuntime && panelShadowHostForPanelRuntime.style.display !== 'none');
-
-      if (isPanelVisibleForPanelRuntime) {
-        if (canTogglePanelForPanelRuntime) {
-          // skipSync: this is a transient local hide for the capture, not a
-          // user-intended close, so it must not flip the shared cross-tab
-          // state. transient: nor may it take down overlay-only mode, or the
-          // restore below would reopen the full panel over a Quick Question.
-          panelControllerForPanelRuntime.setVisible(false, { skipSync: true, transient: true });
-        } else if (panelShadowHostForPanelRuntime) {
-          panelShadowHostForPanelRuntime.style.display = 'none';
-        }
+      const captureNsForPanelRuntime = (globalThis.ABChatContent || {}).screenshotCapture;
+      if (!captureNsForPanelRuntime || typeof captureNsForPanelRuntime.captureWithoutPanelUi !== 'function') {
+        return { ok: false, error: 'Screenshot capture is unavailable in this tab.' };
       }
-
-      try {
-        if (isPanelVisibleForPanelRuntime) {
-          const didHideForPanelRuntime = await waitForPanelUiHiddenConfirmationForPanelRuntime(
-            panelShadowHostForPanelRuntime,
-            8
-          );
-          if (!didHideForPanelRuntime) {
-            return { ok: false, error: 'Could not hide extension UI before screenshot.' };
-          }
-        }
-        const sharedActionsForPanelRuntime = getSharedActionsForPanelRuntime();
-        const actionForPanelRuntime = sharedActionsForPanelRuntime.captureVisibleTabScreenshot || 'captureVisibleTabScreenshot';
-        let lastResponseForPanelRuntime = null;
-        for (let attemptForPanelRuntime = 0; attemptForPanelRuntime < 2; attemptForPanelRuntime++) {
-          if (attemptForPanelRuntime > 0 && isPanelVisibleForPanelRuntime) {
-            await waitForAnimationFramesForPanelRuntime(2);
-            await waitMsForPanelRuntime(80);
-          }
-          const responseForPanelRuntime = await sendRuntimeMessageForPanelRuntime({ action: actionForPanelRuntime });
-          lastResponseForPanelRuntime = responseForPanelRuntime;
-          if (responseForPanelRuntime && responseForPanelRuntime.ok && responseForPanelRuntime.dataUrl) {
-            return responseForPanelRuntime;
-          }
-        }
-        return lastResponseForPanelRuntime || { ok: false, error: 'Screenshot capture failed.' };
-      } finally {
-        if (isPanelVisibleForPanelRuntime) {
-          if (canTogglePanelForPanelRuntime) {
-            panelControllerForPanelRuntime.setVisible(true, { skipSync: true, transient: true });
-          } else if (panelShadowHostForPanelRuntime) {
-            panelShadowHostForPanelRuntime.style.display = 'block';
-          }
-        }
-      }
+      return await captureNsForPanelRuntime.captureWithoutPanelUi();
     }
 
     async function resolveChipPreviewPayloadForPanelRuntime(chipSourceForPanelRuntime) {

@@ -745,12 +745,28 @@
       } catch (errorForPanelStateSync) {}
     }
     if (!windowFocusListenerForPanelStateSync) {
-      windowFocusListenerForPanelStateSync = function panelStateSyncWindowFocusListenerForPanelStateSync() {
+      windowFocusListenerForPanelStateSync = function panelStateSyncWindowFocusListenerForPanelStateSync(
+        eventForWindowFocus
+      ) {
         if (isStaleForPanelStateSync()) {
           try {
             window.removeEventListener("focus", windowFocusListenerForPanelStateSync, true);
           } catch (errorForPanelStateSync) {}
           windowFocusListenerForPanelStateSync = null;
+          return;
+        }
+        // focus does not bubble, but it does capture: bound on window in the capture
+        // phase this fires for EVERY element focus in the document (page fields, ad
+        // iframes taking focus, anything inside the panel), not just the window gaining
+        // focus. Only the latter is an activation signal. Treating element focus as one
+        // meant an SW reconcile round trip per focus change, and an optimistic show that
+        // could put the panel back on screen in the middle of a screenshot capture.
+        const focusTargetForWindowFocus = eventForWindowFocus ? eventForWindowFocus.target : null;
+        if (
+          focusTargetForWindowFocus &&
+          typeof focusTargetForWindowFocus.nodeType === "number" &&
+          focusTargetForWindowFocus.nodeType === 1
+        ) {
           return;
         }
         maybeOptimisticShowForPanelStateSync();
