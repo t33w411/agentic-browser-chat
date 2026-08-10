@@ -211,13 +211,19 @@
     return tooltipForContentSelector;
   }
 
+  // The number has to predict the capture, not the rendering, so it comes from the same module
+  // that builds the payload. innerText was answering the wrong question: it drops hidden
+  // subtrees that the capture keeps, which undercounted every collapsed accordion, inactive
+  // tab panel and off-screen block on the page.
   function getWordCountForContentSelector(elementForWordCount) {
     if (!elementForWordCount) return 0;
-    var rawTextForWordCount = elementForWordCount.innerText || elementForWordCount.textContent || "";
-    var trimmedTextForWordCount = rawTextForWordCount.trim();
-    if (!trimmedTextForWordCount) return 0;
-    var matchesForWordCount = trimmedTextForWordCount.match(/\S+/g);
-    return matchesForWordCount ? matchesForWordCount.length : 0;
+    var nsForWordCount = globalThis.ABChatContent || {};
+    var flattenedToolForWordCount =
+      nsForWordCount.tools && nsForWordCount.tools.flattenedContent ? nsForWordCount.tools.flattenedContent : null;
+    if (!flattenedToolForWordCount || typeof flattenedToolForWordCount.countPayloadWordsForNode !== "function") {
+      return 0;
+    }
+    return flattenedToolForWordCount.countPayloadWordsForNode(elementForWordCount);
   }
 
   function formatWordCountForContentSelector(countForWordCount) {

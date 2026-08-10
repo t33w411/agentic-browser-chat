@@ -1232,6 +1232,86 @@
     flattenMediaElementsForFlattenedContent(rootNodeForFlattenedContent);
   }
 
+  // Tags whose text never survives into either payload: both noise passes strip
+  // script/style/noscript, and slot elements are skipped by the clone because their assigned
+  // content is already counted through the host's light DOM children.
+  const nonPayloadTextTagsForFlattenedContent = {
+    script: true,
+    style: true,
+    noscript: true,
+    slot: true
+  };
+
+  function collectPayloadTextForFlattenedContent(nodeForPayloadText, chunksForPayloadText) {
+    if (!nodeForPayloadText) {
+      return;
+    }
+    if (nodeForPayloadText.nodeType === Node.TEXT_NODE) {
+      chunksForPayloadText.push(nodeForPayloadText.nodeValue || "");
+      return;
+    }
+    if (nodeForPayloadText.nodeType !== Node.ELEMENT_NODE) {
+      return;
+    }
+    const tagForPayloadText = (nodeForPayloadText.tagName || "").toLowerCase();
+    if (nonPayloadTextTagsForFlattenedContent[tagForPayloadText]) {
+      return;
+    }
+    if (nodeForPayloadText.id === "abchat-panel-shadow-host") {
+      return;
+    }
+    // Element boundaries separate words, so two adjacent blocks never merge into one token.
+    chunksForPayloadText.push(" ");
+    const kidsForPayloadText = nodeForPayloadText.childNodes || [];
+    for (let iForPayloadText = 0; iForPayloadText < kidsForPayloadText.length; iForPayloadText++) {
+      collectPayloadTextForFlattenedContent(kidsForPayloadText[iForPayloadText], chunksForPayloadText);
+    }
+    if (nodeForPayloadText.shadowRoot) {
+      const shadowKidsForPayloadText = nodeForPayloadText.shadowRoot.childNodes || [];
+      for (let sForPayloadText = 0; sForPayloadText < shadowKidsForPayloadText.length; sForPayloadText++) {
+        collectPayloadTextForFlattenedContent(shadowKidsForPayloadText[sForPayloadText], chunksForPayloadText);
+      }
+    }
+    chunksForPayloadText.push(" ");
+  }
+
+  // Counts the words a capture of this node would actually carry, which is a different
+  // question from what innerText answers. Hidden subtrees count because "marked" mode keeps
+  // them in the payload, and open shadow roots count because the clone inlines them; both are
+  // invisible to innerText. Anything the pipelines strip is left out.
+  function countPayloadWordsForNodeForFlattenedContent(nodeForCount) {
+    if (!nodeForCount) {
+      return 0;
+    }
+    const chunksForCount = [];
+    collectPayloadTextForFlattenedContent(nodeForCount, chunksForCount);
+    const textForCount = stripInvisibleCharsForFlattenedContent(chunksForCount.join(""));
+    const matchesForCount = textForCount.match(/\S+/g);
+    return matchesForCount ? matchesForCount.length : 0;
+  }
+
+  // Same count taken from an already-built payload string. Returns null when the string could
+  // not be parsed, so a caller can tell "no text" apart from "could not measure".
+  function countPayloadWordsForHtmlForFlattenedContent(htmlStringForCount) {
+    const sourceForCount = String(htmlStringForCount || "");
+    if (!sourceForCount.trim()) {
+      return 0;
+    }
+    if (typeof DOMParser === "undefined") {
+      return null;
+    }
+    try {
+      // A DOMParser document has no browsing context, so nothing here loads or executes.
+      const parsedForCount = new DOMParser().parseFromString(sourceForCount, "text/html");
+      if (!parsedForCount || !parsedForCount.body) {
+        return null;
+      }
+      return countPayloadWordsForNodeForFlattenedContent(parsedForCount.body);
+    } catch (errForCount) {
+      return null;
+    }
+  }
+
   function buildRawHtmlPayloadForFlattenedContent(targetRootForFlattenedContent) {
     if (!targetRootForFlattenedContent || !targetRootForFlattenedContent.cloneNode) {
       return "";
@@ -1503,7 +1583,9 @@
   contentNamespaceForFlattenedContent.tools.flattenedContent = {
     getFullPageContent: getFullPageContentForFlattenedContent,
     buildCleanHtml: buildCleanHtmlPayloadForFlattenedContent,
-    buildRawHtml: buildRawHtmlPayloadForFlattenedContent
+    buildRawHtml: buildRawHtmlPayloadForFlattenedContent,
+    countPayloadWordsForNode: countPayloadWordsForNodeForFlattenedContent,
+    countPayloadWordsForHtml: countPayloadWordsForHtmlForFlattenedContent
   };
 
   globalScopeForFlattenedContent.ABChatContent = contentNamespaceForFlattenedContent;

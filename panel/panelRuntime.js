@@ -10386,19 +10386,44 @@
 
     let currentAttachPreviewForPanelRuntime = null;
 
-    function computeAttachPreviewStatsForPanelRuntime(textForStats) {
+    function computeAttachPreviewStatsForPanelRuntime(textForStats, isHtmlPayloadForStats) {
       const sForStats = String(textForStats || '');
       const charsForStats = sForStats.length;
       const trimmedForStats = sForStats.trim();
-      const wordsForStats = trimmedForStats ? trimmedForStats.split(/\s+/).length : 0;
+      const whitespaceWordsForStats = trimmedForStats ? trimmedForStats.split(/\s+/).length : 0;
       const linesForStats = sForStats ? sForStats.split(/\r\n|\r|\n/).length : 0;
-      return { chars: charsForStats, words: wordsForStats, lines: linesForStats };
+      if (!isHtmlPayloadForStats) {
+        return { chars: charsForStats, words: whitespaceWordsForStats, lines: linesForStats, isHtml: false };
+      }
+      // This payload is markup, so splitting it on whitespace counts tags and attributes as
+      // words and reports a number several times larger than the page selector's tooltip for
+      // the very same capture. Count the text the markup carries instead, by the same rules.
+      const flattenedNsForStats = (globalThis.ABChatContent || {}).tools;
+      const flattenedToolForStats = flattenedNsForStats && flattenedNsForStats.flattenedContent;
+      const htmlWordsForStats = flattenedToolForStats && typeof flattenedToolForStats.countPayloadWordsForHtml === 'function'
+        ? flattenedToolForStats.countPayloadWordsForHtml(sForStats)
+        : null;
+      return {
+        chars: charsForStats,
+        words: Number.isFinite(htmlWordsForStats) ? htmlWordsForStats : whitespaceWordsForStats,
+        lines: linesForStats,
+        isHtml: true
+      };
     }
 
     function formatAttachPreviewStatsForPanelRuntime(statsForFormat) {
       const pluralizeForStats = function (countForStats, nounForStats) {
         return countForStats.toLocaleString() + ' ' + nounForStats + (countForStats === 1 ? '' : 's');
       };
+      if (statsForFormat.isHtml) {
+        // Line count is dropped here: a flattened payload has its whitespace collapsed, so it
+        // is always one line and says nothing. Chars are labelled because the body on screen is
+        // markup while the word count describes the text inside it.
+        return [
+          pluralizeForStats(statsForFormat.words, 'word'),
+          statsForFormat.chars.toLocaleString() + ' chars of HTML'
+        ].join(' · ');
+      }
       return [
         pluralizeForStats(statsForFormat.chars, 'char'),
         pluralizeForStats(statsForFormat.words, 'word'),
@@ -10536,7 +10561,7 @@
       if (countsElForPanelRuntime) {
         if (hasTextForFooter) {
           countsElForPanelRuntime.textContent = formatAttachPreviewStatsForPanelRuntime(
-            computeAttachPreviewStatsForPanelRuntime(textContentForFooter)
+            computeAttachPreviewStatsForPanelRuntime(textContentForFooter, previewTypeForFooter === 'code')
           );
           countsElForPanelRuntime.classList.remove('hidden');
         } else {
