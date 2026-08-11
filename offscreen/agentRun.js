@@ -556,6 +556,11 @@
     }
     var accumulatedSearchSourcesForRun = [];
     var seenSearchUrlsForRun = new Set();
+    // Generated images actually shown to the user in this send, counted in the display phase after
+    // the blob persists rather than on API success, so a generation whose blob store failed never
+    // makes the next result claim an earlier image is on screen. A non-zero count tells the model
+    // its new image is an addition, not a replacement, and that it owes the user an explanation.
+    var imagesShownToUserCountForRun = 0;
 
     var hooksForRun = agentNsForRun.hooks || null;
     var turnContextForRun = (hooksForRun && typeof hooksForRun.createTurnContext === 'function')
@@ -1068,7 +1073,16 @@
           var toolResult = toolResultsForRun[ti];
           var toolResultForModel = toolResult;
           if (tcNameForResult === 'generate_image' && toolResult && toolResult.ok && typeof toolResult.dataUrl === 'string') {
-            toolResultForModel = { ok: true, prompt: toolResult.prompt || '' };
+            toolResultForModel = { ok: true, prompt: toolResult.prompt || '', aspect_ratio: toolResult.aspectRatio || '' };
+            if (Number(toolResult.width) > 0 && Number(toolResult.height) > 0) {
+              toolResultForModel.width = Number(toolResult.width);
+              toolResultForModel.height = Number(toolResult.height);
+            }
+            if (imagesShownToUserCountForRun > 0) {
+              toolResultForModel.note = 'You had already generated and shown the user '
+                + imagesShownToUserCountForRun + ' image' + (imagesShownToUserCountForRun === 1 ? '' : 's')
+                + ' earlier in this turn. Generating this one did NOT replace them: every image stays visible in the chat and each one was billed. Your reply must state that you regenerated the image, why, and which of the images shown is the final one.';
+            }
           } else if (tcNameForResult === 'create_document' && toolResult && toolResult.ok && typeof toolResult.dataUrl === 'string') {
             toolResultForModel = { ok: true, format: toolResult.format || '', filename: toolResult.filename || '', mimeType: toolResult.mimeType || '', size: Number(toolResult.size) || 0, note: 'The generated document has been saved and displayed to the user.' };
           } else if (tcNameForResult === 'eval' && toolResult && toolResult.ok && toolResult._generatedDocument && typeof toolResult._generatedDocument.dataUrl === 'string') {
@@ -1174,7 +1188,10 @@
                 displayOnly: true,
                 tool_call_id: toolCallsForLoop[gi].id
               }, { touchChat: false });
-              if (imgMsgPersisted) messagesForRun.push(imgMsgPersisted);
+              if (imgMsgPersisted) {
+                messagesForRun.push(imgMsgPersisted);
+                imagesShownToUserCountForRun++;
+              }
               hasAppendedRenderableAssistantMessageForRun = true;
               emitForAgentRun('stream_message_persisted', chatId, null);
             }

@@ -9827,10 +9827,48 @@ self.onmessage = function (e) {
     } catch (e) { /* silent */ }
   }
 
+  // Decodes the produced image just far enough to report its real pixel size back to the model.
+  // Best-effort: any failure reports 0x0 rather than failing the generation, since the image
+  // itself is already valid and displayed.
+  function measureGeneratedImageForToolExec(dataUrlForMeasure) {
+    if (typeof createImageBitmap !== 'function' || typeof Blob === 'undefined' || typeof atob !== 'function') {
+      return Promise.resolve({ width: 0, height: 0 });
+    }
+    var commaIndexForMeasure = String(dataUrlForMeasure || '').indexOf(',');
+    if (commaIndexForMeasure === -1) return Promise.resolve({ width: 0, height: 0 });
+    var headerForMeasure = dataUrlForMeasure.slice(0, commaIndexForMeasure);
+    if (headerForMeasure.indexOf(';base64') === -1) return Promise.resolve({ width: 0, height: 0 });
+    var mimeMatchForMeasure = headerForMeasure.match(/^data:([^;,]+)/);
+    var mimeForMeasure = mimeMatchForMeasure ? mimeMatchForMeasure[1] : 'image/png';
+    var bytesForMeasure;
+    try {
+      var binaryForMeasure = atob(dataUrlForMeasure.slice(commaIndexForMeasure + 1));
+      bytesForMeasure = new Uint8Array(binaryForMeasure.length);
+      for (var iForMeasure = 0; iForMeasure < binaryForMeasure.length; iForMeasure++) {
+        bytesForMeasure[iForMeasure] = binaryForMeasure.charCodeAt(iForMeasure);
+      }
+    } catch (decodeErrForMeasure) {
+      return Promise.resolve({ width: 0, height: 0 });
+    }
+    return createImageBitmap(new Blob([bytesForMeasure], { type: mimeForMeasure }))
+      .then(function (bitmapForMeasure) {
+        var sizeForMeasure = { width: bitmapForMeasure.width || 0, height: bitmapForMeasure.height || 0 };
+        if (typeof bitmapForMeasure.close === 'function') bitmapForMeasure.close();
+        return sizeForMeasure;
+      })
+      .catch(function () { return { width: 0, height: 0 }; });
+  }
+
   async function generateImageToolForToolExec(args, context) {
     const prompt = typeof args.prompt === 'string' ? args.prompt.trim() : '';
     if (!prompt) return { ok: false, error: 'No prompt provided.' };
-    const sourceBlobIdForImage = Number.isFinite(Number(args.source_blob_id)) ? Number(args.source_blob_id) : null;
+    // Only a positive integer is a blob id. Number(0), Number(null) and Number('') are all the
+    // finite value 0, so a looser check treats "no source" as a request to iterate on blob 0,
+    // which silently falls through to the text-only path below instead of being a plain new image.
+    const rawSourceBlobIdForImage = Number(args.source_blob_id);
+    const sourceBlobIdForImage = (Number.isInteger(rawSourceBlobIdForImage) && rawSourceBlobIdForImage > 0)
+      ? rawSourceBlobIdForImage
+      : null;
     const ctxForImage = context || {};
     const apiKey = ctxForImage.apiKey;
     const imageModel = ctxForImage.imageModel || '';
@@ -9948,7 +9986,16 @@ self.onmessage = function (e) {
         return { ok: false, error: 'No image data in response.' };
       }
       writeImageGenLogForToolExec({ model: imageModel, prompt: prompt, aspectRatio: aspectRatioForImage, totalLatencyMs: Date.now() - imageGenStartTimeForToolExec, status: 'success', usage: jsonForImage.usage || null });
-      return { ok: true, dataUrl: dataUrlForImage, prompt: prompt, _usage: jsonForImage.usage || null };
+      const measuredForImage = await measureGeneratedImageForToolExec(dataUrlForImage);
+      return {
+        ok: true,
+        dataUrl: dataUrlForImage,
+        prompt: prompt,
+        aspectRatio: aspectRatioForImage,
+        width: measuredForImage.width,
+        height: measuredForImage.height,
+        _usage: jsonForImage.usage || null
+      };
     } catch (e) {
       if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
       const catchErrMsgForImageLog = (e && e.message) || 'Image generation request failed.';
