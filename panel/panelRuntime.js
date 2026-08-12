@@ -224,6 +224,11 @@
     const MAX_ATTACHMENT_BYTES_FOR_PANEL_RUNTIME = 50 * 1024 * 1024;
     const MAX_IMAGE_BYTES_FOR_PANEL_RUNTIME = 20 * 1024 * 1024;
     const MAX_INPUT_CHIPS_FOR_PANEL_RUNTIME = 10;
+    // Longest note content copied straight into the message rather than left for a `read` call.
+    // ~8K chars is roughly 2K tokens, well under what one extra agent-loop iteration costs (that
+    // iteration re-sends the whole prompt), so inlining is the cheaper side of the trade up to
+    // here even when the model would not have read the note at all.
+    const MAX_INLINED_NOTE_CHARS_FOR_PANEL_RUNTIME = 8000;
     const MAX_FILES_PER_DROP_FOR_PANEL_RUNTIME = 5;
     const SUPPORTED_UPLOAD_EXTENSIONS_FOR_PANEL_RUNTIME = [
       'txt', 'md', 'markdown', 'json', 'csv', 'pdf', 'docx', 'xlsx', 'xls', 'ods', 'pptx'
@@ -5588,6 +5593,32 @@
 
       const isHtmlMimeTypeForPanelRuntime = chipMetaForPanelRuntime.mimeType === 'text/html';
 
+      // Note chips resolve ahead of the generic inline-content branch below. A sent note chip now
+      // carries the snapshot that was inlined into the message, and that branch would hand it back
+      // without the sourceMissing / sourceChanged checks, silently dropping the "changed since
+      // attached" banner. Preview shows the snapshot that was actually sent when there is one, so
+      // it matches what the model read, and the banner reports whether the live note has moved on.
+      if (chipTypeForPanelRuntime === 'note' && Number.isFinite(Number(chipMetaForPanelRuntime.refId))) {
+        var repoForNotePreview = getPanelDataRepoForPanelRuntime();
+        if (repoForNotePreview && typeof repoForNotePreview.getNote === 'function') {
+          try {
+            var noteForPreview = await repoForNotePreview.getNote(Number(chipMetaForPanelRuntime.refId));
+            if (!noteForPreview) {
+              return { previewType: 'text', content: '', sourceMissing: true, sourceType: 'note' };
+            }
+            if (noteForPreview) {
+              var noteChangedForPreview = await isChipSourceChangedForPanelRuntime('note', Number(chipMetaForPanelRuntime.refId), chipMetaForPanelRuntime.sourceHash);
+              return {
+                previewType: 'markdown',
+                content: inlineContentForPanelRuntime.trim() ? inlineContentForPanelRuntime : (noteForPreview.body || ''),
+                sourceChanged: noteChangedForPreview,
+                sourceType: 'note'
+              };
+            }
+          } catch (eForNotePreview) { /* fall through */ }
+        }
+      }
+
       if (inlineContentForPanelRuntime.trim()) {
         if (isHtmlMimeTypeForPanelRuntime) {
           return { previewType: 'code', content: inlineContentForPanelRuntime };
@@ -5599,21 +5630,6 @@
         return { previewType: 'text', content: chipMetaForPanelRuntime.preview.trim() };
       }
 
-      if (chipTypeForPanelRuntime === 'note' && Number.isFinite(Number(chipMetaForPanelRuntime.refId))) {
-        var repoForNotePreview = getPanelDataRepoForPanelRuntime();
-        if (repoForNotePreview && typeof repoForNotePreview.getNote === 'function') {
-          try {
-            var noteForPreview = await repoForNotePreview.getNote(Number(chipMetaForPanelRuntime.refId));
-            if (!noteForPreview) {
-              return { previewType: 'text', content: '', sourceMissing: true, sourceType: 'note' };
-            }
-            if (noteForPreview) {
-              var noteChangedForPreview = await isChipSourceChangedForPanelRuntime('note', Number(chipMetaForPanelRuntime.refId), chipMetaForPanelRuntime.sourceHash);
-              return { previewType: 'markdown', content: noteForPreview.body || '', sourceChanged: noteChangedForPreview, sourceType: 'note' };
-            }
-          } catch (eForNotePreview) { /* fall through */ }
-        }
-      }
       if (chipTypeForPanelRuntime === 'chat' && Number.isFinite(Number(chipMetaForPanelRuntime.refId))) {
         var repoForChatPreview = getPanelDataRepoForPanelRuntime();
         if (repoForChatPreview && typeof repoForChatPreview.listMessagesByChatId === 'function') {
@@ -12875,12 +12891,28 @@
       return currentRevForCheck !== storedForCheck;
     }
 
-    // Stamp the current source rev onto every note/chat input chip just before the message is
+    // Stamp the source snapshot onto every note/chat input chip just before the message is
     // collected and sent, capturing what the model is about to read. Runs before the collect call
     // in the send path.
-    async function stampInputChipSourceHashesForPanelRuntime() {
+    //
+    // A plain note under the inline cap gets its content copied onto the chip, so the model reads
+    // it straight out of the message instead of spending a whole agent-loop iteration on a `read`
+    // call; that round trip re-sends the entire prompt, which costs far more than the note does.
+    // Copying at SEND time (rather than resolving at context-build time) is what keeps history
+    // honest: the message keeps the text the reply was actually based on, even after the note is
+    // later edited, and the rev stamped beside it describes that same snapshot.
+    //
+    // Left as a bare reference, to be fetched with `read` only when needed: chat chips (a chat can
+    // be larger than the whole prompt), clips (their payload is a full page capture), and any note
+    // over the cap. Their byte size is stamped so the model can see what a read would cost.
+    async function stampInputChipSourceSnapshotsForPanelRuntime() {
       const rowForStamp = root.querySelector('.input-chips-row');
       if (!rowForStamp) return;
+      const agentNsForStamp = globalThis.ABChatAgent;
+      const repoForStamp = getPanelDataRepoForPanelRuntime();
+      const canSnapshotForStamp = !!(agentNsForStamp
+        && typeof agentNsForStamp.getSourceSnapshot === 'function'
+        && repoForStamp);
       const chipsForStamp = Array.from(rowForStamp.querySelectorAll('.ic'));
       for (let stampIndexForPanelRuntime = 0; stampIndexForPanelRuntime < chipsForStamp.length; stampIndexForPanelRuntime++) {
         const chipForStamp = chipsForStamp[stampIndexForPanelRuntime];
@@ -12889,7 +12921,30 @@
         if (typeForStamp !== 'note' && typeForStamp !== 'chat') continue;
         const refIdForStamp = Number(chipForStamp.dataset.attachRefId);
         if (!Number.isFinite(refIdForStamp)) continue;
-        chipForStamp.dataset.attachSourceHash = await computeChipSourceRevForPanelRuntime(typeForStamp, refIdForStamp);
+        if (!canSnapshotForStamp) {
+          chipForStamp.dataset.attachSourceHash = await computeChipSourceRevForPanelRuntime(typeForStamp, refIdForStamp);
+          continue;
+        }
+        let snapshotForStamp = null;
+        try {
+          snapshotForStamp = await agentNsForStamp.getSourceSnapshot(repoForStamp, typeForStamp, refIdForStamp);
+        } catch (errForStamp) {
+          snapshotForStamp = null;
+        }
+        if (!snapshotForStamp) {
+          chipForStamp.dataset.attachSourceHash = '';
+          continue;
+        }
+        const contentForStamp = String(snapshotForStamp.content || '');
+        chipForStamp.dataset.attachSourceHash = String(snapshotForStamp.rev || '');
+        chipForStamp.dataset.attachSize = String(contentForStamp.length);
+        const isClipForStamp = String(chipForStamp.dataset.attachKind || '').trim().toLowerCase() === 'clip'
+          || String(snapshotForStamp.noteType || '').trim().toLowerCase() === 'clip';
+        const canInlineForStamp = typeForStamp === 'note'
+          && !isClipForStamp
+          && contentForStamp.length > 0
+          && contentForStamp.length <= MAX_INLINED_NOTE_CHARS_FOR_PANEL_RUNTIME;
+        chipForStamp.dataset.attachContent = canInlineForStamp ? contentForStamp : '';
       }
     }
 
@@ -14686,7 +14741,7 @@
         if (brokenChipsForSend.length > 0) {
           showChipSourceMissingToastForPanelRuntime(brokenChipsForSend);
         }
-        await stampInputChipSourceHashesForPanelRuntime();
+        await stampInputChipSourceSnapshotsForPanelRuntime();
         const chipsForOffscreen = collectInputChipsForPanelRuntime();
         await appendMessageToChatForPanelRuntime(chatId, { role: "user", content: text, md: text, chips: chipsForOffscreen, pageContext: getCurrentPageContextForPanelRuntime(), _addedByThisTab: true }, { persistToDb: false });
         chatTaForSend.value = "";

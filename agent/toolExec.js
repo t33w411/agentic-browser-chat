@@ -12118,5 +12118,23 @@ self.onmessage = function (e) {
       return '';
     }
   };
+  // Content and rev for a note/chat in a SINGLE fetch, over the same serialization the read tool
+  // returns. Two separate calls could straddle an edit and pair a rev with content it does not
+  // describe, which would hand the model a rev the write tool then rejects. Returns null when the
+  // item is missing. noteType lets callers exclude clips, whose content is read-only.
+  ns.getSourceSnapshot = async function (panelDataRepoForSnap, typeForSnap, idForSnap) {
+    try {
+      var gotForSnap = await getItemWithContentStringForToolExec(panelDataRepoForSnap, typeForSnap, idForSnap);
+      if (!gotForSnap || !gotForSnap.item) return null;
+      var contentForSnap = String(gotForSnap.contentString || '');
+      return {
+        content: contentForSnap,
+        rev: computeRevTokenForToolExec(contentForSnap),
+        noteType: String(gotForSnap.item.noteType || '')
+      };
+    } catch (errForSnap) {
+      return null;
+    }
+  };
   globalScopeForToolExec.ABChatAgent = ns;
 })();
