@@ -33,8 +33,8 @@
 //   - picker and attachment preview modals: per-tab interaction state.
 //   - scroll positions: too noisy and prone to cross-tab scroll fighting.
 //   - collapsed sidebars: per-tab layout preference.
-//   - chat input draft text + chips: already mirrored by panelRuntime.js via
-//     INPUT_DRAFT_KEY_FOR_PANEL_RUNTIME (do not duplicate).
+//   - chat input draft text + chips: already mirrored per chat by panelRuntime.js via
+//     INPUT_DRAFT_SYNC_KEY_PREFIX_FOR_PANEL_RUNTIME (do not duplicate).
 //   - inline quick-question overlay: per-tab by design.
 //   - note editor body draft: notes auto-save to DB; cross-tab refresh
 //     already covers this.

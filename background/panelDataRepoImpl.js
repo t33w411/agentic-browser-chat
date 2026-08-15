@@ -449,15 +449,39 @@
       await dbForPanelDataRepo.messages.where('chatId').equals(numericChatIdForPanelDataRepo).delete();
       await dbForPanelDataRepo.chats.delete(numericChatIdForPanelDataRepo);
     });
+    await removeChatInputDraftsForPanelDataRepo([numericChatIdForPanelDataRepo]);
     pruneOrphanedBlobsForPanelDataRepo(protectedBlobIdsForPanelDataRepo).catch(function () {});
     return true;
   }
 
   // Draft keys in chrome.storage.local that carry blob references. Kept in step with the panel
-  // constants of the same value: the chat input draft (one key, chips[].refId) and one key per
-  // note being edited (attachments[].refId).
-  var INPUT_DRAFT_STORAGE_KEY_FOR_PANEL_DATA_REPO = 'abchat_input_draft';
+  // constants of the same value: one input draft per chat (chips[].refId) and one key per note
+  // being edited (attachments[].refId). The legacy input key remains readable during migration.
+  var LEGACY_INPUT_DRAFT_STORAGE_KEY_FOR_PANEL_DATA_REPO = 'abchat_input_draft';
+  var INPUT_DRAFT_STORAGE_KEY_PREFIX_FOR_PANEL_DATA_REPO = 'abchat_input_draft_sync:';
   var NOTE_DRAFT_STORAGE_KEY_PREFIX_FOR_PANEL_DATA_REPO = 'abchat_note_draft_sync:';
+
+  function removeChatInputDraftsForPanelDataRepo(chatIdsForPanelDataRepo) {
+    var keysForDraftRemoval = Array.isArray(chatIdsForPanelDataRepo)
+      ? chatIdsForPanelDataRepo.map(Number).filter(function (chatIdForDraftRemoval) {
+          return Number.isFinite(chatIdForDraftRemoval) && chatIdForDraftRemoval > 0;
+        }).map(function (chatIdForDraftRemoval) {
+          return INPUT_DRAFT_STORAGE_KEY_PREFIX_FOR_PANEL_DATA_REPO + String(chatIdForDraftRemoval);
+        }).filter(function (keyForDraftRemoval, indexForDraftRemoval, allKeysForDraftRemoval) {
+          return allKeysForDraftRemoval.indexOf(keyForDraftRemoval) === indexForDraftRemoval;
+        })
+      : [];
+    if (keysForDraftRemoval.length === 0) return Promise.resolve();
+    return new Promise(function (resolveForDraftRemoval) {
+      try {
+        chrome.storage.local.remove(keysForDraftRemoval, function () {
+          resolveForDraftRemoval();
+        });
+      } catch (errorForDraftRemoval) {
+        resolveForDraftRemoval();
+      }
+    });
+  }
 
   function readAllLocalStorageForPanelDataRepo() {
     return new Promise(function (resolveForStorageRead) {
@@ -545,7 +569,10 @@
       var keyForRefs = storedKeysForRefs[keyIndexForRefs];
       var valueForRefs = storedItemsForRefs[keyForRefs];
       if (!valueForRefs || typeof valueForRefs !== 'object') continue;
-      if (keyForRefs === INPUT_DRAFT_STORAGE_KEY_FOR_PANEL_DATA_REPO) {
+      if (
+        keyForRefs === LEGACY_INPUT_DRAFT_STORAGE_KEY_FOR_PANEL_DATA_REPO
+        || keyForRefs.indexOf(INPUT_DRAFT_STORAGE_KEY_PREFIX_FOR_PANEL_DATA_REPO) === 0
+      ) {
         addBlobRefIdsFromEntryListForPanelDataRepo(referencedBlobIdsForRefs, valueForRefs.chips);
       } else if (keyForRefs.indexOf(NOTE_DRAFT_STORAGE_KEY_PREFIX_FOR_PANEL_DATA_REPO) === 0) {
         addBlobRefIdsFromEntryListForPanelDataRepo(referencedBlobIdsForRefs, valueForRefs.attachments);
@@ -626,6 +653,7 @@
         }
         await dbForPanelDataRepo.chats.bulkDelete(oldChatIdsForPanelDataRepo);
       });
+      await removeChatInputDraftsForPanelDataRepo(oldChatIdsForPanelDataRepo);
     }
 
     var pruneResultForPanelDataRepo = await pruneOrphanedBlobsForPanelDataRepo(protectedBlobIdsForPanelDataRepo);

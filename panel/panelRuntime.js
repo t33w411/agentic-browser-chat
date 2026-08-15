@@ -4096,6 +4096,30 @@
       });
     }
 
+    async function reconcileDeletedChatDraftAndViewForPanelRuntime(chatIdForPanelRuntime) {
+      const numericChatIdForDeleteReconcile = Number(chatIdForPanelRuntime);
+      if (!Number.isFinite(numericChatIdForDeleteReconcile)) return;
+      await removeInputDraftStorageScopeForPanelRuntime(String(numericChatIdForDeleteReconcile));
+      if (S.activeChatId === numericChatIdForDeleteReconcile) {
+        S.activeChatId = null;
+        writePanelStateSyncForPanelRuntime({ activeChatId: null });
+        switchInputDraftScopeForPanelRuntime(
+          NEW_CHAT_DRAFT_SCOPE_FOR_PANEL_RUNTIME,
+          { discardPreviousScope: true }
+        );
+        S.hiddenPairIds = new Set();
+        S.chatEditingMsgId = null;
+        backFromChat();
+        showChatMessages(false);
+        clearSessionTokenCounterForPanelRuntime();
+        updateChatBackTitleForPanelRuntime();
+      }
+      const repoForDeleteReconcile = getPanelDataRepoForPanelRuntime();
+      if (repoForDeleteReconcile && typeof repoForDeleteReconcile.pruneOrphanedBlobs === 'function') {
+        repoForDeleteReconcile.pruneOrphanedBlobs(getPendingBlobIdsForPanelRuntime()).catch(function () {});
+      }
+    }
+
     async function deleteChatForPanelRuntime(chatIdForPanelRuntime) {
       const numericChatIdForPanelRuntime = Number(chatIdForPanelRuntime);
       if (!Number.isFinite(numericChatIdForPanelRuntime)) return;
@@ -4108,20 +4132,11 @@
           return;
         }
       }
+      await reconcileDeletedChatDraftAndViewForPanelRuntime(numericChatIdForPanelRuntime);
       removeChatFromRuntimeStoreForPanelRuntime(numericChatIdForPanelRuntime);
       removeChatUiForPanelRuntime(numericChatIdForPanelRuntime);
       markPendingChipsForDeletedRecordForPanelRuntime('chat', numericChatIdForPanelRuntime, 'chat');
       closeRawViewForPanelRuntime();
-      if (S.activeChatId === numericChatIdForPanelRuntime) {
-        S.activeChatId = null;
-        writePanelStateSyncForPanelRuntime({ activeChatId: null });
-        S.hiddenPairIds = new Set();
-        S.chatEditingMsgId = null;
-        backFromChat();
-        showChatMessages(false);
-        clearSessionTokenCounterForPanelRuntime();
-        updateChatBackTitleForPanelRuntime();
-      }
     }
 
     function deleteChatItemFromDropdownForPanelRuntime(btnForPanelRuntime) {
@@ -4522,6 +4537,7 @@
       root.querySelectorAll('.chat-item').forEach(el => el.classList.remove('active'));
       S.activeChatId = null;
       writePanelStateSyncForPanelRuntime({ activeChatId: null });
+      switchInputDraftScopeForPanelRuntime(NEW_CHAT_DRAFT_SCOPE_FOR_PANEL_RUNTIME);
       clearSessionTokenCounterForPanelRuntime();
       // Re-sync the composer for the now-empty (null) active chat. Without this, switching
       // here while another chat is still responding leaves the textarea disabled and the
@@ -4548,10 +4564,14 @@
       }
     }
 
-    function selectChat(id) {
+    function selectChat(id, optionsForSelectChat) {
+      const optsForSelectChat = optionsForSelectChat || {};
       closeRawViewForPanelRuntime();
       S.activeChatId = id;
       writePanelStateSyncForPanelRuntime({ activeChatId: id });
+      if (!optsForSelectChat.skipInputDraftSwitch) {
+        switchInputDraftScopeForPanelRuntime(String(Number(id)));
+      }
       clearSessionTokenCounterForPanelRuntime();
       setSendingUIStateForPanelRuntime();
       S.hiddenPairIds = new Set();
@@ -5127,6 +5147,7 @@
 
     function removeInputChipForPanelRuntime(chipNodeForPanelRuntime) {
       if (!chipNodeForPanelRuntime) return;
+      if (draftMountedScopeForPanelRuntime === draftScopeLockedForSendForPanelRuntime) return;
       const chipTypeForRemove = String(chipNodeForPanelRuntime.dataset.attachType || '').trim();
       const chipKindForRemove = String(chipNodeForPanelRuntime.dataset.attachKind || '').trim();
       const chipContextForRemove = String(chipNodeForPanelRuntime.dataset.attachContext || '').trim();
@@ -5165,6 +5186,22 @@
         throw new Error('Attachment storage failed.');
       }
       return persistedBlobForPanelRuntime;
+    }
+
+    function discardUnclaimedInputBlobForPanelRuntime(blobIdForDiscard) {
+      const numericBlobIdForDiscard = Number(blobIdForDiscard);
+      const repoForDiscard = getPanelDataRepoForPanelRuntime();
+      if (
+        !Number.isFinite(numericBlobIdForDiscard)
+        || numericBlobIdForDiscard <= 0
+        || !repoForDiscard
+        || typeof repoForDiscard.deleteAttachmentBlobIfUnreferenced !== 'function'
+      ) {
+        return;
+      }
+      repoForDiscard
+        .deleteAttachmentBlobIfUnreferenced(numericBlobIdForDiscard, getPendingBlobIdsForPanelRuntime())
+        .catch(function () {});
     }
 
     async function getAttachmentBlobForPanelRuntime(blobIdForPanelRuntime) {
@@ -6137,6 +6174,9 @@
             removeChatUiForPanelRuntime(idForRefresh);
           }
         });
+        if (activeChatIdAtRefreshStart && !dbChatIdSetForRefresh.has(Number(activeChatIdAtRefreshStart))) {
+          await reconcileDeletedChatDraftAndViewForPanelRuntime(activeChatIdAtRefreshStart);
+        }
 
         chatsFromDb.forEach(function (cForRefresh) {
           if (!cForRefresh || cForRefresh.id == null) return;
@@ -6837,6 +6877,7 @@
           removeChatUiForPanelRuntime(idForApply);
           syncSearchIndexForPanelRuntime('chats', 'remove', idForApply);
           chatMessagesLoadedSetForPanelRuntime.delete(idForApply);
+          await reconcileDeletedChatDraftAndViewForPanelRuntime(idForApply);
           orderChangedForApply = true;
           continue;
         }
@@ -6845,13 +6886,9 @@
         try {
           fetchedMetaForApply = await repoForApply.getChatMeta(idForApply);
         } catch (eForApply) {
-          // Treat fetch failure as a delete to keep the in-memory store
-          // in sync with what the SW reports.
-          removeChatFromRuntimeStoreForPanelRuntime(idForApply);
-          removeChatUiForPanelRuntime(idForApply);
-          syncSearchIndexForPanelRuntime('chats', 'remove', idForApply);
-          chatMessagesLoadedSetForPanelRuntime.delete(idForApply);
-          orderChangedForApply = true;
+          // A failed fetch is not proof of deletion. Keep the local record and let a full refresh
+          // distinguish a transient service-worker/DB failure from a record that is actually gone.
+          scheduleStoreRefreshForPanelRuntime('chats');
           continue;
         }
 
@@ -11268,7 +11305,9 @@
     const THEME_KEY_FOR_PANEL_RUNTIME = 'abchat_theme';
     const TRANSPARENCY_KEY_FOR_PANEL_RUNTIME = 'abchat_panel_transparency';
     const HEADER_BTN_KEY_FOR_PANEL_RUNTIME = 'abchat_header_btn';
-    const INPUT_DRAFT_KEY_FOR_PANEL_RUNTIME = 'abchat_input_draft';
+    const LEGACY_INPUT_DRAFT_KEY_FOR_PANEL_RUNTIME = 'abchat_input_draft';
+    const INPUT_DRAFT_SYNC_KEY_PREFIX_FOR_PANEL_RUNTIME = 'abchat_input_draft_sync:';
+    const NEW_CHAT_DRAFT_SCOPE_FOR_PANEL_RUNTIME = 'new';
     const NOTE_DRAFT_SYNC_KEY_PREFIX_FOR_PANEL_RUNTIME = 'abchat_note_draft_sync:';
     // User-authored profile text sent with every model call. Each field is independently toggleable:
     // switching one off omits it from the prompt while leaving the stored text untouched.
@@ -11792,79 +11831,214 @@
     }
 
     /* ============================================================
-      INPUT DRAFT PERSISTENCE (cross-tab)
+      INPUT DRAFT PERSISTENCE (per-chat, cross-tab)
     ============================================================ */
     var draftSaveTimerForPanelRuntime = null;
     var draftApplyingForPanelRuntime = false;
-    var selfDraftWriteQueueForPanelRuntime = [];
-    var lastSelfDraftWriteTsForPanelRuntime = 0;
+    var draftStorageSyncListenerForPanelRuntime = null;
+    var draftSyncSourceIdForPanelRuntime = '';
+    var draftLocalRevisionForPanelRuntime = 0;
+    var draftMountedScopeForPanelRuntime = null;
+    var draftUiBaseVersionForPanelRuntime = '';
+    var draftUiBaseUpdatedAtForPanelRuntime = 0;
+    var draftUiBaseClearedThroughUpdatedAtForPanelRuntime = 0;
+    var draftLocalDirtyForPanelRuntime = false;
+    var draftLoadGenerationForPanelRuntime = 0;
+    var draftWriteChainsForPanelRuntime = {};
+    var draftScopeLockedForSendForPanelRuntime = null;
+    var draftDeferredPayloadsForPanelRuntime = {};
 
-    function serializeCurrentDraftForPanelRuntime() {
-      const taForDraft = root.querySelector('.chat-textarea');
-      const text = taForDraft ? taForDraft.value : '';
-      const chips = collectDraftChipsForPanelRuntime();
-      return JSON.stringify({ text: text, chips: chips });
-    }
-
-    function recordSelfDraftWriteForPanelRuntime(serializedForSelfWrite) {
-      selfDraftWriteQueueForPanelRuntime.push(String(serializedForSelfWrite));
-      if (selfDraftWriteQueueForPanelRuntime.length > 50) {
-        selfDraftWriteQueueForPanelRuntime.splice(0, selfDraftWriteQueueForPanelRuntime.length - 50);
+    function getDraftSyncSourceIdForPanelRuntime() {
+      if (draftSyncSourceIdForPanelRuntime) return draftSyncSourceIdForPanelRuntime;
+      let baseSourceIdForDraft = '';
+      try {
+        baseSourceIdForDraft = sessionStorage.getItem('abchat_input_draft_sync_source_id') || '';
+      } catch (errorForDraftSource) {
+        baseSourceIdForDraft = '';
       }
-      lastSelfDraftWriteTsForPanelRuntime = Date.now();
-    }
-
-    function consumeMatchingSelfDraftWriteForPanelRuntime(incomingSerializedForSelfWrite) {
-      const idxForSelfWrite = selfDraftWriteQueueForPanelRuntime.indexOf(String(incomingSerializedForSelfWrite));
-      if (idxForSelfWrite === -1) return false;
-      selfDraftWriteQueueForPanelRuntime.splice(idxForSelfWrite, 1);
-      return true;
-    }
-
-    // Resolves once the write has landed in storage. Most callers ignore the result; blob reclaim
-    // sequences behind it, because the stored draft is how the background sees pending chips.
-    function saveDraftForPanelRuntime() {
-      if (draftApplyingForPanelRuntime) return Promise.resolve();
-      const serialized = serializeCurrentDraftForPanelRuntime();
-      const parsed = JSON.parse(serialized);
-      return new Promise(function (resolveForDraftSave) {
+      if (!baseSourceIdForDraft) {
+        baseSourceIdForDraft = 'draft_tab_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2);
         try {
-          if (!parsed.text && parsed.chips.length === 0) {
-            recordSelfDraftWriteForPanelRuntime(JSON.stringify({ text: '', chips: [] }));
-            chrome.storage.local.remove(INPUT_DRAFT_KEY_FOR_PANEL_RUNTIME, function () { resolveForDraftSave(); });
-          } else {
-            recordSelfDraftWriteForPanelRuntime(serialized);
-            chrome.storage.local.set({ [INPUT_DRAFT_KEY_FOR_PANEL_RUNTIME]: parsed }, function () { resolveForDraftSave(); });
-          }
-        } catch (e) {
-          resolveForDraftSave();
+          sessionStorage.setItem('abchat_input_draft_sync_source_id', baseSourceIdForDraft);
+        } catch (errorForDraftSource) {}
+      }
+      // sessionStorage can be copied when a tab is duplicated. The per-injection suffix keeps
+      // those live tabs distinct while the stored base still identifies this tab across reloads.
+      draftSyncSourceIdForPanelRuntime = baseSourceIdForDraft
+        + ':' + String(window.abchatListenerGeneration || 0)
+        + ':' + Math.random().toString(36).slice(2);
+      return draftSyncSourceIdForPanelRuntime;
+    }
+
+    function getActiveInputDraftScopeForPanelRuntime() {
+      const hasActiveChatForDraftScope = S.activeChatId !== null && S.activeChatId !== undefined && S.activeChatId !== '';
+      const activeChatIdForDraftScope = Number(S.activeChatId);
+      return hasActiveChatForDraftScope && Number.isFinite(activeChatIdForDraftScope)
+        ? String(activeChatIdForDraftScope)
+        : NEW_CHAT_DRAFT_SCOPE_FOR_PANEL_RUNTIME;
+    }
+
+    function getInputDraftStorageKeyForPanelRuntime(scopeForDraftKey) {
+      return INPUT_DRAFT_SYNC_KEY_PREFIX_FOR_PANEL_RUNTIME + String(scopeForDraftKey);
+    }
+
+    function getInputDraftScopeFromStorageKeyForPanelRuntime(keyForDraftScope) {
+      if (typeof keyForDraftScope !== 'string') return null;
+      if (keyForDraftScope.indexOf(INPUT_DRAFT_SYNC_KEY_PREFIX_FOR_PANEL_RUNTIME) !== 0) return null;
+      const scopeForDraftKey = keyForDraftScope.slice(INPUT_DRAFT_SYNC_KEY_PREFIX_FOR_PANEL_RUNTIME.length);
+      if (scopeForDraftKey === NEW_CHAT_DRAFT_SCOPE_FOR_PANEL_RUNTIME) return scopeForDraftKey;
+      const numericScopeForDraftKey = Number(scopeForDraftKey);
+      return scopeForDraftKey && Number.isFinite(numericScopeForDraftKey) && numericScopeForDraftKey > 0
+        ? String(numericScopeForDraftKey)
+        : null;
+    }
+
+    function normalizeInputDraftForPanelRuntime(draftForNormalize) {
+      const draftForInput = draftForNormalize && typeof draftForNormalize === 'object' ? draftForNormalize : {};
+      return {
+        text: String(draftForInput.text || ''),
+        chips: Array.isArray(draftForInput.chips)
+          ? draftForInput.chips.filter(function (chipForDraftNormalize) {
+              return chipForDraftNormalize && typeof chipForDraftNormalize === 'object';
+            }).map(function (chipForDraftNormalize) {
+              return Object.assign({}, chipForDraftNormalize);
+            })
+          : []
+      };
+    }
+
+    function serializeInputDraftForPanelRuntime(draftForSerialize) {
+      return JSON.stringify(normalizeInputDraftForPanelRuntime(draftForSerialize));
+    }
+
+    function collectCurrentInputDraftForPanelRuntime() {
+      const taForDraft = root.querySelector('.chat-textarea');
+      return normalizeInputDraftForPanelRuntime({
+        text: taForDraft ? taForDraft.value : '',
+        chips: collectDraftChipsForPanelRuntime()
+      });
+    }
+
+    function buildInputDraftPayloadForPanelRuntime(scopeForDraftPayload, draftForPayload, optionsForDraftPayload) {
+      const optsForDraftPayload = optionsForDraftPayload || {};
+      const normalizedForDraftPayload = normalizeInputDraftForPanelRuntime(draftForPayload);
+      const explicitUpdatedAtForDraftPayload = Number(optsForDraftPayload.updatedAt);
+      const updatedAtForDraftPayload = Number.isFinite(explicitUpdatedAtForDraftPayload)
+        ? explicitUpdatedAtForDraftPayload
+        : Date.now();
+      draftLocalRevisionForPanelRuntime += 1;
+      return Object.assign({}, normalizedForDraftPayload, {
+        chatScope: String(scopeForDraftPayload),
+        sourceId: getDraftSyncSourceIdForPanelRuntime(),
+        revision: draftLocalRevisionForPanelRuntime,
+        version: getDraftSyncSourceIdForPanelRuntime() + ':' + String(draftLocalRevisionForPanelRuntime) + ':' + String(updatedAtForDraftPayload),
+        updatedAt: updatedAtForDraftPayload,
+        cleared: Boolean(optsForDraftPayload.cleared),
+        clearedThroughVersion: String(optsForDraftPayload.clearedThroughVersion || ''),
+        clearedThroughUpdatedAt: Number(optsForDraftPayload.clearedThroughUpdatedAt) || 0
+      });
+    }
+
+    function setInputDraftStoragePayloadForPanelRuntime(scopeForDraftWrite, payloadForDraftWrite) {
+      return new Promise(function (resolveForDraftWrite, rejectForDraftWrite) {
+        try {
+          const dataForDraftWrite = {};
+          dataForDraftWrite[getInputDraftStorageKeyForPanelRuntime(scopeForDraftWrite)] = payloadForDraftWrite;
+          chrome.storage.local.set(dataForDraftWrite, function () {
+            if (chrome.runtime && chrome.runtime.lastError) {
+              rejectForDraftWrite(new Error(chrome.runtime.lastError.message || 'Could not save input draft'));
+              return;
+            }
+            resolveForDraftWrite(payloadForDraftWrite);
+          });
+        } catch (errorForDraftWrite) {
+          rejectForDraftWrite(errorForDraftWrite);
         }
       });
     }
 
+    function queueInputDraftWriteForPanelRuntime(scopeForDraftWrite, draftForWrite, optionsForDraftWrite) {
+      const resolvedScopeForDraftWrite = String(scopeForDraftWrite);
+      const normalizedForDraftWrite = normalizeInputDraftForPanelRuntime(draftForWrite);
+      const requestedUpdatedAtForDraftWrite = Number(optionsForDraftWrite && optionsForDraftWrite.updatedAt);
+      const intentUpdatedAtForDraftWrite = Number.isFinite(requestedUpdatedAtForDraftWrite)
+        ? requestedUpdatedAtForDraftWrite
+        : Date.now();
+      const resolvedOptionsForDraftWrite = Object.assign(
+        {},
+        optionsForDraftWrite || {},
+        { updatedAt: intentUpdatedAtForDraftWrite }
+      );
+      const previousWriteForDraft = draftWriteChainsForPanelRuntime[resolvedScopeForDraftWrite] || Promise.resolve();
+      const nextWriteForDraft = previousWriteForDraft
+        .catch(function () {})
+        .then(function () {
+          const payloadForDraftWrite = buildInputDraftPayloadForPanelRuntime(
+            resolvedScopeForDraftWrite,
+            normalizedForDraftWrite,
+            resolvedOptionsForDraftWrite
+          );
+          return setInputDraftStoragePayloadForPanelRuntime(resolvedScopeForDraftWrite, payloadForDraftWrite);
+        })
+        .then(function (landedPayloadForDraftWrite) {
+          const serializedForDraftWrite = serializeInputDraftForPanelRuntime(landedPayloadForDraftWrite);
+          if (
+            draftMountedScopeForPanelRuntime === resolvedScopeForDraftWrite
+            && serializeInputDraftForPanelRuntime(collectCurrentInputDraftForPanelRuntime()) === serializedForDraftWrite
+          ) {
+            draftUiBaseVersionForPanelRuntime = String(landedPayloadForDraftWrite.version || '');
+            draftUiBaseUpdatedAtForPanelRuntime = Number(landedPayloadForDraftWrite.updatedAt) || 0;
+            draftLocalDirtyForPanelRuntime = false;
+            reconcileMountedInputDraftForPanelRuntime().catch(function () {});
+          }
+          return landedPayloadForDraftWrite;
+        });
+      draftWriteChainsForPanelRuntime[resolvedScopeForDraftWrite] = nextWriteForDraft;
+      nextWriteForDraft.then(function () {
+        if (draftWriteChainsForPanelRuntime[resolvedScopeForDraftWrite] === nextWriteForDraft) {
+          delete draftWriteChainsForPanelRuntime[resolvedScopeForDraftWrite];
+        }
+      }).catch(function () {});
+      return nextWriteForDraft;
+    }
+
+    // Resolves once the write has landed in storage. Blob reclaim sequences behind this because
+    // the stored draft is how the background sees pending chips in every tab.
+    function saveDraftForPanelRuntime() {
+      if (draftApplyingForPanelRuntime) return Promise.resolve(null);
+      const scopeForDraftSave = draftMountedScopeForPanelRuntime || getActiveInputDraftScopeForPanelRuntime();
+      if (scopeForDraftSave === draftScopeLockedForSendForPanelRuntime) return Promise.resolve(null);
+      draftLocalDirtyForPanelRuntime = true;
+      return queueInputDraftWriteForPanelRuntime(
+        scopeForDraftSave,
+        collectCurrentInputDraftForPanelRuntime()
+      );
+    }
+
     function scheduleDraftSaveForPanelRuntime() {
+      if (draftApplyingForPanelRuntime) return;
+      draftLocalDirtyForPanelRuntime = true;
       if (draftSaveTimerForPanelRuntime) clearTimeout(draftSaveTimerForPanelRuntime);
-      draftSaveTimerForPanelRuntime = setTimeout(saveDraftForPanelRuntime, 300);
+      const scopeForScheduledDraft = draftMountedScopeForPanelRuntime || getActiveInputDraftScopeForPanelRuntime();
+      draftSaveTimerForPanelRuntime = setTimeout(function () {
+        draftSaveTimerForPanelRuntime = null;
+        if (draftMountedScopeForPanelRuntime !== scopeForScheduledDraft) return;
+        saveDraftForPanelRuntime();
+      }, 300);
     }
 
-    function clearDraftForPanelRuntime() {
-      if (draftSaveTimerForPanelRuntime) clearTimeout(draftSaveTimerForPanelRuntime);
-      try { chrome.storage.local.remove(INPUT_DRAFT_KEY_FOR_PANEL_RUNTIME); } catch (e) {}
-    }
-
-    function applyDraftToUiForPanelRuntime(draft) {
-      if (!draft || typeof draft !== 'object') return;
+    function applyDraftToUiForPanelRuntime(draftForApply, metadataForDraftApply) {
+      const normalizedForDraftApply = normalizeInputDraftForPanelRuntime(draftForApply);
       draftApplyingForPanelRuntime = true;
       try {
         const taForApply = root.querySelector('.chat-textarea');
         if (taForApply) {
-          taForApply.value = String(draft.text || '');
+          taForApply.value = normalizedForDraftApply.text;
           updateAutoExpandForTextareaForPanelRuntime(taForApply);
         }
         const rowForApply = root.querySelector('.input-chips-row');
         if (rowForApply) rowForApply.innerHTML = '';
-        const chipsForApply = Array.isArray(draft.chips) ? draft.chips : [];
-        chipsForApply.forEach(function (chipDataForApply) {
+        normalizedForDraftApply.chips.forEach(function (chipDataForApply) {
           if (chipDataForApply && chipDataForApply.type && chipDataForApply.label) {
             addInputChipForPanelRuntime(chipDataForApply);
           }
@@ -11872,28 +12046,299 @@
       } finally {
         draftApplyingForPanelRuntime = false;
       }
-      // The draft carries record ids, not content, so a chip restored here can point at something
-      // deleted while this row did not exist. Re-check rather than trusting the stored status.
+      draftUiBaseVersionForPanelRuntime = String((metadataForDraftApply && metadataForDraftApply.version) || '');
+      draftUiBaseUpdatedAtForPanelRuntime = Number(metadataForDraftApply && metadataForDraftApply.updatedAt) || 0;
+      draftUiBaseClearedThroughUpdatedAtForPanelRuntime = Number(
+        metadataForDraftApply && metadataForDraftApply.clearedThroughUpdatedAt
+      ) || 0;
+      draftLocalDirtyForPanelRuntime = false;
+      // The draft carries record ids, not content, so restored chips must be checked against the
+      // live stores before they can be sent.
       scheduleChipReferenceValidationForPanelRuntime();
     }
 
-    function restoreDraftForPanelRuntime() {
-      try {
-        chrome.storage.local.get([INPUT_DRAFT_KEY_FOR_PANEL_RUNTIME], function (res) {
-          const draft = res && res[INPUT_DRAFT_KEY_FOR_PANEL_RUNTIME];
-          if (!draft) return;
-          applyDraftToUiForPanelRuntime(draft);
-        });
-      } catch (e) {}
+    function getInputDraftStoragePayloadForPanelRuntime(scopeForDraftRead) {
+      return new Promise(function (resolveForDraftRead) {
+        const keyForDraftRead = getInputDraftStorageKeyForPanelRuntime(scopeForDraftRead);
+        try {
+          chrome.storage.local.get([keyForDraftRead], function (resultForDraftRead) {
+            resolveForDraftRead(resultForDraftRead && resultForDraftRead[keyForDraftRead]);
+          });
+        } catch (errorForDraftRead) {
+          resolveForDraftRead(null);
+        }
+      });
     }
 
-    // Named storage listener stored in a module-scoped variable so it can be:
-    //   1. Removed before re-adding (prevents duplicate listeners after reload).
-    //   2. Removed inside teardown() when the panel is destroyed on extension reload.
-    //   3. Self-removed when a generation mismatch detects an orphaned context.
-    // REGRESSION RISK: do not replace this with an anonymous function; anonymous listeners
-    // cannot be deduped or removed, causing accumulation across extension reloads.
-    var draftStorageSyncListenerForPanelRuntime = null;
+    function removeInputDraftStorageScopeForPanelRuntime(scopeForDraftRemoval) {
+      const resolvedScopeForDraftRemoval = String(scopeForDraftRemoval);
+      if (draftMountedScopeForPanelRuntime === resolvedScopeForDraftRemoval) {
+        if (draftSaveTimerForPanelRuntime) {
+          clearTimeout(draftSaveTimerForPanelRuntime);
+          draftSaveTimerForPanelRuntime = null;
+        }
+        draftLocalDirtyForPanelRuntime = false;
+      }
+      const pendingWriteForDraftRemoval = draftWriteChainsForPanelRuntime[resolvedScopeForDraftRemoval] || Promise.resolve();
+      return pendingWriteForDraftRemoval.catch(function () {}).then(function () {
+        return new Promise(function (resolveForDraftRemoval) {
+          try {
+            chrome.storage.local.remove(
+              getInputDraftStorageKeyForPanelRuntime(resolvedScopeForDraftRemoval),
+              resolveForDraftRemoval
+            );
+          } catch (errorForDraftRemoval) {
+            resolveForDraftRemoval();
+          }
+        });
+      });
+    }
+
+    function switchInputDraftScopeForPanelRuntime(nextScopeForDraftSwitch, optionsForDraftSwitch) {
+      const optsForDraftSwitch = optionsForDraftSwitch || {};
+      const resolvedNextScopeForDraftSwitch = String(nextScopeForDraftSwitch);
+      const previousScopeForDraftSwitch = draftMountedScopeForPanelRuntime;
+      if (previousScopeForDraftSwitch === resolvedNextScopeForDraftSwitch) return Promise.resolve();
+
+      if (draftSaveTimerForPanelRuntime) {
+        clearTimeout(draftSaveTimerForPanelRuntime);
+        draftSaveTimerForPanelRuntime = null;
+      }
+      if (
+        previousScopeForDraftSwitch !== null
+        && draftLocalDirtyForPanelRuntime
+        && !optsForDraftSwitch.discardPreviousScope
+      ) {
+        queueInputDraftWriteForPanelRuntime(
+          previousScopeForDraftSwitch,
+          collectCurrentInputDraftForPanelRuntime()
+        ).catch(function () {});
+      }
+
+      draftMountedScopeForPanelRuntime = resolvedNextScopeForDraftSwitch;
+      draftLoadGenerationForPanelRuntime += 1;
+      const loadGenerationForDraftSwitch = draftLoadGenerationForPanelRuntime;
+      applyDraftToUiForPanelRuntime({ text: '', chips: [] }, { updatedAt: 0 });
+
+      return getInputDraftStoragePayloadForPanelRuntime(resolvedNextScopeForDraftSwitch).then(function (payloadForDraftSwitch) {
+        if (
+          draftMountedScopeForPanelRuntime !== resolvedNextScopeForDraftSwitch
+          || draftLoadGenerationForPanelRuntime !== loadGenerationForDraftSwitch
+          || draftLocalDirtyForPanelRuntime
+        ) {
+          return;
+        }
+        applyDraftToUiForPanelRuntime(payloadForDraftSwitch || { text: '', chips: [] }, payloadForDraftSwitch);
+      });
+    }
+
+    function reconcileMountedInputDraftForPanelRuntime() {
+      const scopeForDraftReconcile = draftMountedScopeForPanelRuntime;
+      if (scopeForDraftReconcile === null || draftLocalDirtyForPanelRuntime) return Promise.resolve();
+      return getInputDraftStoragePayloadForPanelRuntime(scopeForDraftReconcile).then(function (payloadForDraftReconcile) {
+        if (
+          draftMountedScopeForPanelRuntime !== scopeForDraftReconcile
+          || draftLocalDirtyForPanelRuntime
+        ) {
+          return;
+        }
+        const deferredForDraftReconcile = draftDeferredPayloadsForPanelRuntime[scopeForDraftReconcile];
+        delete draftDeferredPayloadsForPanelRuntime[scopeForDraftReconcile];
+        const deferredDiffersFromClearedForReconcile = Boolean(
+          deferredForDraftReconcile
+          && !deferredForDraftReconcile.cleared
+          && payloadForDraftReconcile
+          && payloadForDraftReconcile.cleared
+          && Number(deferredForDraftReconcile.updatedAt) >= Number(payloadForDraftReconcile.clearedThroughUpdatedAt)
+        );
+        const deferredIsNewerThanStoredForReconcile = Boolean(
+          deferredForDraftReconcile
+          && !deferredForDraftReconcile.cleared
+          && payloadForDraftReconcile
+          && !payloadForDraftReconcile.cleared
+          && Number(deferredForDraftReconcile.updatedAt) > Number(payloadForDraftReconcile.updatedAt)
+        );
+        if (deferredDiffersFromClearedForReconcile || deferredIsNewerThanStoredForReconcile) {
+          return queueInputDraftWriteForPanelRuntime(
+            scopeForDraftReconcile,
+            deferredForDraftReconcile
+          ).then(function (restoredForDraftReconcile) {
+            applyDraftToUiForPanelRuntime(restoredForDraftReconcile, restoredForDraftReconcile);
+          });
+        }
+        handleIncomingInputDraftForPanelRuntime(scopeForDraftReconcile, payloadForDraftReconcile);
+      });
+    }
+
+    function migrateLegacyInputDraftForPanelRuntime() {
+      return new Promise(function (resolveForLegacyDraftMigration) {
+        try {
+          chrome.storage.local.get([LEGACY_INPUT_DRAFT_KEY_FOR_PANEL_RUNTIME], function (resultForLegacyDraftMigration) {
+            const legacyDraftForMigration = resultForLegacyDraftMigration
+              && resultForLegacyDraftMigration[LEGACY_INPUT_DRAFT_KEY_FOR_PANEL_RUNTIME];
+            if (!legacyDraftForMigration) {
+              resolveForLegacyDraftMigration();
+              return;
+            }
+            const scopeForLegacyDraftMigration = getActiveInputDraftScopeForPanelRuntime();
+            getInputDraftStoragePayloadForPanelRuntime(scopeForLegacyDraftMigration).then(function (existingForLegacyDraftMigration) {
+              const migrationWriteForLegacyDraft = existingForLegacyDraftMigration
+                ? Promise.resolve()
+                : queueInputDraftWriteForPanelRuntime(scopeForLegacyDraftMigration, legacyDraftForMigration);
+              return migrationWriteForLegacyDraft.then(function () {
+                return new Promise(function (resolveForLegacyDraftRemoval) {
+                  try {
+                    chrome.storage.local.remove(LEGACY_INPUT_DRAFT_KEY_FOR_PANEL_RUNTIME, resolveForLegacyDraftRemoval);
+                  } catch (errorForLegacyDraftRemoval) {
+                    resolveForLegacyDraftRemoval();
+                  }
+                });
+              });
+            }).then(resolveForLegacyDraftMigration).catch(resolveForLegacyDraftMigration);
+          });
+        } catch (errorForLegacyDraftMigration) {
+          resolveForLegacyDraftMigration();
+        }
+      });
+    }
+
+    function saveSubmittedDraftSnapshotForPanelRuntime(scopeForSubmittedDraft, startedAtForSubmittedDraft) {
+      if (draftSaveTimerForPanelRuntime) {
+        clearTimeout(draftSaveTimerForPanelRuntime);
+        draftSaveTimerForPanelRuntime = null;
+      }
+      return Promise.resolve(
+        buildInputDraftPayloadForPanelRuntime(
+          scopeForSubmittedDraft,
+          collectCurrentInputDraftForPanelRuntime(),
+          { updatedAt: startedAtForSubmittedDraft }
+        )
+      );
+    }
+
+    function clearSubmittedDraftForPanelRuntime(scopeForSubmittedDraft, submittedPayloadForDraft) {
+      const resolvedScopeForSubmittedDraft = String(scopeForSubmittedDraft);
+      const pendingWriteForSubmittedDraft = draftWriteChainsForPanelRuntime[resolvedScopeForSubmittedDraft] || Promise.resolve();
+      return pendingWriteForSubmittedDraft
+        .catch(function () {})
+        .then(function () {
+          return getInputDraftStoragePayloadForPanelRuntime(resolvedScopeForSubmittedDraft);
+        })
+        .then(function (currentPayloadForSubmittedDraft) {
+          const currentMatchesSubmittedForDraft = Boolean(
+            currentPayloadForSubmittedDraft
+            && currentPayloadForSubmittedDraft.version === submittedPayloadForDraft.version
+          );
+          const currentIsNewerThanSubmittedForDraft = Boolean(
+            currentPayloadForSubmittedDraft
+            && Number(currentPayloadForSubmittedDraft.updatedAt) >= Number(submittedPayloadForDraft.updatedAt)
+          );
+          if (
+            currentPayloadForSubmittedDraft
+            && !currentMatchesSubmittedForDraft
+            && currentIsNewerThanSubmittedForDraft
+          ) {
+            if (
+              draftMountedScopeForPanelRuntime === resolvedScopeForSubmittedDraft
+              && !draftLocalDirtyForPanelRuntime
+            ) {
+              applyDraftToUiForPanelRuntime(currentPayloadForSubmittedDraft, currentPayloadForSubmittedDraft);
+            }
+            return currentPayloadForSubmittedDraft;
+          }
+          return queueInputDraftWriteForPanelRuntime(
+            resolvedScopeForSubmittedDraft,
+            { text: '', chips: [] },
+            {
+              cleared: true,
+              clearedThroughVersion: submittedPayloadForDraft.version,
+              clearedThroughUpdatedAt: submittedPayloadForDraft.updatedAt
+            }
+          ).then(function (clearPayloadForSubmittedDraft) {
+            if (draftMountedScopeForPanelRuntime === resolvedScopeForSubmittedDraft) {
+              applyDraftToUiForPanelRuntime({ text: '', chips: [] }, clearPayloadForSubmittedDraft);
+            }
+            return clearPayloadForSubmittedDraft;
+          });
+        });
+    }
+
+    function handleIncomingInputDraftForPanelRuntime(scopeForIncomingDraft, incomingForDraft) {
+      if (scopeForIncomingDraft !== draftMountedScopeForPanelRuntime) return;
+      if (incomingForDraft && incomingForDraft.sourceId === getDraftSyncSourceIdForPanelRuntime()) return;
+      if (scopeForIncomingDraft === draftScopeLockedForSendForPanelRuntime) {
+        const deferredForIncomingDraft = draftDeferredPayloadsForPanelRuntime[scopeForIncomingDraft];
+        if (
+          incomingForDraft
+          && (
+            !deferredForIncomingDraft
+            || Number(incomingForDraft.updatedAt) >= Number(deferredForIncomingDraft.updatedAt)
+          )
+        ) {
+          draftDeferredPayloadsForPanelRuntime[scopeForIncomingDraft] = incomingForDraft;
+        }
+        return;
+      }
+
+      const incomingUpdatedAtForDraft = Number(incomingForDraft && incomingForDraft.updatedAt) || 0;
+      const incomingRestoresPostSubmitDraft = Boolean(
+        incomingForDraft
+        && !incomingForDraft.cleared
+        && !draftLocalDirtyForPanelRuntime
+        && draftUiBaseClearedThroughUpdatedAtForPanelRuntime > 0
+        && incomingUpdatedAtForDraft >= draftUiBaseClearedThroughUpdatedAtForPanelRuntime
+      );
+      if (incomingRestoresPostSubmitDraft) {
+        queueInputDraftWriteForPanelRuntime(
+          scopeForIncomingDraft,
+          incomingForDraft
+        ).then(function (restoredForIncomingDraft) {
+          applyDraftToUiForPanelRuntime(restoredForIncomingDraft, restoredForIncomingDraft);
+        }).catch(function () {});
+        return;
+      }
+      if (
+        incomingForDraft
+        && !draftLocalDirtyForPanelRuntime
+        && draftUiBaseUpdatedAtForPanelRuntime > incomingUpdatedAtForDraft
+      ) {
+        saveDraftForPanelRuntime().catch(function () {});
+        return;
+      }
+
+      if (incomingForDraft && incomingForDraft.cleared) {
+        const clearedThroughUpdatedAtForIncoming = Number(incomingForDraft.clearedThroughUpdatedAt) || 0;
+        const clearedThroughVersionForIncoming = String(incomingForDraft.clearedThroughVersion || '');
+        if (
+          draftLocalDirtyForPanelRuntime
+          || draftUiBaseUpdatedAtForPanelRuntime > clearedThroughUpdatedAtForIncoming
+          || (
+            draftUiBaseUpdatedAtForPanelRuntime === clearedThroughUpdatedAtForIncoming
+            && draftUiBaseVersionForPanelRuntime
+            && draftUiBaseVersionForPanelRuntime !== clearedThroughVersionForIncoming
+          )
+        ) {
+          saveDraftForPanelRuntime().catch(function () {});
+          return;
+        }
+      } else if (draftLocalDirtyForPanelRuntime) {
+        const deferredForDirtyDraft = draftDeferredPayloadsForPanelRuntime[scopeForIncomingDraft];
+        if (
+          incomingForDraft
+          && (
+            !deferredForDirtyDraft
+            || Number(incomingForDraft.updatedAt) >= Number(deferredForDirtyDraft.updatedAt)
+          )
+        ) {
+          draftDeferredPayloadsForPanelRuntime[scopeForIncomingDraft] = incomingForDraft;
+        }
+        return;
+      }
+
+      applyDraftToUiForPanelRuntime(incomingForDraft || { text: '', chips: [] }, incomingForDraft);
+    }
+
+    // Named listener so re-injection teardown can remove it and stale generations self-remove.
     function bindDraftStorageSyncForPanelRuntime() {
       try {
         if (draftStorageSyncListenerForPanelRuntime) {
@@ -11901,30 +12346,24 @@
           draftStorageSyncListenerForPanelRuntime = null;
         }
         var capturedGenForDraftSync = window.abchatListenerGeneration || 0;
-        draftStorageSyncListenerForPanelRuntime = function draftStorageSyncHandlerForPanelRuntime(changes, area) {
+        draftStorageSyncListenerForPanelRuntime = function draftStorageSyncHandlerForPanelRuntime(changesForDraftSync, areaForDraftSync) {
           if ((window.abchatListenerGeneration || 0) !== capturedGenForDraftSync) {
             chrome.storage.onChanged.removeListener(draftStorageSyncListenerForPanelRuntime);
             draftStorageSyncListenerForPanelRuntime = null;
             return;
           }
-          if (area !== 'local' || !changes[INPUT_DRAFT_KEY_FOR_PANEL_RUNTIME]) return;
-          const incoming = changes[INPUT_DRAFT_KEY_FOR_PANEL_RUNTIME].newValue;
-          const incomingSerialized = JSON.stringify(incoming || { text: '', chips: [] });
-          if (consumeMatchingSelfDraftWriteForPanelRuntime(incomingSerialized)) return;
-          // Defensive layer 1: any chip mid-upload means this event almost certainly
-          // carries a stale self-write snapshot (filtered while loading). Don't wipe.
-          const rowForLoadingGuard = root.querySelector('.input-chips-row');
-          if (rowForLoadingGuard && rowForLoadingGuard.querySelector('.ic-status-loading')) return;
-          // Defensive layer 2: if we wrote the draft very recently, treat any unmatched
-          // event as a self-write echo Chrome coalesced or reordered. Cross-tab updates
-          // catch up on the next user edit.
-          if (Date.now() - lastSelfDraftWriteTsForPanelRuntime < 1500) return;
-          const currentSerialized = serializeCurrentDraftForPanelRuntime();
-          if (currentSerialized === incomingSerialized) return;
-          applyDraftToUiForPanelRuntime(incoming || { text: '', chips: [] });
+          if (areaForDraftSync !== 'local') return;
+          Object.keys(changesForDraftSync).forEach(function (keyForDraftSync) {
+            const scopeForDraftSync = getInputDraftScopeFromStorageKeyForPanelRuntime(keyForDraftSync);
+            if (scopeForDraftSync === null) return;
+            handleIncomingInputDraftForPanelRuntime(
+              scopeForDraftSync,
+              changesForDraftSync[keyForDraftSync].newValue
+            );
+          });
         };
         chrome.storage.onChanged.addListener(draftStorageSyncListenerForPanelRuntime);
-      } catch (e) {}
+      } catch (errorForDraftSync) {}
     }
 
     function getNextChatIdForPanelRuntime() {
@@ -14600,6 +15039,8 @@
           sendInFlightChatsForPanelRuntime.delete(lockCtxForSendLock.chatKey);
         }
         if (!isResendForSendLock) composerSendInFlightForPanelRuntime = false;
+        draftScopeLockedForSendForPanelRuntime = null;
+        await reconcileMountedInputDraftForPanelRuntime().catch(function () {});
         releaseComposerBusyStateForPanelRuntime(wasComposerFocusedForSendLock);
       }
     }
@@ -14616,6 +15057,17 @@
         ? ''
         : chatTaForSend.value.trim();
       if (!isResendForPanelRuntime && !text) return;
+      const draftScopeForSend = isResendForPanelRuntime
+        ? null
+        : (draftMountedScopeForPanelRuntime || getActiveInputDraftScopeForPanelRuntime());
+      const draftStartedAtForSend = Date.now();
+      const initialChatIdForSend = isResendForPanelRuntime
+        ? Number(optsForPanelRuntime.chatId)
+        : (
+            S.activeChatId !== null && S.activeChatId !== undefined && Number.isFinite(Number(S.activeChatId))
+              ? Number(S.activeChatId)
+              : null
+          );
 
       // Before any side effect. The disabled send button covers the click path, but Enter calls
       // straight in here, and the button's state can lag a chip that just started loading.
@@ -14626,7 +15078,9 @@
           showBusyAttachmentsToastForPanelRuntime(busyChipsForSend.length);
           return;
         }
+        draftScopeLockedForSendForPanelRuntime = draftScopeForSend;
       }
+      let submittedDraftPayloadForSend = null;
 
       // Capture model before any selectChat call can reset it
       const userSelectedModelForSend = (modelSelectForSend && modelSelectForSend.value) ? modelSelectForSend.value : DEFAULT_MODEL_FOR_PANEL_RUNTIME;
@@ -14647,11 +15101,33 @@
         }
         setOfflineBannerStateForPanelRuntime('hidden');
       }
+      if (
+        !isResendForPanelRuntime
+        && (
+          draftMountedScopeForPanelRuntime !== draftScopeForSend
+          || (
+            initialChatIdForSend === null
+              ? S.activeChatId !== null && S.activeChatId !== undefined
+              : Number(S.activeChatId) !== initialChatIdForSend
+          )
+        )
+      ) {
+        return;
+      }
 
       // Create chat if none is active
-      if (!S.activeChatId && !isResendForPanelRuntime) {
+      let createdChatFromNewDraftForSend = false;
+      if (initialChatIdForSend === null && !isResendForPanelRuntime) {
         const newChatId = await createNewChatForPanelRuntime(text);
-        selectChat(newChatId);
+        if (
+          draftMountedScopeForPanelRuntime !== draftScopeForSend
+          || (S.activeChatId !== null && S.activeChatId !== undefined)
+        ) {
+          await deleteChatForPanelRuntime(newChatId);
+          return;
+        }
+        createdChatFromNewDraftForSend = true;
+        selectChat(newChatId, { skipInputDraftSwitch: true });
         // Restore user's model choice after selectChat resets the select for a new chat
         if (modelSelectForSend) {
           modelSelectForSend.value = userSelectedModelForSend;
@@ -14659,7 +15135,9 @@
         }
       }
 
-      const chatId = Number(optsForPanelRuntime.chatId || S.activeChatId);
+      const chatId = isResendForPanelRuntime
+        ? Number(optsForPanelRuntime.chatId)
+        : (createdChatFromNewDraftForSend ? Number(S.activeChatId) : initialChatIdForSend);
       if (!Number.isFinite(chatId)) return;
       // Take the per-chat half of the send lock now that the id is known. The composer flag
       // taken at entry covers only the window before this point, so this is what stops a
@@ -14718,6 +15196,7 @@
       }
 
       if (!isResendForPanelRuntime) {
+        if (draftMountedScopeForPanelRuntime !== draftScopeForSend) return;
         const msgsForAutoChipScanOffscreen = (CHAT_STORE_FOR_PANEL_RUNTIME[chatId] || {}).messages || [];
         const blobIdPatternForAutoChipOffscreen = /__blob:(\d+)__/;
         let lastUserIndexForAutoChipOffscreen = -1;
@@ -14742,11 +15221,20 @@
           showChipSourceMissingToastForPanelRuntime(brokenChipsForSend);
         }
         await stampInputChipSourceSnapshotsForPanelRuntime();
+        if (draftMountedScopeForPanelRuntime !== draftScopeForSend) return;
+        submittedDraftPayloadForSend = await saveSubmittedDraftSnapshotForPanelRuntime(
+          draftScopeForSend,
+          draftStartedAtForSend
+        );
         const chipsForOffscreen = collectInputChipsForPanelRuntime();
         await appendMessageToChatForPanelRuntime(chatId, { role: "user", content: text, md: text, chips: chipsForOffscreen, pageContext: getCurrentPageContextForPanelRuntime(), _addedByThisTab: true }, { persistToDb: false });
         chatTaForSend.value = "";
         clearInputChipsForPanelRuntime();
-        clearDraftForPanelRuntime();
+        draftLocalDirtyForPanelRuntime = false;
+        await clearSubmittedDraftForPanelRuntime(draftScopeForSend, submittedDraftPayloadForSend);
+        if (createdChatFromNewDraftForSend) {
+          await switchInputDraftScopeForPanelRuntime(String(chatId));
+        }
         updateAutoExpandForTextareaForPanelRuntime(chatTaForSend);
         renderChatMessages();
         scrollChatToBottomForPanelRuntime();
@@ -15517,7 +16005,10 @@
       if (daysForPanelRuntime == null || !Number.isFinite(Number(daysForPanelRuntime)) || Number(daysForPanelRuntime) <= 0) return;
       var repoForPanelRuntime = getPanelDataRepoForPanelRuntime();
       if (!repoForPanelRuntime || typeof repoForPanelRuntime.deleteChatsOlderThan !== 'function') return;
-      repoForPanelRuntime.deleteChatsOlderThan(Number(daysForPanelRuntime), getPendingBlobIdsForPanelRuntime()).catch(function () {});
+      try {
+        await repoForPanelRuntime.deleteChatsOlderThan(Number(daysForPanelRuntime), getPendingBlobIdsForPanelRuntime());
+        await executeStoreRefreshForPanelRuntime('chats');
+      } catch (errorForChatRetention) {}
     }
 
     async function pruneOrphanedBlobsFromSettingsForPanelRuntime() {
@@ -16134,7 +16625,10 @@
         type: chipTypeForPanelRuntime,
         label: String(fileForPanelRuntime.name || 'Image')
       });
-      if (!targetChipForPanelRuntime) return;
+      if (!targetChipForPanelRuntime || !targetChipForPanelRuntime.isConnected) {
+        discardUnclaimedInputBlobForPanelRuntime(persistedBlobForPanelRuntime.id);
+        return;
+      }
       targetChipForPanelRuntime.dataset.attachType = String(chipTypeForPanelRuntime || 'image');
       targetChipForPanelRuntime.dataset.attachName = String(fileForPanelRuntime.name || 'Image');
       targetChipForPanelRuntime.dataset.attachRefId = String(Number(persistedBlobForPanelRuntime.id) || '');
@@ -16176,7 +16670,10 @@
           size: Number(responseForPanelRuntime.size || 0),
           dataUrl: dataUrlForPanelRuntime
         });
-        if (!pendingChipForPanelRuntime) return;
+        if (!pendingChipForPanelRuntime || !pendingChipForPanelRuntime.isConnected) {
+          discardUnclaimedInputBlobForPanelRuntime(persistedBlobForPanelRuntime.id);
+          return;
+        }
         pendingChipForPanelRuntime.dataset.attachType = 'screenshot';
         pendingChipForPanelRuntime.dataset.attachName = 'Screenshot';
         pendingChipForPanelRuntime.dataset.attachRefId = String(Number(persistedBlobForPanelRuntime.id) || '');
@@ -16382,7 +16879,10 @@
         type: 'file',
         label: String(fileForPanelRuntime.name || 'File')
       });
-      if (!targetChipForPanelRuntime) return;
+      if (!targetChipForPanelRuntime || !targetChipForPanelRuntime.isConnected) {
+        discardUnclaimedInputBlobForPanelRuntime(blobIdForPanelRuntime);
+        return;
+      }
       targetChipForPanelRuntime.dataset.attachType = 'file';
       targetChipForPanelRuntime.dataset.attachName = String(fileForPanelRuntime.name || 'File');
       targetChipForPanelRuntime.dataset.attachRefId = String(blobIdForPanelRuntime || '');
@@ -18582,14 +19082,17 @@
       bindProfileFieldsStorageSyncForPanelRuntime();
       bindPageContextStorageSyncForPanelRuntime();
       initModelSelectsForPanelRuntime();
-      autoDeleteOldChatsForPanelRuntime();
       // Retention days must be read before the sweep so it uses the user's setting rather
       // than the default; both are fire-and-forget so a slow read cannot delay panel init.
       loadClipRetentionSettingForPanelRuntime()
         .then(autoDeleteOldClipsForPanelRuntime)
         .catch(function () {});
-      restoreDraftForPanelRuntime();
       bindDraftStorageSyncForPanelRuntime();
+      migrateLegacyInputDraftForPanelRuntime().then(function () {
+        return switchInputDraftScopeForPanelRuntime(getActiveInputDraftScopeForPanelRuntime());
+      }).then(function () {
+        return autoDeleteOldChatsForPanelRuntime();
+      }).catch(function () {});
       bindNoteDraftStorageSyncForPanelRuntime();
 
       if (typeof MutationObserver === 'function' && mountNodeForPanelRuntime) {
@@ -19468,6 +19971,7 @@
         clearTimeout(draftSaveTimerForPanelRuntime);
         draftSaveTimerForPanelRuntime = null;
       }
+      draftLoadGenerationForPanelRuntime += 1;
       if (draftStorageSyncListenerForPanelRuntime) {
         try { chrome.storage.onChanged.removeListener(draftStorageSyncListenerForPanelRuntime); } catch (e) {}
         draftStorageSyncListenerForPanelRuntime = null;
