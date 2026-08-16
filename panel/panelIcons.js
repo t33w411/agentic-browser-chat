@@ -23,6 +23,7 @@
   var chevronRightPath = '<polyline points="9 18 15 12 9 6"/>';
   var chevronDownPath = '<polyline points="6 9 12 15 18 9"/>';
   var searchPaths = '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>';
+  var filterPaths = '<polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>';
   var starPath = '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>';
   var zapPath = '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>';
   var moonPath = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
@@ -77,6 +78,7 @@
   icons.chevronDown10 = svgForPanelIcon(10, 2.5, chevronDownPath);
   icons.modelPickerChevron10 = svgForPanelIcon(10, 2.5, chevronDownPath, 'class="model-picker-chevron"');
   icons.search11 = svgForPanelIcon(11, 2.5, searchPaths);
+  icons.filter11 = svgForPanelIcon(11, 2, filterPaths);
   icons.search12 = svgForPanelIcon(12, 2.5, searchPaths);
   icons.starEmpty12 = svgForPanelIcon(12, 2, starPath);
   icons.starFilled12 = svgForPanelIcon(12, 2, starPath, '', 'currentColor', 'currentColor');

@@ -509,6 +509,77 @@
 .panel-host[data-theme="dark"] .task-search .s-clear:hover { color: #1e293b; background: rgba(15,23,42,0.08); }
 .sidebar-search input, .ns-search input, .task-search input { padding-right: 24px; }
 
+/* An active search box is tinted so the list below is never read as "everything there is". */
+.sidebar-search.has-value input,
+.ns-search.has-value input,
+.task-search.has-value input { border-color: var(--abchat-accent); }
+.sidebar-search.has-value .s-icon,
+.ns-search.has-value .s-icon,
+.task-search.has-value .s-icon { color: var(--abchat-accent); }
+
+/* ============================================================
+   LIST FILTER BAR
+   Shown above a list whenever a search or filter is narrowing it:
+   states the count, names the filters in its tooltip, and clears them.
+============================================================ */
+.list-filter-bar {
+  --lfb-fg: var(--abchat-text-accent);
+  --lfb-bg: rgba(37,99,235,0.10);
+  --lfb-border: rgba(37,99,235,0.28);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px 5px 8px;
+  border: 1px solid var(--lfb-border);
+  border-left: 3px solid var(--lfb-fg);
+  border-radius: var(--abchat-r-sm);
+  background: var(--lfb-bg);
+  font-size: 11px;
+  line-height: 1.3;
+  flex-shrink: 0;
+}
+.list-filter-bar .lfb-icon { display: flex; color: var(--lfb-fg); flex-shrink: 0; }
+.list-filter-bar .lfb-text {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  color: var(--lfb-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.list-filter-bar .lfb-clear {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  padding: 2px 5px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: var(--abchat-font);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--lfb-fg);
+  transition: background 0.1s;
+}
+.list-filter-bar .lfb-clear:hover { background: var(--lfb-border); }
+/* Same tint reads far weaker over the dark sidebar, so lift it there. */
+.panel-host[data-theme="dark"] .list-filter-bar,
+#picker-overlay[data-theme="dark"] .list-filter-bar {
+  --lfb-bg: rgba(59,130,246,0.18);
+  --lfb-border: rgba(96,165,250,0.36);
+}
+.list-filter-bar.lfb-empty {
+  --lfb-fg: #b45309;
+  --lfb-bg: rgba(180,83,9,0.10);
+  --lfb-border: rgba(180,83,9,0.28);
+}
+.panel-host[data-theme="dark"] .list-filter-bar.lfb-empty,
+#picker-overlay[data-theme="dark"] .list-filter-bar.lfb-empty {
+  --lfb-fg: #fbbf24;
+  --lfb-bg: rgba(251,191,36,0.12);
+  --lfb-border: rgba(251,191,36,0.30);
+}
+
 .chat-list {
   flex: 1;
   overflow-y: auto;
@@ -1473,6 +1544,11 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 .mp-filter-chip.active { background: var(--abchat-accent); border-color: var(--abchat-accent); color: #fff; }
 .mp-list { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
 .mp-empty { padding: 10px 8px; text-align: center; font-size: 13px; color: var(--abchat-text-secondary); }
+.mp-filter-count {
+  margin-left: auto; align-self: center;
+  font-size: 11px; font-weight: 600; color: var(--abchat-text-accent);
+}
+.mp-search-row.has-value .mp-search { border-color: var(--abchat-accent); }
 .mp-group { margin-bottom: 2px; }
 .mp-group:last-child { margin-bottom: 0; }
 .mp-group-label {
@@ -3185,6 +3261,9 @@ mjx-container svg { overflow: visible; max-width: 6px; min-height: 17px; }
 .pk-search-icon { position: absolute; left: 19px; top: 50%; transform: translateY(-50%); color: #94a3b8; pointer-events: none; }
 .pk-search-clear { right: 16px; }
 .pk-search { padding-right: 28px; }
+.pk-search-wrap.has-value .pk-search { border-color: var(--abchat-accent); }
+.pk-search-wrap.has-value .pk-search-icon { color: var(--abchat-accent); }
+.pk-filter-bar { margin: 8px 10px 0; }
 .pk-list {
   flex: 1; overflow-y: auto; padding: 6px;
   scrollbar-width: thin; scrollbar-color: #e2e8f0 transparent;

@@ -484,7 +484,7 @@
     const MAX_CLIP_RETENTION_DAYS_FOR_PANEL_RUNTIME = 30;
     const CLIP_EXCERPT_LENGTH_FOR_PANEL_RUNTIME = 500;
     var clipRetentionDaysForPanelRuntime = DEFAULT_CLIP_RETENTION_DAYS_FOR_PANEL_RUNTIME;
-    var searchForcedTaskIdsForPanelRuntime = new Set();
+    var filterForcedTaskIdsForPanelRuntime = new Set();
     var searchForcedQuizIdsForPanelRuntime = new Set();
     CHAT_DATA.forEach(function(srcForStore) {
       const createdAtForStore = typeof srcForStore.createdAt === 'string' ? srcForStore.createdAt : '';
@@ -1441,11 +1441,13 @@
     }
 
     function activateLibsReadyGateForPanelRuntime() {
-      if (!libsOverlayForPanelRuntime) return;
+      // No overlay means there is no gate to run, and the composer must not be left disabled by
+      // the markup with nothing left to open it.
+      if (!libsOverlayForPanelRuntime) {
+        openComposerInputGateForPanelRuntime();
+        return;
+      }
 
-      // Disable the main chat input while libraries are initialising.
-      const chatTaForGate = root.querySelector('.chat-textarea');
-      if (chatTaForGate) chatTaForGate.disabled = true;
       libsReadyForPanelRuntime = false;
       refreshSendAvailabilityForPanelRuntime();
 
@@ -1455,9 +1457,17 @@
 
       buildLibsReadyGateForPanelRuntime()
         .then(function () {
+          // The composer also stays disabled until the draft mirror has mounted. The markup
+          // ships it disabled because panel.js builds the DOM before initialize() runs (it waits
+          // on dbReadyPromise first), and anything typed in that window is captured by nothing
+          // and then overwritten by the stored draft when it loads. A draft-mount failure must
+          // not surface as a library error, so it is swallowed rather than propagated.
+          return Promise.resolve(draftMountedPromiseForPanelRuntime).catch(function () {});
+        })
+        .then(function () {
           libsOverlayForPanelRuntime.classList.add('libs-ready');
-          if (chatTaForGate) chatTaForGate.disabled = false;
           libsReadyForPanelRuntime = true;
+          openComposerInputGateForPanelRuntime();
           refreshSendAvailabilityForPanelRuntime();
           // Remove the overlay from the DOM after the CSS fade completes.
           setTimeout(function () {
@@ -4806,8 +4816,10 @@
       const queryForFilter = String(rawQueryForFilter || '').trim().toLowerCase();
       const reasoningOnlyForFilter = reasoningFilterActiveForPanelRuntime;
       let totalVisibleForFilter = 0;
+      let totalItemsForFilter = 0;
       listForFilter.querySelectorAll('.mp-group').forEach(function (groupForFilter) {
         let visibleInGroupForFilter = 0;
+        totalItemsForFilter += groupForFilter.querySelectorAll('.mp-item').length;
         groupForFilter.querySelectorAll('.mp-item').forEach(function (itemForFilter) {
           const haystackForFilter = itemForFilter.dataset.searchText || itemForFilter.textContent.toLowerCase();
           const matchesQueryForFilter = !queryForFilter || haystackForFilter.indexOf(queryForFilter) !== -1;
@@ -4821,6 +4833,16 @@
       });
       const emptyForFilter = root.getElementById('model-picker-empty');
       if (emptyForFilter) emptyForFilter.hidden = totalVisibleForFilter > 0;
+      const countForFilter = root.getElementById('model-picker-count');
+      if (countForFilter) {
+        const narrowedForFilter =
+          (Boolean(queryForFilter) || reasoningOnlyForFilter) && totalItemsForFilter > 0;
+        countForFilter.textContent = narrowedForFilter
+          ? totalVisibleForFilter + ' of ' + totalItemsForFilter
+          : '';
+        countForFilter.classList.toggle('hidden', !narrowedForFilter);
+      }
+      syncSearchWrapValueStateForPanelRuntime('model-picker-search');
     }
 
     function toggleReasoningFilterForPanelRuntime() {
@@ -4931,6 +4953,18 @@
     // markup) is not left with a permanently disabled send button. The gate clears it when it
     // actually takes over, and sets it again once the libraries are up.
     var libsReadyForPanelRuntime = true;
+
+    // Owns the "libraries and draft mirror are not ready yet" half of the composer's disabled
+    // state. The markup ships the textarea disabled, so this stays false until the gate releases.
+    // setSendingUIState reads it, which is what stops an unrelated repaint (a stream event, a
+    // chat switch, an attachment finishing) from enabling the input behind the gate's back.
+    var composerInputGateOpenForPanelRuntime = false;
+
+    function openComposerInputGateForPanelRuntime() {
+      if (composerInputGateOpenForPanelRuntime) return;
+      composerInputGateOpenForPanelRuntime = true;
+      setSendingUIStateForPanelRuntime();
+    }
 
     function getLoadingInputChipsForPanelRuntime() {
       const rowForLoadingChips = root.querySelector('.input-chips-row');
@@ -9798,6 +9832,7 @@
       S.pickerMode = 'note';
       root.getElementById('pk-title').textContent = 'Attach Note';
       root.getElementById('pk-search').placeholder = 'Search notes...';
+      resetPickerSearchForPanelRuntime();
       renderPickerList(getPickerNotesForPanelRuntime(), 'note');
       pickerOverlay.classList.remove('hidden');
       writePanelStateSyncForPanelRuntime({ pickerOpen: true, pickerMode: 'note' });
@@ -9808,9 +9843,19 @@
       S.pickerMode = 'chat';
       root.getElementById('pk-title').textContent = 'Attach Chat Summary';
       root.getElementById('pk-search').placeholder = 'Search chats...';
+      resetPickerSearchForPanelRuntime();
       renderPickerList(getPickerChatsForPanelRuntime(), 'chat');
       pickerOverlay.classList.remove('hidden');
       writePanelStateSyncForPanelRuntime({ pickerOpen: true, pickerMode: 'chat' });
+    }
+
+    // Each picker opens on the full list, so a query left over from the previous open would
+    // sit in the box describing a filter that is no longer applied.
+    function resetPickerSearchForPanelRuntime() {
+      const searchForReset = root.getElementById('pk-search');
+      if (searchForReset) searchForReset.value = '';
+      syncSearchWrapValueStateForPanelRuntime('pk-search');
+      updateListFilterBarForPanelRuntime('pk-filter-bar', { reasons: [] });
     }
 
     function renderPickerList(items, type) {
@@ -10280,6 +10325,7 @@
       S.pickerMode = 'clip';
       root.getElementById('pk-title').textContent = 'Attach Saved Clip';
       root.getElementById('pk-search').placeholder = 'Search clips...';
+      resetPickerSearchForPanelRuntime();
       renderPickerList(getPickerClipsForPanelRuntime(), 'clip');
       pickerOverlay.classList.remove('hidden');
       writePanelStateSyncForPanelRuntime({ pickerOpen: true, pickerMode: 'clip' });
@@ -10899,6 +10945,92 @@
       SEARCH / FILTER
     ============================================================ */
 
+    // A narrowed list looks exactly like a short list, so every filterable list carries a
+    // bar that says so and offers the way out. This is the single writer of every
+    // .list-filter-bar: callers hand it counts they derived from the store, never from the
+    // DOM, so list windowing cannot skew the numbers. An empty `reasons` list means nothing
+    // is narrowing and the bar stays hidden.
+    function updateListFilterBarForPanelRuntime(barIdForBar, stateForBar) {
+      const barForBar = root.getElementById(barIdForBar);
+      if (!barForBar) return;
+      const optsForBar = stateForBar || {};
+      const reasonsForBar = (optsForBar.reasons || []).filter(Boolean);
+      const totalForBar = Number(optsForBar.total) || 0;
+      // An empty list with nothing in the store behind it was not narrowed by anything, so
+      // the bar would be claiming a filter hid results that never existed.
+      if (reasonsForBar.length === 0 || totalForBar === 0) {
+        barForBar.classList.add('hidden');
+        barForBar.classList.remove('lfb-empty');
+        barForBar.removeAttribute('title');
+        return;
+      }
+      const nounForBar = optsForBar.noun || 'items';
+      const visibleForBar = Number(optsForBar.visible) || 0;
+      const textElForBar = barForBar.querySelector('.lfb-text');
+      if (textElForBar) {
+        textElForBar.textContent = visibleForBar === 0
+          ? '0 of ' + totalForBar + ' ' + nounForBar + ' match'
+          : 'Showing ' + visibleForBar + ' of ' + totalForBar + ' ' + nounForBar;
+      }
+      barForBar.classList.toggle('lfb-empty', visibleForBar === 0);
+      barForBar.title = 'Filtered by ' + reasonsForBar.join(' + ');
+      barForBar.classList.remove('hidden');
+    }
+
+    // The clear button and the accent styling on an active search box both hang off
+    // .has-value, so the class has to track the input's value wherever it was set from
+    // (typing, a cross-tab mirror, a programmatic reapply), not only from the input handler.
+    function syncSearchWrapValueStateForPanelRuntime(inputIdForSync) {
+      const inputForSync = root.getElementById(inputIdForSync);
+      if (!inputForSync) return;
+      const wrapForSync = inputForSync.closest('.sidebar-search,.ns-search,.task-search,.pk-search-wrap,.mp-search-row');
+      if (wrapForSync) wrapForSync.classList.toggle('has-value', (inputForSync.value || '').length > 0);
+    }
+
+    function describeSearchFilterReasonForPanelRuntime(queryForReason) {
+      const trimmedForReason = String(queryForReason || '').trim();
+      return trimmedForReason ? 'search "' + trimmedForReason + '"' : '';
+    }
+
+    // The bar's escape hatch. It reports every narrowing filter on the list, so it has to
+    // clear every one of them, not just the search box.
+    function clearListFiltersForPanelRuntime(listNameForClear) {
+      if (listNameForClear === 'chats') {
+        const searchForClear = root.getElementById('chat-search-input');
+        if (searchForClear) searchForClear.value = '';
+        const favsBtnForClear = root.getElementById('favs-btn');
+        if (favsBtnForClear && favsBtnForClear.classList.contains('active')) {
+          favsBtnForClear.classList.remove('active');
+          favsBtnForClear.innerHTML = ic.starEmpty12 + ' Favs';
+        }
+        applyChatListFilterForPanelRuntime();
+        writePanelStateSyncForPanelRuntime({ chatSearchQuery: '' });
+        if (searchForClear) searchForClear.focus();
+        return;
+      }
+      if (listNameForClear === 'notes') {
+        const searchForClear = root.getElementById('notes-search-input');
+        if (searchForClear) searchForClear.value = '';
+        const favsBtnForClear = root.getElementById('note-favs-btn');
+        if (favsBtnForClear && favsBtnForClear.classList.contains('active')) {
+          favsBtnForClear.classList.remove('active');
+          favsBtnForClear.innerHTML = ic.starEmpty12 + ' Favs';
+        }
+        applyNoteListFilterForPanelRuntime();
+        writePanelStateSyncForPanelRuntime({ notesSearchQuery: '' });
+        if (searchForClear) searchForClear.focus();
+        return;
+      }
+      if (listNameForClear === 'tasks') {
+        const searchForClear = root.getElementById('task-search-input');
+        if (searchForClear) searchForClear.value = '';
+        // setFilter re-runs the task filter off the (now empty) input, so it covers both.
+        setFilter('all');
+        writePanelStateSyncForPanelRuntime({ taskSearchQuery: '' });
+        if (searchForClear) searchForClear.focus();
+      }
+    }
+
     function getActiveChatFilterStateForPanelRuntime() {
       var favsBtnForState = root.getElementById('favs-btn');
       var searchInputForState = root.getElementById('chat-search-input');
@@ -11006,6 +11138,29 @@
       } else {
         refreshChatGroupLabelsVisibilityForPanelRuntime();
       }
+
+      syncSearchWrapValueStateForPanelRuntime('chat-search-input');
+      updateChatFilterBarForPanelRuntime(filterStateForApply, visibleIdsForApply.size);
+    }
+
+    function updateChatFilterBarForPanelRuntime(filterStateForBar, visibleCountForBar) {
+      const wantQuickQForBar = filterStateForBar.type === 'quickq';
+      let totalForBar = 0;
+      CHAT_ORDER_FOR_PANEL_RUNTIME.forEach(function (idForBar) {
+        const chatForBar = CHAT_STORE_FOR_PANEL_RUNTIME[idForBar];
+        if (!chatForBar) return;
+        if ((chatForBar.type === 'quickq') !== wantQuickQForBar) return;
+        totalForBar++;
+      });
+      updateListFilterBarForPanelRuntime('chat-filter-bar', {
+        visible: visibleCountForBar,
+        total: totalForBar,
+        noun: wantQuickQForBar ? 'quick questions' : 'chats',
+        reasons: [
+          describeSearchFilterReasonForPanelRuntime(filterStateForBar.query),
+          filterStateForBar.favsOn ? 'favourites only' : ''
+        ]
+      });
     }
 
     function filterChatListForPanelRuntime(query) {
@@ -11023,14 +11178,14 @@
       const trimmedQueryForFilter = (query || '').trim();
       const activeFilterForTasks = S.taskFilter || 'all';
 
-      searchForcedTaskIdsForPanelRuntime.forEach(function (idForClear) {
+      filterForcedTaskIdsForPanelRuntime.forEach(function (idForClear) {
         var posForClear = TASK_ORDER_FOR_PANEL_RUNTIME.indexOf(Number(idForClear));
         if (posForClear >= renderedTaskCountForPanelRuntime) {
           var elForClear = tasksListForFilter.querySelector('.task-item[data-task-id="' + idForClear + '"]');
           if (elForClear) elForClear.remove();
         }
       });
-      searchForcedTaskIdsForPanelRuntime.clear();
+      filterForcedTaskIdsForPanelRuntime.clear();
 
       // Build set of ids matching the search query (all ids if no query).
       let matchedIdsForFilter = null; // null means "no search constraint"
@@ -11053,26 +11208,55 @@
             }
           });
         }
+      }
 
-        matchedIdsForFilter.forEach(function (id) {
-          var posForTaskSearch = TASK_ORDER_FOR_PANEL_RUNTIME.indexOf(Number(id));
-          if (posForTaskSearch >= renderedTaskCountForPanelRuntime) {
-            syncMainTaskListItemForPanelRuntime(id, false, true);
-            searchForcedTaskIdsForPanelRuntime.add(id);
+      // Resolve status and search against the store rather than the rendered rows: the list
+      // is windowed, so a match beyond the window has no row to inspect and would be missing
+      // from both the list and the count.
+      const visibleIdsForFilter = new Set();
+      let totalForFilter = 0;
+      TASK_ORDER_FOR_PANEL_RUNTIME.forEach(function (idForScan) {
+        const taskForScan = TASK_STORE_FOR_PANEL_RUNTIME[idForScan];
+        if (!taskForScan) return;
+        totalForFilter++;
+        const doneForScan = Boolean(taskForScan.isCompleted);
+        const passesStatusForScan =
+          activeFilterForTasks === 'all' ||
+          (activeFilterForTasks === 'pending' && !doneForScan) ||
+          (activeFilterForTasks === 'completed' && doneForScan);
+        const passesSearchForScan =
+          matchedIdsForFilter === null || matchedIdsForFilter.has(Number(idForScan));
+        if (passesStatusForScan && passesSearchForScan) visibleIdsForFilter.add(Number(idForScan));
+      });
+
+      // Status and search are both narrowing filters, so their matches must be pulled into
+      // the DOM. Nothing else would ever scroll an out-of-window match into view once the
+      // rows around it are hidden.
+      if (trimmedQueryForFilter || activeFilterForTasks !== 'all') {
+        visibleIdsForFilter.forEach(function (idForForce) {
+          const posForForce = TASK_ORDER_FOR_PANEL_RUNTIME.indexOf(Number(idForForce));
+          if (posForForce >= renderedTaskCountForPanelRuntime) {
+            syncMainTaskListItemForPanelRuntime(idForForce, false, true);
+            filterForcedTaskIdsForPanelRuntime.add(Number(idForForce));
           }
         });
       }
 
       tasksListForFilter.querySelectorAll('.task-item').forEach(function (itemForFilter) {
-        const doneForFilter = itemForFilter.dataset.completed === 'true';
-        const passesFilterForFilter =
-          activeFilterForTasks === 'all' ||
-          (activeFilterForTasks === 'pending' && !doneForFilter) ||
-          (activeFilterForTasks === 'completed' && doneForFilter);
-        const passesSearchForFilter =
-          matchedIdsForFilter === null ||
-          matchedIdsForFilter.has(Number(itemForFilter.dataset.taskId));
-        itemForFilter.style.display = (passesFilterForFilter && passesSearchForFilter) ? '' : 'none';
+        itemForFilter.style.display =
+          visibleIdsForFilter.has(Number(itemForFilter.dataset.taskId)) ? '' : 'none';
+      });
+
+      syncSearchWrapValueStateForPanelRuntime('task-search-input');
+      updateListFilterBarForPanelRuntime('task-filter-bar', {
+        visible: visibleIdsForFilter.size,
+        total: totalForFilter,
+        noun: 'tasks',
+        reasons: [
+          describeSearchFilterReasonForPanelRuntime(trimmedQueryForFilter),
+          activeFilterForTasks === 'pending' ? 'pending only' : '',
+          activeFilterForTasks === 'completed' ? 'completed only' : ''
+        ]
       });
     }
 
@@ -11173,6 +11357,28 @@
       });
 
       updateNotesEmptyStateForPanelRuntime(visibleIdsForApply.size, filterStateForApply);
+      syncSearchWrapValueStateForPanelRuntime('notes-search-input');
+      updateNoteFilterBarForPanelRuntime(filterStateForApply, visibleIdsForApply.size);
+    }
+
+    function updateNoteFilterBarForPanelRuntime(filterStateForBar, visibleCountForBar) {
+      const wantClipsForBar = filterStateForBar.type === 'clips';
+      let totalForBar = 0;
+      NOTE_ORDER_FOR_PANEL_RUNTIME.forEach(function (idForBar) {
+        const noteForBar = NOTE_STORE_FOR_PANEL_RUNTIME[idForBar];
+        if (!noteForBar) return;
+        if (isClipNoteTypeForPanelRuntime(noteForBar.noteType) !== wantClipsForBar) return;
+        totalForBar++;
+      });
+      updateListFilterBarForPanelRuntime('note-filter-bar', {
+        visible: visibleCountForBar,
+        total: totalForBar,
+        noun: wantClipsForBar ? 'clips' : 'notes',
+        reasons: [
+          describeSearchFilterReasonForPanelRuntime(filterStateForBar.query),
+          filterStateForBar.favsOn ? 'favourites only' : ''
+        ]
+      });
     }
 
     function filterNotesListForPanelRuntime(query) {
@@ -11841,12 +12047,19 @@
     var draftMountedScopeForPanelRuntime = null;
     var draftUiBaseVersionForPanelRuntime = '';
     var draftUiBaseUpdatedAtForPanelRuntime = 0;
-    var draftUiBaseClearedThroughUpdatedAtForPanelRuntime = 0;
     var draftLocalDirtyForPanelRuntime = false;
     var draftLoadGenerationForPanelRuntime = 0;
     var draftWriteChainsForPanelRuntime = {};
     var draftScopeLockedForSendForPanelRuntime = null;
-    var draftDeferredPayloadsForPanelRuntime = {};
+    // Settles once the composer is bound to a scope and its stored draft has loaded. The libs
+    // gate waits on it before enabling the input.
+    var draftMountedPromiseForPanelRuntime = null;
+
+    // Ordering rules live in panelDraftSync.js so they can be exercised without a browser. Read
+    // from the namespace per call rather than cached, so a re-injection picks up the new copy.
+    function getDraftSyncRulesForPanelRuntime() {
+      return (globalThis.ABChatContent || {}).draftSync || null;
+    }
 
     function getDraftSyncSourceIdForPanelRuntime() {
       if (draftSyncSourceIdForPanelRuntime) return draftSyncSourceIdForPanelRuntime;
@@ -11894,21 +12107,15 @@
     }
 
     function normalizeInputDraftForPanelRuntime(draftForNormalize) {
-      const draftForInput = draftForNormalize && typeof draftForNormalize === 'object' ? draftForNormalize : {};
-      return {
-        text: String(draftForInput.text || ''),
-        chips: Array.isArray(draftForInput.chips)
-          ? draftForInput.chips.filter(function (chipForDraftNormalize) {
-              return chipForDraftNormalize && typeof chipForDraftNormalize === 'object';
-            }).map(function (chipForDraftNormalize) {
-              return Object.assign({}, chipForDraftNormalize);
-            })
-          : []
-      };
+      const rulesForNormalize = getDraftSyncRulesForPanelRuntime();
+      if (!rulesForNormalize) return { text: '', chips: [] };
+      return rulesForNormalize.normalizeDraft(draftForNormalize);
     }
 
     function serializeInputDraftForPanelRuntime(draftForSerialize) {
-      return JSON.stringify(normalizeInputDraftForPanelRuntime(draftForSerialize));
+      const rulesForSerialize = getDraftSyncRulesForPanelRuntime();
+      if (!rulesForSerialize) return '';
+      return rulesForSerialize.serializeDraft(draftForSerialize);
     }
 
     function collectCurrentInputDraftForPanelRuntime() {
@@ -11934,7 +12141,6 @@
         version: getDraftSyncSourceIdForPanelRuntime() + ':' + String(draftLocalRevisionForPanelRuntime) + ':' + String(updatedAtForDraftPayload),
         updatedAt: updatedAtForDraftPayload,
         cleared: Boolean(optsForDraftPayload.cleared),
-        clearedThroughVersion: String(optsForDraftPayload.clearedThroughVersion || ''),
         clearedThroughUpdatedAt: Number(optsForDraftPayload.clearedThroughUpdatedAt) || 0
       });
     }
@@ -12022,39 +12228,67 @@
       const scopeForScheduledDraft = draftMountedScopeForPanelRuntime || getActiveInputDraftScopeForPanelRuntime();
       draftSaveTimerForPanelRuntime = setTimeout(function () {
         draftSaveTimerForPanelRuntime = null;
+        if (!draftLocalDirtyForPanelRuntime) return;
         if (draftMountedScopeForPanelRuntime !== scopeForScheduledDraft) return;
+        // A submit owns the scope until it releases it, and saveDraft refuses for the duration.
+        // Re-arm rather than drop the write, or the edit stays dirty with nothing scheduled to
+        // persist it and survives only until the next keystroke.
+        if (scopeForScheduledDraft === draftScopeLockedForSendForPanelRuntime) {
+          scheduleDraftSaveForPanelRuntime();
+          return;
+        }
         saveDraftForPanelRuntime();
       }, 300);
     }
 
     function applyDraftToUiForPanelRuntime(draftForApply, metadataForDraftApply) {
       const normalizedForDraftApply = normalizeInputDraftForPanelRuntime(draftForApply);
-      draftApplyingForPanelRuntime = true;
-      try {
-        const taForApply = root.querySelector('.chat-textarea');
-        if (taForApply) {
-          taForApply.value = normalizedForDraftApply.text;
-          updateAutoExpandForTextareaForPanelRuntime(taForApply);
-        }
-        const rowForApply = root.querySelector('.input-chips-row');
-        if (rowForApply) rowForApply.innerHTML = '';
-        normalizedForDraftApply.chips.forEach(function (chipDataForApply) {
-          if (chipDataForApply && chipDataForApply.type && chipDataForApply.label) {
-            addInputChipForPanelRuntime(chipDataForApply);
+      // Repainting an unchanged composer would tear the chips row down and rebuild it for
+      // nothing, and every rebuild loses per-chip DOM state. The metadata below is adopted
+      // either way, since that is what records which payload the composer now reflects.
+      const contentChangedForApply =
+        serializeInputDraftForPanelRuntime(collectCurrentInputDraftForPanelRuntime())
+          !== serializeInputDraftForPanelRuntime(normalizedForDraftApply);
+      if (contentChangedForApply) {
+        draftApplyingForPanelRuntime = true;
+        try {
+          const taForApply = root.querySelector('.chat-textarea');
+          if (taForApply) {
+            const wasFocusedForApply = root.activeElement === taForApply;
+            const selectionStartForApply = taForApply.selectionStart;
+            const selectionEndForApply = taForApply.selectionEnd;
+            taForApply.value = normalizedForDraftApply.text;
+            updateAutoExpandForTextareaForPanelRuntime(taForApply);
+            // Assigning value drops the caret to the end. No caret survives text that changed
+            // underneath it, so this only clamps the old offsets into the new range, which is
+            // enough to stop an appended or same-length update from yanking the cursor.
+            if (wasFocusedForApply) {
+              try {
+                const maxOffsetForApply = taForApply.value.length;
+                taForApply.setSelectionRange(
+                  Math.min(Number(selectionStartForApply) || 0, maxOffsetForApply),
+                  Math.min(Number(selectionEndForApply) || 0, maxOffsetForApply)
+                );
+              } catch (errorForApplySelection) {}
+            }
           }
-        });
-      } finally {
-        draftApplyingForPanelRuntime = false;
+          const rowForApply = root.querySelector('.input-chips-row');
+          if (rowForApply) rowForApply.innerHTML = '';
+          normalizedForDraftApply.chips.forEach(function (chipDataForApply) {
+            if (chipDataForApply && chipDataForApply.type && chipDataForApply.label) {
+              addInputChipForPanelRuntime(chipDataForApply);
+            }
+          });
+        } finally {
+          draftApplyingForPanelRuntime = false;
+        }
       }
       draftUiBaseVersionForPanelRuntime = String((metadataForDraftApply && metadataForDraftApply.version) || '');
       draftUiBaseUpdatedAtForPanelRuntime = Number(metadataForDraftApply && metadataForDraftApply.updatedAt) || 0;
-      draftUiBaseClearedThroughUpdatedAtForPanelRuntime = Number(
-        metadataForDraftApply && metadataForDraftApply.clearedThroughUpdatedAt
-      ) || 0;
       draftLocalDirtyForPanelRuntime = false;
       // The draft carries record ids, not content, so restored chips must be checked against the
       // live stores before they can be sent.
-      scheduleChipReferenceValidationForPanelRuntime();
+      if (contentChangedForApply) scheduleChipReferenceValidationForPanelRuntime();
     }
 
     function getInputDraftStoragePayloadForPanelRuntime(scopeForDraftRead) {
@@ -12104,13 +12338,16 @@
         clearTimeout(draftSaveTimerForPanelRuntime);
         draftSaveTimerForPanelRuntime = null;
       }
-      if (
-        previousScopeForDraftSwitch !== null
+      // Unsaved text belongs to the scope being left. On the very first mount there is no scope
+      // to leave, but the text still belongs somewhere: the composer was already bound to the
+      // scope about to be mounted, so it is written there rather than silently dropped.
+      const carryLocalTextForDraftSwitch =
+        previousScopeForDraftSwitch === null
         && draftLocalDirtyForPanelRuntime
-        && !optsForDraftSwitch.discardPreviousScope
-      ) {
+        && !optsForDraftSwitch.discardPreviousScope;
+      if (draftLocalDirtyForPanelRuntime && !optsForDraftSwitch.discardPreviousScope) {
         queueInputDraftWriteForPanelRuntime(
-          previousScopeForDraftSwitch,
+          carryLocalTextForDraftSwitch ? resolvedNextScopeForDraftSwitch : previousScopeForDraftSwitch,
           collectCurrentInputDraftForPanelRuntime()
         ).catch(function () {});
       }
@@ -12118,7 +12355,12 @@
       draftMountedScopeForPanelRuntime = resolvedNextScopeForDraftSwitch;
       draftLoadGenerationForPanelRuntime += 1;
       const loadGenerationForDraftSwitch = draftLoadGenerationForPanelRuntime;
-      applyDraftToUiForPanelRuntime({ text: '', chips: [] }, { updatedAt: 0 });
+      // Carrying local text means the composer already holds what belongs in the new scope, so
+      // there is nothing to blank and the load below is skipped by the dirty guard until the
+      // write for that text lands.
+      if (!carryLocalTextForDraftSwitch) {
+        applyDraftToUiForPanelRuntime({ text: '', chips: [] }, { updatedAt: 0 });
+      }
 
       return getInputDraftStoragePayloadForPanelRuntime(resolvedNextScopeForDraftSwitch).then(function (payloadForDraftSwitch) {
         if (
@@ -12142,30 +12384,10 @@
         ) {
           return;
         }
-        const deferredForDraftReconcile = draftDeferredPayloadsForPanelRuntime[scopeForDraftReconcile];
-        delete draftDeferredPayloadsForPanelRuntime[scopeForDraftReconcile];
-        const deferredDiffersFromClearedForReconcile = Boolean(
-          deferredForDraftReconcile
-          && !deferredForDraftReconcile.cleared
-          && payloadForDraftReconcile
-          && payloadForDraftReconcile.cleared
-          && Number(deferredForDraftReconcile.updatedAt) >= Number(payloadForDraftReconcile.clearedThroughUpdatedAt)
-        );
-        const deferredIsNewerThanStoredForReconcile = Boolean(
-          deferredForDraftReconcile
-          && !deferredForDraftReconcile.cleared
-          && payloadForDraftReconcile
-          && !payloadForDraftReconcile.cleared
-          && Number(deferredForDraftReconcile.updatedAt) > Number(payloadForDraftReconcile.updatedAt)
-        );
-        if (deferredDiffersFromClearedForReconcile || deferredIsNewerThanStoredForReconcile) {
-          return queueInputDraftWriteForPanelRuntime(
-            scopeForDraftReconcile,
-            deferredForDraftReconcile
-          ).then(function (restoredForDraftReconcile) {
-            applyDraftToUiForPanelRuntime(restoredForDraftReconcile, restoredForDraftReconcile);
-          });
-        }
+        // An empty read is ambiguous: the record may have been deleted, or the get may simply
+        // have failed. Only the storage listener can tell the two apart, because a removal
+        // reaches it as an explicit change event. Never blank the composer off an ambiguous read.
+        if (!payloadForDraftReconcile) return;
         handleIncomingInputDraftForPanelRuntime(scopeForDraftReconcile, payloadForDraftReconcile);
       });
     }
@@ -12225,19 +12447,16 @@
           return getInputDraftStoragePayloadForPanelRuntime(resolvedScopeForSubmittedDraft);
         })
         .then(function (currentPayloadForSubmittedDraft) {
-          const currentMatchesSubmittedForDraft = Boolean(
-            currentPayloadForSubmittedDraft
-            && currentPayloadForSubmittedDraft.version === submittedPayloadForDraft.version
-          );
-          const currentIsNewerThanSubmittedForDraft = Boolean(
-            currentPayloadForSubmittedDraft
-            && Number(currentPayloadForSubmittedDraft.updatedAt) >= Number(submittedPayloadForDraft.updatedAt)
-          );
-          if (
-            currentPayloadForSubmittedDraft
-            && !currentMatchesSubmittedForDraft
-            && currentIsNewerThanSubmittedForDraft
-          ) {
+          const rulesForSubmittedDraft = getDraftSyncRulesForPanelRuntime();
+          const decisionForSubmittedDraft = rulesForSubmittedDraft
+            ? rulesForSubmittedDraft.decideSubmittedClearAction(
+                submittedPayloadForDraft,
+                currentPayloadForSubmittedDraft
+              )
+            : { action: 'clear' };
+          // Something landed after the snapshot we submitted, so it is not the message that was
+          // just sent and must not be cleared.
+          if (decisionForSubmittedDraft.action === 'adopt') {
             if (
               draftMountedScopeForPanelRuntime === resolvedScopeForSubmittedDraft
               && !draftLocalDirtyForPanelRuntime
@@ -12251,7 +12470,6 @@
             { text: '', chips: [] },
             {
               cleared: true,
-              clearedThroughVersion: submittedPayloadForDraft.version,
               clearedThroughUpdatedAt: submittedPayloadForDraft.updatedAt
             }
           ).then(function (clearPayloadForSubmittedDraft) {
@@ -12263,79 +12481,38 @@
         });
     }
 
+    // Thin adapter over the rules in panelDraftSync.js: gather the receiver's state, ask what to
+    // do, do it. No ordering decision belongs here, so that the tested rules are the only ones.
+    // In particular nothing in this function may write `incomingForDraft` back to storage: a tab
+    // republishing a payload it did not adopt re-stamps stale text as the newest record and
+    // defeats the ordering for every tab at once.
     function handleIncomingInputDraftForPanelRuntime(scopeForIncomingDraft, incomingForDraft) {
-      if (scopeForIncomingDraft !== draftMountedScopeForPanelRuntime) return;
-      if (incomingForDraft && incomingForDraft.sourceId === getDraftSyncSourceIdForPanelRuntime()) return;
-      if (scopeForIncomingDraft === draftScopeLockedForSendForPanelRuntime) {
-        const deferredForIncomingDraft = draftDeferredPayloadsForPanelRuntime[scopeForIncomingDraft];
-        if (
-          incomingForDraft
-          && (
-            !deferredForIncomingDraft
-            || Number(incomingForDraft.updatedAt) >= Number(deferredForIncomingDraft.updatedAt)
-          )
-        ) {
-          draftDeferredPayloadsForPanelRuntime[scopeForIncomingDraft] = incomingForDraft;
-        }
-        return;
-      }
-
-      const incomingUpdatedAtForDraft = Number(incomingForDraft && incomingForDraft.updatedAt) || 0;
-      const incomingRestoresPostSubmitDraft = Boolean(
+      const rulesForIncomingDraft = getDraftSyncRulesForPanelRuntime();
+      if (!rulesForIncomingDraft) return;
+      const decisionForIncomingDraft = rulesForIncomingDraft.decideIncomingDraftAction(
+        {
+          mountedScope: draftMountedScopeForPanelRuntime,
+          baseUpdatedAt: draftUiBaseUpdatedAtForPanelRuntime,
+          baseVersion: draftUiBaseVersionForPanelRuntime,
+          dirty: draftLocalDirtyForPanelRuntime,
+          chipLoading: getLoadingInputChipsForPanelRuntime().length > 0,
+          sendLocked: draftMountedScopeForPanelRuntime === draftScopeLockedForSendForPanelRuntime,
+          selfSourceId: getDraftSyncSourceIdForPanelRuntime()
+        },
+        scopeForIncomingDraft,
         incomingForDraft
-        && !incomingForDraft.cleared
-        && !draftLocalDirtyForPanelRuntime
-        && draftUiBaseClearedThroughUpdatedAtForPanelRuntime > 0
-        && incomingUpdatedAtForDraft >= draftUiBaseClearedThroughUpdatedAtForPanelRuntime
       );
-      if (incomingRestoresPostSubmitDraft) {
-        queueInputDraftWriteForPanelRuntime(
-          scopeForIncomingDraft,
-          incomingForDraft
-        ).then(function (restoredForIncomingDraft) {
-          applyDraftToUiForPanelRuntime(restoredForIncomingDraft, restoredForIncomingDraft);
-        }).catch(function () {});
+      if (decisionForIncomingDraft.action === 'apply') {
+        applyDraftToUiForPanelRuntime(incomingForDraft, incomingForDraft);
         return;
       }
-      if (
-        incomingForDraft
-        && !draftLocalDirtyForPanelRuntime
-        && draftUiBaseUpdatedAtForPanelRuntime > incomingUpdatedAtForDraft
-      ) {
+      if (decisionForIncomingDraft.action === 'apply-empty') {
+        applyDraftToUiForPanelRuntime({ text: '', chips: [] }, null);
+        return;
+      }
+      if (decisionForIncomingDraft.action === 'reassert') {
         saveDraftForPanelRuntime().catch(function () {});
-        return;
       }
-
-      if (incomingForDraft && incomingForDraft.cleared) {
-        const clearedThroughUpdatedAtForIncoming = Number(incomingForDraft.clearedThroughUpdatedAt) || 0;
-        const clearedThroughVersionForIncoming = String(incomingForDraft.clearedThroughVersion || '');
-        if (
-          draftLocalDirtyForPanelRuntime
-          || draftUiBaseUpdatedAtForPanelRuntime > clearedThroughUpdatedAtForIncoming
-          || (
-            draftUiBaseUpdatedAtForPanelRuntime === clearedThroughUpdatedAtForIncoming
-            && draftUiBaseVersionForPanelRuntime
-            && draftUiBaseVersionForPanelRuntime !== clearedThroughVersionForIncoming
-          )
-        ) {
-          saveDraftForPanelRuntime().catch(function () {});
-          return;
-        }
-      } else if (draftLocalDirtyForPanelRuntime) {
-        const deferredForDirtyDraft = draftDeferredPayloadsForPanelRuntime[scopeForIncomingDraft];
-        if (
-          incomingForDraft
-          && (
-            !deferredForDirtyDraft
-            || Number(incomingForDraft.updatedAt) >= Number(deferredForDirtyDraft.updatedAt)
-          )
-        ) {
-          draftDeferredPayloadsForPanelRuntime[scopeForIncomingDraft] = incomingForDraft;
-        }
-        return;
-      }
-
-      applyDraftToUiForPanelRuntime(incomingForDraft || { text: '', chips: [] }, incomingForDraft);
     }
 
     // Named listener so re-injection teardown can remove it and stale generations self-remove.
@@ -12471,7 +12648,10 @@
         // above only decides which of the two roles the button is in.
         refreshSendAvailabilityForPanelRuntime();
       }
-      if (chatTaForUI) chatTaForUI.disabled = sending || isComposerLockedForPanelRuntime();
+      if (chatTaForUI) {
+        chatTaForUI.disabled =
+          sending || isComposerLockedForPanelRuntime() || !composerInputGateOpenForPanelRuntime;
+      }
       // Voice input cannot start while a run is in flight for the active chat.
       const voiceBtnForUI = root.getElementById('voice-input-btn');
       if (voiceBtnForUI) voiceBtnForUI.disabled = sending;
@@ -15014,7 +15194,7 @@
     async function sendChatForPanelRuntime(optionsForPanelRuntime) {
       const optsForSendLock = optionsForPanelRuntime || {};
       const isResendForSendLock = Boolean(optsForSendLock.skipUserAppend);
-      const lockCtxForSendLock = { chatKey: null };
+      const lockCtxForSendLock = { chatKey: null, draftScope: null };
       if (isResendForSendLock) {
         const resendChatIdForSendLock = Number(optsForSendLock.chatId);
         if (!Number.isFinite(resendChatIdForSendLock)) return;
@@ -15039,7 +15219,15 @@
           sendInFlightChatsForPanelRuntime.delete(lockCtxForSendLock.chatKey);
         }
         if (!isResendForSendLock) composerSendInFlightForPanelRuntime = false;
-        draftScopeLockedForSendForPanelRuntime = null;
+        // Only the send that took the draft lock may release it. A resend never takes one, and
+        // clearing it unconditionally let a resend finishing mid-initiation unlock the scope of a
+        // composer send for a different chat.
+        if (
+          lockCtxForSendLock.draftScope !== null
+          && draftScopeLockedForSendForPanelRuntime === lockCtxForSendLock.draftScope
+        ) {
+          draftScopeLockedForSendForPanelRuntime = null;
+        }
         await reconcileMountedInputDraftForPanelRuntime().catch(function () {});
         releaseComposerBusyStateForPanelRuntime(wasComposerFocusedForSendLock);
       }
@@ -15079,6 +15267,7 @@
           return;
         }
         draftScopeLockedForSendForPanelRuntime = draftScopeForSend;
+        if (lockCtxForSend) lockCtxForSend.draftScope = draftScopeForSend;
       }
       let submittedDraftPayloadForSend = null;
 
@@ -16481,6 +16670,7 @@
       S.pickerMode = 'tab';
       root.getElementById('pk-title').textContent = 'Attach Browser Tab Content';
       root.getElementById('pk-search').placeholder = 'Search open tabs...';
+      resetPickerSearchForPanelRuntime();
       S.pickerTabs = await fetchOpenTabsForPanelRuntime();
       renderTabPickerList(getPickerTabsForPanelRuntime());
       pickerOverlay.classList.remove('hidden');
@@ -18280,6 +18470,12 @@
           });
         }
         renderTabPickerList(filteredForTabSearch);
+        updateListFilterBarForPanelRuntime('pk-filter-bar', {
+          visible: filteredForTabSearch.length,
+          total: tabsForSearch.length,
+          noun: 'open tabs',
+          reasons: [describeSearchFilterReasonForPanelRuntime(qTrimmedForPicker)]
+        });
         return;
       }
 
@@ -18294,6 +18490,7 @@
 
       if (!qTrimmedForPicker) {
         renderPickerList(allItemsForPicker, S.pickerMode);
+        updateListFilterBarForPanelRuntime('pk-filter-bar', { reasons: [] });
         return;
       }
 
@@ -18322,9 +18519,16 @@
         });
       }
 
-      renderPickerList(allItemsForPicker.filter(function(itemForPicker) {
+      const filteredItemsForPicker = allItemsForPicker.filter(function(itemForPicker) {
         return matchedIdsForPicker.has(Number(itemForPicker.id));
-      }), S.pickerMode);
+      });
+      renderPickerList(filteredItemsForPicker, S.pickerMode);
+      updateListFilterBarForPanelRuntime('pk-filter-bar', {
+        visible: filteredItemsForPicker.length,
+        total: allItemsForPicker.length,
+        noun: S.pickerMode === 'clip' ? 'clips' : (S.pickerMode === 'chat' ? 'chats' : 'notes'),
+        reasons: [describeSearchFilterReasonForPanelRuntime(qTrimmedForPicker)]
+      });
     });
 
       function bindDelegatedActionsForPanelRuntime(rootNodeForActions) {
@@ -18777,7 +18981,9 @@
               const inputForClear = searchIdForClear ? root.getElementById(searchIdForClear) : null;
               if (!inputForClear) break;
               inputForClear.value = '';
-              const wrapForClear = tgtForRuntime.closest('.sidebar-search,.ns-search,.task-search,.pk-search-wrap,.mp-search-row');
+              // Resolved from the input, not from the button: the filter bar's Clear sits
+              // outside the search wrap and would find nothing to un-flag.
+              const wrapForClear = inputForClear.closest('.sidebar-search,.ns-search,.task-search,.pk-search-wrap,.mp-search-row');
               if (wrapForClear) wrapForClear.classList.remove('has-value');
               if (searchIdForClear === 'chat-search-input') { filterChatListForPanelRuntime(''); writePanelStateSyncForPanelRuntime({ chatSearchQuery: '' }); }
               else if (searchIdForClear === 'notes-search-input') { filterNotesListForPanelRuntime(''); writePanelStateSyncForPanelRuntime({ notesSearchQuery: '' }); }
@@ -18785,6 +18991,10 @@
               else if (searchIdForClear === 'model-picker-search') { filterModelPickerForPanelRuntime(''); }
               else inputForClear.dispatchEvent(new Event('input'));
               inputForClear.focus();
+              break;
+            }
+            case 'clear-list-filters': {
+              clearListFiltersForPanelRuntime(tgtForRuntime.dataset.list);
               break;
             }
           }
@@ -19088,9 +19298,10 @@
         .then(autoDeleteOldClipsForPanelRuntime)
         .catch(function () {});
       bindDraftStorageSyncForPanelRuntime();
-      migrateLegacyInputDraftForPanelRuntime().then(function () {
+      draftMountedPromiseForPanelRuntime = migrateLegacyInputDraftForPanelRuntime().then(function () {
         return switchInputDraftScopeForPanelRuntime(getActiveInputDraftScopeForPanelRuntime());
-      }).then(function () {
+      });
+      draftMountedPromiseForPanelRuntime.then(function () {
         return autoDeleteOldChatsForPanelRuntime();
       }).catch(function () {});
       bindNoteDraftStorageSyncForPanelRuntime();

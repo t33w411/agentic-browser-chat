@@ -3,6 +3,9 @@
   "version": "1.1.0",
   "description": "Local-first AI assistant Chrome extension: chat with any page, take agent actions, manage notes, tasks, and quizzes, with full chat history.",
   "main": "index.js",
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  },
   "keywords": [
     "chrome-extension",
     "ai",

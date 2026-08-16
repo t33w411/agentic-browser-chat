@@ -54,6 +54,7 @@
     "panel/panelIcons.js",
     "panel/panelTemplate.js",
     "panel/panelData.js",
+    "panel/panelDraftSync.js",
     "agent/apiLogger.js",
     "agent/pageActionLogger.js",
     "agent/tools.js",

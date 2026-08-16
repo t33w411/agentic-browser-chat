@@ -97,6 +97,11 @@
               <input type="text" placeholder="Search chats..." data-action="search-chats" id="chat-search-input">
               <button class="s-clear" data-action="clear-search" data-search-id="chat-search-input" title="Clear">${icForPanelTemplate.x10}</button>
             </div>
+            <div class="list-filter-bar hidden" id="chat-filter-bar" role="status" aria-live="polite">
+              <span class="lfb-icon">${icForPanelTemplate.filter11}</span>
+              <span class="lfb-text" id="chat-filter-bar-text"></span>
+              <button class="lfb-clear" data-action="clear-list-filters" data-list="chats" title="Clear filters">Clear</button>
+            </div>
           </div>
           <div class="chat-list">
           </div>
@@ -148,7 +153,11 @@
           <!-- Input area -->
           <div class="chat-input-area">
             <div class="input-chips-row"></div>
-            <textarea class="chat-textarea" placeholder="Type your message..." rows="3"></textarea>
+            <!-- Ships disabled: this markup is built before the panel runtime initialises, and
+                 text typed before the draft mirror mounts is persisted by nothing and then
+                 overwritten by the stored draft. The libs-ready gate enables it once both the
+                 libraries and the draft mount have settled. -->
+            <textarea class="chat-textarea" placeholder="Type your message..." rows="3" disabled></textarea>
             <div class="input-bottom">
               <div class="input-left">
                 <div style="position:relative">
@@ -185,6 +194,7 @@
                     </div>
                     <div class="mp-filter-row">
                       <button type="button" class="mp-filter-chip" id="mp-reasoning-filter" data-action="toggle-reasoning-filter" aria-pressed="false" title="Show only models with reasoning on by default">${icForPanelTemplate.brain13}<span>Reasoning</span></button>
+                      <span class="mp-filter-count hidden" id="model-picker-count" role="status" aria-live="polite"></span>
                     </div>
                     <div class="mp-list" id="model-picker-list"></div>
                     <div class="mp-empty" id="model-picker-empty" hidden>No matching models</div>
@@ -236,6 +246,11 @@
               </span>
               <input type="text" placeholder="Search notes..." data-action="search-notes" id="notes-search-input">
               <button class="s-clear" data-action="clear-search" data-search-id="notes-search-input" title="Clear">${icForPanelTemplate.x10}</button>
+            </div>
+            <div class="list-filter-bar hidden" id="note-filter-bar" role="status" aria-live="polite">
+              <span class="lfb-icon">${icForPanelTemplate.filter11}</span>
+              <span class="lfb-text" id="note-filter-bar-text"></span>
+              <button class="lfb-clear" data-action="clear-list-filters" data-list="notes" title="Clear filters">Clear</button>
             </div>
           </div>
           <div class="notes-list">
@@ -369,6 +384,11 @@
               </span>
               <input type="text" placeholder="Search tasks..." data-action="search-tasks" id="task-search-input">
               <button class="s-clear" data-action="clear-search" data-search-id="task-search-input" title="Clear">${icForPanelTemplate.x10}</button>
+            </div>
+            <div class="list-filter-bar hidden" id="task-filter-bar" role="status" aria-live="polite">
+              <span class="lfb-icon">${icForPanelTemplate.filter11}</span>
+              <span class="lfb-text" id="task-filter-bar-text"></span>
+              <button class="lfb-clear" data-action="clear-list-filters" data-list="tasks" title="Clear filters">Clear</button>
             </div>
           </div>
           <div class="tasks-list">
@@ -1044,6 +1064,11 @@
       </span>
       <input class="pk-search" id="pk-search" type="text" placeholder="Search...">
       <button class="s-clear pk-search-clear" data-action="clear-search" data-search-id="pk-search" title="Clear">${icForPanelTemplate.x10}</button>
+    </div>
+    <div class="list-filter-bar pk-filter-bar hidden" id="pk-filter-bar" role="status" aria-live="polite">
+      <span class="lfb-icon">${icForPanelTemplate.filter11}</span>
+      <span class="lfb-text" id="pk-filter-bar-text"></span>
+      <button class="lfb-clear" data-action="clear-search" data-search-id="pk-search" title="Clear search">Clear</button>
     </div>
     <div class="pk-list" id="pk-list"></div>
   </div>
