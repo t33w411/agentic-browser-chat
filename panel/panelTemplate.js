@@ -152,7 +152,14 @@
 
           <!-- Input area -->
           <div class="chat-input-area">
-            <div class="input-chips-row"></div>
+            <!-- The button is a SIBLING of the chips row, never a child: the row is emptied with
+                 innerHTML on every draft apply and composer clear, which would take the button with
+                 it. Its visibility rides the row's :empty state in CSS, so no JS has to remember to
+                 keep it in step with the chip count. -->
+            <div class="input-chips-bar">
+              <div class="input-chips-row"></div>
+              <button type="button" class="chips-copy-btn" data-action="copy-composer" title="Copy message and attachments as Markdown" aria-label="Copy message and attachments">${icForPanelTemplate.copy12}</button>
+            </div>
             <!-- Ships disabled: this markup is built before the panel runtime initialises, and
                  text typed before the draft mirror mounts is persisted by nothing and then
                  overwritten by the stored draft. The libs-ready gate enables it once both the
@@ -322,7 +329,7 @@
               <div class="ne-preview" id="ne-preview"></div>
               <!-- Edit mode: raw text -->
               <div class="ne-body-ta-wrap">
-                <textarea class="ne-body-ta" id="ne-body" rows="8" placeholder="Write anything — plain text, markdown, JSON, code…"></textarea>
+                <textarea class="ne-body-ta" id="ne-body" rows="8" placeholder="Write anything — plain text, markdown, JSON, code…" data-no-auto-expand="1"></textarea>
               </div>
               <div id="ne-tags-section">
                 <div class="field-label">Tags</div>

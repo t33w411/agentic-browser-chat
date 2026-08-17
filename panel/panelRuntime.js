@@ -1710,8 +1710,24 @@
       return 240;
     }
 
+    // A textarea inside a hidden view (or in the panel while the shadow host is still
+    // display:none) has no layout box, so scrollHeight reads 0. Acting on that would pin
+    // height:0px and, worse, overflow-y:hidden onto the element, and those inline styles
+    // outlive the measurement: nothing recomputes them until the next input or paste on
+    // that same field, so it stays unscrollable for the rest of the session. Defer instead:
+    // the field keeps its stylesheet sizing and overflow, and the deferred measurement is
+    // taken on the first press or keystroke that lands in it, once it really has a box.
+    function isAutoExpandMeasurableForPanelRuntime(textareaForPanelRuntime) {
+      return Boolean(textareaForPanelRuntime) && (textareaForPanelRuntime.clientHeight || 0) > 0;
+    }
+
     function updateAutoExpandForTextareaForPanelRuntime(textareaForPanelRuntime) {
       if (!textareaForPanelRuntime || typeof textareaForPanelRuntime.style === 'undefined') return;
+      if (!isAutoExpandMeasurableForPanelRuntime(textareaForPanelRuntime)) {
+        textareaForPanelRuntime.dataset.abchatAutoExpandPending = '1';
+        return;
+      }
+      delete textareaForPanelRuntime.dataset.abchatAutoExpandPending;
       const maxHeightForPanelRuntime = getAutoExpandMaxHeightForPanelRuntime(textareaForPanelRuntime);
       textareaForPanelRuntime.style.height = 'auto';
       const nextHeightForPanelRuntime = Math.min(textareaForPanelRuntime.scrollHeight || 0, maxHeightForPanelRuntime);
@@ -1735,6 +1751,16 @@
             setTimeout(function () {
               updateAutoExpandForTextareaForPanelRuntime(textareaForPanelRuntime);
             }, 0);
+          });
+          // Re-measure a field whose first measurement was skipped, on the first press
+          // that lands in it. Not a focus listener: focus/focusin landing on a panel
+          // element is stopImmediatePropagation'd at window capture by the focus-trap
+          // defense, so it never reaches a listener on the element itself. A keyboard-only
+          // arrival is covered by the input handler above on the first keystroke.
+          textareaForPanelRuntime.addEventListener('pointerdown', function () {
+            if (textareaForPanelRuntime.dataset.abchatAutoExpandPending === '1') {
+              updateAutoExpandForTextareaForPanelRuntime(textareaForPanelRuntime);
+            }
           });
         }
         updateAutoExpandForTextareaForPanelRuntime(textareaForPanelRuntime);
@@ -10432,6 +10458,125 @@
       openAttachmentPreview(chipNameForPanelRuntime, previewPayloadForPanelRuntime);
     }
 
+    let composerCopyInFlightForPanelRuntime = false;
+    let composerCopyResetTimerForPanelRuntime = null;
+
+    function setComposerCopyButtonStateForPanelRuntime(buttonForCopyState, stateForCopyState) {
+      if (!buttonForCopyState) return;
+      if (composerCopyResetTimerForPanelRuntime) {
+        clearTimeout(composerCopyResetTimerForPanelRuntime);
+        composerCopyResetTimerForPanelRuntime = null;
+      }
+      buttonForCopyState.disabled = stateForCopyState === 'busy';
+      buttonForCopyState.classList.toggle('is-copied', stateForCopyState === 'copied');
+      buttonForCopyState.innerHTML = stateForCopyState === 'copied' ? ic.check12 : ic.copy12;
+      if (stateForCopyState !== 'copied') return;
+      composerCopyResetTimerForPanelRuntime = setTimeout(function () {
+        composerCopyResetTimerForPanelRuntime = null;
+        if (!buttonForCopyState.isConnected) return;
+        buttonForCopyState.classList.remove('is-copied');
+        buttonForCopyState.innerHTML = ic.copy12;
+      }, 1400);
+    }
+
+    // Each chip is resolved the same way the preview modal resolves it, so what lands on the
+    // clipboard is what clicking the chip shows. That matters most for note and chat chips: they
+    // carry no content of their own until the send path stamps them, so reading dataset.attachContent
+    // here (as the draft and send collectors do) would copy them as empty.
+    async function buildComposerCopyAttachmentsForPanelRuntime(chipNodesForCopy) {
+      const attachmentsForCopy = [];
+      for (let chipIndexForCopy = 0; chipIndexForCopy < chipNodesForCopy.length; chipIndexForCopy++) {
+        const chipForCopy = chipNodesForCopy[chipIndexForCopy];
+        if (!chipForCopy || !chipForCopy.dataset) continue;
+        let payloadForCopy = null;
+        try {
+          payloadForCopy = await resolveChipPreviewPayloadForPanelRuntime(chipForCopy);
+        } catch (errorForCopyResolve) {
+          payloadForCopy = null;
+        }
+        const isImageForCopy = !!(payloadForCopy && payloadForCopy.previewType === 'image');
+        attachmentsForCopy.push({
+          label: String(chipForCopy.dataset.attachName || ''),
+          type: String(chipForCopy.dataset.attachType || ''),
+          kind: String(chipForCopy.dataset.attachKind || ''),
+          mimeType: String(chipForCopy.dataset.attachMimeType || ''),
+          pageUrl: String(chipForCopy.dataset.attachPageUrl || ''),
+          pageTitle: String(chipForCopy.dataset.attachPageTitle || ''),
+          content: isImageForCopy ? '' : String((payloadForCopy && payloadForCopy.content) || ''),
+          isImage: isImageForCopy,
+          missing: !!(payloadForCopy && payloadForCopy.sourceMissing),
+          missingType: String((payloadForCopy && payloadForCopy.sourceType) || '')
+        });
+      }
+      return attachmentsForCopy;
+    }
+
+    async function copyComposerToClipboardForPanelRuntime(buttonForCopy) {
+      if (composerCopyInFlightForPanelRuntime) return;
+      const composerCopyNsForPanelRuntime = (globalThis.ABChatContent || {}).composerCopy;
+      const clipboardUtilForComposerCopy = ((globalThis.ABChatContent || {}).utils || {}).clipboard;
+      const toastForComposerCopy = ((globalThis.ABChatContent || {}).ui || {}).toast;
+      function notifyForComposerCopy(messageForNotify) {
+        if (toastForComposerCopy && typeof toastForComposerCopy.show === 'function') {
+          toastForComposerCopy.show(messageForNotify, { durationMs: 3500 });
+        }
+      }
+      if (!composerCopyNsForPanelRuntime || typeof composerCopyNsForPanelRuntime.buildComposerMarkdown !== 'function') {
+        notifyForComposerCopy('Copy is unavailable right now. Reload the page and try again.');
+        return;
+      }
+
+      const rowForCopy = root.querySelector('.input-chips-row');
+      const textareaForCopy = root.querySelector('.chat-textarea');
+      const allChipsForCopy = rowForCopy ? Array.from(rowForCopy.querySelectorAll('.ic')) : [];
+      // A mid-upload chip has no content to resolve yet, exactly as for the draft and the send path.
+      const readyChipsForCopy = allChipsForCopy.filter(function (chipForFilter) {
+        return String(chipForFilter.dataset.attachStatus || '').trim().toLowerCase() !== 'loading';
+      });
+      const skippedChipCountForCopy = allChipsForCopy.length - readyChipsForCopy.length;
+
+      composerCopyInFlightForPanelRuntime = true;
+      setComposerCopyButtonStateForPanelRuntime(buttonForCopy, 'busy');
+      let copiedForComposerCopy = false;
+      try {
+        const attachmentsForCopy = await buildComposerCopyAttachmentsForPanelRuntime(readyChipsForCopy);
+        const markdownForCopy = composerCopyNsForPanelRuntime.buildComposerMarkdown({
+          text: textareaForCopy ? String(textareaForCopy.value || '') : '',
+          attachments: attachmentsForCopy
+        });
+        if (!markdownForCopy.trim()) {
+          notifyForComposerCopy('Nothing to copy yet.');
+          return;
+        }
+        copiedForComposerCopy = clipboardUtilForComposerCopy
+          && typeof clipboardUtilForComposerCopy.copyText === 'function'
+          ? await clipboardUtilForComposerCopy.copyText(markdownForCopy)
+          : false;
+        if (!copiedForComposerCopy) {
+          // The write happens well after the click, once the blob and repo reads have settled, so
+          // it can land outside the transient activation the Clipboard API wants, or while a page
+          // focus trap holds the document. Both surface here as a plain false.
+          notifyForComposerCopy('Could not write to the clipboard. Click the panel and try again.');
+          return;
+        }
+        const attachmentCountLabelForCopy = attachmentsForCopy.length === 1
+          ? '1 attachment'
+          : attachmentsForCopy.length + ' attachments';
+        notifyForComposerCopy(
+          'Copied ' + attachmentCountLabelForCopy + ' and your message ('
+            + markdownForCopy.length.toLocaleString('en-US') + ' characters).'
+            + (skippedChipCountForCopy > 0
+              ? ' ' + skippedChipCountForCopy + ' still processing and left out.'
+              : '')
+        );
+      } catch (errorForComposerCopy) {
+        notifyForComposerCopy('Copy failed. Try again.');
+      } finally {
+        composerCopyInFlightForPanelRuntime = false;
+        setComposerCopyButtonStateForPanelRuntime(buttonForCopy, copiedForComposerCopy ? 'copied' : 'idle');
+      }
+    }
+
     let currentAttachPreviewForPanelRuntime = null;
 
     function computeAttachPreviewStatsForPanelRuntime(textForStats, isHtmlPayloadForStats) {
@@ -18781,6 +18926,7 @@
               break;
             }
             case 'preview-input-chip':   previewInputChipForPanelRuntime(tgtForRuntime); break;
+            case 'copy-composer':        copyComposerToClipboardForPanelRuntime(tgtForRuntime); break;
             case 'preview-message-chip': previewMessageChipForPanelRuntime(tgtForRuntime.dataset.messageId, tgtForRuntime.dataset.chipIndex); break;
             case 'toggle-attach-picker': toggleAttachPicker(); evtForRuntime.stopPropagation(); break;
             case 'toggle-model-picker':  toggleModelPickerForPanelRuntime(); evtForRuntime.stopPropagation(); break;

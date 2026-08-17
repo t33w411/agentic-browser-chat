@@ -1269,9 +1269,32 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
   background: color-mix(in srgb, var(--abchat-accent) 8%, var(--abchat-bg-input));
 }
 
-.input-chips-row {
-  display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px;
+.input-chips-bar {
+  display: flex; align-items: flex-start; gap: 6px; margin-bottom: 8px;
 }
+.input-chips-row {
+  display: flex; flex-wrap: wrap; gap: 5px; flex: 1 1 auto; min-width: 0;
+}
+.chips-copy-btn {
+  flex: 0 0 auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px;
+  padding: 0;
+  border: 1px solid var(--abchat-border);
+  border-radius: var(--abchat-r-sm);
+  background: var(--abchat-bg-input);
+  color: var(--abchat-text-secondary);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+.chips-copy-btn:hover {
+  background: var(--abchat-bg-hover); color: var(--abchat-text-primary); border-color: var(--abchat-accent);
+}
+.chips-copy-btn.is-copied { color: var(--abchat-accent, #2563eb); border-color: var(--abchat-accent, #2563eb); }
+.chips-copy-btn:disabled { opacity: 0.5; cursor: default; }
+/* No chips, no button. The row holds nothing but chips, so :empty is an exact test and it cannot
+   drift out of step with the chip count the way a JS toggle at each mutation site would. */
+.input-chips-row:empty + .chips-copy-btn { display: none; }
 .ic {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 3px 8px; border-radius: 99px;
@@ -1911,11 +1934,14 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
   scrollbar-width: thin; scrollbar-color: var(--abchat-border) transparent;
 }
 .ne-body-ta-wrap { position: relative; flex: 1; display: flex; flex-direction: column; min-height: 100px; }
+/* Full-height editor, not a growing composer: it fills .ne-body-ta-wrap and scrolls
+   its own overflow. overflow-y is stated rather than left to the UA default so nothing
+   reads it as unset and no inline override is needed to make the field scrollable. */
 .ne-body-ta {
   border: 1px solid var(--abchat-border); border-radius: var(--abchat-r-sm);
   padding: 8px 10px; background: var(--abchat-bg-input); color: var(--abchat-text-primary);
   font-family: "SF Mono","Fira Code",monospace; font-size: 13.5px; resize: none; outline: none;
-  flex: 1; line-height: 1.65;
+  flex: 1; line-height: 1.65; overflow-y: auto;
 }
 .ne-body-ta:focus { border-color: var(--abchat-accent); }
 .ne-body-ta::placeholder { color: var(--abchat-text-muted); }
