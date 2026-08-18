@@ -2007,6 +2007,23 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 }
 .panel-host[data-theme="dark"] .ne-preview code:not(.hljs) { background: #0d2540; border-color: #3b6fa8; color: #7dd3fc; }
 .ne-preview pre { border-radius: var(--abchat-r-sm); margin: 6px 0; overflow-x: auto; }
+/* Clip excerpts are shown verbatim, so they arrive as one long whitespace-collapsed line and
+   must wrap rather than scroll sideways. Themed tokens only: no dark-mode override needed. */
+.ne-preview pre.ne-clip-excerpt {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--abchat-bg-input);
+  border: 1px solid var(--abchat-border);
+  border-radius: var(--abchat-r-sm);
+  overflow-x: auto;
+  font-family: "SF Mono","Fira Code",monospace;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--abchat-text-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 .ne-preview pre code.hljs {
   font-family: "SF Mono","Fira Code",monospace; font-size: 12.5px;
   line-height: 1.65; border-radius: var(--abchat-r-sm); padding: 10px 12px;

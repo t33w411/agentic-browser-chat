@@ -5790,6 +5790,30 @@
       return renderMarkdown(text);
     }
 
+    // A clip body is never authored markdown: it is a fixed-length slice of captured bytes, and
+    // for a page capture those bytes are third-party HTML cut at an arbitrary offset with all
+    // whitespace collapsed. Rendering it paints a mangled half-fragment of someone else's page
+    // and gives that page's markup a route into the panel's shadow root, so the excerpt is shown
+    // verbatim instead. Matches the escaped 'code' preview a clip chip already gets in
+    // openAttachmentPreview. Deliberately skips the markdown hydration pass: there is nothing
+    // for mermaid or MathJax to find in a text node, and neither should parse captured bytes.
+    function renderClipExcerptIntoPreviewForPanelRuntime(previewElForClipExcerpt, bodyTextForClipExcerpt) {
+      if (!previewElForClipExcerpt) return;
+      previewElForClipExcerpt.innerHTML = '';
+      const excerptTextForClipExcerpt = String(bodyTextForClipExcerpt || '');
+      if (!excerptTextForClipExcerpt.trim()) {
+        const emptyElForClipExcerpt = document.createElement('span');
+        emptyElForClipExcerpt.className = 'ne-preview-empty';
+        emptyElForClipExcerpt.textContent = 'Nothing here yet.';
+        previewElForClipExcerpt.appendChild(emptyElForClipExcerpt);
+        return;
+      }
+      const preElForClipExcerpt = document.createElement('pre');
+      preElForClipExcerpt.className = 'ne-clip-excerpt';
+      preElForClipExcerpt.textContent = excerptTextForClipExcerpt;
+      previewElForClipExcerpt.appendChild(preElForClipExcerpt);
+    }
+
     function normalizeTagsForPanelRuntime(tagsForPanelRuntime) {
       if (!Array.isArray(tagsForPanelRuntime)) return [];
       const seenTagsForPanelRuntime = {};
@@ -7739,8 +7763,14 @@
       noteBodyInputForPanelRuntime.value = normalizedDraftForPanelRuntime.body;
       noteTitleDisplayForPanelRuntime.textContent = normalizedDraftForPanelRuntime.title || 'Untitled';
       noteTitleDisplayForPanelRuntime.classList.toggle('untitled', !normalizedDraftForPanelRuntime.title);
-      notePreviewForPanelRuntime.innerHTML = renderNoteMarkdown(normalizedDraftForPanelRuntime.body);
-      hydrateRenderedMarkdownForPanelRuntime(notePreviewForPanelRuntime);
+      // Same clip test applyClipModeToMainEditorForPanelRuntime uses below, so the preview and
+      // the clip chrome can never disagree about what kind of record is on screen.
+      if (getClipRecordForPanelRuntime(noteIdForPanelRuntime)) {
+        renderClipExcerptIntoPreviewForPanelRuntime(notePreviewForPanelRuntime, normalizedDraftForPanelRuntime.body);
+      } else {
+        notePreviewForPanelRuntime.innerHTML = renderNoteMarkdown(normalizedDraftForPanelRuntime.body);
+        hydrateRenderedMarkdownForPanelRuntime(notePreviewForPanelRuntime);
+      }
       tagsWrapForPanelRuntime.querySelectorAll('.tag-pill').forEach(function (tagPillForPanelRuntime) {
         tagPillForPanelRuntime.remove();
       });
