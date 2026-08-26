@@ -3635,9 +3635,8 @@
             updateProfileFieldCounterForPanelRuntime(descriptorForTab);
           }, 0);
         });
+        refreshSettingsViewForPanelRuntime();
         loadStorageEstimateForPanelRuntime();
-        loadDeleteChatsOlderThanSettingForPanelRuntime();
-        loadClipRetentionSettingForPanelRuntime();
         refreshAgentManageCountsForPanelRuntime();
       }
       if (tab === 'skills') {
@@ -15923,6 +15922,9 @@
     async function loadApiKeyIntoSettingsForPanelRuntime() {
       const inputForKey = root.getElementById('settings-api-key-input');
       if (!inputForKey) return;
+      // A cross-tab or tab-open refresh must not overwrite a key the user is mid-edit on. The field
+      // only saves on blur/Enter, so being focused is the one window where it holds unsaved text.
+      if (root.activeElement === inputForKey) return;
       const key = await getApiKeyForPanelRuntime();
       inputForKey.value = key;
     }
@@ -16048,7 +16050,11 @@
       const alertToggleForBehaviour = root.getElementById('settings-alert-sound-toggle');
       if (alertToggleForBehaviour) alertToggleForBehaviour.checked = settingsForBehaviour.alertSound !== false;
       const leadTimeInputForBehaviour = root.getElementById('settings-reminder-lead-time');
-      if (leadTimeInputForBehaviour) leadTimeInputForBehaviour.value = currentReminderLeadTimeForPanelRuntime;
+      // Skip the DOM write while the field is focused so a cross-tab refresh cannot clobber a value
+      // the user is typing (it saves on blur). The module var still tracks the stored truth.
+      if (leadTimeInputForBehaviour && root.activeElement !== leadTimeInputForBehaviour) {
+        leadTimeInputForBehaviour.value = currentReminderLeadTimeForPanelRuntime;
+      }
       sendPageContextEnabledForPanelRuntime = settingsForBehaviour.sendPageContext !== false;
       const pageContextToggleForBehaviour = root.getElementById('settings-page-context-toggle');
       if (pageContextToggleForBehaviour) pageContextToggleForBehaviour.checked = sendPageContextEnabledForPanelRuntime;
@@ -16315,6 +16321,78 @@
         };
         chrome.storage.onChanged.addListener(profileFieldsStorageSyncListenerForPanelRuntime);
       } catch (e) {}
+    }
+
+    // Re-pulls every settings field from storage so an already-open settings view reflects the
+    // current values. Profile fields (aboutUser/agentRules) are deliberately excluded: they can hold
+    // unsaved edits and have their own conflict-aware listener, so re-baselining them here would
+    // discard a draft on a tab switch.
+    function refreshSettingsViewForPanelRuntime() {
+      loadApiKeyIntoSettingsForPanelRuntime();
+      loadBehaviourSettingsForPanelRuntime();
+      initModelSelectsForPanelRuntime();
+      loadThemeIntoSettingsForPanelRuntime();
+      loadPanelTransparencyIntoSettingsForPanelRuntime();
+      loadHeaderButtonIntoSettingsForPanelRuntime();
+      loadDeleteChatsOlderThanSettingForPanelRuntime();
+      loadClipRetentionSettingForPanelRuntime();
+    }
+
+    // Cross-tab sync for the abchatSettings-backed fields that had no listener: alert sound, reminder
+    // lead time, and the two retention selects. The page-context toggle and profile fields keep their
+    // own dedicated listeners (the latter needs unsaved-edit conflict handling), so they are not
+    // repainted here.
+    var syncSettingsStorageSyncListenerForPanelRuntime = null;
+    function bindSyncSettingsStorageSyncForPanelRuntime() {
+      try {
+        if (syncSettingsStorageSyncListenerForPanelRuntime) {
+          chrome.storage.onChanged.removeListener(syncSettingsStorageSyncListenerForPanelRuntime);
+          syncSettingsStorageSyncListenerForPanelRuntime = null;
+        }
+        var capturedGenForSyncSettings = window.abchatListenerGeneration || 0;
+        syncSettingsStorageSyncListenerForPanelRuntime = function syncSettingsStorageSyncHandlerForPanelRuntime(changes, area) {
+          if ((window.abchatListenerGeneration || 0) !== capturedGenForSyncSettings) {
+            chrome.storage.onChanged.removeListener(syncSettingsStorageSyncListenerForPanelRuntime);
+            syncSettingsStorageSyncListenerForPanelRuntime = null;
+            return;
+          }
+          if (area !== 'sync' || !changes.abchatSettings) return;
+          loadBehaviourSettingsForPanelRuntime();
+          loadDeleteChatsOlderThanSettingForPanelRuntime();
+          loadClipRetentionSettingForPanelRuntime();
+        };
+        chrome.storage.onChanged.addListener(syncSettingsStorageSyncListenerForPanelRuntime);
+      } catch (eSyncSettingsBind) {}
+    }
+
+    // Cross-tab sync for the local-storage settings that had no listener: API key, default model, and
+    // image model. A new key changes the available model list and a new default/image model changes
+    // the selection, so both cases repaint the selects via initModelSelects, which reads the shared
+    // model cache and only hits the network when that cache was cleared.
+    var localModelKeysStorageSyncListenerForPanelRuntime = null;
+    function bindLocalModelKeysStorageSyncForPanelRuntime() {
+      try {
+        if (localModelKeysStorageSyncListenerForPanelRuntime) {
+          chrome.storage.onChanged.removeListener(localModelKeysStorageSyncListenerForPanelRuntime);
+          localModelKeysStorageSyncListenerForPanelRuntime = null;
+        }
+        var capturedGenForLocalModelKeys = window.abchatListenerGeneration || 0;
+        localModelKeysStorageSyncListenerForPanelRuntime = function localModelKeysStorageSyncHandlerForPanelRuntime(changes, area) {
+          if ((window.abchatListenerGeneration || 0) !== capturedGenForLocalModelKeys) {
+            chrome.storage.onChanged.removeListener(localModelKeysStorageSyncListenerForPanelRuntime);
+            localModelKeysStorageSyncListenerForPanelRuntime = null;
+            return;
+          }
+          if (area !== 'local') return;
+          var apiKeyChangedForLocalSync = !!changes.abchat_api_key;
+          var modelChangedForLocalSync =
+            !!changes[SELECTED_MODEL_KEY_FOR_PANEL_RUNTIME] || !!changes[SELECTED_IMAGE_MODEL_KEY_FOR_PANEL_RUNTIME];
+          if (!apiKeyChangedForLocalSync && !modelChangedForLocalSync) return;
+          if (apiKeyChangedForLocalSync) loadApiKeyIntoSettingsForPanelRuntime();
+          initModelSelectsForPanelRuntime();
+        };
+        chrome.storage.onChanged.addListener(localModelKeysStorageSyncListenerForPanelRuntime);
+      } catch (eLocalModelKeysBind) {}
     }
 
     function formatBytesForPanelRuntime(bytesForPanelRuntime) {
@@ -19467,6 +19545,8 @@
       maybeShowAutomationIntroForPanelRuntime();
       bindProfileFieldsStorageSyncForPanelRuntime();
       bindPageContextStorageSyncForPanelRuntime();
+      bindSyncSettingsStorageSyncForPanelRuntime();
+      bindLocalModelKeysStorageSyncForPanelRuntime();
       initModelSelectsForPanelRuntime();
       // Retention days must be read before the sweep so it uses the user's setting rather
       // than the default; both are fire-and-forget so a slow read cannot delay panel init.

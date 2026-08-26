@@ -8634,6 +8634,16 @@ self.onmessage = function (e) {
   // Removed before the payload is measured, so it never reaches the output.
   var IMAGE_CANDIDATE_ATTR_FOR_TOOL_EXEC = 'data-abchat-img-candidate';
 
+  // Sync with: MAX_FIELD_VALUE_CHARS_FOR_FLATTENED_CONTENT in tools/flattenedContent.js
+  var MAX_FIELD_VALUE_CHARS_FOR_TOOL_EXEC = 300;
+
+  // Sync with: capFieldValueForFlattenedContent in tools/flattenedContent.js
+  function capFieldValueForFetch(value) {
+    if (typeof value !== 'string') return '';
+    if (value.length <= MAX_FIELD_VALUE_CHARS_FOR_TOOL_EXEC) return value;
+    return value.slice(0, MAX_FIELD_VALUE_CHARS_FOR_TOOL_EXEC) + '…';
+  }
+
   // Adapted from buildCleanHtmlPayloadForFlattenedContent in tools/flattenedContent.js.
   // Each inner function below has a counterpart in flattenedContent.js; keep them in sync.
   function flattenFetchedHtmlForToolExec(htmlStr, baseUrl) {
@@ -8799,6 +8809,12 @@ self.onmessage = function (e) {
         var type = (input.getAttribute('type') || '').toLowerCase();
         var name = input.getAttribute('name') || '';
         var placeholder = input.getAttribute('placeholder') || '';
+        // Fetched HTML is never interacted with, so the parsed node's properties already reflect the
+        // server-rendered state (checked attribute, value attribute, first-option default). Read
+        // properties for parity with the live path, which stamps them onto the clone before this runs.
+        var isChecked = input.checked === true;
+        var isDisabled = input.disabled === true;
+        var rawValue = typeof input.value === 'string' ? input.value : '';
         if (type === 'checkbox' || type === 'radio') {
           try {
             var replacement = doc.createElement(type === 'checkbox' ? 'checkbox' : 'radio');
@@ -8807,6 +8823,8 @@ self.onmessage = function (e) {
             } else if (placeholder) {
               replacement.setAttribute('placeholder', placeholder);
             }
+            if (isChecked) replacement.setAttribute('checked', '');
+            if (isDisabled) replacement.setAttribute('disabled', '');
             if (input.replaceWith) input.replaceWith(replacement);
           } catch (e) {}
           return;
@@ -8817,30 +8835,47 @@ self.onmessage = function (e) {
         } else if (placeholder) {
           input.setAttribute('placeholder', placeholder);
         }
+        if (type === 'password') {
+          if (rawValue) input.setAttribute('filled', '');
+        } else if (rawValue) {
+          input.setAttribute('value', capFieldValueForFetch(rawValue));
+        }
+        if (isDisabled) input.setAttribute('disabled', '');
       });
       root.querySelectorAll('select').forEach(function (sel) {
         var name = sel.getAttribute('name') || '';
         var placeholder = sel.getAttribute('placeholder') || '';
+        var isDisabled = sel.disabled === true;
         Array.from(sel.children).forEach(function (child) {
           if (child.tagName && child.tagName.toLowerCase() !== 'option') child.remove();
         });
+        var options = Array.from(sel.querySelectorAll('option'));
+        var selectedFlags = options.map(function (o) { return o.selected === true; });
         while (sel.attributes.length) sel.removeAttribute(sel.attributes[0].name);
         if (name) {
           sel.setAttribute('name', name);
         } else if (placeholder) {
           sel.setAttribute('placeholder', placeholder);
         }
+        if (isDisabled) sel.setAttribute('disabled', '');
+        options.forEach(function (o, i) {
+          while (o.attributes.length) o.removeAttribute(o.attributes[0].name);
+          if (selectedFlags[i]) o.setAttribute('selected', '');
+        });
       });
       root.querySelectorAll('textarea').forEach(function (ta) {
         var name = ta.getAttribute('name') || '';
         var placeholder = ta.getAttribute('placeholder') || '';
-        ta.textContent = '';
+        var isDisabled = ta.disabled === true;
+        var rawValue = typeof ta.value === 'string' ? ta.value : '';
+        ta.textContent = rawValue ? capFieldValueForFetch(rawValue) : '';
         while (ta.attributes.length) ta.removeAttribute(ta.attributes[0].name);
         if (name) {
           ta.setAttribute('name', name);
         } else if (placeholder) {
           ta.setAttribute('placeholder', placeholder);
         }
+        if (isDisabled) ta.setAttribute('disabled', '');
       });
     }
 
@@ -9004,11 +9039,12 @@ self.onmessage = function (e) {
       var allowedByTag = {
         a: new Set(['href']),
         form: new Set(['action']),
-        input: new Set(['name', 'placeholder']),
-        select: new Set(['name', 'placeholder']),
-        textarea: new Set(['name', 'placeholder']),
-        checkbox: new Set(['name', 'placeholder']),
-        radio: new Set(['name', 'placeholder']),
+        input: new Set(['name', 'placeholder', 'value', 'disabled', 'filled']),
+        select: new Set(['name', 'placeholder', 'disabled']),
+        textarea: new Set(['name', 'placeholder', 'disabled']),
+        checkbox: new Set(['name', 'placeholder', 'checked', 'disabled']),
+        radio: new Set(['name', 'placeholder', 'checked', 'disabled']),
+        option: new Set(['selected']),
         td: new Set(['colspan', 'rowspan']),
         th: new Set(['colspan', 'rowspan', 'scope']),
         ol: new Set(['start']),
@@ -9139,21 +9175,17 @@ self.onmessage = function (e) {
     }
 
     // Sync with: formatFormElementsForPromptForFlattenedContent in tools/flattenedContent.js
+    // Boolean state attributes serialize as name=""; rewrite them to bare form. The attribute
+    // sub-pattern is quote-aware ("[^"]*" | [^">]) so an emitted value containing ">" does not
+    // terminate the match early.
     function formatFormElementsForFetch(cleanHtml) {
       if (!cleanHtml || typeof cleanHtml !== 'string') return '';
       return cleanHtml
-        .replace(/<input name="([^"]+)">/gi, function (_, v) { return '<input name="' + v + '" />'; })
-        .replace(/<input placeholder="([^"]+)">/gi, function (_, v) { return '<input placeholder="' + v + '" />'; })
-        .replace(/<input>/gi, '<input />')
-        .replace(/<textarea name="([^"]+)"><\/textarea>/gi, function (_, v) { return '<textarea name="' + v + '" />'; })
-        .replace(/<textarea placeholder="([^"]+)"><\/textarea>/gi, function (_, v) { return '<textarea placeholder="' + v + '" />'; })
-        .replace(/<textarea><\/textarea>/gi, '<textarea />')
-        .replace(/<checkbox name="([^"]+)"><\/checkbox>/gi, function (_, v) { return '<checkbox name="' + v + '">'; })
-        .replace(/<checkbox placeholder="([^"]+)"><\/checkbox>/gi, function (_, v) { return '<checkbox placeholder="' + v + '">'; })
-        .replace(/<checkbox><\/checkbox>/gi, '<checkbox>')
-        .replace(/<radio name="([^"]+)"><\/radio>/gi, function (_, v) { return '<radio name="' + v + '">'; })
-        .replace(/<radio placeholder="([^"]+)"><\/radio>/gi, function (_, v) { return '<radio placeholder="' + v + '">'; })
-        .replace(/<radio><\/radio>/gi, '<radio>');
+        .replace(/ (checked|disabled|selected|filled)=""/gi, ' $1')
+        .replace(/<input\b((?:"[^"]*"|[^">])*)>/gi, function (_, attrs) { return '<input' + attrs + ' />'; })
+        .replace(/<textarea\b((?:"[^"]*"|[^">])*)><\/textarea>/gi, function (_, attrs) { return '<textarea' + attrs + ' />'; })
+        .replace(/<checkbox\b((?:"[^"]*"|[^">])*)><\/checkbox>/gi, function (_, attrs) { return '<checkbox' + attrs + '>'; })
+        .replace(/<radio\b((?:"[^"]*"|[^">])*)><\/radio>/gi, function (_, attrs) { return '<radio' + attrs + '>'; });
     }
 
     var bodyForFetch = doc.body || doc.documentElement;

@@ -242,6 +242,12 @@
       const typeValueForFlattenedContent = (inputNodeForFlattenedContent.getAttribute("type") || "").toLowerCase();
       const nameValueForFlattenedContent = inputNodeForFlattenedContent.getAttribute("name") || "";
       const placeholderValueForFlattenedContent = inputNodeForFlattenedContent.getAttribute("placeholder") || "";
+      // State is read from live properties (see stampLiveFormStateForFlattenedContent), never from
+      // attributes, because a user's typed value / ticked box updates the property, not the attribute.
+      const isCheckedForFlattenedContent = inputNodeForFlattenedContent.checked === true;
+      const isDisabledForFlattenedContent = inputNodeForFlattenedContent.disabled === true;
+      const rawValueForFlattenedContent =
+        typeof inputNodeForFlattenedContent.value === "string" ? inputNodeForFlattenedContent.value : "";
 
       if (typeValueForFlattenedContent === "checkbox" || typeValueForFlattenedContent === "radio") {
         const replacementTagForFlattenedContent = typeValueForFlattenedContent === "checkbox" ? "checkbox" : "radio";
@@ -250,6 +256,12 @@
           replacementNodeForFlattenedContent.setAttribute("name", nameValueForFlattenedContent);
         } else if (placeholderValueForFlattenedContent) {
           replacementNodeForFlattenedContent.setAttribute("placeholder", placeholderValueForFlattenedContent);
+        }
+        if (isCheckedForFlattenedContent) {
+          replacementNodeForFlattenedContent.setAttribute("checked", "");
+        }
+        if (isDisabledForFlattenedContent) {
+          replacementNodeForFlattenedContent.setAttribute("disabled", "");
         }
         if (inputNodeForFlattenedContent.replaceWith) {
           inputNodeForFlattenedContent.replaceWith(replacementNodeForFlattenedContent);
@@ -265,6 +277,17 @@
       } else if (placeholderValueForFlattenedContent) {
         inputNodeForFlattenedContent.setAttribute("placeholder", placeholderValueForFlattenedContent);
       }
+      if (typeValueForFlattenedContent === "password") {
+        // Never emit the password itself; mark only that the field holds a value.
+        if (rawValueForFlattenedContent) {
+          inputNodeForFlattenedContent.setAttribute("filled", "");
+        }
+      } else if (rawValueForFlattenedContent) {
+        inputNodeForFlattenedContent.setAttribute("value", capFieldValueForFlattenedContent(rawValueForFlattenedContent));
+      }
+      if (isDisabledForFlattenedContent) {
+        inputNodeForFlattenedContent.setAttribute("disabled", "");
+      }
     });
 
     rootNodeForFlattenedContent.querySelectorAll("select").forEach((selectNodeForFlattenedContent) => {
@@ -273,12 +296,17 @@
       }
       const nameValueForFlattenedContent = selectNodeForFlattenedContent.getAttribute("name") || "";
       const placeholderValueForFlattenedContent = selectNodeForFlattenedContent.getAttribute("placeholder") || "";
+      const isDisabledForFlattenedContent = selectNodeForFlattenedContent.disabled === true;
       // Remove non-option children (e.g. optgroup); keep option elements for their text content.
       Array.from(selectNodeForFlattenedContent.children).forEach((childForFlattenedContent) => {
         if (childForFlattenedContent.tagName && childForFlattenedContent.tagName.toLowerCase() !== "option") {
           childForFlattenedContent.remove();
         }
       });
+      // Capture selectedness before stripping the select's own attributes (removing `multiple` can
+      // change which options report as selected). The arrays stay index-aligned.
+      const optionsForFlattenedContent = Array.from(selectNodeForFlattenedContent.querySelectorAll("option"));
+      const selectedFlagsForFlattenedContent = optionsForFlattenedContent.map((optionForFlattenedContent) => optionForFlattenedContent.selected === true);
       while (selectNodeForFlattenedContent.attributes.length) {
         selectNodeForFlattenedContent.removeAttribute(selectNodeForFlattenedContent.attributes[0].name);
       }
@@ -287,6 +315,17 @@
       } else if (placeholderValueForFlattenedContent) {
         selectNodeForFlattenedContent.setAttribute("placeholder", placeholderValueForFlattenedContent);
       }
+      if (isDisabledForFlattenedContent) {
+        selectNodeForFlattenedContent.setAttribute("disabled", "");
+      }
+      optionsForFlattenedContent.forEach((optionForFlattenedContent, optionIndexForFlattenedContent) => {
+        while (optionForFlattenedContent.attributes.length) {
+          optionForFlattenedContent.removeAttribute(optionForFlattenedContent.attributes[0].name);
+        }
+        if (selectedFlagsForFlattenedContent[optionIndexForFlattenedContent]) {
+          optionForFlattenedContent.setAttribute("selected", "");
+        }
+      });
     });
 
     rootNodeForFlattenedContent.querySelectorAll("textarea").forEach((textareaNodeForFlattenedContent) => {
@@ -295,7 +334,12 @@
       }
       const nameValueForFlattenedContent = textareaNodeForFlattenedContent.getAttribute("name") || "";
       const placeholderValueForFlattenedContent = textareaNodeForFlattenedContent.getAttribute("placeholder") || "";
-      textareaNodeForFlattenedContent.textContent = "";
+      const isDisabledForFlattenedContent = textareaNodeForFlattenedContent.disabled === true;
+      const rawValueForFlattenedContent =
+        typeof textareaNodeForFlattenedContent.value === "string" ? textareaNodeForFlattenedContent.value : "";
+      textareaNodeForFlattenedContent.textContent = rawValueForFlattenedContent
+        ? capFieldValueForFlattenedContent(rawValueForFlattenedContent)
+        : "";
       while (textareaNodeForFlattenedContent.attributes.length) {
         textareaNodeForFlattenedContent.removeAttribute(textareaNodeForFlattenedContent.attributes[0].name);
       }
@@ -303,6 +347,9 @@
         textareaNodeForFlattenedContent.setAttribute("name", nameValueForFlattenedContent);
       } else if (placeholderValueForFlattenedContent) {
         textareaNodeForFlattenedContent.setAttribute("placeholder", placeholderValueForFlattenedContent);
+      }
+      if (isDisabledForFlattenedContent) {
+        textareaNodeForFlattenedContent.setAttribute("disabled", "");
       }
     });
   }
@@ -419,11 +466,12 @@
     const allowedByTagForFlattenedContent = {
       a: new Set(["href"]),
       form: new Set(["action"]),
-      input: new Set(["name", "placeholder"]),
-      select: new Set(["name", "placeholder"]),
-      textarea: new Set(["name", "placeholder"]),
-      checkbox: new Set(["name", "placeholder"]),
-      radio: new Set(["name", "placeholder"]),
+      input: new Set(["name", "placeholder", "value", "disabled", "filled"]),
+      select: new Set(["name", "placeholder", "disabled"]),
+      textarea: new Set(["name", "placeholder", "disabled"]),
+      checkbox: new Set(["name", "placeholder", "checked", "disabled"]),
+      radio: new Set(["name", "placeholder", "checked", "disabled"]),
+      option: new Set(["selected"]),
       td: new Set(["colspan", "rowspan"]),
       th: new Set(["colspan", "rowspan", "scope"]),
       ol: new Set(["start"]),
@@ -593,6 +641,22 @@
   // Marks a placeholder as carrying a resolved alt/src pair while the rest of the pipeline runs.
   // Removed before the payload is measured, so it never reaches the output.
   const IMAGE_CANDIDATE_ATTR_FOR_FLATTENED_CONTENT = "data-abchat-img-candidate";
+
+  // Upper bound on the length of a form-field value emitted into the flattened payload. A single
+  // textarea can hold tens of KB; without a cap one field could dominate the whole context window.
+  // Sync with: MAX_FIELD_VALUE_CHARS_FOR_TOOL_EXEC in agent/toolExec.js
+  const MAX_FIELD_VALUE_CHARS_FOR_FLATTENED_CONTENT = 300;
+
+  // Sync with: capFieldValueForFetch in agent/toolExec.js
+  function capFieldValueForFlattenedContent(valueForFlattenedContent) {
+    if (typeof valueForFlattenedContent !== "string") {
+      return "";
+    }
+    if (valueForFlattenedContent.length <= MAX_FIELD_VALUE_CHARS_FOR_FLATTENED_CONTENT) {
+      return valueForFlattenedContent;
+    }
+    return valueForFlattenedContent.slice(0, MAX_FIELD_VALUE_CHARS_FOR_FLATTENED_CONTENT) + "…";
+  }
 
   // Sync with: getDescriptiveImageAltForFetch in agent/toolExec.js
   function getDescriptiveImageAltForFlattenedContent(imgElementForFlattenedContent) {
@@ -1173,7 +1237,71 @@
     return null;
   }
 
-  function cloneNodeWithShadowsForFlattenedContent(liveNodeForFlattenedContent) {
+  // Copies live form-field state (typed values, ticked boxes, chosen options, disabled) from a live
+  // node onto its clone as ATTRIBUTES. A plain attribute clone loses this: the browser tracks a
+  // user's input in DOM properties (.value/.checked/.selected), not in the reflected attributes.
+  // Writing attributes (rather than properties) is deliberate: attributes survive the clone being
+  // re-appended into its parent, whereas a detached option's .selected can be reset on insertion.
+  // The real password is never copied; only a sentinel that records "this field has a value".
+  function stampLiveFormStateForFlattenedContent(liveNodeForFlattenedContent, clonedNodeForFlattenedContent) {
+    if (!liveNodeForFlattenedContent || !clonedNodeForFlattenedContent || !clonedNodeForFlattenedContent.setAttribute) {
+      return;
+    }
+    const tagForStampForFlattenedContent = (liveNodeForFlattenedContent.tagName || "").toLowerCase();
+    try {
+      if (tagForStampForFlattenedContent === "input") {
+        const typeForStampForFlattenedContent = (liveNodeForFlattenedContent.type || "").toLowerCase();
+        if (typeForStampForFlattenedContent === "checkbox" || typeForStampForFlattenedContent === "radio") {
+          if (liveNodeForFlattenedContent.checked) {
+            clonedNodeForFlattenedContent.setAttribute("checked", "");
+          } else {
+            clonedNodeForFlattenedContent.removeAttribute("checked");
+          }
+        } else {
+          const valueForStampForFlattenedContent =
+            typeof liveNodeForFlattenedContent.value === "string" ? liveNodeForFlattenedContent.value : "";
+          if (typeForStampForFlattenedContent === "password") {
+            if (valueForStampForFlattenedContent) {
+              clonedNodeForFlattenedContent.setAttribute("value", "x");
+            } else {
+              clonedNodeForFlattenedContent.removeAttribute("value");
+            }
+          } else if (valueForStampForFlattenedContent) {
+            clonedNodeForFlattenedContent.setAttribute("value", valueForStampForFlattenedContent);
+          } else {
+            clonedNodeForFlattenedContent.removeAttribute("value");
+          }
+        }
+        if (liveNodeForFlattenedContent.disabled) {
+          clonedNodeForFlattenedContent.setAttribute("disabled", "");
+        } else {
+          clonedNodeForFlattenedContent.removeAttribute("disabled");
+        }
+      } else if (tagForStampForFlattenedContent === "textarea") {
+        clonedNodeForFlattenedContent.textContent =
+          typeof liveNodeForFlattenedContent.value === "string" ? liveNodeForFlattenedContent.value : "";
+        if (liveNodeForFlattenedContent.disabled) {
+          clonedNodeForFlattenedContent.setAttribute("disabled", "");
+        } else {
+          clonedNodeForFlattenedContent.removeAttribute("disabled");
+        }
+      } else if (tagForStampForFlattenedContent === "select") {
+        if (liveNodeForFlattenedContent.disabled) {
+          clonedNodeForFlattenedContent.setAttribute("disabled", "");
+        } else {
+          clonedNodeForFlattenedContent.removeAttribute("disabled");
+        }
+      } else if (tagForStampForFlattenedContent === "option") {
+        if (liveNodeForFlattenedContent.selected) {
+          clonedNodeForFlattenedContent.setAttribute("selected", "");
+        } else {
+          clonedNodeForFlattenedContent.removeAttribute("selected");
+        }
+      }
+    } catch (errForStampForFlattenedContent) {}
+  }
+
+  function cloneNodeWithShadowsForFlattenedContent(liveNodeForFlattenedContent, stampFormStateForFlattenedContent) {
     if (!liveNodeForFlattenedContent || !document || !document.createElement) {
       return null;
     }
@@ -1197,8 +1325,11 @@
         clonedElForFlattenedContent.setAttribute(attrForFlattenedContent.name, attrForFlattenedContent.value);
       } catch (errForFlattenedContent) {}
     });
+    if (stampFormStateForFlattenedContent) {
+      stampLiveFormStateForFlattenedContent(liveNodeForFlattenedContent, clonedElForFlattenedContent);
+    }
     Array.from(liveNodeForFlattenedContent.childNodes || []).forEach(function (childForFlattenedContent) {
-      const clonedChildForFlattenedContent = cloneNodeWithShadowsForFlattenedContent(childForFlattenedContent);
+      const clonedChildForFlattenedContent = cloneNodeWithShadowsForFlattenedContent(childForFlattenedContent, stampFormStateForFlattenedContent);
       if (clonedChildForFlattenedContent) {
         try {
           clonedElForFlattenedContent.appendChild(clonedChildForFlattenedContent);
@@ -1207,7 +1338,7 @@
     });
     if (liveNodeForFlattenedContent.shadowRoot && liveNodeForFlattenedContent.id !== "abchat-panel-shadow-host") {
       Array.from(liveNodeForFlattenedContent.shadowRoot.childNodes || []).forEach(function (shadowChildForFlattenedContent) {
-        const clonedShadowChildForFlattenedContent = cloneNodeWithShadowsForFlattenedContent(shadowChildForFlattenedContent);
+        const clonedShadowChildForFlattenedContent = cloneNodeWithShadowsForFlattenedContent(shadowChildForFlattenedContent, stampFormStateForFlattenedContent);
         if (clonedShadowChildForFlattenedContent) {
           try {
             clonedElForFlattenedContent.appendChild(clonedShadowChildForFlattenedContent);
@@ -1365,7 +1496,7 @@
     const markedHiddenForFlattenedContent = shouldTrackHiddenForFlattenedContent
       ? markHiddenElementsForFlattenedContent(targetRootForFlattenedContent)
       : [];
-    let clonedRootForFlattenedContent = cloneNodeWithShadowsForFlattenedContent(targetRootForFlattenedContent)
+    let clonedRootForFlattenedContent = cloneNodeWithShadowsForFlattenedContent(targetRootForFlattenedContent, true)
       || targetRootForFlattenedContent.cloneNode(true);
     unmarkHiddenElementsForFlattenedContent(markedHiddenForFlattenedContent);
     const isFragmentRootForFlattenedContent =
@@ -1405,14 +1536,13 @@
     );
   }
 
-  function toSelfClosingTagForFlattenedContent(tagNameForFlattenedContent, attrNameForFlattenedContent, attrValueForFlattenedContent) {
-    if (attrNameForFlattenedContent && attrValueForFlattenedContent) {
-      return "<" + tagNameForFlattenedContent + ' ' + attrNameForFlattenedContent + '="' + attrValueForFlattenedContent + '" />';
-    }
-    return "<" + tagNameForFlattenedContent + " />";
-  }
-
   // Sync with: formatFormElementsForFetch in agent/toolExec.js
+  //
+  // Two passes. First, boolean state attributes serialize as name="" (outerHTML has no bare-attribute
+  // form); rewrite them to bare form so the model reads `checked` not `checked=""`. Second, self-close
+  // inputs and empty textareas and drop the closing tag on the custom checkbox/radio tags. The
+  // attribute-matching sub-pattern is quote-aware ("[^"]*" | [^">]) so a value containing ">" does not
+  // terminate the match early; a plain [^>]* would break on such values now that values are emitted.
   function formatFormElementsForPromptForFlattenedContent(cleanHtmlPayloadForFlattenedContent) {
     if (!cleanHtmlPayloadForFlattenedContent || typeof cleanHtmlPayloadForFlattenedContent !== "string") {
       return "";
@@ -1421,55 +1551,28 @@
     let formattedPayloadForFlattenedContent = cleanHtmlPayloadForFlattenedContent;
 
     formattedPayloadForFlattenedContent = formattedPayloadForFlattenedContent.replace(
-      /<input name="([^"]+)">/gi,
-      function (_mForFlattenedContent, vForFlattenedContent) { return toSelfClosingTagForFlattenedContent("input", "name", vForFlattenedContent); }
-    );
-    formattedPayloadForFlattenedContent = formattedPayloadForFlattenedContent.replace(
-      /<input placeholder="([^"]+)">/gi,
-      function (_mForFlattenedContent, vForFlattenedContent) { return toSelfClosingTagForFlattenedContent("input", "placeholder", vForFlattenedContent); }
-    );
-    formattedPayloadForFlattenedContent = formattedPayloadForFlattenedContent.replace(
-      /<input>/gi,
-      function () { return toSelfClosingTagForFlattenedContent("input", "", ""); }
+      / (checked|disabled|selected|filled)=""/gi,
+      " $1"
     );
 
     formattedPayloadForFlattenedContent = formattedPayloadForFlattenedContent.replace(
-      /<textarea name="([^"]+)"><\/textarea>/gi,
-      function (_mForFlattenedContent, vForFlattenedContent) { return toSelfClosingTagForFlattenedContent("textarea", "name", vForFlattenedContent); }
-    );
-    formattedPayloadForFlattenedContent = formattedPayloadForFlattenedContent.replace(
-      /<textarea placeholder="([^"]+)"><\/textarea>/gi,
-      function (_mForFlattenedContent, vForFlattenedContent) { return toSelfClosingTagForFlattenedContent("textarea", "placeholder", vForFlattenedContent); }
-    );
-    formattedPayloadForFlattenedContent = formattedPayloadForFlattenedContent.replace(
-      /<textarea><\/textarea>/gi,
-      function () { return toSelfClosingTagForFlattenedContent("textarea", "", ""); }
+      /<input\b((?:"[^"]*"|[^">])*)>/gi,
+      function (_mForFlattenedContent, attrsForFlattenedContent) { return "<input" + attrsForFlattenedContent + " />"; }
     );
 
     formattedPayloadForFlattenedContent = formattedPayloadForFlattenedContent.replace(
-      /<checkbox name="([^"]+)"><\/checkbox>/gi,
-      function (_mForFlattenedContent, vForFlattenedContent) { return '<checkbox name="' + vForFlattenedContent + '">'; }
-    );
-    formattedPayloadForFlattenedContent = formattedPayloadForFlattenedContent.replace(
-      /<checkbox placeholder="([^"]+)"><\/checkbox>/gi,
-      function (_mForFlattenedContent, vForFlattenedContent) { return '<checkbox placeholder="' + vForFlattenedContent + '">'; }
-    );
-    formattedPayloadForFlattenedContent = formattedPayloadForFlattenedContent.replace(
-      /<checkbox><\/checkbox>/gi,
-      "<checkbox>"
+      /<textarea\b((?:"[^"]*"|[^">])*)><\/textarea>/gi,
+      function (_mForFlattenedContent, attrsForFlattenedContent) { return "<textarea" + attrsForFlattenedContent + " />"; }
     );
 
     formattedPayloadForFlattenedContent = formattedPayloadForFlattenedContent.replace(
-      /<radio name="([^"]+)"><\/radio>/gi,
-      function (_mForFlattenedContent, vForFlattenedContent) { return '<radio name="' + vForFlattenedContent + '">'; }
+      /<checkbox\b((?:"[^"]*"|[^">])*)><\/checkbox>/gi,
+      function (_mForFlattenedContent, attrsForFlattenedContent) { return "<checkbox" + attrsForFlattenedContent + ">"; }
     );
+
     formattedPayloadForFlattenedContent = formattedPayloadForFlattenedContent.replace(
-      /<radio placeholder="([^"]+)"><\/radio>/gi,
-      function (_mForFlattenedContent, vForFlattenedContent) { return '<radio placeholder="' + vForFlattenedContent + '">'; }
-    );
-    formattedPayloadForFlattenedContent = formattedPayloadForFlattenedContent.replace(
-      /<radio><\/radio>/gi,
-      "<radio>"
+      /<radio\b((?:"[^"]*"|[^">])*)><\/radio>/gi,
+      function (_mForFlattenedContent, attrsForFlattenedContent) { return "<radio" + attrsForFlattenedContent + ">"; }
     );
 
     return formattedPayloadForFlattenedContent;
