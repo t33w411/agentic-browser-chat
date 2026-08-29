@@ -4715,6 +4715,8 @@
       MODEL PICKER
     ============================================================ */
     let reasoningFilterActiveForPanelRuntime = false;
+    // Tri-state vision filter: 'all' -> 'vision' (image-input only) -> 'novision' (text/tools only).
+    let visionFilterStateForPanelRuntime = 'all';
 
     function toggleModelPickerForPanelRuntime() {
       const wasOpen = preclickOpenStateForPanelRuntime;
@@ -4732,6 +4734,8 @@
           reasoningChipForOpen.classList.remove('active');
           reasoningChipForOpen.setAttribute('aria-pressed', 'false');
         }
+        visionFilterStateForPanelRuntime = 'all';
+        renderVisionFilterChipForPanelRuntime();
         const searchForOpen = root.getElementById('model-picker-search');
         if (searchForOpen) {
           searchForOpen.value = '';
@@ -4815,18 +4819,23 @@
           btn.dataset.action = 'select-model';
           btn.dataset.modelId = m.id;
           btn.dataset.reasoningDefaultOn = m.reasoningDefaultOn ? '1' : '0';
+          const noVisionForItem = m.supportsVision === false;
+          btn.dataset.supportsVision = noVisionForItem ? '0' : '1';
           const displayNameForItem = getDisplayName(m, providerKey, models);
           const namePart = escHtml(displayNameForItem);
           const tierForBtn = getModelTierForPanelRuntime(m);
-          btn.dataset.searchText = (String(displayNameForItem) + ' ' + String(m.id) + ' ' + (tierForBtn ? tierForBtn.label : '')).toLowerCase();
+          btn.dataset.searchText = (String(displayNameForItem) + ' ' + String(m.id) + ' ' + (tierForBtn ? tierForBtn.label : '') + (noVisionForItem ? ' no vision' : ' vision')).toLowerCase();
           const hoverTooltipForItem = formatModelHoverTooltipForPanelRuntime(m);
           if (hoverTooltipForItem) btn.title = hoverTooltipForItem;
           const reasoningMarkForItem = m.reasoningDefaultOn
             ? ' <span class="mp-reasoning-mark" title="Reasoning on by default">' + (ic.brain13 || '') + '</span>'
             : '';
+          const visionMarkForItem = noVisionForItem
+            ? ' <span class="mp-vision-mark novision" title="Text and tools only, no image input">' + (ic.eyeOff13 || '') + '</span>'
+            : ' <span class="mp-vision-mark" title="Supports image input">' + (ic.eye13 || '') + '</span>';
           btn.innerHTML = tierForBtn
-            ? namePart + reasoningMarkForItem + ' <span class="' + tierForBtn.cls + '">' + tierForBtn.label + '</span>'
-            : namePart + reasoningMarkForItem;
+            ? namePart + reasoningMarkForItem + visionMarkForItem + ' <span class="' + tierForBtn.cls + '">' + tierForBtn.label + '</span>'
+            : namePart + reasoningMarkForItem + visionMarkForItem;
           group.appendChild(btn);
         });
         listForDropdown.appendChild(group);
@@ -4840,6 +4849,7 @@
       if (!listForFilter) return;
       const queryForFilter = String(rawQueryForFilter || '').trim().toLowerCase();
       const reasoningOnlyForFilter = reasoningFilterActiveForPanelRuntime;
+      const visionStateForFilter = visionFilterStateForPanelRuntime;
       let totalVisibleForFilter = 0;
       let totalItemsForFilter = 0;
       listForFilter.querySelectorAll('.mp-group').forEach(function (groupForFilter) {
@@ -4849,7 +4859,11 @@
           const haystackForFilter = itemForFilter.dataset.searchText || itemForFilter.textContent.toLowerCase();
           const matchesQueryForFilter = !queryForFilter || haystackForFilter.indexOf(queryForFilter) !== -1;
           const matchesReasoningForFilter = !reasoningOnlyForFilter || itemForFilter.dataset.reasoningDefaultOn === '1';
-          const matchesForFilter = matchesQueryForFilter && matchesReasoningForFilter;
+          const supportsVisionForFilter = itemForFilter.dataset.supportsVision !== '0';
+          const matchesVisionForFilter = visionStateForFilter === 'all'
+            || (visionStateForFilter === 'vision' && supportsVisionForFilter)
+            || (visionStateForFilter === 'novision' && !supportsVisionForFilter);
+          const matchesForFilter = matchesQueryForFilter && matchesReasoningForFilter && matchesVisionForFilter;
           itemForFilter.style.display = matchesForFilter ? '' : 'none';
           if (matchesForFilter) visibleInGroupForFilter++;
         });
@@ -4861,7 +4875,7 @@
       const countForFilter = root.getElementById('model-picker-count');
       if (countForFilter) {
         const narrowedForFilter =
-          (Boolean(queryForFilter) || reasoningOnlyForFilter) && totalItemsForFilter > 0;
+          (Boolean(queryForFilter) || reasoningOnlyForFilter || visionStateForFilter !== 'all') && totalItemsForFilter > 0;
         countForFilter.textContent = narrowedForFilter
           ? totalVisibleForFilter + ' of ' + totalItemsForFilter
           : '';
@@ -4881,8 +4895,111 @@
       filterModelPickerForPanelRuntime(searchForReasoningFilter ? searchForReasoningFilter.value : '');
     }
 
+    // Paints the tri-state vision chip to match visionFilterStateForPanelRuntime: a plain eye for
+    // 'all'/'vision' and a red crossed eye for 'novision', with the label and aria-label following.
+    function renderVisionFilterChipForPanelRuntime() {
+      const chipForVisionFilter = root.getElementById('mp-vision-filter');
+      if (!chipForVisionFilter) return;
+      const stateForVisionChip = visionFilterStateForPanelRuntime;
+      const isNoVisionForChip = stateForVisionChip === 'novision';
+      const iconForVisionChip = isNoVisionForChip ? (ic.eyeOff13 || '') : (ic.eye13 || '');
+      const labelForVisionChip = isNoVisionForChip ? 'No vision' : 'Vision';
+      chipForVisionFilter.innerHTML = iconForVisionChip + '<span>' + labelForVisionChip + '</span>';
+      chipForVisionFilter.classList.toggle('active', stateForVisionChip !== 'all');
+      chipForVisionFilter.classList.toggle('novision', isNoVisionForChip);
+      const ariaLabelForVisionChip = stateForVisionChip === 'vision'
+        ? 'Filter by vision: showing only models with vision'
+        : (isNoVisionForChip ? 'Filter by vision: showing only models without vision' : 'Filter by vision: showing all models');
+      chipForVisionFilter.setAttribute('aria-label', ariaLabelForVisionChip);
+    }
+
+    function toggleVisionFilterForPanelRuntime() {
+      visionFilterStateForPanelRuntime = visionFilterStateForPanelRuntime === 'all'
+        ? 'vision'
+        : (visionFilterStateForPanelRuntime === 'vision' ? 'novision' : 'all');
+      renderVisionFilterChipForPanelRuntime();
+      const searchForVisionFilter = root.getElementById('model-picker-search');
+      filterModelPickerForPanelRuntime(searchForVisionFilter ? searchForVisionFilter.value : '');
+    }
+
+    // The chat model currently staged in the picker. Falls back to the global default so a gate
+    // can answer before a chat's own model has been applied to the select.
+    function getCurrentChatModelIdForPanelRuntime() {
+      const chatSelectForModelId = root.getElementById('chat-model-select');
+      if (chatSelectForModelId && chatSelectForModelId.value) return chatSelectForModelId.value;
+      return loadedGlobalDefaultModelForPanelRuntime || DEFAULT_MODEL_FOR_PANEL_RUNTIME;
+    }
+
+    // True only when the model is present in the fetched list AND positively lacks image input.
+    // An unknown id (not in the list, or a router alias) is never treated as non-vision, so a stale
+    // cache or an odd model never wrongly blocks image attachment.
+    function isModelKnownNonVisionForPanelRuntime(modelIdForVisionCheck) {
+      const idForVisionCheck = String(modelIdForVisionCheck || '').trim();
+      if (!idForVisionCheck) return false;
+      const foundForVisionCheck = loadedChatModelsForPanelRuntime.find(function (mForVisionCheck) {
+        return mForVisionCheck && mForVisionCheck.id === idForVisionCheck;
+      });
+      if (!foundForVisionCheck) return false;
+      return foundForVisionCheck.supportsVision === false;
+    }
+
+    function showModelBlocksImagesToastForPanelRuntime() {
+      const toastForBlock = ABChatContent && ABChatContent.ui && ABChatContent.ui.toast;
+      if (toastForBlock && typeof toastForBlock.show === 'function') {
+        toastForBlock.show('The selected model cannot process images. Switch to a vision-capable model to attach images or screenshots.', { durationMs: 4500 });
+      }
+    }
+
+    // Attach-image entry points call this first: false means the current model has no vision and the
+    // attach must be abandoned (a toast has already been shown).
+    function ensureModelSupportsImageAttachForPanelRuntime() {
+      if (!isModelKnownNonVisionForPanelRuntime(getCurrentChatModelIdForPanelRuntime())) return true;
+      showModelBlocksImagesToastForPanelRuntime();
+      return false;
+    }
+
+    // True when the active conversation already carries an image the model would be sent as an
+    // image_url part: a pending composer chip (including a generated-image chip) or a sent message
+    // whose chips include an image/screenshot. Used to refuse a switch to a non-vision model.
+    function activeChatHasImageAttachmentForPanelRuntime() {
+      const rowForImgCheck = root.querySelector('.input-chips-row');
+      if (rowForImgCheck) {
+        const chipsForImgCheck = rowForImgCheck.querySelectorAll('.ic');
+        for (var iForImgCheck = 0; iForImgCheck < chipsForImgCheck.length; iForImgCheck++) {
+          const typeForImgCheck = String(chipsForImgCheck[iForImgCheck].dataset.attachType || '').trim().toLowerCase();
+          const kindForImgCheck = String(chipsForImgCheck[iForImgCheck].dataset.attachKind || '').trim().toLowerCase();
+          if (typeForImgCheck === 'image' || typeForImgCheck === 'screenshot'
+            || kindForImgCheck === 'image' || kindForImgCheck === 'screenshot' || kindForImgCheck === 'generated_image') {
+            return true;
+          }
+        }
+      }
+      const msgsForImgCheck = getActiveChatMessagesForPanelRuntime();
+      for (var jForImgCheck = 0; jForImgCheck < msgsForImgCheck.length; jForImgCheck++) {
+        const msgForImgCheck = msgsForImgCheck[jForImgCheck];
+        const chipsHistForImgCheck = msgForImgCheck && Array.isArray(msgForImgCheck.chips) ? msgForImgCheck.chips : [];
+        for (var cForImgCheck = 0; cForImgCheck < chipsHistForImgCheck.length; cForImgCheck++) {
+          const chipHistForImgCheck = chipsHistForImgCheck[cForImgCheck];
+          const chipTypeHistForImgCheck = String((chipHistForImgCheck && chipHistForImgCheck.type) || '').trim().toLowerCase();
+          if (chipTypeHistForImgCheck === 'image' || chipTypeHistForImgCheck === 'screenshot') return true;
+        }
+      }
+      return false;
+    }
+
     function selectModelForPanelRuntime(modelId) {
       if (!modelId) return;
+      if (isModelKnownNonVisionForPanelRuntime(modelId) && activeChatHasImageAttachmentForPanelRuntime()) {
+        const toastForReject = ABChatContent && ABChatContent.ui && ABChatContent.ui.toast;
+        if (toastForReject && typeof toastForReject.show === 'function') {
+          toastForReject.show('This conversation has image attachments, so it cannot switch to a model without vision support. Start a new chat to use this model.', { durationMs: 5000 });
+        }
+        const dropdownForReject = root.getElementById('model-picker-dropdown');
+        const btnForReject = root.getElementById('model-picker-btn');
+        if (dropdownForReject) dropdownForReject.classList.remove('open');
+        if (btnForReject) btnForReject.classList.remove('open');
+        return;
+      }
       const chatSelect = root.getElementById('chat-model-select');
       if (!chatSelect) return;
       chatSelect.value = modelId;
@@ -8883,11 +9000,16 @@
           return;
         }
 
+        const modelBlocksImagesForDrop = isModelKnownNonVisionForPanelRuntime(getCurrentChatModelIdForPanelRuntime());
         const unsupportedNamesForDrop = [];
         const acceptedFilesForDrop = [];
+        var imageBlockedCountForDrop = 0;
         for (var iForDrop = 0; iForDrop < droppedFilesArr.length; iForDrop++) {
           const fForDrop = droppedFilesArr[iForDrop];
-          if (isAcceptedImageForDragDrop(fForDrop) || isAcceptedFileForDragDrop(fForDrop)) {
+          if (isAcceptedImageForDragDrop(fForDrop)) {
+            if (modelBlocksImagesForDrop) { imageBlockedCountForDrop++; continue; }
+            acceptedFilesForDrop.push(fForDrop);
+          } else if (isAcceptedFileForDragDrop(fForDrop)) {
             acceptedFilesForDrop.push(fForDrop);
           } else {
             unsupportedNamesForDrop.push(String(fForDrop.name || 'file'));
@@ -8904,6 +9026,9 @@
           attachDroppedFileForPanelRuntime(acceptedFilesForDrop[jForDrop]);
         }
 
+        if (imageBlockedCountForDrop > 0) {
+          showDragToastForDragDrop('The selected model cannot process images, so ' + imageBlockedCountForDrop + ' image' + (imageBlockedCountForDrop === 1 ? ' was' : 's were') + ' not attached. Switch to a vision-capable model to attach images.');
+        }
         if (unsupportedNamesForDrop.length > 0) {
           showDragToastForDragDrop('Skipped unsupported file' + (unsupportedNamesForDrop.length === 1 ? '' : 's') + ': ' + unsupportedNamesForDrop.join(', ') + '. Accepted: images (PNG, JPEG, WebP, GIF) and documents (PDF, TXT, MD, JSON, CSV, DOCX, XLSX, PPTX, ODS).');
         }
@@ -11641,7 +11766,7 @@
     var loadedGlobalDefaultModelForPanelRuntime = '';
     var loadedImageModelsForPanelRuntime = [];
     var loadedChatModelsForPanelRuntime = [];
-    const MODEL_CACHE_KEY_FOR_PANEL_RUNTIME = 'abchat_model_cache_v13';
+    const MODEL_CACHE_KEY_FOR_PANEL_RUNTIME = 'abchat_model_cache_v14';
     const ROUTER_EXCEPTION_MODEL_IDS_FOR_PANEL_RUNTIME = ['openrouter/auto', 'openrouter/free'];
     // OpenRouter variant suffixes this extension cannot drive. ':batch' queues the request and
     // returns within 24 hours, which is useless for an interactive streaming agent, and the id
@@ -11763,10 +11888,12 @@
         if (ROUTER_EXCEPTION_MODEL_IDS_FOR_PANEL_RUNTIME.includes(modelId)) return true;
         const hasTools = Array.isArray(m.supported_parameters) && m.supported_parameters.includes('tools');
         const arch = m.architecture || {};
-        const hasImageInput = Array.isArray(arch.input_modalities) && arch.input_modalities.includes('image');
         const outputModalities = Array.isArray(arch.output_modalities) ? arch.output_modalities.filter(Boolean) : [];
         const hasTextOnlyOutput = outputModalities.length > 0 && outputModalities.every(function (mod) { return mod === 'text'; });
-        return hasTools && hasImageInput && hasTextOnlyOutput;
+        // Image input is no longer required: a tool-capable, text-output model with no vision is
+        // allowed and tagged. supportsVision is carried on the mapped object below and gates image
+        // attachment (see ensureModelSupportsImageAttachForPanelRuntime).
+        return hasTools && hasTextOnlyOutput;
       });
       filtered.sort(function (a, b) { return (a.name || a.id || '').localeCompare(b.name || b.id || ''); });
       return filtered.map(function (m) {
@@ -11783,7 +11910,13 @@
         const reasoningMandatory = !!(reasoningInfo && reasoningInfo.mandatory === true);
         const reasoningDefaultOn = !!(reasoningInfo && (reasoningInfo.mandatory === true || reasoningInfo.default_enabled === true));
         const reasoningDefaultEffort = (reasoningInfo && typeof reasoningInfo.default_effort === 'string') ? reasoningInfo.default_effort : '';
-        return { id: m.id, name: m.name || m.id, completionCostPerMillion: costPerMillion, promptCostPerMillion: promptCostPerMillion, contextLength: contextLength, canReason: canReason, reasoningMandatory: reasoningMandatory, reasoningDefaultOn: reasoningDefaultOn, reasoningDefaultEffort: reasoningDefaultEffort, created: m.created || 0 };
+        // Router aliases (openrouter/auto, openrouter/free) have no fixed architecture and can route
+        // to a vision model, so they are treated as vision-capable rather than tagged non-vision.
+        const archForVision = m.architecture || {};
+        const supportsVision = ROUTER_EXCEPTION_MODEL_IDS_FOR_PANEL_RUNTIME.includes(m.id)
+          ? true
+          : (Array.isArray(archForVision.input_modalities) && archForVision.input_modalities.includes('image'));
+        return { id: m.id, name: m.name || m.id, completionCostPerMillion: costPerMillion, promptCostPerMillion: promptCostPerMillion, contextLength: contextLength, canReason: canReason, reasoningMandatory: reasoningMandatory, reasoningDefaultOn: reasoningDefaultOn, reasoningDefaultEffort: reasoningDefaultEffort, supportsVision: supportsVision, created: m.created || 0 };
       }).filter(function (m) {
         if (ROUTER_EXCEPTION_MODEL_IDS_FOR_PANEL_RUNTIME.includes(m.id)) return true;
         if (isFreeModelVariantForPanelRuntime(m)) return true;
@@ -12042,8 +12175,9 @@
             opt.value = m.id;
             const tierForOption = getModelTierForPanelRuntime(m);
             const tierSuffixForOption = tierForOption ? ' -- [' + tierForOption.label + ']' : '';
+            const visionSuffixForOption = m.supportsVision === false ? ' -- [No vision]' : '';
             const modelDisplayNameForOption = getModelDisplayNameForPanelRuntime(m, providerKeyForGroup, pickedForGroup);
-            opt.textContent = modelDisplayNameForOption + tierSuffixForOption;
+            opt.textContent = modelDisplayNameForOption + tierSuffixForOption + visionSuffixForOption;
             if (m.id === effectiveSelected) opt.selected = true;
             optgroupForModels.appendChild(opt);
           });
@@ -15574,6 +15708,9 @@
           if (!autoChipMatchOffscreen) continue;
           const autoChipBlobIdOffscreen = Number(autoChipMatchOffscreen[1]);
           if (!Number.isFinite(autoChipBlobIdOffscreen)) continue;
+          // Do not stage a generated image for a text-only model: it would be sent as an image_url
+          // the model cannot read. The image is still saved in the finished assistant turn.
+          if (isModelKnownNonVisionForPanelRuntime(modelForOffscreen)) continue;
           addInputChipForPanelRuntime({ type: 'image', label: 'Generated image', mimeType: 'image/png', refId: autoChipBlobIdOffscreen, size: 0, kind: 'generated_image' });
         }
         // Last line of defence: a chip whose source is gone would otherwise be sent as a
@@ -17023,6 +17160,7 @@
 
     function openImageUploadForPanelRuntime() {
       closeAttachPicker();
+      if (!ensureModelSupportsImageAttachForPanelRuntime()) return;
       const imageInputForPanelRuntime = root.getElementById('chat-image-input');
       if (!imageInputForPanelRuntime) return;
       imageInputForPanelRuntime.value = '';
@@ -17084,6 +17222,7 @@
 
     async function captureScreenshotForPanelRuntime() {
       closeAttachPicker();
+      if (!ensureModelSupportsImageAttachForPanelRuntime()) return;
       const pendingChipForPanelRuntime = addInputChipForPanelRuntime({
         type: 'screenshot',
         label: 'Screenshot',
@@ -19039,6 +19178,7 @@
             case 'toggle-attach-picker': toggleAttachPicker(); evtForRuntime.stopPropagation(); break;
             case 'toggle-model-picker':  toggleModelPickerForPanelRuntime(); evtForRuntime.stopPropagation(); break;
             case 'toggle-reasoning-filter': toggleReasoningFilterForPanelRuntime(); break;
+            case 'toggle-vision-filter': toggleVisionFilterForPanelRuntime(); break;
             case 'select-model':         selectModelForPanelRuntime(tgtForRuntime.dataset.modelId); break;
             case 'open-image-upload':    openImageUploadForPanelRuntime(); break;
             case 'capture-screenshot':   captureScreenshotForPanelRuntime(); break;

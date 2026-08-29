@@ -1565,6 +1565,7 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 .mp-filter-chip svg { flex-shrink: 0; }
 .mp-filter-chip:hover { background: var(--abchat-bg-hover); color: var(--abchat-text-primary); }
 .mp-filter-chip.active { background: var(--abchat-accent); border-color: var(--abchat-accent); color: #fff; }
+.mp-filter-chip.mp-vision-filter.active.novision { background: #dc2626; border-color: #dc2626; color: #fff; }
 .mp-list { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
 .mp-empty { padding: 10px 8px; text-align: center; font-size: 13px; color: var(--abchat-text-secondary); }
 .mp-filter-count {
@@ -1594,6 +1595,12 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
   font-size: 10px; font-weight: 600; letter-spacing: 0.03em; vertical-align: middle;
   margin-left: 4px; pointer-events: none;
 }
+.mp-vision-mark {
+  display: inline-flex; align-items: center; vertical-align: middle;
+  margin-left: 4px; color: var(--abchat-text-muted); pointer-events: none;
+}
+.mp-vision-mark svg { display: block; flex-shrink: 0; }
+.mp-vision-mark.novision { color: #dc2626; }
 .mp-reasoning-mark {
   display: inline-flex; align-items: center; vertical-align: middle;
   margin-left: 4px; color: var(--abchat-accent); pointer-events: none;

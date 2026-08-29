@@ -201,6 +201,7 @@
                     </div>
                     <div class="mp-filter-row">
                       <button type="button" class="mp-filter-chip" id="mp-reasoning-filter" data-action="toggle-reasoning-filter" aria-pressed="false" title="Show only models with reasoning on by default">${icForPanelTemplate.brain13}<span>Reasoning</span></button>
+                      <button type="button" class="mp-filter-chip mp-vision-filter" id="mp-vision-filter" data-action="toggle-vision-filter" aria-label="Filter by vision: showing all models" title="Filter by vision support">${icForPanelTemplate.eye13}<span>Vision</span></button>
                       <span class="mp-filter-count hidden" id="model-picker-count" role="status" aria-live="polite"></span>
                     </div>
                     <div class="mp-list" id="model-picker-list"></div>
