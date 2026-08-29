@@ -3083,6 +3083,7 @@
               '<button class="msg-dd-item" data-action="fork-chat-from-message" data-message-id="' + last.msgId + '">Fork</button>' +
             '</div>' +
           '</div>';
+        const timestampHtmlForFlush = buildMessageTimestampHtmlForPanelRuntime(last.createdAt);
         html +=
           '<div class="msg-wrap">' +
             '<div class="msg-bubble asst has-options">' +
@@ -3092,6 +3093,7 @@
               memoryBadgeHtmlForFlush +
               sourcesHtml +
             '</div>' +
+            timestampHtmlForFlush +
           '</div>';
         asstMergeBuffer = [];
       }
@@ -3185,6 +3187,7 @@
               md: mdText,
               pairMsgId: pairMsgId,
               msgId: msg.id,
+              createdAt: typeof msg.createdAt === 'string' ? msg.createdAt : '',
               searchSources: Array.isArray(msg.searchSources) ? msg.searchSources : [],
               savedMemory: memoryActionsSinceLastUserMsgForRender.memory,
               savedSkill: memoryActionsSinceLastUserMsgForRender.skill,
@@ -3243,11 +3246,15 @@
     </div>`
           : '';
 
+        const userTimestampHtmlForPanelRuntime = isEditingMessageForPanelRuntime
+          ? ''
+          : buildMessageTimestampHtmlForPanelRuntime(msg.createdAt);
         html += `<div class="msg-wrap user-msg${isEditingMessageForPanelRuntime ? ' is-editing' : ''}">
       <div class="msg-bubble user${messageDropdownHtml ? ' has-options' : ''}">
         ${messageDropdownHtml}${chipsHtml}${contentHtml}
         ${actionsHtml}
       </div>
+      ${userTimestampHtmlForPanelRuntime}
     </div>`;
         i++;
       }
@@ -6021,6 +6028,47 @@
       if (hoursFor12h === 0) hoursFor12h = 12;
       const minStrFor12h = minutesFor12h < 10 ? '0' + minutesFor12h : String(minutesFor12h);
       return hoursFor12h + ':' + minStrFor12h + ' ' + ampmFor12h;
+    }
+
+    // Absolute local time for a chat message. Clock time when the message is from
+    // today, month + day prepended otherwise, and the year added when it is not
+    // the current year. `title` always carries the full date for the hover tooltip.
+    function formatMessageTimestampForPanelRuntime(isoStrForMsgTs) {
+      if (!isoStrForMsgTs || typeof isoStrForMsgTs !== 'string') return null;
+      const dateForMsgTs = new Date(isoStrForMsgTs);
+      if (isNaN(dateForMsgTs.getTime())) return null;
+      const timeStrForMsgTs = formatTime12hForPanelRuntime(dateForMsgTs);
+      const nowForMsgTs = new Date();
+      const monthAbbrForMsgTs = MONTH_ABBR_FOR_PANEL_RUNTIME[dateForMsgTs.getMonth()];
+      const dayNumForMsgTs = dateForMsgTs.getDate();
+      const yearForMsgTs = dateForMsgTs.getFullYear();
+      const isSameDayForMsgTs =
+        yearForMsgTs === nowForMsgTs.getFullYear() &&
+        dateForMsgTs.getMonth() === nowForMsgTs.getMonth() &&
+        dayNumForMsgTs === nowForMsgTs.getDate();
+      let textForMsgTs;
+      if (isSameDayForMsgTs) {
+        textForMsgTs = timeStrForMsgTs;
+      } else if (yearForMsgTs === nowForMsgTs.getFullYear()) {
+        textForMsgTs = monthAbbrForMsgTs + ' ' + dayNumForMsgTs + ', ' + timeStrForMsgTs;
+      } else {
+        textForMsgTs = monthAbbrForMsgTs + ' ' + dayNumForMsgTs + ', ' + yearForMsgTs + ', ' + timeStrForMsgTs;
+      }
+      const secondsForMsgTs = dateForMsgTs.getSeconds();
+      const secStrForMsgTs = secondsForMsgTs < 10 ? '0' + secondsForMsgTs : String(secondsForMsgTs);
+      const timePartsForMsgTs = timeStrForMsgTs.split(' ');
+      const titleTimeForMsgTs = timePartsForMsgTs.length === 2
+        ? timePartsForMsgTs[0] + ':' + secStrForMsgTs + ' ' + timePartsForMsgTs[1]
+        : timeStrForMsgTs;
+      const titleForMsgTs = monthAbbrForMsgTs + ' ' + dayNumForMsgTs + ', ' + yearForMsgTs + ', ' + titleTimeForMsgTs;
+      return { text: textForMsgTs, title: titleForMsgTs };
+    }
+
+    function buildMessageTimestampHtmlForPanelRuntime(isoStrForTsHtml) {
+      const infoForTsHtml = formatMessageTimestampForPanelRuntime(isoStrForTsHtml);
+      if (!infoForTsHtml) return '';
+      return '<div class="msg-timestamp" title="' + escHtml(infoForTsHtml.title) + '">'
+        + escHtml(infoForTsHtml.text) + '</div>';
     }
 
     function formatTaskDueForPanelRuntime(isoStrForDue) {

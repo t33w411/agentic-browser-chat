@@ -954,6 +954,16 @@
   width: 90%;
   max-width: 90%;
 }
+.msg-timestamp {
+  font-size: 11px;
+  line-height: 1.2;
+  color: var(--abchat-text-muted);
+  padding: 0 2px;
+  align-self: flex-start;
+  margin-left: 16px;
+  user-select: none;
+}
+.msg-wrap.user-msg .msg-timestamp { align-self: flex-end; margin-left: 0; margin-right: 8px; }
 .msg-actions-bar {
   display: flex;
   align-items: center;
