@@ -4,6 +4,11 @@
   <audio id="reminder-audio" src="../sounds/reminder.wav"></audio>
   <script src="offscreen.js"></script>
 
+  <!-- Shared read-aloud audio cache. Loaded early so its message listener is registered before the
+       heavier agent scripts below, shrinking the window where a just-created offscreen document could
+       drop the first cache PUT. -->
+  <script src="ttsAudioCache.js"></script>
+
   <!-- Agent run loop host. The orchestration loop runs here (not in the page content
        script) so an in-flight run survives a page reload. Scripts are loaded in the
        same dependency order the manifest uses for the content script. Page-DOM-bound

@@ -964,6 +964,56 @@
   user-select: none;
 }
 .msg-wrap.user-msg .msg-timestamp { align-self: flex-end; margin-left: 0; margin-right: 8px; }
+.msg-footer {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  align-self: flex-start;
+  margin-left: 13px;
+}
+.msg-footer .msg-timestamp {
+  margin-left: 0;
+  padding-left: 0;
+}
+.msg-read-aloud {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: -4px;
+  padding: 4px;
+  border: none;
+  background: transparent;
+  color: var(--abchat-text-muted);
+  border-radius: 6px;
+  cursor: pointer;
+  flex: 0 0 auto;
+  line-height: 0;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.msg-read-aloud svg {
+  display: block;
+}
+.msg-read-aloud:hover {
+  background: var(--abchat-bg-hover);
+  color: var(--abchat-text-primary);
+}
+.msg-read-aloud.is-speaking {
+  color: var(--abchat-accent);
+}
+.msg-read-aloud.is-loading {
+  cursor: default;
+}
+.ra-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--abchat-border);
+  border-top-color: var(--abchat-accent);
+  border-radius: 50%;
+  animation: ra-spin 0.7s linear infinite;
+}
+@keyframes ra-spin {
+  to { transform: rotate(360deg); }
+}
 .msg-actions-bar {
   display: flex;
   align-items: center;

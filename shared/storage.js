@@ -41,7 +41,8 @@
       deleteClipsOlderThanDays: 7,
       alertSound: true,
       reminderLeadTime: 15,
-      sendPageContext: true
+      sendPageContext: true,
+      ttsEngine: "browser"
     };
   }
 
@@ -203,7 +204,12 @@
       sendPageContext:
         typeof safePatchSettingsForStorage.sendPageContext === "boolean"
           ? safePatchSettingsForStorage.sendPageContext
-          : safeBaseSettingsForStorage.sendPageContext
+          : safeBaseSettingsForStorage.sendPageContext,
+      ttsEngine:
+        safePatchSettingsForStorage.ttsEngine === "browser" ||
+        safePatchSettingsForStorage.ttsEngine === "openrouter"
+          ? safePatchSettingsForStorage.ttsEngine
+          : safeBaseSettingsForStorage.ttsEngine
     };
   }
 

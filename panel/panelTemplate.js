@@ -532,6 +532,34 @@
           </div>
 
           <div class="stg-section">
+            <div class="stg-section-title">Read aloud</div>
+            <div class="stg-row">
+              <div class="stg-label">
+                <strong>Read-aloud voice</strong>
+                <span>Voice used by the speaker button on answers</span>
+              </div>
+              <select class="stg-select" id="settings-tts-engine-select" data-action="save-tts-engine">
+                <option value="browser">Browser (free, offline)</option>
+                <option value="openrouter">OpenRouter TTS</option>
+              </select>
+            </div>
+            <div class="stg-row" id="settings-tts-model-row">
+              <div class="stg-label">
+                <strong>OpenRouter TTS model</strong>
+                <span>Used when the read-aloud voice is OpenRouter TTS</span>
+              </div>
+              <select class="stg-select" id="settings-tts-model-select" data-action="save-tts-model"></select>
+            </div>
+            <div class="stg-row" id="settings-tts-voice-row">
+              <div class="stg-label">
+                <strong>Voice</strong>
+                <span>Voice used by the selected OpenRouter TTS model</span>
+              </div>
+              <select class="stg-select" id="settings-tts-voice-select" data-action="save-tts-voice"></select>
+            </div>
+          </div>
+
+          <div class="stg-section">
             <div class="stg-section-title">Agent</div>
             <div class="stg-row stg-row-col">
               <div class="stg-field-head">

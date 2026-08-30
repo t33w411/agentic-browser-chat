@@ -3717,6 +3717,41 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
     return false;
   }
 
+  // Read-aloud shared audio cache, hosted in the offscreen document (cross-tab, survives page
+  // reload). GET relays to the offscreen doc and returns whatever it holds, or null when the doc is
+  // not up yet, which the panel treats as a miss and fetches. A GET never creates the offscreen
+  // document: an absent doc means nothing is cached, so there is nothing to answer.
+  if (messageForServiceWorker.action === "ttsCacheGet") {
+    sendOffscreenMessageForServiceWorker({ action: "ttsOffscreenGet", key: messageForServiceWorker.key })
+      .then(function (respForTtsGet) {
+        sendResponseForServiceWorker({ entry: respForTtsGet || null });
+      });
+    return true;
+  }
+
+  // PUT stores one chunk's bytes (base64). This one creates the offscreen document first if needed,
+  // so the first read of a session has somewhere to cache into. Best-effort: a PUT dropped because the
+  // freshly created doc's listener was not ready yet just means that chunk is re-fetched next read.
+  if (messageForServiceWorker.action === "ttsCachePut") {
+    ensureOffscreenDocumentForServiceWorker().then(function (ensuredForTtsPut) {
+      if (!ensuredForTtsPut) {
+        sendResponseForServiceWorker({ ok: false });
+        return;
+      }
+      sendOffscreenMessageForServiceWorker({
+        action: "ttsOffscreenPut",
+        key: messageForServiceWorker.key,
+        index: messageForServiceWorker.index,
+        total: messageForServiceWorker.total,
+        b64: messageForServiceWorker.b64,
+        mime: messageForServiceWorker.mime
+      }).then(function () {
+        sendResponseForServiceWorker({ ok: true });
+      });
+    });
+    return true;
+  }
+
   // Stream events emitted by the offscreen-hosted loop. The source is the offscreen document
   // (no sender.tab), so the target tab is resolved from the run map and used as the snapshot's
   // originatorTabId, and the event is fanned out to ALL tabs (there is no originating tab to

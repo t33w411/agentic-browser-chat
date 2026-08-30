@@ -1694,6 +1694,7 @@
       }
       await saveApiKeyForPanelRuntime(keyVal);
       await clearCachedModelsForPanelRuntime();
+      await clearCachedTtsModelsForPanelRuntime();
       initModelSelectsForPanelRuntime();
       if (apiKeyOnboardingOverlayForPanelRuntime) {
         apiKeyOnboardingOverlayForPanelRuntime.classList.add('hidden');
@@ -3084,6 +3085,19 @@
             '</div>' +
           '</div>';
         const timestampHtmlForFlush = buildMessageTimestampHtmlForPanelRuntime(last.createdAt);
+        const speakableTextForFlush = mergedMd.replace(/__blob:\d+__/g, '').trim();
+        const isSpeakingThisMsgForFlush = currentReadAloudMsgIdForPanelRuntime === Number(last.msgId);
+        const readAloudBtnHtmlForFlush = (readAloudSupportedForPanelRuntime && speakableTextForFlush)
+          ? '<button class="msg-read-aloud' + (isSpeakingThisMsgForFlush ? ' is-speaking' : '') + '"'
+              + ' data-action="read-message-aloud" data-message-id="' + Number(last.msgId) + '"'
+              + ' title="' + (isSpeakingThisMsgForFlush ? 'Stop reading' : 'Read aloud') + '"'
+              + ' aria-label="' + (isSpeakingThisMsgForFlush ? 'Stop reading' : 'Read aloud') + '">'
+              + (isSpeakingThisMsgForFlush ? ic.stopSquare13 : ic.volume13)
+            + '</button>'
+          : '';
+        const footerHtmlForFlush = (readAloudBtnHtmlForFlush || timestampHtmlForFlush)
+          ? '<div class="msg-footer">' + readAloudBtnHtmlForFlush + timestampHtmlForFlush + '</div>'
+          : '';
         html +=
           '<div class="msg-wrap">' +
             '<div class="msg-bubble asst has-options">' +
@@ -3093,7 +3107,7 @@
               memoryBadgeHtmlForFlush +
               sourcesHtml +
             '</div>' +
-            timestampHtmlForFlush +
+            footerHtmlForFlush +
           '</div>';
         asstMergeBuffer = [];
       }
@@ -4313,6 +4327,657 @@
       }
     }
 
+    // ---- Read-aloud ----
+    // Two engines: the browser's speechSynthesis (default, free, offline) and OpenRouter
+    // TTS. Only one message speaks at a time; the button toggles start/stop. The engine is
+    // chosen in settings and mirrored into ttsEngineForPanelRuntime, read at click time.
+    var readAloudSupportedForPanelRuntime =
+      typeof window !== 'undefined' &&
+      'speechSynthesis' in window &&
+      typeof window.SpeechSynthesisUtterance !== 'undefined';
+    var currentReadAloudMsgIdForPanelRuntime = null;
+    // Mirrors the settings choice; read synchronously at click time. Default is the browser voice.
+    var ttsEngineForPanelRuntime = 'browser';
+    // The HTMLAudioElement playing OpenRouter TTS output, when that engine is active.
+    var currentReadAloudAudioForPanelRuntime = null;
+    // Bumped on every stop/start so an in-flight OpenRouter fetch can detect it is stale.
+    var readAloudTokenForPanelRuntime = 0;
+    // This tab's hot cache of OpenRouter audio: key `${msgId}::${model}::${voice}` -> array of object
+    // URLs (one per chunk). Keyed by model and voice so changing either never replays stale audio.
+    // Bounded to the most recently used TTS_AUDIO_CACHE_MAX_FOR_PANEL_RUNTIME messages (LRU); evicted
+    // entries have their URLs revoked. It survives chat switches now, so returning to a message
+    // replays without re-fetching. Behind it is the shared byte cache in the offscreen document, which
+    // is cross-tab and survives page reloads (see ttsSharedCache* below).
+    var readAloudAudioCacheForPanelRuntime = new Map();
+    // Cache keys in least-recently-used order (most recent last); trimmed in touchReadAloudCacheKey.
+    var readAloudAudioCacheOrderForPanelRuntime = [];
+    var TTS_AUDIO_CACHE_MAX_FOR_PANEL_RUNTIME = 10;
+    var TTS_SPEECH_ENDPOINT_FOR_PANEL_RUNTIME = 'https://openrouter.ai/api/v1/audio/speech';
+    // Per-chunk char caps for OpenRouter reads. Chunks are prefetched one ahead of playback (fetch
+    // current + next concurrently) to hide the between-clip network gap. For that to work the fetch of
+    // the next chunk must finish within the current chunk's playback, so the cap is kept moderate:
+    // synthesis time grows with chunk length, and a 1500-char chunk took longer to synthesize than a
+    // short first clip plays, leaving an audible gap after the first clip. The first chunk uses a
+    // smaller cap so audio starts fast; every later chunk's fetch then overlaps a full clip.
+    var TTS_CHUNK_MAX_LEN_FOR_PANEL_RUNTIME = 400;
+    var TTS_FIRST_CHUNK_MAX_LEN_FOR_PANEL_RUNTIME = 240;
+    // Session memory of the response_format each model accepts: modelId -> 'mp3' | 'pcm'. mp3 plays
+    // directly; a model that rejects mp3 and requires pcm is remembered here so later chunks and
+    // reads go straight to pcm instead of paying for a failed mp3 attempt each time.
+    var ttsFormatByModelForPanelRuntime = new Map();
+    // One API-log record is written per OpenRouter read-aloud (covering all its chunk requests).
+    // Set on the first real fetch of a read, resolved once on success/error/cancellation. Null
+    // when no read is active or when a read replayed entirely from cache (no endpoint call).
+    var pendingTtsLogForPanelRuntime = null;
+
+    // Write one read-aloud API-log record for the given pending object exactly once. Best-effort
+    // and never throws into the call path. costForTtsLog is the summed OpenRouter cost in USD, or
+    // null when it is unknown (error, cancel, or a lookup that never resolved).
+    function writeTtsLogRecordForPanelRuntime(pendingForTtsLog, statusForTtsLog, errorMessageForTtsLog, costForTtsLog) {
+      if (!pendingForTtsLog || pendingForTtsLog.done) return;
+      pendingForTtsLog.done = true;
+      const loggerForTtsLog = (globalThis.ABChatContent || {}).apiLogger;
+      if (!loggerForTtsLog || typeof loggerForTtsLog.writeLog !== 'function') return;
+      // The format the model actually settled on (pcm for models that reject mp3), so the log
+      // matches what was sent rather than the mp3 default we start every model on.
+      const resolvedFormatForTtsLog = ttsFormatByModelForPanelRuntime.get(pendingForTtsLog.model) || 'mp3';
+      const usageForTtsLog = (typeof costForTtsLog === 'number' && Number.isFinite(costForTtsLog) && costForTtsLog > 0)
+        ? { cost: costForTtsLog }
+        : null;
+      // Per-chunk breakdown (exact text, fetch latency, cost) for the log detail view. Stripped of the
+      // internal generationId. A cached chunk keeps latencyMs/cost null (no fetch, already paid).
+      const ttsChunksForLog = Array.isArray(pendingForTtsLog.chunks)
+        ? pendingForTtsLog.chunks.map(function (chunkStatForTtsLog) {
+            return {
+              index: chunkStatForTtsLog.index,
+              chars: chunkStatForTtsLog.chars,
+              latencyMs: chunkStatForTtsLog.latencyMs,
+              cost: chunkStatForTtsLog.cost,
+              text: chunkStatForTtsLog.text
+            };
+          })
+        : [];
+      try {
+        loggerForTtsLog.writeLog({
+          requestType: 'tts',
+          timestamp: new Date(pendingForTtsLog.startTime).toISOString(),
+          model: pendingForTtsLog.model,
+          iterationCount: 1,
+          totalLatencyMs: Date.now() - pendingForTtsLog.startTime,
+          status: statusForTtsLog,
+          errorMessage: errorMessageForTtsLog || '',
+          requestMessages: sanitizeMessagesForLogDisplay([{ role: 'user', content: pendingForTtsLog.inputText }]),
+          apiParams: { stream: false, model: pendingForTtsLog.model, voice: pendingForTtsLog.voice || '', response_format: resolvedFormatForTtsLog },
+          responseContent: '[audio output: ' + resolvedFormatForTtsLog + ', ' + pendingForTtsLog.chunkCount + ' chunk(s)]',
+          ttsChunks: ttsChunksForLog,
+          usage: usageForTtsLog
+        }).catch(function () {});
+      } catch (eTtsLogWrite) { /* logging must never break the read */ }
+    }
+
+    // Finalize the currently-active read's log (error/cancel paths) with no cost. A read served
+    // fully from cache leaves pendingTtsLog null, so nothing is logged for it (no endpoint call).
+    function finalizeTtsLogForPanelRuntime(statusForTtsLog, errorMessageForTtsLog) {
+      const pendingForTtsLog = pendingTtsLogForPanelRuntime;
+      pendingTtsLogForPanelRuntime = null;
+      writeTtsLogRecordForPanelRuntime(pendingForTtsLog, statusForTtsLog, errorMessageForTtsLog, null);
+    }
+
+    // Look up each fetched chunk's real OpenRouter cost, write it back onto the chunk's stat (for the
+    // per-chunk log breakdown), sum the total, then write the success record. Runs after playback and
+    // the UI reset, off the read path, so a slow or missing cost lookup never holds up the audio. The
+    // pending object is detached by the caller before this runs, so a subsequent stop()/read cannot
+    // finalize it as cancelled underneath us.
+    async function finalizeTtsSuccessWithCostForPanelRuntime(pendingForCost, apiKeyForCost) {
+      if (!pendingForCost || pendingForCost.done) return;
+      let totalCostForTts = 0;
+      let anyCostForTts = false;
+      const chunkStatsForCost = Array.isArray(pendingForCost.chunks) ? pendingForCost.chunks : [];
+      const agentNsForCost = globalThis.ABChatAgent || {};
+      const clientForCost = agentNsForCost.client || {};
+      if (apiKeyForCost && typeof clientForCost.fetchGenerationCost === 'function') {
+        for (let iForCost = 0; iForCost < chunkStatsForCost.length; iForCost++) {
+          const statForCost = chunkStatsForCost[iForCost];
+          if (!statForCost || !statForCost.generationId) continue;
+          let costForOne = null;
+          try { costForOne = await clientForCost.fetchGenerationCost(apiKeyForCost, statForCost.generationId); } catch (eFetchCost) { costForOne = null; }
+          if (typeof costForOne === 'number' && Number.isFinite(costForOne)) {
+            statForCost.cost = costForOne;
+            totalCostForTts += costForOne;
+            anyCostForTts = true;
+          }
+        }
+      }
+      writeTtsLogRecordForPanelRuntime(pendingForCost, 'success', '', anyCostForTts ? totalCostForTts : null);
+    }
+
+    // Render assistant markdown to HTML, drop block-level code/diagrams (reading
+    // those aloud is noise), and return the visible prose as plain text.
+    function getSpeechTextForPanelRuntime(mdText) {
+      const htmlForSpeech = renderMarkdown(String(mdText || ''));
+      if (!htmlForSpeech) return '';
+      const holderForSpeech = document.createElement('div');
+      holderForSpeech.innerHTML = htmlForSpeech;
+      holderForSpeech.querySelectorAll('pre, .mermaid-container, .mermaid').forEach(function (elForSpeech) {
+        elForSpeech.remove();
+      });
+      return (holderForSpeech.textContent || '').replace(/\s+/g, ' ').trim();
+    }
+
+    // Split prose into chunks no longer than maxLenForChunking. The logic is pure and lives in
+    // panelSpeechChunk.js so it can be unit-tested; read it at call time so a re-injection picks up
+    // the freshly loaded copy rather than one captured at IIFE top-level.
+    function chunkSpeechTextForPanelRuntime(textForChunking, maxLenForChunking, firstChunkMaxLenForChunking) {
+      const speechChunkNsForPanelRuntime = (globalThis.ABChatContent || {}).speechChunk;
+      if (speechChunkNsForPanelRuntime && typeof speechChunkNsForPanelRuntime.chunk === 'function') {
+        return speechChunkNsForPanelRuntime.chunk(textForChunking, maxLenForChunking, firstChunkMaxLenForChunking);
+      }
+      const trimmedTextForChunking = String(textForChunking || '').trim();
+      return trimmedTextForChunking ? [trimmedTextForChunking] : [];
+    }
+
+    // stateForReadAloud is one of 'idle', 'loading', 'speaking'. Paints a single button.
+    function setReadAloudButtonStateForPanelRuntime(buttonForReadAloud, stateForReadAloud) {
+      if (!buttonForReadAloud) return;
+      const isLoadingForReadAloud = stateForReadAloud === 'loading';
+      const isSpeakingForReadAloud = stateForReadAloud === 'speaking';
+      buttonForReadAloud.classList.toggle('is-loading', isLoadingForReadAloud);
+      buttonForReadAloud.classList.toggle('is-speaking', isSpeakingForReadAloud);
+      if (isLoadingForReadAloud) {
+        buttonForReadAloud.innerHTML = '<span class="ra-spinner" aria-hidden="true"></span>';
+      } else {
+        buttonForReadAloud.innerHTML = isSpeakingForReadAloud ? ic.stopSquare13 : ic.volume13;
+      }
+      const labelForReadAloud = isLoadingForReadAloud ? 'Loading audio'
+        : (isSpeakingForReadAloud ? 'Stop reading' : 'Read aloud');
+      buttonForReadAloud.title = labelForReadAloud;
+      buttonForReadAloud.setAttribute('aria-label', labelForReadAloud);
+    }
+
+    function repaintReadAloudButtonsToIdleForPanelRuntime() {
+      const containerForRepaint = root.getElementById('chat-messages-content');
+      if (!containerForRepaint) return;
+      containerForRepaint.querySelectorAll('.msg-read-aloud.is-speaking, .msg-read-aloud.is-loading').forEach(function (btnForRepaint) {
+        setReadAloudButtonStateForPanelRuntime(btnForRepaint, 'idle');
+      });
+    }
+
+    // Resolve the message's live button each time rather than holding a reference, so state
+    // survives a chat re-render that replaces the element. Clears all others first, since only
+    // one message reads at a time.
+    function paintReadAloudStateForMessageForPanelRuntime(msgIdForPaint, stateForPaint) {
+      repaintReadAloudButtonsToIdleForPanelRuntime();
+      if (stateForPaint === 'idle') return;
+      const containerForPaint = root.getElementById('chat-messages-content');
+      const btnForPaint = containerForPaint
+        ? containerForPaint.querySelector('.msg-read-aloud[data-message-id="' + msgIdForPaint + '"]')
+        : null;
+      if (btnForPaint) setReadAloudButtonStateForPanelRuntime(btnForPaint, stateForPaint);
+    }
+
+    function stopReadAloudForPanelRuntime() {
+      // A still-pending log here means the read was ended before it finished on its own, i.e.
+      // cancelled. Terminal success/error paths finalize first, so this is a no-op for them.
+      finalizeTtsLogForPanelRuntime('cancelled', '');
+      // Invalidate any in-flight OpenRouter fetch and stop both engines.
+      readAloudTokenForPanelRuntime++;
+      currentReadAloudMsgIdForPanelRuntime = null;
+      try {
+        if (readAloudSupportedForPanelRuntime) window.speechSynthesis.cancel();
+      } catch (errForReadAloudStop) { /* ignore */ }
+      if (currentReadAloudAudioForPanelRuntime) {
+        try {
+          currentReadAloudAudioForPanelRuntime.pause();
+          currentReadAloudAudioForPanelRuntime.onended = null;
+          currentReadAloudAudioForPanelRuntime.onerror = null;
+          currentReadAloudAudioForPanelRuntime.src = '';
+        } catch (errForAudioStop) { /* ignore */ }
+        currentReadAloudAudioForPanelRuntime = null;
+      }
+      repaintReadAloudButtonsToIdleForPanelRuntime();
+    }
+
+    // Mark a cache key most-recently-used and evict the oldest entries past the cap, revoking their
+    // object URLs. The cache is no longer cleared on chat switch (returning to a message should replay
+    // from cache), so this LRU bound is what keeps the tab's audio URLs from growing without limit.
+    function touchReadAloudCacheKeyForPanelRuntime(keyForTouch) {
+      const idxForTouch = readAloudAudioCacheOrderForPanelRuntime.indexOf(keyForTouch);
+      if (idxForTouch >= 0) readAloudAudioCacheOrderForPanelRuntime.splice(idxForTouch, 1);
+      readAloudAudioCacheOrderForPanelRuntime.push(keyForTouch);
+      while (readAloudAudioCacheOrderForPanelRuntime.length > TTS_AUDIO_CACHE_MAX_FOR_PANEL_RUNTIME) {
+        const evictedKeyForCache = readAloudAudioCacheOrderForPanelRuntime.shift();
+        const evictedUrlsForCache = readAloudAudioCacheForPanelRuntime.get(evictedKeyForCache);
+        (evictedUrlsForCache || []).forEach(function (urlForEvict) {
+          if (urlForEvict) { try { URL.revokeObjectURL(urlForEvict); } catch (eRevokeEvict) {} }
+        });
+        readAloudAudioCacheForPanelRuntime.delete(evictedKeyForCache);
+      }
+    }
+
+    // ArrayBuffer -> base64, for handing audio bytes to the shared offscreen cache. base64 is used so
+    // the payload survives runtime messaging regardless of how it serializes binary. Chunked so a
+    // large buffer does not overflow the argument list of String.fromCharCode.
+    function ttsArrayBufferToBase64ForPanelRuntime(bufferForB64) {
+      const bytesForB64 = new Uint8Array(bufferForB64);
+      let binaryForB64 = '';
+      const STEP_FOR_B64 = 0x8000;
+      for (let iForB64 = 0; iForB64 < bytesForB64.length; iForB64 += STEP_FOR_B64) {
+        binaryForB64 += String.fromCharCode.apply(null, bytesForB64.subarray(iForB64, iForB64 + STEP_FOR_B64));
+      }
+      return btoa(binaryForB64);
+    }
+
+    // base64 audio (mime type) -> a playable object URL local to this document.
+    function ttsBase64ToObjectUrlForPanelRuntime(b64ForUrl, mimeForUrl) {
+      try {
+        const binaryForUrl = atob(b64ForUrl);
+        const lenForUrl = binaryForUrl.length;
+        const bytesForUrl = new Uint8Array(lenForUrl);
+        for (let iForUrl = 0; iForUrl < lenForUrl; iForUrl++) bytesForUrl[iForUrl] = binaryForUrl.charCodeAt(iForUrl);
+        const blobForUrl = new Blob([bytesForUrl], { type: mimeForUrl || 'audio/mpeg' });
+        return URL.createObjectURL(blobForUrl);
+      } catch (errForB64Url) {
+        return '';
+      }
+    }
+
+    // Look a message up in the shared offscreen audio cache. Resolves { chunks: [{ b64, mime } | null],
+    // total } or null; any failure (offscreen not up, no key) resolves null so the caller just fetches.
+    function ttsSharedCacheGetForPanelRuntime(keyForShared) {
+      return new Promise(function (resolveForShared) {
+        try {
+          chrome.runtime.sendMessage({ action: 'ttsCacheGet', key: keyForShared }, function (respForShared) {
+            if (chrome.runtime.lastError) { resolveForShared(null); return; }
+            resolveForShared(respForShared && respForShared.entry ? respForShared.entry : null);
+          });
+        } catch (errForShared) {
+          resolveForShared(null);
+        }
+      });
+    }
+
+    // Store one fetched chunk's bytes in the shared offscreen cache. Fire-and-forget: a logging or
+    // delivery failure must never break the read.
+    function ttsSharedCachePutForPanelRuntime(keyForShared, indexForShared, totalForShared, bytesForShared, mimeForShared) {
+      if (!bytesForShared) return;
+      let b64ForShared = '';
+      try {
+        b64ForShared = ttsArrayBufferToBase64ForPanelRuntime(bytesForShared);
+      } catch (eConvertForShared) {
+        return;
+      }
+      if (!b64ForShared) return;
+      try {
+        chrome.runtime.sendMessage({
+          action: 'ttsCachePut',
+          key: keyForShared,
+          index: indexForShared,
+          total: totalForShared,
+          b64: b64ForShared,
+          mime: mimeForShared
+        }, function () { void chrome.runtime.lastError; });
+      } catch (errForSharedPut) {
+        /* best-effort */
+      }
+    }
+
+    function readMessageAloudForPanelRuntime(messageIdForReadAloud) {
+      const numericMessageIdForReadAloud = Number(messageIdForReadAloud);
+      if (!Number.isFinite(numericMessageIdForReadAloud)) return;
+      // Second click on the message currently loading/speaking: toggle off.
+      if (currentReadAloudMsgIdForPanelRuntime === numericMessageIdForReadAloud) {
+        stopReadAloudForPanelRuntime();
+        return;
+      }
+      stopReadAloudForPanelRuntime();
+      const messageForReadAloud = getMsgById(numericMessageIdForReadAloud);
+      if (!messageForReadAloud) return;
+      const speechTextForReadAloud = getSpeechTextForPanelRuntime(messageForReadAloud.md || messageForReadAloud.content || '');
+      if (!speechTextForReadAloud) return;
+
+      if (ttsEngineForPanelRuntime === 'openrouter' && navigator.onLine) {
+        startOpenRouterReadAloudForPanelRuntime(numericMessageIdForReadAloud, speechTextForReadAloud);
+        return;
+      }
+      startBrowserReadAloudForPanelRuntime(numericMessageIdForReadAloud, speechTextForReadAloud);
+    }
+
+    function startBrowserReadAloudForPanelRuntime(msgIdForBrowserTts, textForBrowserTts) {
+      if (!readAloudSupportedForPanelRuntime) return;
+      const chunksForBrowserTts = chunkSpeechTextForPanelRuntime(textForBrowserTts, 200);
+      if (!chunksForBrowserTts.length) return;
+      currentReadAloudMsgIdForPanelRuntime = msgIdForBrowserTts;
+      paintReadAloudStateForMessageForPanelRuntime(msgIdForBrowserTts, 'speaking');
+      let chunkIndexForBrowserTts = 0;
+      function speakNextChunkForBrowserTts() {
+        if (currentReadAloudMsgIdForPanelRuntime !== msgIdForBrowserTts) return;
+        if (chunkIndexForBrowserTts >= chunksForBrowserTts.length) {
+          stopReadAloudForPanelRuntime();
+          return;
+        }
+        const utteranceForBrowserTts = new window.SpeechSynthesisUtterance(chunksForBrowserTts[chunkIndexForBrowserTts]);
+        chunkIndexForBrowserTts++;
+        utteranceForBrowserTts.onend = speakNextChunkForBrowserTts;
+        utteranceForBrowserTts.onerror = function () { stopReadAloudForPanelRuntime(); };
+        try {
+          window.speechSynthesis.speak(utteranceForBrowserTts);
+        } catch (errForBrowserSpeak) {
+          stopReadAloudForPanelRuntime();
+        }
+      }
+      speakNextChunkForBrowserTts();
+    }
+
+    // Reads a sample rate out of a PCM response's content-type (e.g. "audio/L16;rate=24000"),
+    // falling back to the 24kHz that Gemini and OpenAI TTS emit when the header states no rate.
+    function parsePcmSampleRateForPanelRuntime(contentTypeForPcm) {
+      const rateMatchForPcm = /rate=(\d+)/i.exec(contentTypeForPcm || '');
+      const rateForPcm = rateMatchForPcm ? parseInt(rateMatchForPcm[1], 10) : 0;
+      return (Number.isFinite(rateForPcm) && rateForPcm > 0) ? rateForPcm : 24000;
+    }
+
+    // Wrap raw little-endian 16-bit PCM in a minimal WAV container so new Audio() can play it.
+    // PCM from the speech endpoint is headerless samples; a browser needs the RIFF/WAVE header.
+    function wrapPcmInWavForPanelRuntime(pcmBufferForWav, sampleRateForWav, channelsForWav) {
+      const channelsForWavHeader = channelsForWav || 1;
+      const bitsPerSampleForWav = 16;
+      const bytesPerSampleForWav = bitsPerSampleForWav / 8;
+      const blockAlignForWav = channelsForWavHeader * bytesPerSampleForWav;
+      const byteRateForWav = sampleRateForWav * blockAlignForWav;
+      const dataLengthForWav = pcmBufferForWav.byteLength;
+      const outBufferForWav = new ArrayBuffer(44 + dataLengthForWav);
+      const viewForWav = new DataView(outBufferForWav);
+      const writeStringForWav = function (offsetForWav, strForWav) {
+        for (let iForWav = 0; iForWav < strForWav.length; iForWav++) {
+          viewForWav.setUint8(offsetForWav + iForWav, strForWav.charCodeAt(iForWav));
+        }
+      };
+      writeStringForWav(0, 'RIFF');
+      viewForWav.setUint32(4, 36 + dataLengthForWav, true);
+      writeStringForWav(8, 'WAVE');
+      writeStringForWav(12, 'fmt ');
+      viewForWav.setUint32(16, 16, true);
+      viewForWav.setUint16(20, 1, true);
+      viewForWav.setUint16(22, channelsForWavHeader, true);
+      viewForWav.setUint32(24, sampleRateForWav, true);
+      viewForWav.setUint32(28, byteRateForWav, true);
+      viewForWav.setUint16(32, blockAlignForWav, true);
+      viewForWav.setUint16(34, bitsPerSampleForWav, true);
+      writeStringForWav(36, 'data');
+      viewForWav.setUint32(40, dataLengthForWav, true);
+      new Uint8Array(outBufferForWav, 44).set(new Uint8Array(pcmBufferForWav));
+      return new Blob([outBufferForWav], { type: 'audio/wav' });
+    }
+
+    // Fetch one chunk of audio from OpenRouter. Returns { url, generationId }: an object URL for
+    // playback and the X-Generation-Id (for the after-the-fact cost lookup, may be ''). Rejects on
+    // any failure so the caller can decide between browser fallback and stopping. Starts every model
+    // on mp3 (plays directly); a model that rejects mp3 and requires pcm is retried as pcm, the raw
+    // samples wrapped in a WAV container, and the choice remembered so later chunks skip mp3.
+    async function fetchTtsAudioUrlForPanelRuntime(textForTts, modelForTts, voiceForTts, apiKeyForTts) {
+      let formatForTts = ttsFormatByModelForPanelRuntime.get(modelForTts) || 'mp3';
+      const requestOnceForTts = function (responseFormatForTts) {
+        const bodyForTts = { model: modelForTts, input: textForTts, response_format: responseFormatForTts };
+        if (voiceForTts) bodyForTts.voice = voiceForTts;
+        return fetch(TTS_SPEECH_ENDPOINT_FOR_PANEL_RUNTIME, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + apiKeyForTts },
+          body: JSON.stringify(bodyForTts)
+        });
+      };
+      const readErrBodyForTts = async function (respForErr) {
+        try { return ((await respForErr.text()) || '').replace(/\s+/g, ' ').trim().slice(0, 300); } catch (eReadTtsErrBody) { return ''; }
+      };
+      let respForTts = await requestOnceForTts(formatForTts);
+      if (!respForTts.ok) {
+        // OpenRouter returns the actual reason (invalid model, unsupported voice, response_format,
+        // etc.) in the body of a non-2xx. Read it so the log and toast show why, not just a status.
+        const bodySnippetForTts = await readErrBodyForTts(respForTts);
+        // A model that rejects mp3 and demands pcm: remember it and retry this chunk as pcm.
+        if (respForTts.status === 400 && formatForTts !== 'pcm' && /pcm/i.test(bodySnippetForTts) && /response_format|format/i.test(bodySnippetForTts)) {
+          ttsFormatByModelForPanelRuntime.set(modelForTts, 'pcm');
+          formatForTts = 'pcm';
+          respForTts = await requestOnceForTts('pcm');
+          if (!respForTts.ok) {
+            const retryBodyForTts = await readErrBodyForTts(respForTts);
+            throw new Error('TTS request failed: HTTP ' + respForTts.status + (retryBodyForTts ? ' - ' + retryBodyForTts : ''));
+          }
+        } else {
+          throw new Error('TTS request failed: HTTP ' + respForTts.status + (bodySnippetForTts ? ' - ' + bodySnippetForTts : ''));
+        }
+      }
+      const generationIdForTts = respForTts.headers.get('x-generation-id') || '';
+      // bytes/mime are the playable form (mp3 as-is, pcm wrapped in WAV), returned so the caller can
+      // both play locally and hand the same bytes to the shared cache for other tabs to reuse.
+      if (formatForTts === 'pcm') {
+        const pcmBufferForTts = await respForTts.arrayBuffer();
+        if (!pcmBufferForTts || !pcmBufferForTts.byteLength) throw new Error('TTS returned empty audio');
+        const wavBlobForTts = wrapPcmInWavForPanelRuntime(pcmBufferForTts, parsePcmSampleRateForPanelRuntime(respForTts.headers.get('content-type')), 1);
+        const wavBytesForTts = await wavBlobForTts.arrayBuffer();
+        return { url: URL.createObjectURL(wavBlobForTts), generationId: generationIdForTts, bytes: wavBytesForTts, mime: 'audio/wav' };
+      }
+      const blobForTts = await respForTts.blob();
+      if (!blobForTts || !blobForTts.size) throw new Error('TTS returned empty audio');
+      const mp3BytesForTts = await blobForTts.arrayBuffer();
+      return { url: URL.createObjectURL(blobForTts), generationId: generationIdForTts, bytes: mp3BytesForTts, mime: blobForTts.type || 'audio/mpeg' };
+    }
+
+    async function startOpenRouterReadAloudForPanelRuntime(msgIdForOrTts, textForOrTts) {
+      const apiKeyForOrTts = await getApiKeyForPanelRuntime();
+      if (!apiKeyForOrTts) {
+        // No key: fall back to the browser voice so the button still does something.
+        showReadAloudFallbackToastForPanelRuntime('Add an OpenRouter API key to use OpenRouter TTS. Using the browser voice.');
+        startBrowserReadAloudForPanelRuntime(msgIdForOrTts, textForOrTts);
+        return;
+      }
+      const modelForOrTts = (await getTtsModelForPanelRuntime()) || DEFAULT_TTS_MODEL_ID_FOR_PANEL_RUNTIME;
+      const voiceForOrTts = await resolveTtsVoiceForModelForPanelRuntime(modelForOrTts, apiKeyForOrTts);
+      const chunksForOrTts = chunkSpeechTextForPanelRuntime(
+        textForOrTts,
+        TTS_CHUNK_MAX_LEN_FOR_PANEL_RUNTIME,
+        TTS_FIRST_CHUNK_MAX_LEN_FOR_PANEL_RUNTIME
+      );
+      if (!chunksForOrTts.length) return;
+
+      const tokenForOrTts = ++readAloudTokenForPanelRuntime;
+      currentReadAloudMsgIdForPanelRuntime = msgIdForOrTts;
+      paintReadAloudStateForMessageForPanelRuntime(msgIdForOrTts, 'loading');
+
+      // Key by message, model and voice so a voice/model change does not replay stale audio, and so
+      // the tab-local and shared caches agree on identity.
+      const ttsCacheKeyForOrTts = msgIdForOrTts + '::' + modelForOrTts + '::' + (voiceForOrTts || '');
+
+      let cachedUrlsForOrTts = readAloudAudioCacheForPanelRuntime.get(ttsCacheKeyForOrTts);
+      if (!Array.isArray(cachedUrlsForOrTts) || cachedUrlsForOrTts.length !== chunksForOrTts.length) {
+        // A length change means the message re-chunked (e.g. read while still streaming); revoke the
+        // stale URLs before replacing so they are not orphaned.
+        (cachedUrlsForOrTts || []).forEach(function (urlForStale) {
+          if (urlForStale) { try { URL.revokeObjectURL(urlForStale); } catch (eStaleRevoke) {} }
+        });
+        cachedUrlsForOrTts = new Array(chunksForOrTts.length).fill(null);
+        readAloudAudioCacheForPanelRuntime.set(ttsCacheKeyForOrTts, cachedUrlsForOrTts);
+      }
+      touchReadAloudCacheKeyForPanelRuntime(ttsCacheKeyForOrTts);
+
+      // Chunk bytes from the shared offscreen cache, filled by the one GET below. A hit at an index
+      // lets that chunk play from cached bytes with no billed request. Holes (null) are fetched.
+      let sharedChunkBytesForOrTts = new Array(chunksForOrTts.length).fill(null);
+
+      let chunkIndexForOrTts = 0;
+      let hasStartedPlaybackForOrTts = false;
+      // Per-chunk breakdown for the log: exact text, char count, fetch latency and (filled on success)
+      // cost. A cached chunk keeps latencyMs null (no fetch). generationId is internal, used only to
+      // look the cost up, and is stripped before the record is stored.
+      const chunkStatsForOrTts = chunksForOrTts.map(function (textForChunkStat, indexForChunkStat) {
+        return {
+          index: indexForChunkStat + 1,
+          chars: textForChunkStat.length,
+          text: textForChunkStat,
+          latencyMs: null,
+          generationId: '',
+          cost: null
+        };
+      });
+      // Memoized fetch per chunk index, so prefetching the next chunk and later playing it share one
+      // request. Each entry resolves to { url, error } and never rejects, so a prefetch that fails
+      // does not surface as an unhandled rejection; the error is handled when playback consumes it.
+      const chunkFetchesForOrTts = new Array(chunksForOrTts.length).fill(null);
+
+      // The first real (non-cache) fetch opens the one log record for the whole read. A read served
+      // entirely from cache never calls this, so nothing is logged for it (no endpoint call).
+      function openTtsLogIfNeededForOrTts() {
+        if (pendingTtsLogForPanelRuntime && pendingTtsLogForPanelRuntime.token === tokenForOrTts) return;
+        // A different read's log still open (a rapid re-trigger before its audio began): close it as
+        // cancelled so its own endpoint call is not lost from the log.
+        finalizeTtsLogForPanelRuntime('cancelled', '');
+        pendingTtsLogForPanelRuntime = {
+          token: tokenForOrTts,
+          startTime: Date.now(),
+          model: modelForOrTts,
+          voice: voiceForOrTts,
+          inputText: textForOrTts,
+          chunkCount: chunksForOrTts.length,
+          chunks: chunkStatsForOrTts,
+          done: false
+        };
+      }
+
+      function ensureChunkFetchForOrTts(indexForFetch) {
+        if (indexForFetch < 0 || indexForFetch >= chunksForOrTts.length) return null;
+        if (chunkFetchesForOrTts[indexForFetch]) return chunkFetchesForOrTts[indexForFetch];
+        if (cachedUrlsForOrTts[indexForFetch]) {
+          const cachedResultForOrTts = Promise.resolve({ url: cachedUrlsForOrTts[indexForFetch], error: '' });
+          chunkFetchesForOrTts[indexForFetch] = cachedResultForOrTts;
+          return cachedResultForOrTts;
+        }
+        // Shared-cache hit: this chunk was fetched by an earlier read, in this tab or another. Mint a
+        // local URL from the cached bytes and play it, no billed request. latencyMs stays null so the
+        // log shows it as cached.
+        const sharedBytesForFetch = sharedChunkBytesForOrTts[indexForFetch];
+        if (sharedBytesForFetch && sharedBytesForFetch.b64) {
+          const sharedUrlForFetch = ttsBase64ToObjectUrlForPanelRuntime(sharedBytesForFetch.b64, sharedBytesForFetch.mime);
+          if (sharedUrlForFetch) {
+            cachedUrlsForOrTts[indexForFetch] = sharedUrlForFetch;
+            const sharedResultForFetch = Promise.resolve({ url: sharedUrlForFetch, error: '' });
+            chunkFetchesForOrTts[indexForFetch] = sharedResultForFetch;
+            return sharedResultForFetch;
+          }
+        }
+        openTtsLogIfNeededForOrTts();
+        const fetchStartForOrTts = Date.now();
+        const fetchResultForOrTts = (async function () {
+          try {
+            const fetchedForOrTts = await fetchTtsAudioUrlForPanelRuntime(
+              chunksForOrTts[indexForFetch], modelForOrTts, voiceForOrTts, apiKeyForOrTts
+            );
+            chunkStatsForOrTts[indexForFetch].latencyMs = Date.now() - fetchStartForOrTts;
+            if (fetchedForOrTts && fetchedForOrTts.url) cachedUrlsForOrTts[indexForFetch] = fetchedForOrTts.url;
+            if (fetchedForOrTts && fetchedForOrTts.generationId) chunkStatsForOrTts[indexForFetch].generationId = fetchedForOrTts.generationId;
+            // Hand the fetched bytes to the shared cache so other tabs (and this tab after a reload)
+            // replay this chunk without paying for it again.
+            if (fetchedForOrTts && fetchedForOrTts.bytes) {
+              ttsSharedCachePutForPanelRuntime(
+                ttsCacheKeyForOrTts, indexForFetch, chunksForOrTts.length, fetchedForOrTts.bytes, fetchedForOrTts.mime
+              );
+            }
+            return { url: fetchedForOrTts ? fetchedForOrTts.url : null, error: '' };
+          } catch (errForOrTtsFetch) {
+            chunkStatsForOrTts[indexForFetch].latencyMs = Date.now() - fetchStartForOrTts;
+            return {
+              url: null,
+              error: (errForOrTtsFetch && errForOrTtsFetch.message) ? errForOrTtsFetch.message : 'OpenRouter TTS request failed'
+            };
+          }
+        })();
+        chunkFetchesForOrTts[indexForFetch] = fetchResultForOrTts;
+        return fetchResultForOrTts;
+      }
+
+      async function playNextChunkForOrTts() {
+        if (readAloudTokenForPanelRuntime !== tokenForOrTts) return;
+        if (chunkIndexForOrTts >= chunksForOrTts.length) {
+          // Detach the pending log so the UI reset below (which finalizes as cancelled) cannot
+          // claim it, reset the UI now, then look up the real per-chunk cost and write the success
+          // record off the read path so a slow cost lookup never holds up anything.
+          const claimedPendingForCost = pendingTtsLogForPanelRuntime;
+          pendingTtsLogForPanelRuntime = null;
+          stopReadAloudForPanelRuntime();
+          finalizeTtsSuccessWithCostForPanelRuntime(claimedPendingForCost, apiKeyForOrTts);
+          return;
+        }
+        // Kick the current chunk's fetch and warm the next so its request overlaps this clip's
+        // playback, hiding the between-clip network gap.
+        const currentFetchForOrTts = ensureChunkFetchForOrTts(chunkIndexForOrTts);
+        ensureChunkFetchForOrTts(chunkIndexForOrTts + 1);
+
+        // Show the buffering spinner while this chunk is still being fetched, so an inter-chunk wait
+        // reads as "more is coming" rather than a stuck stop button. When the fetch is already done
+        // (prefetched during the previous clip) the await resolves in a microtask and 'speaking'
+        // repaints before the browser paints the spinner, so there is no flicker in the common case.
+        paintReadAloudStateForMessageForPanelRuntime(msgIdForOrTts, 'loading');
+
+        const resultForOrTts = await currentFetchForOrTts;
+        if (readAloudTokenForPanelRuntime !== tokenForOrTts) return;
+        if (!resultForOrTts || !resultForOrTts.url) {
+          finalizeTtsLogForPanelRuntime('error', (resultForOrTts && resultForOrTts.error) || 'OpenRouter TTS request failed');
+          if (!hasStartedPlaybackForOrTts) {
+            // First chunk failed: fall back to the browser voice for the whole message.
+            showReadAloudFallbackToastForPanelRuntime('OpenRouter TTS failed. Using the browser voice.');
+            startBrowserReadAloudForPanelRuntime(msgIdForOrTts, textForOrTts);
+          } else {
+            // Mid-playback failure: stop rather than swap voices halfway.
+            stopReadAloudForPanelRuntime();
+          }
+          return;
+        }
+        hasStartedPlaybackForOrTts = true;
+        paintReadAloudStateForMessageForPanelRuntime(msgIdForOrTts, 'speaking');
+        const audioForOrTts = new Audio(resultForOrTts.url);
+        currentReadAloudAudioForPanelRuntime = audioForOrTts;
+        audioForOrTts.onended = function () {
+          if (readAloudTokenForPanelRuntime !== tokenForOrTts) return;
+          chunkIndexForOrTts++;
+          playNextChunkForOrTts();
+        };
+        audioForOrTts.onerror = function () {
+          if (readAloudTokenForPanelRuntime !== tokenForOrTts) return;
+          finalizeTtsLogForPanelRuntime('error', 'Audio playback failed');
+          stopReadAloudForPanelRuntime();
+        };
+        try {
+          const playPromiseForOrTts = audioForOrTts.play();
+          if (playPromiseForOrTts && typeof playPromiseForOrTts.catch === 'function') {
+            playPromiseForOrTts.catch(function () {
+              if (readAloudTokenForPanelRuntime !== tokenForOrTts) return;
+              finalizeTtsLogForPanelRuntime('error', 'Audio playback failed');
+              stopReadAloudForPanelRuntime();
+            });
+          }
+        } catch (errForOrTtsPlay) {
+          finalizeTtsLogForPanelRuntime('error', 'Audio playback failed');
+          stopReadAloudForPanelRuntime();
+        }
+      }
+
+      // One shared-cache lookup for the whole message before playback. A hit fills sharedChunkBytes,
+      // which ensureChunkFetchForOrTts consults per chunk. The 'loading' state is already painted, so
+      // this quick round-trip is covered. If the read was superseded while it was in flight, bail.
+      const sharedEntryForOrTts = await ttsSharedCacheGetForPanelRuntime(ttsCacheKeyForOrTts);
+      if (readAloudTokenForPanelRuntime !== tokenForOrTts) return;
+      if (sharedEntryForOrTts && sharedEntryForOrTts.total === chunksForOrTts.length && Array.isArray(sharedEntryForOrTts.chunks)) {
+        sharedChunkBytesForOrTts = sharedEntryForOrTts.chunks;
+      }
+
+      playNextChunkForOrTts();
+    }
+
+    function showReadAloudFallbackToastForPanelRuntime(messageForFallbackToast) {
+      const toastForFallback = ABChatContent && ABChatContent.ui && ABChatContent.ui.toast;
+      if (toastForFallback && typeof toastForFallback.show === 'function') {
+        toastForFallback.show(messageForFallbackToast, { durationMs: 4000 });
+      }
+    }
+
     function copyMessageForPanelRuntime(messageIdForPanelRuntime, buttonForPanelRuntime) {
       const numericMessageIdForPanelRuntime = Number(messageIdForPanelRuntime);
       if (!Number.isFinite(numericMessageIdForPanelRuntime)) return;
@@ -4608,6 +5273,9 @@
 
     function selectChat(id, optionsForSelectChat) {
       const optsForSelectChat = optionsForSelectChat || {};
+      // Stop any read in progress but keep the audio cache: it is keyed by message and bounded by an
+      // LRU, so returning to this chat replays a recently read message without re-fetching or re-paying.
+      stopReadAloudForPanelRuntime();
       closeRawViewForPanelRuntime();
       S.activeChatId = id;
       writePanelStateSyncForPanelRuntime({ activeChatId: id });
@@ -12334,6 +13002,273 @@
       return models[0].id;
     }
 
+    // TTS (speech-output) models are excluded from the default /models catalog and only surface
+    // under the output_modalities=speech filter, so they are fetched separately and cached. Each
+    // model record carries its own supported_voices; a request must send a voice the model accepts
+    // (an empty voice is rejected by most providers), so models with no listed voices are dropped.
+    const SELECTED_TTS_MODEL_KEY_FOR_PANEL_RUNTIME = 'abchat_selected_tts_model';
+    const SELECTED_TTS_VOICE_KEY_FOR_PANEL_RUNTIME = 'abchat_selected_tts_voice';
+    const DEFAULT_TTS_MODEL_ID_FOR_PANEL_RUNTIME = 'hexgrad/kokoro-82m';
+    const TTS_MODEL_CACHE_KEY_FOR_PANEL_RUNTIME = 'abchat_tts_model_cache_v1';
+    // Curated "nice" default voice for a few models; every other model defaults to voices[0].
+    const TTS_PREFERRED_VOICE_FOR_PANEL_RUNTIME = {
+      'hexgrad/kokoro-82m': 'af_heart',
+      'x-ai/grok-voice-tts-1.0': 'eve'
+    };
+    // Used only when both the network fetch and the cache are unavailable (offline first run). The
+    // live fetch replaces this; voices here are a valid subset so the dropdown still works offline.
+    const TTS_FALLBACK_MODELS_FOR_PANEL_RUNTIME = [
+      { id: 'deepgram/flux-tts:free', name: 'Deepgram: Flux TTS (free)', voices: ['flux-alexis-en', 'flux-bree-en', 'flux-brooke-en', 'flux-cliff-en', 'flux-drew-en', 'flux-jack-en'], promptCostPerMillion: 0, isFree: true },
+      { id: 'hexgrad/kokoro-82m', name: 'hexgrad: Kokoro 82M', voices: ['af_heart', 'af_bella', 'af_nicole', 'am_michael', 'am_onyx', 'bf_emma', 'bm_george'], promptCostPerMillion: 0.62, isFree: false },
+      { id: 'google/gemini-3.1-flash-tts-preview', name: 'Google: Gemini 3.1 Flash TTS Preview', voices: ['Zephyr', 'Puck', 'Charon', 'Kore', 'Fenrir', 'Leda'], promptCostPerMillion: 1, isFree: false },
+      { id: 'x-ai/grok-voice-tts-1.0', name: 'Grok Voice TTS 1.0', voices: ['eve', 'ara', 'rex', 'sal', 'leo'], promptCostPerMillion: 15, isFree: false }
+    ];
+    let loadedTtsModelsForPanelRuntime = [];
+
+    function filterTtsModelsForPanelRuntime(rawModelsForTts) {
+      const mappedForTts = (Array.isArray(rawModelsForTts) ? rawModelsForTts : []).map(function (mForTts) {
+        const archForTts = mForTts.architecture || {};
+        const outputsForTts = Array.isArray(archForTts.output_modalities) ? archForTts.output_modalities : [];
+        if (outputsForTts.indexOf('speech') === -1) return null;
+        const voicesForTts = Array.isArray(mForTts.supported_voices)
+          ? mForTts.supported_voices.filter(function (vForTts) { return typeof vForTts === 'string' && vForTts; })
+          : [];
+        if (!voicesForTts.length) return null;
+        const pricingForTts = mForTts.pricing || {};
+        const promptRawForTts = Number(pricingForTts.prompt);
+        const promptCostForTts = Number.isFinite(promptRawForTts) ? promptRawForTts * 1000000 : null;
+        const isFreeForTts = /:free$/.test(mForTts.id) || promptCostForTts === 0;
+        return { id: mForTts.id, name: mForTts.name || mForTts.id, voices: voicesForTts, promptCostPerMillion: promptCostForTts, isFree: isFreeForTts };
+      }).filter(Boolean);
+      mappedForTts.sort(function (aForTts, bForTts) {
+        const caForTts = aForTts.promptCostPerMillion == null ? Infinity : aForTts.promptCostPerMillion;
+        const cbForTts = bForTts.promptCostPerMillion == null ? Infinity : bForTts.promptCostPerMillion;
+        if (caForTts !== cbForTts) return caForTts - cbForTts;
+        return (aForTts.name || '').localeCompare(bForTts.name || '');
+      });
+      return mappedForTts;
+    }
+
+    function getCachedTtsModelsForPanelRuntime() {
+      return new Promise(function (resolve) {
+        try {
+          chrome.storage.local.get([TTS_MODEL_CACHE_KEY_FOR_PANEL_RUNTIME], function (resForTtsCache) {
+            const entryForTtsCache = resForTtsCache && resForTtsCache[TTS_MODEL_CACHE_KEY_FOR_PANEL_RUNTIME];
+            if (!entryForTtsCache || !Array.isArray(entryForTtsCache.models) || !entryForTtsCache.ts) { resolve(null); return; }
+            if (Date.now() - entryForTtsCache.ts > MODEL_CACHE_TTL_MS_FOR_PANEL_RUNTIME) { resolve(null); return; }
+            resolve(entryForTtsCache.models);
+          });
+        } catch (eGetTtsCache) {
+          resolve(null);
+        }
+      });
+    }
+
+    function getStaleCachedTtsModelsForPanelRuntime() {
+      return new Promise(function (resolve) {
+        try {
+          chrome.storage.local.get([TTS_MODEL_CACHE_KEY_FOR_PANEL_RUNTIME], function (resForStaleTts) {
+            const entryForStaleTts = resForStaleTts && resForStaleTts[TTS_MODEL_CACHE_KEY_FOR_PANEL_RUNTIME];
+            if (!entryForStaleTts || !Array.isArray(entryForStaleTts.models) || entryForStaleTts.models.length === 0) { resolve(null); return; }
+            resolve(entryForStaleTts.models);
+          });
+        } catch (eGetStaleTts) {
+          resolve(null);
+        }
+      });
+    }
+
+    function saveCachedTtsModelsForPanelRuntime(modelsForTtsCache) {
+      return new Promise(function (resolve) {
+        try {
+          const entryForTtsCacheSave = { models: modelsForTtsCache || [], ts: Date.now() };
+          const dataForTtsCacheSave = {};
+          dataForTtsCacheSave[TTS_MODEL_CACHE_KEY_FOR_PANEL_RUNTIME] = entryForTtsCacheSave;
+          chrome.storage.local.set(dataForTtsCacheSave, function () { resolve(); });
+        } catch (eSaveTtsCache) {
+          resolve();
+        }
+      });
+    }
+
+    function clearCachedTtsModelsForPanelRuntime() {
+      loadedTtsModelsForPanelRuntime = [];
+      return new Promise(function (resolve) {
+        try {
+          chrome.storage.local.remove([TTS_MODEL_CACHE_KEY_FOR_PANEL_RUNTIME], function () { resolve(); });
+        } catch (eClearTtsCache) {
+          resolve();
+        }
+      });
+    }
+
+    async function getAllTtsModelsForPanelRuntime(apiKeyForTtsModels) {
+      const cachedForTtsModels = await getCachedTtsModelsForPanelRuntime();
+      if (cachedForTtsModels && cachedForTtsModels.length) return cachedForTtsModels;
+      try {
+        const agentNsForTtsModels = globalThis.ABChatAgent || {};
+        const clientForTtsModels = agentNsForTtsModels.client || {};
+        if (typeof clientForTtsModels.fetchRawTtsModels === 'function') {
+          const rawForTtsModels = await clientForTtsModels.fetchRawTtsModels(apiKeyForTtsModels || '');
+          if (Array.isArray(rawForTtsModels) && rawForTtsModels.length > 0) {
+            const filteredForTtsModels = filterTtsModelsForPanelRuntime(rawForTtsModels);
+            if (filteredForTtsModels.length) {
+              await saveCachedTtsModelsForPanelRuntime(filteredForTtsModels);
+              return filteredForTtsModels;
+            }
+          }
+        }
+      } catch (eGetAllTtsModels) {
+        const staleForTtsModels = await getStaleCachedTtsModelsForPanelRuntime();
+        if (staleForTtsModels && staleForTtsModels.length) return staleForTtsModels;
+      }
+      return TTS_FALLBACK_MODELS_FOR_PANEL_RUNTIME.slice();
+    }
+
+    async function ensureTtsModelsLoadedForPanelRuntime(apiKeyForEnsureTts) {
+      if (loadedTtsModelsForPanelRuntime.length) return loadedTtsModelsForPanelRuntime;
+      const modelsForEnsureTts = await getAllTtsModelsForPanelRuntime(apiKeyForEnsureTts);
+      loadedTtsModelsForPanelRuntime = Array.isArray(modelsForEnsureTts) ? modelsForEnsureTts : [];
+      return loadedTtsModelsForPanelRuntime;
+    }
+
+    function getTtsModelRecordForPanelRuntime(modelIdForRecord, modelsForRecord) {
+      const listForRecord = Array.isArray(modelsForRecord) ? modelsForRecord : loadedTtsModelsForPanelRuntime;
+      for (var iForRecord = 0; iForRecord < listForRecord.length; iForRecord++) {
+        if (listForRecord[iForRecord].id === modelIdForRecord) return listForRecord[iForRecord];
+      }
+      return null;
+    }
+
+    function getDefaultVoiceForTtsModelForPanelRuntime(recordForDefaultVoice) {
+      if (!recordForDefaultVoice || !Array.isArray(recordForDefaultVoice.voices) || !recordForDefaultVoice.voices.length) return '';
+      const preferredForDefaultVoice = TTS_PREFERRED_VOICE_FOR_PANEL_RUNTIME[recordForDefaultVoice.id];
+      if (preferredForDefaultVoice && recordForDefaultVoice.voices.indexOf(preferredForDefaultVoice) !== -1) return preferredForDefaultVoice;
+      return recordForDefaultVoice.voices[0];
+    }
+
+    function getTtsModelForPanelRuntime() {
+      return new Promise(function (resolve) {
+        try {
+          chrome.storage.local.get([SELECTED_TTS_MODEL_KEY_FOR_PANEL_RUNTIME], function (resForTtsModel) {
+            resolve((resForTtsModel && resForTtsModel[SELECTED_TTS_MODEL_KEY_FOR_PANEL_RUNTIME]) || '');
+          });
+        } catch (eGetTtsModel) {
+          resolve('');
+        }
+      });
+    }
+
+    function saveTtsModelForPanelRuntime(modelIdForTtsSave) {
+      return new Promise(function (resolve) {
+        try {
+          const dataForTtsModel = {};
+          dataForTtsModel[SELECTED_TTS_MODEL_KEY_FOR_PANEL_RUNTIME] = modelIdForTtsSave;
+          chrome.storage.local.set(dataForTtsModel, function () { resolve(); });
+        } catch (eSaveTtsModel) {
+          resolve();
+        }
+      });
+    }
+
+    function getTtsVoiceForPanelRuntime() {
+      return new Promise(function (resolve) {
+        try {
+          chrome.storage.local.get([SELECTED_TTS_VOICE_KEY_FOR_PANEL_RUNTIME], function (resForTtsVoice) {
+            resolve((resForTtsVoice && resForTtsVoice[SELECTED_TTS_VOICE_KEY_FOR_PANEL_RUNTIME]) || '');
+          });
+        } catch (eGetTtsVoice) {
+          resolve('');
+        }
+      });
+    }
+
+    function saveTtsVoiceForPanelRuntime(voiceForTtsSave) {
+      return new Promise(function (resolve) {
+        try {
+          const dataForTtsVoice = {};
+          dataForTtsVoice[SELECTED_TTS_VOICE_KEY_FOR_PANEL_RUNTIME] = voiceForTtsSave || '';
+          chrome.storage.local.set(dataForTtsVoice, function () { resolve(); });
+        } catch (eSaveTtsVoice) {
+          resolve();
+        }
+      });
+    }
+
+    // Resolves the voice to send at request time: the stored voice when it belongs to this model,
+    // otherwise the model's default. Ensures the model list is loaded so voices can be validated.
+    async function resolveTtsVoiceForModelForPanelRuntime(modelIdForResolve, apiKeyForResolve) {
+      const modelsForResolve = await ensureTtsModelsLoadedForPanelRuntime(apiKeyForResolve);
+      const recordForResolve = getTtsModelRecordForPanelRuntime(modelIdForResolve, modelsForResolve);
+      if (!recordForResolve) return '';
+      const storedVoiceForResolve = await getTtsVoiceForPanelRuntime();
+      if (storedVoiceForResolve && recordForResolve.voices.indexOf(storedVoiceForResolve) !== -1) return storedVoiceForResolve;
+      return getDefaultVoiceForTtsModelForPanelRuntime(recordForResolve);
+    }
+
+    async function populateTtsModelSelectForPanelRuntime() {
+      const selForTts = root.getElementById('settings-tts-model-select');
+      if (!selForTts) return;
+      const apiKeyForPopulateTts = await getApiKeyForPanelRuntime();
+      const modelsForPopulateTts = await getAllTtsModelsForPanelRuntime(apiKeyForPopulateTts);
+      loadedTtsModelsForPanelRuntime = Array.isArray(modelsForPopulateTts) ? modelsForPopulateTts : [];
+      let selectedIdForTts = (await getTtsModelForPanelRuntime()) || DEFAULT_TTS_MODEL_ID_FOR_PANEL_RUNTIME;
+      // A stored model that is no longer offered (removed upstream, or the default not in the list)
+      // falls back to the cheapest available so the selection and voice row stay valid.
+      if (!getTtsModelRecordForPanelRuntime(selectedIdForTts, loadedTtsModelsForPanelRuntime)) {
+        selectedIdForTts = loadedTtsModelsForPanelRuntime.length ? loadedTtsModelsForPanelRuntime[0].id : selectedIdForTts;
+      }
+      selForTts.innerHTML = '';
+      loadedTtsModelsForPanelRuntime.forEach(function (recordForTtsOption) {
+        const optForTts = document.createElement('option');
+        optForTts.value = recordForTtsOption.id;
+        const noteForTts = recordForTtsOption.isFree
+          ? 'free'
+          : (recordForTtsOption.promptCostPerMillion != null ? '$' + recordForTtsOption.promptCostPerMillion.toFixed(2) + '/M' : '');
+        optForTts.textContent = recordForTtsOption.name + (noteForTts ? ' -- [' + noteForTts + ']' : '');
+        if (recordForTtsOption.id === selectedIdForTts) optForTts.selected = true;
+        selForTts.appendChild(optForTts);
+      });
+      await populateTtsVoiceSelectForPanelRuntime(selectedIdForTts);
+    }
+
+    async function populateTtsVoiceSelectForPanelRuntime(modelIdForVoiceSelect) {
+      const selForVoice = root.getElementById('settings-tts-voice-select');
+      if (!selForVoice) return;
+      const recordForVoiceSelect = getTtsModelRecordForPanelRuntime(modelIdForVoiceSelect, loadedTtsModelsForPanelRuntime);
+      const voicesForSelect = recordForVoiceSelect && Array.isArray(recordForVoiceSelect.voices) ? recordForVoiceSelect.voices : [];
+      const storedVoiceForSelect = await getTtsVoiceForPanelRuntime();
+      const defaultVoiceForSelect = getDefaultVoiceForTtsModelForPanelRuntime(recordForVoiceSelect);
+      const selectedVoiceForSelect = (storedVoiceForSelect && voicesForSelect.indexOf(storedVoiceForSelect) !== -1)
+        ? storedVoiceForSelect
+        : defaultVoiceForSelect;
+      selForVoice.innerHTML = '';
+      voicesForSelect.forEach(function (voiceForOption) {
+        const optForVoice = document.createElement('option');
+        optForVoice.value = voiceForOption;
+        optForVoice.textContent = voiceForOption;
+        if (voiceForOption === selectedVoiceForSelect) optForVoice.selected = true;
+        selForVoice.appendChild(optForVoice);
+      });
+      updateTtsModelRowVisibilityForPanelRuntime();
+    }
+
+    // Model change from settings: stop any active read (it used the old model/voice), persist the
+    // model, reset the stored voice to the new model's default (the old voice belongs to the old
+    // model and would not be in this model's list), then repaint the voice select.
+    async function handleTtsModelChangeForPanelRuntime(modelIdForChange) {
+      stopReadAloudForPanelRuntime();
+      await saveTtsModelForPanelRuntime(modelIdForChange);
+      const recordForChange = getTtsModelRecordForPanelRuntime(modelIdForChange, loadedTtsModelsForPanelRuntime);
+      await saveTtsVoiceForPanelRuntime(getDefaultVoiceForTtsModelForPanelRuntime(recordForChange));
+      await populateTtsVoiceSelectForPanelRuntime(modelIdForChange);
+    }
+
+    async function handleTtsVoiceChangeForPanelRuntime(voiceForChange) {
+      stopReadAloudForPanelRuntime();
+      await saveTtsVoiceForPanelRuntime(voiceForChange);
+    }
+
     // populateModelSelectsForPanelRuntime forces the global default model as the
     // selected option on the chat select. When a chat is already active (e.g. on
     // reload-with-open-panel, where state restore and model population race), that
@@ -12368,6 +13303,7 @@
         if (imageModel) await saveImageModelForPanelRuntime(imageModel);
       }
       populateImageModelSelectForPanelRuntime(imageModels, imageModel);
+      populateTtsModelSelectForPanelRuntime();
     }
 
     function getApiKeyForPanelRuntime() {
@@ -14181,7 +15117,7 @@
       const latency = latencyMsForLogRow ? (latencyMsForLogRow / 1000).toFixed(2) + 's' : '';
       const preview = statusMetaForLogRow.preview;
       const reqType = log.requestType || log.type || '';
-      const reqTypeLabels = { chat: 'Chat', 'inline-chat': 'Inline', title: 'Title', compaction: 'Compact', web_search: 'Search', generate_image: 'Image', 'web-fetch-vision': 'Vision', 'web-fetch-summary': 'Summarize', 'tab-read': 'Tab', 'screenshot-vision': 'Vision', 'image-vision': 'Vision', 'quiz-generate': 'Quiz', 'quiz-fix': 'Quiz Fix', 'quiz-review': 'Quiz Review', 'pdf-page-ocr': 'PDF OCR', 'pdf-document-ocr': 'PDF OCR', 'pdf-ocr-job': 'PDF Job' };
+      const reqTypeLabels = { chat: 'Chat', 'inline-chat': 'Inline', title: 'Title', compaction: 'Compact', web_search: 'Search', generate_image: 'Image', 'web-fetch-vision': 'Vision', 'web-fetch-summary': 'Summarize', 'tab-read': 'Tab', 'screenshot-vision': 'Vision', 'image-vision': 'Vision', 'quiz-generate': 'Quiz', 'quiz-fix': 'Quiz Fix', 'quiz-review': 'Quiz Review', 'pdf-page-ocr': 'PDF OCR', 'pdf-document-ocr': 'PDF OCR', 'pdf-ocr-job': 'PDF Job', tts: 'Speech' };
       const reqTypeLabel = reqTypeLabels[reqType] || escapeHtmlForPanelRuntime(reqType);
       const reqTypeBadge = reqType ? `<span class="log-request-type-badge">${reqTypeLabel}</span>` : '';
       const selectedForLogRow = apiSelectedLogIdsForPanelRuntime.has(log.id) ? ' checked' : '';
@@ -14313,7 +15249,7 @@
       const reqTypeRaw = log.requestType || log.type || '';
       const isChatLogDetailForPanelRuntime = reqTypeRaw === 'chat';
       const hasChatTurnsForPanelRuntime = isChatLogDetailForPanelRuntime && Array.isArray(log.turns) && log.turns.length > 0;
-      const reqTypeDisplayMap = { chat: 'Chat', 'inline-chat': 'Inline Chat', title: 'Title Generation', compaction: 'Compaction', web_search: 'Web Search', generate_image: 'Image Generation', 'web-fetch-vision': 'Web Fetch Vision', 'web-fetch-summary': 'Web Fetch Summary', 'tab-read': 'Tab Read', 'screenshot-vision': 'Screenshot Vision', 'image-vision': 'Image Vision', 'quiz-generate': 'Quiz Generation', 'quiz-fix': 'Quiz Question Fix', 'quiz-review': 'Quiz Self-Containment Review', 'pdf-page-ocr': 'Scanned PDF Page Transcription', 'pdf-document-ocr': 'Scanned PDF Document OCR', 'pdf-ocr-job': 'Scanned PDF OCR Job' };
+      const reqTypeDisplayMap = { chat: 'Chat', 'inline-chat': 'Inline Chat', title: 'Title Generation', compaction: 'Compaction', web_search: 'Web Search', generate_image: 'Image Generation', 'web-fetch-vision': 'Web Fetch Vision', 'web-fetch-summary': 'Web Fetch Summary', 'tab-read': 'Tab Read', 'screenshot-vision': 'Screenshot Vision', 'image-vision': 'Image Vision', 'quiz-generate': 'Quiz Generation', 'quiz-fix': 'Quiz Question Fix', 'quiz-review': 'Quiz Self-Containment Review', 'pdf-page-ocr': 'Scanned PDF Page Transcription', 'pdf-document-ocr': 'Scanned PDF Document OCR', 'pdf-ocr-job': 'Scanned PDF OCR Job', tts: 'Text-to-Speech' };
       const reqTypeDisplay = reqTypeDisplayMap[reqTypeRaw] || reqTypeRaw;
       let html = `<div class="log-detail-meta">` +
         `<div class="log-detail-row"><span class="log-detail-label">Status</span><span class="log-status-badge ${statusMetaForLogDetail.cssClass}">${escapeHtmlForPanelRuntime(statusMetaForLogDetail.label)}</span></div>` +
@@ -14324,6 +15260,9 @@
         `<div class="log-detail-row"><span class="log-detail-label">Latency</span><span>${escapeHtmlForPanelRuntime(latency)}</span></div>` +
         (log.iterationCount != null || isChatLogDetailForPanelRuntime
           ? `<div class="log-detail-row"><span class="log-detail-label">Iterations</span><span>${Number(log.iterationCount) || 0}</span></div>`
+          : '') +
+        (log.usage && typeof log.usage.cost === 'number' && log.usage.cost > 0
+          ? `<div class="log-detail-row"><span class="log-detail-label">Cost</span><span>$${log.usage.cost.toFixed(6)}</span></div>`
           : '') +
         `</div>`;
 
@@ -14395,6 +15334,31 @@
           html += `</li>`;
         }
         html += `</ol>`;
+      }
+
+      if (reqTypeRaw === 'tts' && Array.isArray(log.ttsChunks) && log.ttsChunks.length > 0) {
+        const ttsChunksForDetail = log.ttsChunks;
+        html += `<div class="log-detail-section-title">Chunks (${ttsChunksForDetail.length})</div>` +
+          `<div class="log-turns-list">`;
+        for (var tcci = 0; tcci < ttsChunksForDetail.length; tcci++) {
+          const chunkForDetail = ttsChunksForDetail[tcci] || {};
+          const chunkLatencyForDetail = typeof chunkForDetail.latencyMs === 'number'
+            ? (chunkForDetail.latencyMs / 1000).toFixed(2) + 's'
+            : 'cached';
+          const chunkCostForDetail = (typeof chunkForDetail.cost === 'number' && chunkForDetail.cost > 0)
+            ? '$' + chunkForDetail.cost.toFixed(6)
+            : '';
+          const chunkMetaForDetail = chunkLatencyForDetail + (chunkCostForDetail ? ' · ' + chunkCostForDetail : '');
+          html += '<div class="log-turn-item">' +
+            '<div class="log-turn-header">' +
+              '<span class="log-turn-label">Chunk ' + (chunkForDetail.index || (tcci + 1)) + ' of ' + ttsChunksForDetail.length +
+              ' (' + (chunkForDetail.chars || 0) + ' chars)</span>' +
+              '<span class="log-turn-latency">' + escapeHtmlForPanelRuntime(chunkMetaForDetail) + '</span>' +
+            '</div>' +
+            '<pre class="log-code">' + escapeHtmlForPanelRuntime(chunkForDetail.text || '') + '</pre>' +
+          '</div>';
+        }
+        html += `</div>`;
       }
 
       if (log.apiParams) {
@@ -16101,6 +17065,7 @@
       const keyVal = inputForKey.value.trim();
       await saveApiKeyForPanelRuntime(keyVal);
       await clearCachedModelsForPanelRuntime();
+      await clearCachedTtsModelsForPanelRuntime();
       initModelSelectsForPanelRuntime();
     }
 
@@ -16243,6 +17208,10 @@
       sendPageContextEnabledForPanelRuntime = settingsForBehaviour.sendPageContext !== false;
       const pageContextToggleForBehaviour = root.getElementById('settings-page-context-toggle');
       if (pageContextToggleForBehaviour) pageContextToggleForBehaviour.checked = sendPageContextEnabledForPanelRuntime;
+      ttsEngineForPanelRuntime = settingsForBehaviour.ttsEngine === 'openrouter' ? 'openrouter' : 'browser';
+      const ttsEngineSelectForBehaviour = root.getElementById('settings-tts-engine-select');
+      if (ttsEngineSelectForBehaviour) ttsEngineSelectForBehaviour.value = ttsEngineForPanelRuntime;
+      updateTtsModelRowVisibilityForPanelRuntime();
       try {
         chrome.storage.local.get('abchatAutomationEnabled', function (itemsForAutomationToggle) {
           const automationToggleForBehaviour = root.getElementById('settings-automation-toggle');
@@ -16251,6 +17220,28 @@
           }
         });
       } catch (eAutomationLoadForBehaviour) {}
+    }
+
+    function updateTtsModelRowVisibilityForPanelRuntime() {
+      const isOpenRouterTtsForVisibility = ttsEngineForPanelRuntime === 'openrouter';
+      const rowForTtsModel = root.getElementById('settings-tts-model-row');
+      if (rowForTtsModel) rowForTtsModel.classList.toggle('hidden', !isOpenRouterTtsForVisibility);
+      const rowForTtsVoice = root.getElementById('settings-tts-voice-row');
+      const selForTtsVoiceVisibility = root.getElementById('settings-tts-voice-select');
+      const hasVoicesForVisibility = !!(selForTtsVoiceVisibility && selForTtsVoiceVisibility.options && selForTtsVoiceVisibility.options.length);
+      if (rowForTtsVoice) rowForTtsVoice.classList.toggle('hidden', !isOpenRouterTtsForVisibility || !hasVoicesForVisibility);
+    }
+
+    async function saveTtsEngineFromSettingsForPanelRuntime(engineValueForSave) {
+      const normalizedEngineForSave = engineValueForSave === 'openrouter' ? 'openrouter' : 'browser';
+      ttsEngineForPanelRuntime = normalizedEngineForSave;
+      updateTtsModelRowVisibilityForPanelRuntime();
+      // Switching engine mid-read would leave a half-spoken answer under the wrong voice.
+      stopReadAloudForPanelRuntime();
+      const storageManagerForTtsEngine = (globalThis.ABChatShared || {}).storageManager;
+      if (storageManagerForTtsEngine && typeof storageManagerForTtsEngine.saveSettings === 'function') {
+        await storageManagerForTtsEngine.saveSettings({ ttsEngine: normalizedEngineForSave });
+      }
     }
 
     function handleAutomationToggleForPanelRuntime(wantEnabledForAutomation) {
@@ -16571,7 +17562,10 @@
           if (area !== 'local') return;
           var apiKeyChangedForLocalSync = !!changes.abchat_api_key;
           var modelChangedForLocalSync =
-            !!changes[SELECTED_MODEL_KEY_FOR_PANEL_RUNTIME] || !!changes[SELECTED_IMAGE_MODEL_KEY_FOR_PANEL_RUNTIME];
+            !!changes[SELECTED_MODEL_KEY_FOR_PANEL_RUNTIME]
+            || !!changes[SELECTED_IMAGE_MODEL_KEY_FOR_PANEL_RUNTIME]
+            || !!changes[SELECTED_TTS_MODEL_KEY_FOR_PANEL_RUNTIME]
+            || !!changes[SELECTED_TTS_VOICE_KEY_FOR_PANEL_RUNTIME];
           if (!apiKeyChangedForLocalSync && !modelChangedForLocalSync) return;
           if (apiKeyChangedForLocalSync) loadApiKeyIntoSettingsForPanelRuntime();
           initModelSelectsForPanelRuntime();
@@ -19031,6 +20025,10 @@
               copyMessageForPanelRuntime(Number(tgtForRuntime.dataset.messageId), tgtForRuntime);
               break;
             }
+            case 'read-message-aloud': {
+              readMessageAloudForPanelRuntime(Number(tgtForRuntime.dataset.messageId));
+              break;
+            }
             case 'copy-inline-message': {
               const textForInlineCopy = tgtForRuntime.dataset.copyText || '';
               if (!textForInlineCopy) break;
@@ -19454,6 +20452,9 @@
             case 'save-api-key':                   saveApiKeyFromSettingsForPanelRuntime(); break;
             case 'save-default-model':             saveDefaultModelForPanelRuntime(tgtForRuntime.value); break;
             case 'save-image-model':               saveImageModelForPanelRuntime(tgtForRuntime.value); break;
+            case 'save-tts-engine':                saveTtsEngineFromSettingsForPanelRuntime(tgtForRuntime.value); break;
+            case 'save-tts-model':                 handleTtsModelChangeForPanelRuntime(tgtForRuntime.value); break;
+            case 'save-tts-voice':                 handleTtsVoiceChangeForPanelRuntime(tgtForRuntime.value); break;
             case 'save-delete-chats-older-than':   saveDeleteChatsOlderThanForPanelRuntime(tgtForRuntime.value); break;
             case 'save-delete-clips-older-than':   saveClipRetentionForPanelRuntime(tgtForRuntime.value); break;
             case 'prune-orphaned-blobs':           pruneOrphanedBlobsFromSettingsForPanelRuntime(); break;

@@ -251,26 +251,24 @@
   }
 
   const OPENROUTER_MODELS_URL_FOR_CLIENT = "https://openrouter.ai/api/v1/models";
-  async function fetchRawModelsForClient(apiKey) {
-    if (!apiKey) throw new Error("No API key provided.");
+  async function fetchModelsCatalogForClient(urlForCatalog, apiKey) {
     const MAX_RETRIES_FOR_RAW = 2;
     const RETRY_DELAYS_FOR_RAW = [1500, 3000];
     const RETRYABLE_FOR_RAW = [429, 502, 503, 504];
     let responseForRaw = null;
     let lastErrForRaw = null;
+    const headersForRaw = {
+      "HTTP-Referer": "chrome-extension://agentic-browser-chat",
+      "X-OpenRouter-Title": "Agentic Browser Chat"
+    };
+    if (apiKey) headersForRaw["Authorization"] = "Bearer " + apiKey;
     for (let retryForRaw = 0; retryForRaw <= MAX_RETRIES_FOR_RAW; retryForRaw++) {
       if (retryForRaw > 0) {
         await new Promise(function (resolve) { setTimeout(resolve, RETRY_DELAYS_FOR_RAW[retryForRaw - 1]); });
       }
       lastErrForRaw = null;
       try {
-        responseForRaw = await fetch(OPENROUTER_MODELS_URL_FOR_CLIENT, {
-          headers: {
-            "Authorization": "Bearer " + apiKey,
-            "HTTP-Referer": "chrome-extension://agentic-browser-chat",
-            "X-OpenRouter-Title": "Agentic Browser Chat"
-          }
-        });
+        responseForRaw = await fetch(urlForCatalog, { headers: headersForRaw });
         if (!responseForRaw.ok && RETRYABLE_FOR_RAW.indexOf(responseForRaw.status) !== -1 && retryForRaw < MAX_RETRIES_FOR_RAW) {
           lastErrForRaw = new Error("HTTP " + responseForRaw.status);
           responseForRaw = null;
@@ -290,6 +288,47 @@
     }
     const jsonForRaw = await responseForRaw.json();
     return Array.isArray(jsonForRaw.data) ? jsonForRaw.data : [];
+  }
+
+  async function fetchRawModelsForClient(apiKey) {
+    if (!apiKey) throw new Error("No API key provided.");
+    return fetchModelsCatalogForClient(OPENROUTER_MODELS_URL_FOR_CLIENT, apiKey);
+  }
+
+  // Speech-output (TTS) models are excluded from the default catalog and only surface under the
+  // output_modalities=speech filter. The filtered catalog is public, so the key is optional here.
+  async function fetchRawTtsModelsForClient(apiKey) {
+    return fetchModelsCatalogForClient(OPENROUTER_MODELS_URL_FOR_CLIENT + "?output_modalities=speech", apiKey || "");
+  }
+
+  // Look up the real billed cost (USD) of one generation after the fact, for calls whose response
+  // body carries no usage object (the audio/speech endpoint returns raw bytes). The id comes from
+  // the call's X-Generation-Id response header. Cost is computed asynchronously upstream, so a
+  // freshly-finished generation can 404 briefly; retry a few times before giving up. Best-effort:
+  // returns a number, or null when unknown. Never throws.
+  const OPENROUTER_GENERATION_URL_FOR_CLIENT = "https://openrouter.ai/api/v1/generation";
+  async function fetchGenerationCostForClient(apiKey, generationId) {
+    if (!apiKey || !generationId) return null;
+    const urlForGen = OPENROUTER_GENERATION_URL_FOR_CLIENT + "?id=" + encodeURIComponent(generationId);
+    const RETRY_DELAYS_FOR_GEN = [400, 800, 1600];
+    for (let attemptForGen = 0; attemptForGen <= RETRY_DELAYS_FOR_GEN.length; attemptForGen++) {
+      if (attemptForGen > 0) {
+        await new Promise(function (resolve) { setTimeout(resolve, RETRY_DELAYS_FOR_GEN[attemptForGen - 1]); });
+      }
+      try {
+        const respForGen = await fetch(urlForGen, { headers: { "Authorization": "Bearer " + apiKey } });
+        if (respForGen.status === 404) continue; // cost not ready yet
+        if (!respForGen.ok) return null;
+        const jsonForGen = await respForGen.json();
+        const dataForGen = (jsonForGen && jsonForGen.data) ? jsonForGen.data : jsonForGen;
+        if (!dataForGen) return null;
+        const costRawForGen = Number(dataForGen.total_cost != null ? dataForGen.total_cost : dataForGen.usage);
+        return Number.isFinite(costRawForGen) ? costRawForGen : null;
+      } catch (errForGen) {
+        // network hiccup: fall through to the next attempt
+      }
+    }
+    return null;
   }
 
   async function generateTitleForClient(paramsForTitle) {
@@ -414,6 +453,8 @@
   nsForClient.client = {
     streamCompletion: streamCompletionForClient,
     fetchRawModels: fetchRawModelsForClient,
+    fetchRawTtsModels: fetchRawTtsModelsForClient,
+    fetchGenerationCost: fetchGenerationCostForClient,
     generateTitle: generateTitleForClient
   };
 
