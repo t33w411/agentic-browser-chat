@@ -152,6 +152,10 @@
 
           <!-- Input area -->
           <div class="chat-input-area">
+            <!-- Centered above the composer (bottom: 100%), so it floats just above it
+                 regardless of the composer's height. Starts hidden; the runtime shows it
+                 whenever the messages area is scrolled up away from the bottom. -->
+            <button type="button" class="chat-jump-bottom-btn hidden" id="chat-jump-bottom-btn" data-action="jump-to-bottom" aria-label="Jump to latest messages"><span class="chat-jump-bottom-label">Jump to bottom</span>${icForPanelTemplate.arrowDown13}</button>
             <!-- The button is a SIBLING of the chips row, never a child: the row is emptied with
                  innerHTML on every draft apply and composer clear, which would take the button with
                  it. Its visibility rides the row's :empty state in CSS, so no JS has to remember to

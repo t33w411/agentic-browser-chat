@@ -1329,6 +1329,46 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
   background: color-mix(in srgb, var(--abchat-accent) 8%, var(--abchat-bg-input));
 }
 
+.chat-jump-bottom-btn {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid var(--abchat-border);
+  border-radius: 999px;
+  background: var(--abchat-bg-panel);
+  color: var(--abchat-text-secondary);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: var(--abchat-shadow-float);
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.chat-jump-bottom-btn .chat-jump-bottom-label { display: inline-block; }
+.chat-jump-bottom-btn svg { display: block; }
+.chat-jump-bottom-btn:hover {
+  background: var(--abchat-bg-hover);
+  color: var(--abchat-text-primary);
+  border-color: var(--abchat-text-secondary);
+}
+.chat-jump-bottom-btn:active { transform: translateX(-50%) translateY(1px); }
+.panel-host[data-theme="dark"] .chat-jump-bottom-btn {
+  background: #3d526d;
+  border-color: #5b7394;
+  color: #e8edf4;
+}
+.panel-host[data-theme="dark"] .chat-jump-bottom-btn:hover {
+  background: #4a6280;
+  color: #ffffff;
+}
+
 .input-chips-bar {
   display: flex; align-items: flex-start; gap: 6px; margin-bottom: 8px;
 }

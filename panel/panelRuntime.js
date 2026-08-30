@@ -988,7 +988,7 @@
           if (S.activeChatId !== numericChatIdForRemote) return;
           renderChatMessages();
           reattachLiveTurnBubbleForPanelRuntime(numericChatIdForRemote);
-          scrollChatToBottomForPanelRuntime();
+          maybeScrollChatToBottomForPanelRuntime();
         });
         return;
       }
@@ -1328,6 +1328,21 @@
     // How long an ended bubble may outlive its run while waiting for the stream_end
     // refresh to render the persisted final message, before being force-removed.
     const LIVE_TURN_END_REMOVE_FALLBACK_MS_FOR_PANEL_RUNTIME = 2000;
+
+    // Sticky-bottom: while true, streaming and other passive content growth keep the chat
+    // pinned to the newest message. It is set false the moment the user scrolls up and
+    // re-armed when they return to the bottom or press the jump-to-bottom button. The same
+    // flag drives that button's visibility.
+    let chatStickToBottomForPanelRuntime = true;
+    // Distance (px) from the bottom within which stick-to-bottom re-arms.
+    const CHAT_STICK_BOTTOM_THRESHOLD_FOR_PANEL_RUNTIME = 60;
+    // Distance (px) from the bottom beyond which the jump-to-bottom button appears. The gap
+    // above the stick threshold is a dead zone so the button does not flicker at the edge.
+    const CHAT_JUMP_BOTTOM_SHOW_THRESHOLD_FOR_PANEL_RUNTIME = 120;
+    // Set while a smooth programmatic scroll-to-bottom is animating, so the scroll listener
+    // does not read the animation's intermediate positions as the user detaching.
+    let chatSmoothScrollActiveForPanelRuntime = false;
+    let chatSmoothScrollGuardTimerForPanelRuntime = null;
 
     let apiLogsPageForPanelRuntime = 0;
     let apiLogsCacheForPanelRuntime = [];
@@ -5217,6 +5232,9 @@
           12
         );
       }
+      // Leaving the conversation (empty state or raw view) must hide the jump button;
+      // entering re-evaluates it for the freshly shown messages.
+      updateChatJumpToBottomButtonForPanelRuntime();
     }
 
     function getActiveChatTitleForPanelRuntime() {
@@ -5322,7 +5340,7 @@
         requestAndApplyStreamSnapshotForPanelRuntime(id);
         scrollChatToBottomForPanelRuntime();
         if (mermaidDoneForSelectChat && typeof mermaidDoneForSelectChat.then === 'function') {
-          mermaidDoneForSelectChat.then(scrollChatToBottomForPanelRuntime);
+          mermaidDoneForSelectChat.then(function () { scrollChatToBottomForPanelRuntime(); });
         }
       });
       S.inChatView = true;
@@ -7250,7 +7268,7 @@
           var convContainerForRefresh = root.querySelector('.messages-area');
           var savedScrollTopForRefresh = convContainerForRefresh ? convContainerForRefresh.scrollTop : 0;
           var wasAtBottomForRefresh = convContainerForRefresh
-            ? (convContainerForRefresh.scrollHeight - convContainerForRefresh.scrollTop - convContainerForRefresh.clientHeight) < 60
+            ? (convContainerForRefresh.scrollHeight - convContainerForRefresh.scrollTop - convContainerForRefresh.clientHeight) < CHAT_STICK_BOTTOM_THRESHOLD_FOR_PANEL_RUNTIME
             : true;
           loadGeneratedBlobsForMessagesForPanelRuntime(getActiveChatMessagesForPanelRuntime()).then(function () {
             if (S.activeChatId !== refreshedActiveChatIdForRefresh) return;
@@ -7271,6 +7289,7 @@
             } else {
               var convForRestore = root.querySelector('.messages-area');
               if (convForRestore) convForRestore.scrollTop = savedScrollTopForRefresh;
+              updateChatJumpToBottomButtonForPanelRuntime();
             }
             if (mermaidDoneForDbRefresh && typeof mermaidDoneForDbRefresh.then === 'function') {
               mermaidDoneForDbRefresh.then(function () {
@@ -7279,6 +7298,7 @@
                 } else {
                   var convForMermaidRestore = root.querySelector('.messages-area');
                   if (convForMermaidRestore) convForMermaidRestore.scrollTop = savedScrollTopForRefresh;
+                  updateChatJumpToBottomButtonForPanelRuntime();
                 }
               });
             }
@@ -7904,7 +7924,7 @@
           var convContainerForApply = root.querySelector('.messages-area');
           var savedScrollTopForApply = convContainerForApply ? convContainerForApply.scrollTop : 0;
           var wasAtBottomForApply = convContainerForApply
-            ? (convContainerForApply.scrollHeight - convContainerForApply.scrollTop - convContainerForApply.clientHeight) < 60
+            ? (convContainerForApply.scrollHeight - convContainerForApply.scrollTop - convContainerForApply.clientHeight) < CHAT_STICK_BOTTOM_THRESHOLD_FOR_PANEL_RUNTIME
             : true;
           var chatIdForApplyRender = idForApply;
           loadGeneratedBlobsForMessagesForPanelRuntime(getActiveChatMessagesForPanelRuntime()).then(function () {
@@ -7917,6 +7937,7 @@
             } else {
               var convForRestoreApply = root.querySelector('.messages-area');
               if (convForRestoreApply) convForRestoreApply.scrollTop = savedScrollTopForApply;
+              updateChatJumpToBottomButtonForPanelRuntime();
             }
             if (mermaidDoneForApply && typeof mermaidDoneForApply.then === 'function') {
               mermaidDoneForApply.then(function () {
@@ -7925,6 +7946,7 @@
                 } else {
                   var convForMermaidApply = root.querySelector('.messages-area');
                   if (convForMermaidApply) convForMermaidApply.scrollTop = savedScrollTopForApply;
+                  updateChatJumpToBottomButtonForPanelRuntime();
                 }
               });
             }
@@ -13896,9 +13918,92 @@
       return createNewLocalChatForPanelRuntime(firstText, chatTypeForPanelRuntime, Boolean(optsForPanelRuntime.isPinned), lastModelForPanelRuntime);
     }
 
-    function scrollChatToBottomForPanelRuntime() {
-      const container = root.querySelector('.messages-area');
-      if (container) container.scrollTop = container.scrollHeight;
+    function getChatMessagesAreaForPanelRuntime() {
+      return root.querySelector('.messages-area');
+    }
+
+    function getChatDistanceFromBottomForPanelRuntime(containerForDistance) {
+      const containerForDist = containerForDistance || getChatMessagesAreaForPanelRuntime();
+      if (!containerForDist) return 0;
+      return containerForDist.scrollHeight - containerForDist.scrollTop - containerForDist.clientHeight;
+    }
+
+    // Show the jump-to-bottom button only when a chat's messages are on screen (not the
+    // empty state or the raw JSON view) and the user has scrolled up past the show threshold.
+    function updateChatJumpToBottomButtonForPanelRuntime() {
+      const btnForJump = root.getElementById('chat-jump-bottom-btn');
+      if (!btnForJump) return;
+      const containerForJump = getChatMessagesAreaForPanelRuntime();
+      const messagesContentForJump = root.getElementById('chat-messages-content');
+      const inChatMessagesForJump = Boolean(
+        containerForJump &&
+        messagesContentForJump &&
+        !messagesContentForJump.classList.contains('hidden')
+      );
+      const distanceForJump = getChatDistanceFromBottomForPanelRuntime(containerForJump);
+      const shouldShowForJump = inChatMessagesForJump &&
+        distanceForJump > CHAT_JUMP_BOTTOM_SHOW_THRESHOLD_FOR_PANEL_RUNTIME;
+      btnForJump.classList.toggle('hidden', !shouldShowForJump);
+    }
+
+    // Recompute the stick flag and button from a live scroll position. Called on every user
+    // scroll of the messages area. Skips the intermediate frames of our own smooth animation.
+    function handleChatScrollStickForPanelRuntime(containerForStick) {
+      const distanceForStick = getChatDistanceFromBottomForPanelRuntime(containerForStick);
+      if (chatSmoothScrollActiveForPanelRuntime) {
+        if (distanceForStick <= CHAT_STICK_BOTTOM_THRESHOLD_FOR_PANEL_RUNTIME) {
+          chatSmoothScrollActiveForPanelRuntime = false;
+          if (chatSmoothScrollGuardTimerForPanelRuntime) {
+            clearTimeout(chatSmoothScrollGuardTimerForPanelRuntime);
+            chatSmoothScrollGuardTimerForPanelRuntime = null;
+          }
+          chatStickToBottomForPanelRuntime = true;
+        }
+        updateChatJumpToBottomButtonForPanelRuntime();
+        return;
+      }
+      chatStickToBottomForPanelRuntime =
+        distanceForStick <= CHAT_STICK_BOTTOM_THRESHOLD_FOR_PANEL_RUNTIME;
+      updateChatJumpToBottomButtonForPanelRuntime();
+    }
+
+    // Force the chat to the bottom and re-arm stick-to-bottom. Used for user-intent
+    // landings: opening a chat, sending a message, and the jump-to-bottom button. Pass
+    // `{ smooth: true }` to animate; callers omit it (instant) during an active stream so
+    // the animation does not fight incoming deltas.
+    function scrollChatToBottomForPanelRuntime(optionsForScroll) {
+      const container = getChatMessagesAreaForPanelRuntime();
+      if (!container) return;
+      chatStickToBottomForPanelRuntime = true;
+      const smoothForScroll = Boolean(optionsForScroll && optionsForScroll.smooth);
+      if (chatSmoothScrollGuardTimerForPanelRuntime) {
+        clearTimeout(chatSmoothScrollGuardTimerForPanelRuntime);
+        chatSmoothScrollGuardTimerForPanelRuntime = null;
+      }
+      if (smoothForScroll && typeof container.scrollTo === 'function') {
+        chatSmoothScrollActiveForPanelRuntime = true;
+        // Safety net: clear the guard if the animation is interrupted before it lands, so a
+        // later user scroll-up is not ignored indefinitely.
+        chatSmoothScrollGuardTimerForPanelRuntime = setTimeout(function () {
+          chatSmoothScrollActiveForPanelRuntime = false;
+          chatSmoothScrollGuardTimerForPanelRuntime = null;
+        }, 700);
+        container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+      } else {
+        chatSmoothScrollActiveForPanelRuntime = false;
+        container.scrollTop = container.scrollHeight;
+      }
+      updateChatJumpToBottomButtonForPanelRuntime();
+    }
+
+    // Passive scroll for streaming and other content-growth paths: honors the stick flag,
+    // so a user who scrolled up is left where they are. Always instant.
+    function maybeScrollChatToBottomForPanelRuntime() {
+      if (chatStickToBottomForPanelRuntime) {
+        const container = getChatMessagesAreaForPanelRuntime();
+        if (container) container.scrollTop = container.scrollHeight;
+      }
+      updateChatJumpToBottomButtonForPanelRuntime();
     }
 
     // True when the chat currently being viewed has a run in flight: a remote-mirrored
@@ -14224,14 +14329,14 @@
         bubbleForStream.innerHTML = '<div class="msg-bubble asst"><div class="msg-text" id="abchat-streaming-text"></div></div>';
       }
       container.appendChild(bubbleForStream);
-      scrollChatToBottomForPanelRuntime();
+      maybeScrollChatToBottomForPanelRuntime();
     }
 
     function updateStreamingBubbleForPanelRuntime(text) {
       const textEl = root.getElementById('abchat-streaming-text');
       if (!textEl) return;
       textEl.innerHTML = renderMarkdown(text);
-      scrollChatToBottomForPanelRuntime();
+      maybeScrollChatToBottomForPanelRuntime();
     }
 
     function removeStreamingBubbleForPanelRuntime() {
@@ -14254,7 +14359,7 @@
           '</div>' +
         '</div>';
       container.appendChild(bubbleForCompacting);
-      scrollChatToBottomForPanelRuntime();
+      maybeScrollChatToBottomForPanelRuntime();
     }
 
     function removeCompactingBubbleForPanelRuntime() {
@@ -14278,7 +14383,7 @@
         const container = root.getElementById('chat-messages-content');
         if (container) {
           container.appendChild(wrap);
-          scrollChatToBottomForPanelRuntime();
+          maybeScrollChatToBottomForPanelRuntime();
         }
       }
     }
@@ -14301,7 +14406,7 @@
       if (!container.contains(state.wrap)) {
         container.appendChild(state.wrap);
       }
-      scrollChatToBottomForPanelRuntime();
+      maybeScrollChatToBottomForPanelRuntime();
     }
 
     // Append a blinking block caret ("▌") at the tail of the streamed text so the
@@ -14367,7 +14472,7 @@
         spinner.style.display = 'none';
         textEl.style.display  = '';
       }
-      if (S.activeChatId === chatId) scrollChatToBottomForPanelRuntime();
+      if (S.activeChatId === chatId) maybeScrollChatToBottomForPanelRuntime();
     }
 
     // Reveal one frame's worth of buffered characters and schedule the next tick if more remain.
@@ -14674,7 +14779,7 @@
         toolsRow.appendChild(chip);
       });
       bubble.appendChild(toolsRow);
-      if (S.activeChatId === chatId) scrollChatToBottomForPanelRuntime();
+      if (S.activeChatId === chatId) maybeScrollChatToBottomForPanelRuntime();
     }
 
     function updateLiveTurnToolStepStatusForPanelRuntime(chatId, toolCallId, status, statusText) {
@@ -14685,7 +14790,7 @@
       );
       if (!chip) return;
       setInputChipStatusForPanelRuntime(chip, status, statusText || '');
-      if (S.activeChatId === chatId) scrollChatToBottomForPanelRuntime();
+      if (S.activeChatId === chatId) maybeScrollChatToBottomForPanelRuntime();
     }
 
     // Called on stream_end instead of removing the bubble outright: the bubble keeps
@@ -14756,7 +14861,7 @@
       el.className = 'msg-wrap';
       el.innerHTML = '<div class="msg-bubble asst msg-system-notice"><div class="msg-text"><em>' + escHtml(text) + '</em></div></div>';
       container.appendChild(el);
-      scrollChatToBottomForPanelRuntime();
+      maybeScrollChatToBottomForPanelRuntime();
     }
 
     async function persistAgentStopNoticeForPanelRuntime(chatIdForStopNotice, stopReasonForStopNotice, toolTimeoutMsForStopNotice) {
@@ -14772,7 +14877,7 @@
       }, { skipChatUpdate: true });
       if (S.activeChatId === chatIdForStopNotice) {
         renderChatMessages();
-        scrollChatToBottomForPanelRuntime();
+        maybeScrollChatToBottomForPanelRuntime();
       }
     }
 
@@ -20202,6 +20307,7 @@
             case 'toggle-raw-wrap':      toggleRawChatWrapForPanelRuntime(); break;
             case 'copy-raw-chat':        copyRawChatForPanelRuntime(tgtForRuntime); break;
             case 'back-from-chat':       backFromChat(); break;
+            case 'jump-to-bottom':       scrollChatToBottomForPanelRuntime({ smooth: !isActiveChatSendingForPanelRuntime() }); break;
             case 'use-prompt':           usePrompt(tgtForRuntime); break;
             case 'remove-ic':            {
               const icForRuntime = tgtForRuntime.closest('.ic');
@@ -21339,6 +21445,9 @@
       if (!containerForScroll || containerForScroll.dataset.abchatScrollSyncBound === '1') return;
       containerForScroll.dataset.abchatScrollSyncBound = '1';
       containerForScroll.addEventListener('scroll', function () {
+        // Recompute stick-to-bottom and the jump button immediately, before the debounced
+        // cross-tab scroll write, so the button tracks the scroll without lag.
+        handleChatScrollStickForPanelRuntime(containerForScroll);
         if (chatScrollWriteTimerForPanelRuntime) clearTimeout(chatScrollWriteTimerForPanelRuntime);
         chatScrollWriteTimerForPanelRuntime = setTimeout(function () {
           writePanelStateSyncForPanelRuntime({ chatScrollTop: containerForScroll.scrollTop });
@@ -21626,6 +21735,10 @@
       if (draftSaveTimerForPanelRuntime) {
         clearTimeout(draftSaveTimerForPanelRuntime);
         draftSaveTimerForPanelRuntime = null;
+      }
+      if (chatSmoothScrollGuardTimerForPanelRuntime) {
+        clearTimeout(chatSmoothScrollGuardTimerForPanelRuntime);
+        chatSmoothScrollGuardTimerForPanelRuntime = null;
       }
       draftLoadGenerationForPanelRuntime += 1;
       if (draftStorageSyncListenerForPanelRuntime) {
