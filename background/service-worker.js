@@ -3570,6 +3570,67 @@ if (chrome.commands && chrome.commands.onCommand) {
   });
 }
 
+// Fetches an http(s) image URL with the service worker's host permissions (content-script
+// fetches of cross-origin images are CORS-gated and usually fail) and returns it as a data
+// URL. Used by the "drag a page image into the composer" path for images the panel cannot
+// resolve itself. Deliberately not routed through webFetch: this needs the raw bytes with no
+// tab-content preference, cross-host-redirect block, or web-fetch caching.
+async function fetchImageAsDataUrlForServiceWorker(rawUrlForImageFetch) {
+  var urlForImageFetch = String(rawUrlForImageFetch || '').trim();
+  if (!/^https?:\/\//i.test(urlForImageFetch)) {
+    return { ok: false, error: 'Only http(s) image URLs can be fetched.' };
+  }
+  // SVG is allowed through here so the panel can fetch the source and rasterize it to PNG; the
+  // vision endpoints do not accept image/svg+xml, so it never reaches the model as-is.
+  var ALLOWED_IMAGE_MIMES_FOR_IMAGE_FETCH = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/svg+xml'];
+  var MAX_IMAGE_BYTES_FOR_IMAGE_FETCH = 20 * 1024 * 1024;
+  var controllerForImageFetch = new AbortController();
+  var timeoutIdForImageFetch = setTimeout(function () { controllerForImageFetch.abort(); }, 15000);
+  try {
+    var responseForImageFetch;
+    try {
+      responseForImageFetch = await fetch(urlForImageFetch, { method: 'GET', signal: controllerForImageFetch.signal });
+    } catch (fetchErrForImageFetch) {
+      return {
+        ok: false,
+        error: fetchErrForImageFetch && fetchErrForImageFetch.name === 'AbortError'
+          ? 'Image fetch timed out.'
+          : 'Could not fetch image: ' + (fetchErrForImageFetch && fetchErrForImageFetch.message ? fetchErrForImageFetch.message : String(fetchErrForImageFetch))
+      };
+    }
+    if (!responseForImageFetch.ok) {
+      return { ok: false, error: 'Image fetch failed (HTTP ' + responseForImageFetch.status + ').' };
+    }
+    var contentTypeForImageFetch = (responseForImageFetch.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    if (ALLOWED_IMAGE_MIMES_FOR_IMAGE_FETCH.indexOf(contentTypeForImageFetch) === -1) {
+      return { ok: false, error: 'Dropped item is not a supported image.' };
+    }
+    var bufferForImageFetch;
+    try {
+      bufferForImageFetch = await responseForImageFetch.arrayBuffer();
+    } catch (readErrForImageFetch) {
+      return { ok: false, error: 'Could not read image data.' };
+    }
+    if (bufferForImageFetch.byteLength > MAX_IMAGE_BYTES_FOR_IMAGE_FETCH) {
+      return { ok: false, error: 'Image is too large. Max size is 20MB.' };
+    }
+    var bytesForImageFetch = new Uint8Array(bufferForImageFetch);
+    var binaryForImageFetch = '';
+    var CHUNK_FOR_IMAGE_FETCH = 0x8000;
+    for (var offForImageFetch = 0; offForImageFetch < bytesForImageFetch.length; offForImageFetch += CHUNK_FOR_IMAGE_FETCH) {
+      binaryForImageFetch += String.fromCharCode.apply(null, bytesForImageFetch.subarray(offForImageFetch, offForImageFetch + CHUNK_FOR_IMAGE_FETCH));
+    }
+    return {
+      ok: true,
+      dataUrl: 'data:' + contentTypeForImageFetch + ';base64,' + btoa(binaryForImageFetch),
+      mimeType: contentTypeForImageFetch,
+      size: bufferForImageFetch.byteLength
+    };
+  } finally {
+    clearTimeout(timeoutIdForImageFetch);
+  }
+}
+
 chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceWorker, sendResponseForServiceWorker) => {
   if (!messageForServiceWorker || !messageForServiceWorker.type && !messageForServiceWorker.action) {
     return false;
@@ -4023,6 +4084,20 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
 
   if (messageForServiceWorker.action === "abchatConnectivityProbe") {
     handleConnectivityProbeForServiceWorker(messageForServiceWorker, sendResponseForServiceWorker);
+    return true;
+  }
+
+  if (messageForServiceWorker.action === "abchatFetchImageAsDataUrl") {
+    fetchImageAsDataUrlForServiceWorker(messageForServiceWorker.url)
+      .then(function (resultForImageFetch) {
+        sendResponseForServiceWorker(resultForImageFetch);
+      })
+      .catch(function (errForImageFetch) {
+        sendResponseForServiceWorker({
+          ok: false,
+          error: errForImageFetch && errForImageFetch.message ? errForImageFetch.message : 'Could not fetch image.'
+        });
+      });
     return true;
   }
 

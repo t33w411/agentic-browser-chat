@@ -185,7 +185,7 @@
                     <button class="ap-item" data-action="open-chat-picker"><span class="ap-icon">${icForPanelTemplate.message16}</span> Chat summary</button>
                     <button class="ap-item" data-action="spreadsheet-from-clipboard"><span class="ap-icon">${icForPanelTemplate.spreadsheet16}</span> Spreadsheet in page</button>
                   </div>
-                  <input type="file" id="chat-image-input" data-action="chat-image-input-change" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+                  <input type="file" id="chat-image-input" data-action="chat-image-input-change" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml,.svg" multiple hidden>
                   <input type="file" id="chat-file-input" data-action="chat-file-input-change" accept=".txt,.md,.markdown,.json,.csv,.pdf,.docx,.xlsx,.xls,.ods,.pptx,text/*" multiple hidden>
                 </div>
                 <div class="model-wrap">

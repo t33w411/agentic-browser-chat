@@ -9656,7 +9656,7 @@
       const inputAreaForDragDrop = rootNodeForDragDrop && rootNodeForDragDrop.querySelector('.chat-input-area');
       if (!inputAreaForDragDrop) return;
 
-      const SUPPORTED_IMAGE_TYPES_FOR_DRAG_DROP = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+      const SUPPORTED_IMAGE_TYPES_FOR_DRAG_DROP = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/svg+xml'];
       const SUPPORTED_FILE_TYPES_FOR_DRAG_DROP = [
         'text/', 'application/json', 'application/pdf',
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -9685,21 +9685,28 @@
         }
       }
 
+      // Accept OS file drops (dataTransfer.types has 'Files') and drags of a page image or link
+      // (types has 'text/uri-list'). A text-selection drag carries 'text/html'/'text/plain' but
+      // never 'text/uri-list', so it does not light up the drop zone; a dropped non-image URL is
+      // declined with a soft toast on drop, not here (data cannot be read during dragover).
+      function dragHasAttachableForDragDrop(dataTransferForCheck) {
+        if (!dataTransferForCheck || !dataTransferForCheck.types) return false;
+        const typesForCheck = dataTransferForCheck.types;
+        return Array.prototype.indexOf.call(typesForCheck, 'Files') !== -1
+          || Array.prototype.indexOf.call(typesForCheck, 'text/uri-list') !== -1;
+      }
+
       var dragDepthForDragDrop = 0;
 
       inputAreaForDragDrop.addEventListener('dragenter', function (evtForDragEnter) {
-        if (!evtForDragEnter.dataTransfer || !evtForDragEnter.dataTransfer.types) return;
-        const hasFile = Array.prototype.indexOf.call(evtForDragEnter.dataTransfer.types, 'Files') !== -1;
-        if (!hasFile) return;
+        if (!dragHasAttachableForDragDrop(evtForDragEnter.dataTransfer)) return;
         evtForDragEnter.preventDefault();
         dragDepthForDragDrop++;
         inputAreaForDragDrop.classList.add('drag-over');
       });
 
       inputAreaForDragDrop.addEventListener('dragover', function (evtForDragOver) {
-        if (!evtForDragOver.dataTransfer || !evtForDragOver.dataTransfer.types) return;
-        const hasFile = Array.prototype.indexOf.call(evtForDragOver.dataTransfer.types, 'Files') !== -1;
-        if (!hasFile) return;
+        if (!dragHasAttachableForDragDrop(evtForDragOver.dataTransfer)) return;
         evtForDragOver.preventDefault();
         evtForDragOver.dataTransfer.dropEffect = 'copy';
       });
@@ -9719,7 +9726,10 @@
         inputAreaForDragDrop.classList.remove('drag-over');
 
         const filesForDrop = evtForDrop.dataTransfer && evtForDrop.dataTransfer.files;
-        if (!filesForDrop || filesForDrop.length === 0) return;
+        if (!filesForDrop || filesForDrop.length === 0) {
+          handlePageImageDropForDragDrop(evtForDrop.dataTransfer);
+          return;
+        }
 
         if (filesForDrop.length > MAX_FILES_PER_DROP_FOR_PANEL_RUNTIME) {
           showDragToastForDragDrop('You can drop a maximum of ' + MAX_FILES_PER_DROP_FOR_PANEL_RUNTIME + ' files at once.');
@@ -9807,6 +9817,222 @@
           }
           appendSystemMsgToContainerForPanelRuntime(errForFile && errForFile.message ? errForFile.message : 'File upload failed.');
         });
+      }
+
+      const SUPPORTED_DROPPED_IMAGE_MIMES_FOR_DRAG_DROP = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+
+      // Resolve a candidate string to a usable data:/blob:/http(s): image URL, or '' if it is
+      // not one we can attach. Relative srcs are resolved against the page URL.
+      function normalizeDroppedUrlForDragDrop(candidateForNormalize) {
+        const rawForNormalize = String(candidateForNormalize || '').trim();
+        if (!rawForNormalize) return '';
+        if (/^data:image\//i.test(rawForNormalize)) return rawForNormalize;
+        if (/^data:/i.test(rawForNormalize)) return '';
+        try {
+          const resolvedForNormalize = new URL(rawForNormalize, window.location.href);
+          const protoForNormalize = resolvedForNormalize.protocol.toLowerCase();
+          if (protoForNormalize === 'http:' || protoForNormalize === 'https:' || protoForNormalize === 'blob:') {
+            return resolvedForNormalize.href;
+          }
+        } catch (eForNormalize) {}
+        return '';
+      }
+
+      function looksLikeImageUrlForDragDrop(urlForLooks) {
+        if (/^data:image\//i.test(urlForLooks)) return true;
+        if (/^blob:/i.test(urlForLooks)) return true;
+        return /\.(png|jpe?g|webp|gif|svg)(?:[?#]|$)/i.test(urlForLooks);
+      }
+
+      // Pull an image URL out of a drag that carried no OS file. text/html (the dragged <img>)
+      // is authoritative; the uri-list/plain fallbacks are only trusted when the URL itself looks
+      // like an image, so a dragged hyperlink does not trigger a fetch.
+      function extractDroppedImageUrlForDragDrop(dataTransferForExtract) {
+        if (!dataTransferForExtract) return '';
+        let htmlForExtract = '';
+        try { htmlForExtract = dataTransferForExtract.getData('text/html') || ''; } catch (eForHtml) {}
+        if (htmlForExtract) {
+          const matchForExtract = /<img[^>]+src\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i.exec(htmlForExtract);
+          const srcForExtract = matchForExtract ? (matchForExtract[1] || matchForExtract[2] || matchForExtract[3] || '') : '';
+          const normalizedHtmlForExtract = normalizeDroppedUrlForDragDrop(srcForExtract);
+          if (normalizedHtmlForExtract) return normalizedHtmlForExtract;
+        }
+        let uriForExtract = '';
+        try { uriForExtract = dataTransferForExtract.getData('text/uri-list') || ''; } catch (eForUri) {}
+        if (uriForExtract) {
+          const linesForExtract = uriForExtract.split(/\r?\n/);
+          for (let iForExtract = 0; iForExtract < linesForExtract.length; iForExtract++) {
+            const lineForExtract = linesForExtract[iForExtract].trim();
+            if (!lineForExtract || lineForExtract.charAt(0) === '#') continue;
+            const normalizedUriForExtract = normalizeDroppedUrlForDragDrop(lineForExtract);
+            if (normalizedUriForExtract && looksLikeImageUrlForDragDrop(normalizedUriForExtract)) return normalizedUriForExtract;
+            break;
+          }
+        }
+        let plainForExtract = '';
+        try { plainForExtract = dataTransferForExtract.getData('text/plain') || ''; } catch (eForPlain) {}
+        const normalizedPlainForExtract = normalizeDroppedUrlForDragDrop(plainForExtract.trim());
+        if (normalizedPlainForExtract && looksLikeImageUrlForDragDrop(normalizedPlainForExtract)) return normalizedPlainForExtract;
+        return '';
+      }
+
+      function deriveImageNameFromUrlForDragDrop(urlForName) {
+        const rawForName = String(urlForName || '');
+        if (/^data:/i.test(rawForName) || /^blob:/i.test(rawForName)) return 'Image';
+        try {
+          const parsedForName = new URL(rawForName, window.location.href);
+          let baseForName = decodeURIComponent((parsedForName.pathname || '').split('/').pop() || '').trim();
+          baseForName = baseForName.replace(/[\r\n\t]+/g, ' ').trim();
+          if (baseForName && baseForName.length <= 120) return baseForName;
+        } catch (eForName) {}
+        return 'Image';
+      }
+
+      async function validatedImageInputFromBlobForDragDrop(blobForValidate, nameForValidate) {
+        const mimeForValidate = String(blobForValidate && blobForValidate.type || '').toLowerCase();
+        if (SUPPORTED_DROPPED_IMAGE_MIMES_FOR_DRAG_DROP.indexOf(mimeForValidate) === -1) {
+          throw new Error('Unsupported image type. Allowed: PNG, JPEG, WebP, GIF.');
+        }
+        if (Number(blobForValidate.size || 0) > MAX_IMAGE_BYTES_FOR_PANEL_RUNTIME) {
+          throw new Error('Image is too large. Max size is 20MB.');
+        }
+        const bufferForValidate = await blobForValidate.arrayBuffer();
+        return {
+          name: nameForValidate,
+          mimeType: mimeForValidate,
+          size: Number(blobForValidate.size || 0),
+          dataUrl: arrayBufferToDataUrlForPanelRuntime(bufferForValidate, mimeForValidate)
+        };
+      }
+
+      // data: decoded here, blob: fetched here (page origin), http(s): fetched by the service
+      // worker (its host permissions clear cross-origin CORS the content script cannot).
+      async function resolveDroppedImageToBlobInputForDragDrop(urlForResolve) {
+        const nameForResolve = deriveImageNameFromUrlForDragDrop(urlForResolve);
+        if (/^data:/i.test(urlForResolve)) {
+          const mimeMatchForResolve = /^data:([^;,]+)/i.exec(urlForResolve);
+          const mimeForResolve = String(mimeMatchForResolve ? mimeMatchForResolve[1] : '').toLowerCase();
+          if (mimeForResolve === 'image/svg+xml') {
+            return await rasterizeSvgDataUrlToPngInputForPanelRuntime(urlForResolve, nameForResolve);
+          }
+          if (SUPPORTED_DROPPED_IMAGE_MIMES_FOR_DRAG_DROP.indexOf(mimeForResolve) === -1) {
+            throw new Error('Unsupported image type. Allowed: PNG, JPEG, WebP, GIF.');
+          }
+          const commaIdxForResolve = urlForResolve.indexOf(',');
+          const payloadForResolve = commaIdxForResolve >= 0 ? urlForResolve.slice(commaIdxForResolve + 1) : '';
+          const isBase64ForResolve = /;base64/i.test(urlForResolve.slice(0, commaIdxForResolve >= 0 ? commaIdxForResolve : 0));
+          let sizeForResolve;
+          if (isBase64ForResolve) {
+            const cleanedForResolve = payloadForResolve.replace(/=+$/, '');
+            sizeForResolve = Math.floor(cleanedForResolve.length * 3 / 4);
+          } else {
+            try { sizeForResolve = decodeURIComponent(payloadForResolve).length; } catch (eForSize) { sizeForResolve = payloadForResolve.length; }
+          }
+          if (sizeForResolve > MAX_IMAGE_BYTES_FOR_PANEL_RUNTIME) {
+            throw new Error('Image is too large. Max size is 20MB.');
+          }
+          return { name: nameForResolve, mimeType: mimeForResolve, size: sizeForResolve, dataUrl: urlForResolve };
+        }
+        if (/^blob:/i.test(urlForResolve)) {
+          let responseForResolve;
+          try {
+            responseForResolve = await fetch(urlForResolve);
+          } catch (eForBlobFetch) {
+            throw new Error('Could not read the dragged image.');
+          }
+          if (!responseForResolve || !responseForResolve.ok) throw new Error('Could not read the dragged image.');
+          const blobForResolve = await responseForResolve.blob();
+          if (String(blobForResolve.type || '').toLowerCase() === 'image/svg+xml') {
+            const svgBufferForResolve = await blobForResolve.arrayBuffer();
+            const svgDataUrlForResolve = arrayBufferToDataUrlForPanelRuntime(svgBufferForResolve, 'image/svg+xml');
+            return await rasterizeSvgDataUrlToPngInputForPanelRuntime(svgDataUrlForResolve, nameForResolve);
+          }
+          return await validatedImageInputFromBlobForDragDrop(blobForResolve, nameForResolve);
+        }
+        if (/^https?:/i.test(urlForResolve)) {
+          const responseForResolve = await sendRuntimeMessageForPanelRuntime({ action: 'abchatFetchImageAsDataUrl', url: urlForResolve });
+          if (!responseForResolve || !responseForResolve.ok || !responseForResolve.dataUrl) {
+            throw new Error(responseForResolve && responseForResolve.error ? responseForResolve.error : 'Could not fetch the dragged image.');
+          }
+          const mimeForHttp = String(responseForResolve.mimeType || '').toLowerCase();
+          if (mimeForHttp === 'image/svg+xml') {
+            return await rasterizeSvgDataUrlToPngInputForPanelRuntime(String(responseForResolve.dataUrl), nameForResolve);
+          }
+          if (SUPPORTED_DROPPED_IMAGE_MIMES_FOR_DRAG_DROP.indexOf(mimeForHttp) === -1) {
+            throw new Error('Dropped item is not a supported image.');
+          }
+          if (Number(responseForResolve.size || 0) > MAX_IMAGE_BYTES_FOR_PANEL_RUNTIME) {
+            throw new Error('Image is too large. Max size is 20MB.');
+          }
+          return { name: nameForResolve, mimeType: mimeForHttp, size: Number(responseForResolve.size || 0), dataUrl: String(responseForResolve.dataUrl) };
+        }
+        throw new Error('Only images can be dropped here from the page.');
+      }
+
+      async function attachDroppedPageImageForDragDrop(urlForPageImage) {
+        const rowForPageImageCap = rootNodeForDragDrop.querySelector('.input-chips-row');
+        const existingCountForPageImageCap = rowForPageImageCap ? rowForPageImageCap.querySelectorAll('.ic').length : 0;
+        if (existingCountForPageImageCap >= MAX_INPUT_CHIPS_FOR_PANEL_RUNTIME) {
+          showDragToastForDragDrop('Attachment limit reached (max ' + MAX_INPUT_CHIPS_FOR_PANEL_RUNTIME + ').');
+          return;
+        }
+        if (isModelKnownNonVisionForPanelRuntime(getCurrentChatModelIdForPanelRuntime())) {
+          showDragToastForDragDrop('The selected model cannot process images. Switch to a vision-capable model to attach images.');
+          return;
+        }
+        const pendingChipForPageImage = addInputChipForPanelRuntime({
+          type: 'image',
+          label: deriveImageNameFromUrlForDragDrop(urlForPageImage),
+          status: 'loading',
+          statusText: 'Loading image...'
+        });
+        if (!pendingChipForPageImage) return;
+        try {
+          const blobInputForPageImage = await resolveDroppedImageToBlobInputForDragDrop(urlForPageImage);
+          const persistedBlobForPageImage = await createAttachmentBlobForPanelRuntime({
+            name: blobInputForPageImage.name,
+            kind: 'image',
+            mimeType: blobInputForPageImage.mimeType,
+            size: blobInputForPageImage.size,
+            dataUrl: blobInputForPageImage.dataUrl
+          });
+          if (!pendingChipForPageImage.isConnected) {
+            discardUnclaimedInputBlobForPanelRuntime(persistedBlobForPageImage.id);
+            return;
+          }
+          pendingChipForPageImage.dataset.attachType = 'image';
+          pendingChipForPageImage.dataset.attachName = blobInputForPageImage.name;
+          pendingChipForPageImage.dataset.attachRefId = String(Number(persistedBlobForPageImage.id) || '');
+          pendingChipForPageImage.dataset.attachMimeType = blobInputForPageImage.mimeType;
+          pendingChipForPageImage.dataset.attachSize = String(Number(blobInputForPageImage.size) || 0);
+          pendingChipForPageImage.dataset.attachKind = 'image';
+          pendingChipForPageImage.dataset.attachContent = '';
+          pendingChipForPageImage.dataset.attachPageUrl = String(window.location.href || '');
+          pendingChipForPageImage.dataset.attachPageTitle = String(document.title || '');
+          // Rasterizing an SVG renames it to .png, so keep the visible label in step.
+          const labelNodeForPageImage = pendingChipForPageImage.querySelector('.ic-label');
+          if (labelNodeForPageImage) {
+            labelNodeForPageImage.textContent = truncateChipLabelForPanelRuntime(blobInputForPageImage.name);
+          }
+          setInputChipStatusForPanelRuntime(pendingChipForPageImage, '', '');
+        } catch (errForPageImage) {
+          const messageForPageImage = errForPageImage && errForPageImage.message ? errForPageImage.message : 'Could not attach image.';
+          setInputChipStatusForPanelRuntime(pendingChipForPageImage, 'error', messageForPageImage);
+          showDragToastForDragDrop(messageForPageImage);
+        }
+      }
+
+      function handlePageImageDropForDragDrop(dataTransferForPageDrop) {
+        const urlForPageDrop = extractDroppedImageUrlForDragDrop(dataTransferForPageDrop);
+        if (!urlForPageDrop) {
+          const typesForPageDrop = dataTransferForPageDrop && dataTransferForPageDrop.types;
+          const hadUriForPageDrop = typesForPageDrop && Array.prototype.indexOf.call(typesForPageDrop, 'text/uri-list') !== -1;
+          if (hadUriForPageDrop) {
+            showDragToastForDragDrop('Only images can be dropped here from the page.');
+          }
+          return;
+        }
+        attachDroppedPageImageForDragDrop(urlForPageDrop).catch(function () {});
       }
     }
 
@@ -18322,14 +18548,104 @@
       fileInputForPanelRuntime.click();
     }
 
+    function ensurePngImageNameForPanelRuntime(nameForPng) {
+      let baseForPng = String(nameForPng || 'Image').replace(/\.(svg|png|jpe?g|webp|gif)$/i, '').trim();
+      if (!baseForPng) baseForPng = 'Image';
+      return baseForPng + '.png';
+    }
+
+    // Rasterize an SVG data URL to a PNG the vision endpoints accept. Loading the SVG as an
+    // <img> (not inline) means its scripts never run. A cross-origin SVG that pulls in external
+    // images or fonts taints the canvas, so toDataURL throws and we surface a clear decline.
+    function rasterizeSvgDataUrlToPngInputForPanelRuntime(svgDataUrlForRaster, nameForRaster) {
+      return new Promise(function (resolveForRaster, rejectForRaster) {
+        const imgForRaster = new Image();
+        let settledForRaster = false;
+        const timeoutForRaster = setTimeout(function () {
+          if (settledForRaster) return;
+          settledForRaster = true;
+          rejectForRaster(new Error('SVG could not be rendered.'));
+        }, 10000);
+        function failForRaster(messageForRaster) {
+          if (settledForRaster) return;
+          settledForRaster = true;
+          clearTimeout(timeoutForRaster);
+          rejectForRaster(new Error(messageForRaster));
+        }
+        imgForRaster.onload = function () {
+          if (settledForRaster) return;
+          settledForRaster = true;
+          clearTimeout(timeoutForRaster);
+          try {
+            const MAX_DIM_FOR_RASTER = 2048;
+            let widthForRaster = Number(imgForRaster.naturalWidth) || 0;
+            let heightForRaster = Number(imgForRaster.naturalHeight) || 0;
+            if (!widthForRaster || !heightForRaster) {
+              widthForRaster = widthForRaster || 512;
+              heightForRaster = heightForRaster || 512;
+            }
+            if (widthForRaster > MAX_DIM_FOR_RASTER || heightForRaster > MAX_DIM_FOR_RASTER) {
+              const scaleForRaster = MAX_DIM_FOR_RASTER / Math.max(widthForRaster, heightForRaster);
+              widthForRaster = Math.max(1, Math.round(widthForRaster * scaleForRaster));
+              heightForRaster = Math.max(1, Math.round(heightForRaster * scaleForRaster));
+            }
+            const canvasForRaster = document.createElement('canvas');
+            canvasForRaster.width = widthForRaster;
+            canvasForRaster.height = heightForRaster;
+            const ctxForRaster = canvasForRaster.getContext('2d');
+            if (!ctxForRaster) { rejectForRaster(new Error('SVG could not be rendered.')); return; }
+            ctxForRaster.drawImage(imgForRaster, 0, 0, widthForRaster, heightForRaster);
+            let pngDataUrlForRaster;
+            try {
+              pngDataUrlForRaster = canvasForRaster.toDataURL('image/png');
+            } catch (taintErrForRaster) {
+              rejectForRaster(new Error('This SVG references external content and cannot be converted. Save it as a PNG and attach that instead.'));
+              return;
+            }
+            if (!pngDataUrlForRaster || pngDataUrlForRaster.indexOf('data:image/png') !== 0) {
+              rejectForRaster(new Error('SVG could not be rendered.'));
+              return;
+            }
+            const commaIdxForRaster = pngDataUrlForRaster.indexOf(',');
+            const base64ForRaster = commaIdxForRaster >= 0
+              ? pngDataUrlForRaster.slice(commaIdxForRaster + 1).replace(/=+$/, '')
+              : '';
+            const sizeForRaster = Math.floor(base64ForRaster.length * 3 / 4);
+            if (sizeForRaster > MAX_IMAGE_BYTES_FOR_PANEL_RUNTIME) {
+              rejectForRaster(new Error('Image is too large. Max size is 20MB.'));
+              return;
+            }
+            resolveForRaster({
+              name: ensurePngImageNameForPanelRuntime(nameForRaster),
+              mimeType: 'image/png',
+              size: sizeForRaster,
+              dataUrl: pngDataUrlForRaster
+            });
+          } catch (rasterErrForRaster) {
+            rejectForRaster(new Error('SVG could not be rendered.'));
+          }
+        };
+        imgForRaster.onerror = function () {
+          failForRaster('SVG could not be rendered.');
+        };
+        try {
+          imgForRaster.src = svgDataUrlForRaster;
+        } catch (setSrcErrForRaster) {
+          failForRaster('SVG could not be rendered.');
+        }
+      });
+    }
+
     async function attachImageFileForPanelRuntime(fileForPanelRuntime, chipTypeForPanelRuntime, chipNodeForPanelRuntime) {
       if (!fileForPanelRuntime) return;
+      const rawImageTypeForPanelRuntime = String(fileForPanelRuntime.type || '').toLowerCase();
+      const isSvgImageForPanelRuntime = rawImageTypeForPanelRuntime === 'image/svg+xml';
       const SUPPORTED_IMAGE_TYPES_FOR_PANEL_RUNTIME = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
-      if (!SUPPORTED_IMAGE_TYPES_FOR_PANEL_RUNTIME.includes(String(fileForPanelRuntime.type || '').toLowerCase())) {
+      if (!isSvgImageForPanelRuntime && !SUPPORTED_IMAGE_TYPES_FOR_PANEL_RUNTIME.includes(rawImageTypeForPanelRuntime)) {
         if (chipNodeForPanelRuntime) {
-          showChipAttachErrorForPanelRuntime(chipNodeForPanelRuntime, 'Unsupported image type. Allowed: PNG, JPEG, WebP, GIF.');
+          showChipAttachErrorForPanelRuntime(chipNodeForPanelRuntime, 'Unsupported image type. Allowed: PNG, JPEG, WebP, GIF, SVG.');
         }
-        appendSystemMsgToContainerForPanelRuntime('Unsupported image type. Allowed types: PNG, JPEG, WebP, GIF.');
+        appendSystemMsgToContainerForPanelRuntime('Unsupported image type. Allowed types: PNG, JPEG, WebP, GIF, SVG.');
         return;
       }
       if (Number(fileForPanelRuntime.size || 0) > MAX_IMAGE_BYTES_FOR_PANEL_RUNTIME) {
@@ -18339,31 +18655,68 @@
         appendSystemMsgToContainerForPanelRuntime('Image is too large. Max size is 20MB.');
         return;
       }
-      const arrayBufferForPanelRuntime = await fileToArrayBufferForPanelRuntime(fileForPanelRuntime);
-      const mimeTypeForPanelRuntime = String(fileForPanelRuntime.type || 'image/png');
-      const dataUrlForPanelRuntime = arrayBufferToDataUrlForPanelRuntime(arrayBufferForPanelRuntime, mimeTypeForPanelRuntime);
+
+      let attachNameForPanelRuntime = String(fileForPanelRuntime.name || 'Image');
+      let mimeTypeForPanelRuntime;
+      let sizeForPanelRuntime;
+      let dataUrlForPanelRuntime;
+      if (isSvgImageForPanelRuntime) {
+        // SVG cannot go to the vision endpoints, so rasterize it to PNG before storing.
+        const svgBufferForPanelRuntime = await fileToArrayBufferForPanelRuntime(fileForPanelRuntime);
+        const svgDataUrlForPanelRuntime = arrayBufferToDataUrlForPanelRuntime(svgBufferForPanelRuntime, 'image/svg+xml');
+        let pngInputForPanelRuntime;
+        try {
+          pngInputForPanelRuntime = await rasterizeSvgDataUrlToPngInputForPanelRuntime(svgDataUrlForPanelRuntime, attachNameForPanelRuntime);
+        } catch (svgErrForPanelRuntime) {
+          const svgMessageForPanelRuntime = svgErrForPanelRuntime && svgErrForPanelRuntime.message
+            ? svgErrForPanelRuntime.message
+            : 'SVG could not be rendered.';
+          if (chipNodeForPanelRuntime) {
+            showChipAttachErrorForPanelRuntime(chipNodeForPanelRuntime, svgMessageForPanelRuntime);
+          }
+          appendSystemMsgToContainerForPanelRuntime(svgMessageForPanelRuntime);
+          return;
+        }
+        attachNameForPanelRuntime = pngInputForPanelRuntime.name;
+        mimeTypeForPanelRuntime = pngInputForPanelRuntime.mimeType;
+        sizeForPanelRuntime = Number(pngInputForPanelRuntime.size) || 0;
+        dataUrlForPanelRuntime = pngInputForPanelRuntime.dataUrl;
+      } else {
+        const arrayBufferForPanelRuntime = await fileToArrayBufferForPanelRuntime(fileForPanelRuntime);
+        mimeTypeForPanelRuntime = rawImageTypeForPanelRuntime || 'image/png';
+        sizeForPanelRuntime = Number(fileForPanelRuntime.size || 0);
+        dataUrlForPanelRuntime = arrayBufferToDataUrlForPanelRuntime(arrayBufferForPanelRuntime, mimeTypeForPanelRuntime);
+      }
+
       const persistedBlobForPanelRuntime = await createAttachmentBlobForPanelRuntime({
-        name: String(fileForPanelRuntime.name || 'image'),
+        name: attachNameForPanelRuntime,
         kind: chipTypeForPanelRuntime === 'screenshot' ? 'screenshot' : 'image',
         mimeType: mimeTypeForPanelRuntime,
-        size: Number(fileForPanelRuntime.size || 0),
+        size: sizeForPanelRuntime,
         dataUrl: dataUrlForPanelRuntime
       });
       const targetChipForPanelRuntime = chipNodeForPanelRuntime || addInputChipForPanelRuntime({
         type: chipTypeForPanelRuntime,
-        label: String(fileForPanelRuntime.name || 'Image')
+        label: attachNameForPanelRuntime
       });
       if (!targetChipForPanelRuntime || !targetChipForPanelRuntime.isConnected) {
         discardUnclaimedInputBlobForPanelRuntime(persistedBlobForPanelRuntime.id);
         return;
       }
       targetChipForPanelRuntime.dataset.attachType = String(chipTypeForPanelRuntime || 'image');
-      targetChipForPanelRuntime.dataset.attachName = String(fileForPanelRuntime.name || 'Image');
+      targetChipForPanelRuntime.dataset.attachName = attachNameForPanelRuntime;
       targetChipForPanelRuntime.dataset.attachRefId = String(Number(persistedBlobForPanelRuntime.id) || '');
       targetChipForPanelRuntime.dataset.attachMimeType = mimeTypeForPanelRuntime;
-      targetChipForPanelRuntime.dataset.attachSize = String(Number(fileForPanelRuntime.size || 0));
+      targetChipForPanelRuntime.dataset.attachSize = String(sizeForPanelRuntime);
       targetChipForPanelRuntime.dataset.attachKind = chipTypeForPanelRuntime === 'screenshot' ? 'screenshot' : 'image';
       targetChipForPanelRuntime.dataset.attachContent = '';
+      // Rasterizing an SVG renames it to .png, so keep the visible label in step.
+      if (isSvgImageForPanelRuntime) {
+        const labelNodeForPanelRuntime = targetChipForPanelRuntime.querySelector('.ic-label');
+        if (labelNodeForPanelRuntime) {
+          labelNodeForPanelRuntime.textContent = truncateChipLabelForPanelRuntime(attachNameForPanelRuntime);
+        }
+      }
       setInputChipStatusForPanelRuntime(targetChipForPanelRuntime, '', '');
     }
 
@@ -21029,10 +21382,11 @@
 
       var ACCEPTED_IMAGE_TYPES_FOR_CTX_MENU = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
       var classifiedMimeForCtxMenu = classifyImageSrcFormatForPanelRuntime(srcUrlForCtxMenu);
-      if (classifiedMimeForCtxMenu && ACCEPTED_IMAGE_TYPES_FOR_CTX_MENU.indexOf(classifiedMimeForCtxMenu) === -1) {
+      var isSvgForCtxMenu = classifiedMimeForCtxMenu === 'image/svg+xml';
+      if (classifiedMimeForCtxMenu && !isSvgForCtxMenu && ACCEPTED_IMAGE_TYPES_FOR_CTX_MENU.indexOf(classifiedMimeForCtxMenu) === -1) {
         var toastForCtxMenuFormat = ABChatContent && ABChatContent.ui && ABChatContent.ui.toast;
         if (toastForCtxMenuFormat && typeof toastForCtxMenuFormat.show === 'function') {
-          toastForCtxMenuFormat.show('Unsupported image format. Only PNG, JPEG, WEBP and GIF can be added.', { durationMs: 4000 });
+          toastForCtxMenuFormat.show('Unsupported image format. Only PNG, JPEG, WEBP, GIF and SVG can be added.', { durationMs: 4000 });
         }
         return;
       }
@@ -21077,6 +21431,36 @@
         dataUrlForCtxMenu = null;
       }
 
+      // SVG cannot go to the vision endpoints. The canvas path above already rasterizes a
+      // same-origin SVG to PNG; this covers the rest (cross-origin taint, or an SVG the <img>
+      // could not size) by fetching the source through the service worker and rasterizing it.
+      if (!dataUrlForCtxMenu && isSvgForCtxMenu) {
+        var svgErrorForCtxMenu = '';
+        try {
+          var svgFetchForCtxMenu = await sendRuntimeMessageForPanelRuntime({ action: 'abchatFetchImageAsDataUrl', url: srcUrlForCtxMenu });
+          if (
+            svgFetchForCtxMenu &&
+            svgFetchForCtxMenu.ok &&
+            typeof svgFetchForCtxMenu.dataUrl === 'string' &&
+            String(svgFetchForCtxMenu.mimeType || '').toLowerCase() === 'image/svg+xml'
+          ) {
+            var pngInputForCtxMenu = await rasterizeSvgDataUrlToPngInputForPanelRuntime(svgFetchForCtxMenu.dataUrl, displayNameForCtxMenu);
+            dataUrlForCtxMenu = pngInputForCtxMenu.dataUrl;
+            mimeTypeForCtxMenu = 'image/png';
+          } else {
+            svgErrorForCtxMenu = svgFetchForCtxMenu && svgFetchForCtxMenu.error ? svgFetchForCtxMenu.error : '';
+          }
+        } catch (eSvgForCtxMenu) {
+          svgErrorForCtxMenu = eSvgForCtxMenu && eSvgForCtxMenu.message ? eSvgForCtxMenu.message : '';
+        }
+        if (!dataUrlForCtxMenu) {
+          if (pendingChipForCtxMenu) {
+            setInputChipStatusForPanelRuntime(pendingChipForCtxMenu, 'error', svgErrorForCtxMenu || 'Could not load image.');
+          }
+          return;
+        }
+      }
+
       // Fallback: fetch via the background service worker which has <all_urls> host
       // permissions and can bypass CORS restrictions.
       if (!dataUrlForCtxMenu) {
@@ -21112,6 +21496,12 @@
         return;
       }
 
+      // The stored blob is PNG whenever the source was an SVG (canvas or rasterizer), so the
+      // .svg name would misdescribe it.
+      if (isSvgForCtxMenu) {
+        displayNameForCtxMenu = ensurePngImageNameForPanelRuntime(displayNameForCtxMenu);
+      }
+
       try {
         var approxSizeForCtxMenu = Math.floor(dataUrlForCtxMenu.length * 0.75);
         var persistedBlobForCtxMenu = await createAttachmentBlobForPanelRuntime({
@@ -21131,6 +21521,12 @@
         pendingChipForCtxMenu.dataset.attachContent = '';
         pendingChipForCtxMenu.dataset.attachPageUrl = pageUrlForCtxMenu;
         pendingChipForCtxMenu.dataset.attachPageTitle = pageTitleForCtxMenu;
+        if (isSvgForCtxMenu) {
+          var ctxLabelNodeForCtxMenu = pendingChipForCtxMenu.querySelector('.ic-label');
+          if (ctxLabelNodeForCtxMenu) {
+            ctxLabelNodeForCtxMenu.textContent = truncateChipLabelForPanelRuntime(displayNameForCtxMenu);
+          }
+        }
         setInputChipStatusForPanelRuntime(pendingChipForCtxMenu, '', '');
       } catch (eBlobForCtxMenu) {
         if (pendingChipForCtxMenu) {
