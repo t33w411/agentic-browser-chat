@@ -5,33 +5,6 @@
 
   const toolDefinitionsForRegistry = [
     {
-      id: "selectionExplain",
-      action: actionsForRegistry.explainSelection || "explainSelection",
-      label: "Explain Selection",
-      description: "Open quick question modal with explain prompt",
-      defaultEnabled: true,
-      contexts: ["selection"],
-      menuTitle: "Explain selection"
-    },
-    {
-      id: "selectionSummarize",
-      action: actionsForRegistry.summarizeSelection || "summarizeSelection",
-      label: "Summarize Selection",
-      description: "Open quick question modal with summarize prompt",
-      defaultEnabled: true,
-      contexts: ["selection"],
-      menuTitle: "Summarize selection"
-    },
-    {
-      id: "selectionProofread",
-      action: actionsForRegistry.proofreadSelection || "proofreadSelection",
-      label: "Proofread Selection",
-      description: "Open quick question modal with proofread prompt",
-      defaultEnabled: true,
-      contexts: ["selection"],
-      menuTitle: "Proofread selection"
-    },
-    {
       id: "selectionQuickQuestion",
       action: actionsForRegistry.quickQuestionSelection || "quickQuestionSelection",
       label: "Quick Question About Selection",

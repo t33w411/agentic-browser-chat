@@ -97,7 +97,7 @@ A single browser-side agent that can read the current page, search the web and f
 ### Right-click menu and content selector
 
 - **Right-click menu** entries:
-  - On a text selection: *Explain selection*, *Summarize selection*, *Proofread selection*, *Quick Question about selection*, *Add selection to chat*.
+  - On a text selection: *Quick Question about selection*, *Add selection to chat*, *Save selection to clips*.
   - On an image: *Add image to chat*.
 - **Content selector**: a hover-highlight mode you can toggle on. Click any page element to add its content to the chat. Right-clicking the highlight opens a small menu that lets you choose **Add simple HTML to chat** (cleaned, flattened representation) or **Add raw HTML to chat** (the literal markup).
 - **Runs survive navigation**: agent turns are hosted in an offscreen document, so an in-progress task keeps going across page reloads or navigations (the panel re-subscribes when it comes back).

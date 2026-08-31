@@ -11932,9 +11932,7 @@
       const ta = root.getElementById('im-ta');
       conv.innerHTML = '';
       conv.classList.add('empty');
-      if (!(ta.value || '').trim()) {
-        ta.value = 'What should I understand about this?';
-      }
+      ta.value = '';
       updateAutoExpandForTextareaForPanelRuntime(ta);
       root.getElementById('im-send-btn').textContent = 'Ask';
       root.getElementById('im-send-btn').innerHTML = 'Ask ' + ic.send12;

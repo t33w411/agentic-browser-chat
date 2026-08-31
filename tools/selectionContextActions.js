@@ -88,20 +88,7 @@
     snippetNodeForSelectionActions.appendChild(textNodeForSelectionActions);
   }
 
-  function buildSeedPromptForSelectionActions(selectionActionTypeForSelectionActions, selectedTextForSelectionActions) {
-    if (selectionActionTypeForSelectionActions === "explain") {
-      return "Explain this selected text.";
-    }
-    if (selectionActionTypeForSelectionActions === "summarize") {
-      return "Summarize this selected text.";
-    }
-    if (selectionActionTypeForSelectionActions === "proofread") {
-      return "Proofread and improve this selected text.";
-    }
-    return "What should I understand about this?";
-  }
-
-  function setPanelInlinePromptForSelectionActions(seedPromptForSelectionActions) {
+  function resetPanelInlinePromptForSelectionActions() {
     const shadowRootForPromptSelectionActions = getPanelShadowRootForSelectionActions();
     if (!shadowRootForPromptSelectionActions) {
       return;
@@ -110,7 +97,7 @@
     if (!inlineTextAreaForSelectionActions) {
       return;
     }
-    inlineTextAreaForSelectionActions.value = seedPromptForSelectionActions || "What should I understand about this?";
+    inlineTextAreaForSelectionActions.value = "";
     if (typeof inlineTextAreaForSelectionActions.dispatchEvent === "function") {
       inlineTextAreaForSelectionActions.dispatchEvent(new Event("input", { bubbles: true }));
     }
@@ -135,7 +122,7 @@
     }
   }
 
-  function openQuickQuestionInPanelForSelectionActions(selectedTextForSelectionActions, seedPromptForSelectionActions) {
+  function openQuickQuestionInPanelForSelectionActions(selectedTextForSelectionActions) {
     if (!isPanelVisibleForSelectionActions()) {
       return false;
     }
@@ -151,55 +138,30 @@
       }
     }
     setPanelInlineSnippetForSelectionActions(selectedTextForSelectionActions);
-    setPanelInlinePromptForSelectionActions(seedPromptForSelectionActions);
+    resetPanelInlinePromptForSelectionActions();
     return true;
   }
 
-  function handleQuickQuestionForSelectionActions(actionPayloadForSelectionActions, selectionActionTypeForSelectionActions) {
+  function handleQuickQuestionForSelectionActions(actionPayloadForSelectionActions) {
     const selectedTextForSelectionActions = getSelectedTextForSelectionActions(actionPayloadForSelectionActions);
-    const seedPromptForSelectionActions = buildSeedPromptForSelectionActions(
-      selectionActionTypeForSelectionActions,
-      selectedTextForSelectionActions
-    );
     ensurePanelVisibleForSelectionActions();
-    if (openQuickQuestionInPanelForSelectionActions(selectedTextForSelectionActions, seedPromptForSelectionActions)) {
+    if (openQuickQuestionInPanelForSelectionActions(selectedTextForSelectionActions)) {
       return;
     }
     // Panel not yet visible (CSS still loading on first open) — defer until it becomes visible.
     const panelForDeferredForSelectionActions = getPanelNamespaceForSelectionActions();
     if (panelForDeferredForSelectionActions && typeof panelForDeferredForSelectionActions.whenVisible === 'function') {
       panelForDeferredForSelectionActions.whenVisible(function () {
-        openQuickQuestionInPanelForSelectionActions(selectedTextForSelectionActions, seedPromptForSelectionActions);
+        openQuickQuestionInPanelForSelectionActions(selectedTextForSelectionActions);
       });
     }
   }
 
   if (typeof contentNamespaceForSelectionActions.registerActionHandler === "function") {
     contentNamespaceForSelectionActions.registerActionHandler(
-      actionsForSelectionActions.explainSelection || "explainSelection",
-      function explainSelectionHandlerForSelectionActions(actionPayloadForSelectionActions) {
-        handleQuickQuestionForSelectionActions(actionPayloadForSelectionActions, "explain");
-      }
-    );
-
-    contentNamespaceForSelectionActions.registerActionHandler(
-      actionsForSelectionActions.summarizeSelection || "summarizeSelection",
-      function summarizeSelectionHandlerForSelectionActions(actionPayloadForSelectionActions) {
-        handleQuickQuestionForSelectionActions(actionPayloadForSelectionActions, "summarize");
-      }
-    );
-
-    contentNamespaceForSelectionActions.registerActionHandler(
-      actionsForSelectionActions.proofreadSelection || "proofreadSelection",
-      function proofreadSelectionHandlerForSelectionActions(actionPayloadForSelectionActions) {
-        handleQuickQuestionForSelectionActions(actionPayloadForSelectionActions, "proofread");
-      }
-    );
-
-    contentNamespaceForSelectionActions.registerActionHandler(
       actionsForSelectionActions.quickQuestionSelection || "quickQuestionSelection",
       function quickQuestionSelectionHandlerForSelectionActions(actionPayloadForSelectionActions) {
-        handleQuickQuestionForSelectionActions(actionPayloadForSelectionActions, "quickQuestion");
+        handleQuickQuestionForSelectionActions(actionPayloadForSelectionActions);
       }
     );
   }
