@@ -8648,6 +8648,7 @@
         normalizedDraftForPanelRuntime.attachments.length > 0,
         Boolean(keepEditModeForPanelRuntime)
       );
+      refreshNoteContentSearchAvailabilityForPanelRuntime(noteFormForPanelRuntime);
       if (!optsForPanelRuntime.keepConflictNotice) {
         clearNoteConflictNoticeForPanelRuntime(noteFormForPanelRuntime);
       }
@@ -9071,6 +9072,8 @@
       const popoutForPanelRuntime = NOTE_POPOUT_MAP_FOR_PANEL_RUNTIME[noteIdForPanelRuntime];
       if (!popoutForPanelRuntime) return;
       delete NOTE_POPOUT_MAP_FOR_PANEL_RUNTIME[noteIdForPanelRuntime];
+      // Disconnect the search observer before the element leaves the DOM.
+      closeContentSearchForPanelRuntime(popoutForPanelRuntime);
       if (popoutForPanelRuntime.remove) popoutForPanelRuntime.remove();
       if (S.handoffNoteId === noteIdForPanelRuntime) {
         hideNotePopoutHandoffForPanelRuntime();
@@ -9323,13 +9326,23 @@
       const popoutForPanelRuntime = document.createElement('div');
       popoutForPanelRuntime.className = 'note-popout';
       popoutForPanelRuntime.dataset.noteId = noteIdForPanelRuntime;
+      popoutForPanelRuntime.setAttribute('data-content-search-scope', '');
       popoutForPanelRuntime.innerHTML = `
         <div class="note-popout-header">
           <div class="note-popout-header-title"></div>
+          <button class="btn-icon cs-toggle note-popout-search-toggle" type="button" data-action="content-search-toggle" title="Search (⌘/Ctrl+F)" aria-label="Search note">${ic.search12}</button>
           <button class="btn-icon note-popout-edit-btn" type="button" title="Edit note">
             ${ic.noteEdit13}
           </button>
           <button class="ctrl-btn note-popout-close-btn" type="button" title="Close">${ic.x13}</button>
+        </div>
+        <div class="cs-row hidden">
+          <span class="cs-icon">${ic.search12}</span>
+          <input class="cs-input" type="text" placeholder="Search note..." data-action="content-search-input" autocomplete="off" spellcheck="false" />
+          <span class="cs-count"></span>
+          <button class="cs-nav cs-prev" type="button" data-action="content-search-prev" title="Previous match (Shift+Enter)" aria-label="Previous match">${ic.chevronUp12}</button>
+          <button class="cs-nav cs-next" type="button" data-action="content-search-next" title="Next match (Enter)" aria-label="Next match">${ic.chevronDown12}</button>
+          <button class="cs-close" type="button" data-action="content-search-close" title="Close search (Esc)" aria-label="Close search">${ic.x13}</button>
         </div>
         <div class="note-popout-body">
           <div class="note-popout-title-display untitled"></div>
@@ -9352,7 +9365,7 @@
           </div>
           <div class="note-popout-preview-group">
             <div class="field-label">Preview</div>
-            <div class="ne-preview note-popout-preview"></div>
+            <div class="ne-preview note-popout-preview" data-content-search-target></div>
           </div>
         </div>
         <div class="note-popout-footer">
@@ -9372,6 +9385,7 @@
       bringNotePopoutToFrontForPanelRuntime(popoutForPanelRuntime);
       applyNoteDataToPopoutForPanelRuntime(popoutForPanelRuntime, noteDataForPanelRuntime);
       popoutForPanelRuntime.classList.remove('in-edit-mode');
+      refreshNoteContentSearchAvailabilityForPanelRuntime(popoutForPanelRuntime);
       // Sync section visibility for initial preview state
       const initTagsSectionForPanelRuntime = popoutForPanelRuntime.querySelector('.note-popout-tags-section');
       const initAttachSectionForPanelRuntime = popoutForPanelRuntime.querySelector('.note-popout-attachments-section');
@@ -9454,6 +9468,7 @@
 
       function setPopoutEditModeForPanelRuntime(isEditForPanelRuntime) {
         popoutForPanelRuntime.classList.toggle('in-edit-mode', Boolean(isEditForPanelRuntime));
+        refreshNoteContentSearchAvailabilityForPanelRuntime(popoutForPanelRuntime);
         if (!isEditForPanelRuntime) {
           popoutTitleDisplayForPanelRuntime.textContent = popoutTitleInputForPanelRuntime.value || 'Untitled';
           popoutTitleDisplayForPanelRuntime.classList.toggle('untitled', !popoutTitleInputForPanelRuntime.value);
@@ -10203,6 +10218,7 @@
       const form = root.getElementById('note-editor-form');
       if (!form) return;
       form.classList.add('in-edit-mode');
+      refreshNoteContentSearchAvailabilityForPanelRuntime(form);
       // Always reveal both sections in edit mode so the user can add tags/attachments.
       const tagsSectionForEnter = root.getElementById('ne-tags-section');
       const attachSectionForEnter = root.getElementById('ne-attachments-section');
@@ -11696,6 +11712,8 @@
     }
 
     let currentAttachPreviewForPanelRuntime = null;
+    // Per-surface find-in-content state, keyed by the scope element. See the CONTENT SEARCH block.
+    const contentSearchStateByScopeForPanelRuntime = new WeakMap();
 
     function computeAttachPreviewStatsForPanelRuntime(textForStats, isHtmlPayloadForStats) {
       const sForStats = String(textForStats || '');
@@ -11828,6 +11846,12 @@
         hydrateRenderedMarkdownForPanelRuntime(apContentEl);
       }
       configureAttachPreviewFooterForPanelRuntime(name, normalizedPayloadForPanelRuntime);
+      // Search is offered only when there is text to search (never for an image preview).
+      const apIsImageForSearch = normalizedPayloadForPanelRuntime.previewType === 'image'
+        && String(normalizedPayloadForPanelRuntime.dataUrl || '').indexOf('data:image/') === 0;
+      const apHasTextForSearch = !apIsImageForSearch && String(normalizedPayloadForPanelRuntime.content || '').length > 0;
+      closeContentSearchForPanelRuntime(overlay);
+      setContentSearchToggleVisibleForPanelRuntime(overlay, apHasTextForSearch);
       overlay.classList.remove('hidden');
     }
 
@@ -11884,7 +11908,9 @@
     }
 
     function closeAttachPreview() {
-      root.getElementById('attach-preview-overlay').classList.add('hidden');
+      const overlayForClose = root.getElementById('attach-preview-overlay');
+      closeContentSearchForPanelRuntime(overlayForClose);
+      overlayForClose.classList.add('hidden');
       currentAttachPreviewForPanelRuntime = null;
       writePanelStateSyncForPanelRuntime({ attachPreviewOpen: false });
     }
@@ -11893,6 +11919,342 @@
     root.getElementById('attach-preview-overlay').addEventListener('click', function(e) {
       if (e.target === this) closeAttachPreview();
     });
+
+    /* ------------------------------------------------------------
+      CONTENT SEARCH: shared find-in-content for large-text surfaces
+      (attachment preview, note editor, note popouts, API and page-action
+      log detail). One implementation drives every surface. A surface is a
+      scope element carrying [data-content-search-scope] that holds:
+        - a [data-content-search-target] element whose rendered text is searched,
+        - a .cs-toggle button in its header (its visibility decides availability),
+        - a .cs-row bar with .cs-input, .cs-count, .cs-prev, .cs-next.
+      Per-scope state lives in contentSearchStateByScopeForPanelRuntime.
+    ------------------------------------------------------------ */
+
+    const CONTENT_SEARCH_DEBOUNCE_MS_FOR_PANEL_RUNTIME = 150;
+
+    function getContentSearchStateForPanelRuntime(scopeForCs) {
+      let stateForCs = contentSearchStateByScopeForPanelRuntime.get(scopeForCs);
+      if (!stateForCs) {
+        stateForCs = { matches: [], activeIndex: -1, timer: null, observer: null };
+        contentSearchStateByScopeForPanelRuntime.set(scopeForCs, stateForCs);
+      }
+      return stateForCs;
+    }
+
+    function resolveContentSearchTargetForPanelRuntime(scopeForCs) {
+      return scopeForCs ? scopeForCs.querySelector('[data-content-search-target]') : null;
+    }
+
+    function contentSearchRowOpenForPanelRuntime(scopeForCs) {
+      const rowForCs = scopeForCs ? scopeForCs.querySelector('.cs-row') : null;
+      return !!(rowForCs && !rowForCs.classList.contains('hidden'));
+    }
+
+    function clearContentSearchHighlightsForPanelRuntime(targetForCs) {
+      if (!targetForCs) return;
+      const marksForClear = targetForCs.querySelectorAll('mark.abcs-hl');
+      if (!marksForClear.length) return;
+      marksForClear.forEach(function (markForClear) {
+        const parentForClear = markForClear.parentNode;
+        if (!parentForClear) return;
+        while (markForClear.firstChild) parentForClear.insertBefore(markForClear.firstChild, markForClear);
+        parentForClear.removeChild(markForClear);
+      });
+      // Re-merge the text nodes the unwrap split, so a query that straddles a previous match
+      // boundary is found on the next pass.
+      targetForCs.normalize();
+    }
+
+    function highlightTextNodeForContentSearchForPanelRuntime(textNodeForHl, queryLowerForHl, queryLenForHl, matchesForHl) {
+      const originalForHl = textNodeForHl.nodeValue;
+      const lowerForHl = originalForHl.toLowerCase();
+      let idxForHl = lowerForHl.indexOf(queryLowerForHl);
+      if (idxForHl === -1) return;
+      const fragForHl = document.createDocumentFragment();
+      let lastForHl = 0;
+      while (idxForHl !== -1) {
+        if (idxForHl > lastForHl) {
+          fragForHl.appendChild(document.createTextNode(originalForHl.slice(lastForHl, idxForHl)));
+        }
+        const markForHl = document.createElement('mark');
+        markForHl.className = 'abcs-hl';
+        markForHl.textContent = originalForHl.slice(idxForHl, idxForHl + queryLenForHl);
+        fragForHl.appendChild(markForHl);
+        matchesForHl.push(markForHl);
+        lastForHl = idxForHl + queryLenForHl;
+        idxForHl = lowerForHl.indexOf(queryLowerForHl, lastForHl);
+      }
+      if (lastForHl < originalForHl.length) {
+        fragForHl.appendChild(document.createTextNode(originalForHl.slice(lastForHl)));
+      }
+      if (textNodeForHl.parentNode) textNodeForHl.parentNode.replaceChild(fragForHl, textNodeForHl);
+    }
+
+    function runContentSearchForPanelRuntime(scopeForCs) {
+      if (!scopeForCs) return;
+      const stateForCs = getContentSearchStateForPanelRuntime(scopeForCs);
+      const targetForCs = resolveContentSearchTargetForPanelRuntime(scopeForCs);
+      const inputForCs = scopeForCs.querySelector('.cs-input');
+      if (!targetForCs || !inputForCs) return;
+      // We are about to mutate the target; the re-index observer watching it must not see our own
+      // wrap/unwrap and loop. disconnect() also drops any records queued before this call.
+      if (stateForCs.observer) stateForCs.observer.disconnect();
+      clearContentSearchHighlightsForPanelRuntime(targetForCs);
+      stateForCs.matches = [];
+      stateForCs.activeIndex = -1;
+      const queryForCs = String(inputForCs.value || '');
+      if (queryForCs) {
+        const queryLowerForCs = queryForCs.toLowerCase();
+        const queryLenForCs = queryForCs.length;
+        // Collect the matching text nodes first: the tree walker must not run while the highlight
+        // pass is splitting the very nodes it would visit next.
+        const walkerForCs = document.createTreeWalker(targetForCs, NodeFilter.SHOW_TEXT, {
+          acceptNode: function (nodeForWalk) {
+            if (!nodeForWalk.nodeValue) return NodeFilter.FILTER_REJECT;
+            const parentNameForWalk = nodeForWalk.parentNode ? nodeForWalk.parentNode.nodeName : '';
+            if (parentNameForWalk === 'SCRIPT' || parentNameForWalk === 'STYLE') return NodeFilter.FILTER_REJECT;
+            return nodeForWalk.nodeValue.toLowerCase().indexOf(queryLowerForCs) === -1
+              ? NodeFilter.FILTER_SKIP
+              : NodeFilter.FILTER_ACCEPT;
+          }
+        });
+        const textNodesForCs = [];
+        let nodeForCsNext;
+        while ((nodeForCsNext = walkerForCs.nextNode())) textNodesForCs.push(nodeForCsNext);
+        for (let iForCs = 0; iForCs < textNodesForCs.length; iForCs++) {
+          highlightTextNodeForContentSearchForPanelRuntime(textNodesForCs[iForCs], queryLowerForCs, queryLenForCs, stateForCs.matches);
+        }
+        if (stateForCs.matches.length) setActiveContentSearchMatchForPanelRuntime(scopeForCs, 0, true);
+      }
+      updateContentSearchCountForPanelRuntime(scopeForCs);
+      // Resume watching for external content changes (note switch, log view toggle, JSON toggle).
+      if (stateForCs.observer && contentSearchRowOpenForPanelRuntime(scopeForCs)) {
+        stateForCs.observer.observe(targetForCs, { childList: true, subtree: true, characterData: true });
+      }
+    }
+
+    function setActiveContentSearchMatchForPanelRuntime(scopeForCs, indexForActive, scrollForActive) {
+      const stateForCs = getContentSearchStateForPanelRuntime(scopeForCs);
+      const matchesForActive = stateForCs.matches;
+      const prevIndexForActive = stateForCs.activeIndex;
+      if (prevIndexForActive >= 0 && matchesForActive[prevIndexForActive]) {
+        matchesForActive[prevIndexForActive].classList.remove('abcs-hl-current');
+      }
+      if (!matchesForActive.length) { stateForCs.activeIndex = -1; return; }
+      let clampedForActive = indexForActive;
+      if (clampedForActive < 0) clampedForActive = matchesForActive.length - 1;
+      if (clampedForActive >= matchesForActive.length) clampedForActive = 0;
+      stateForCs.activeIndex = clampedForActive;
+      const activeMarkForActive = matchesForActive[clampedForActive];
+      activeMarkForActive.classList.add('abcs-hl-current');
+      if (scrollForActive && typeof activeMarkForActive.scrollIntoView === 'function') {
+        activeMarkForActive.scrollIntoView({ block: 'center', inline: 'nearest' });
+      }
+    }
+
+    function updateContentSearchCountForPanelRuntime(scopeForCs) {
+      const stateForCs = getContentSearchStateForPanelRuntime(scopeForCs);
+      const countElForCs = scopeForCs.querySelector('.cs-count');
+      const inputForCs = scopeForCs.querySelector('.cs-input');
+      const prevBtnForCs = scopeForCs.querySelector('.cs-prev');
+      const nextBtnForCs = scopeForCs.querySelector('.cs-next');
+      const matchesForCs = stateForCs.matches;
+      const hasQueryForCs = !!(inputForCs && String(inputForCs.value || '').length);
+      const noMatchesForCs = hasQueryForCs && matchesForCs.length === 0;
+      if (countElForCs) {
+        if (!hasQueryForCs) countElForCs.textContent = '';
+        else if (!matchesForCs.length) countElForCs.textContent = '0/0';
+        else countElForCs.textContent = (stateForCs.activeIndex + 1) + '/' + matchesForCs.length;
+        countElForCs.classList.toggle('cs-count-empty', noMatchesForCs);
+      }
+      const disableNavForCs = matchesForCs.length === 0;
+      if (prevBtnForCs) prevBtnForCs.disabled = disableNavForCs;
+      if (nextBtnForCs) nextBtnForCs.disabled = disableNavForCs;
+    }
+
+    function stepContentSearchForPanelRuntime(scopeForCs, deltaForStep) {
+      const stateForCs = getContentSearchStateForPanelRuntime(scopeForCs);
+      if (!stateForCs.matches.length) return;
+      setActiveContentSearchMatchForPanelRuntime(scopeForCs, stateForCs.activeIndex + deltaForStep, true);
+      updateContentSearchCountForPanelRuntime(scopeForCs);
+    }
+
+    function scheduleContentSearchForPanelRuntime(scopeForCs) {
+      const stateForCs = getContentSearchStateForPanelRuntime(scopeForCs);
+      if (stateForCs.timer) clearTimeout(stateForCs.timer);
+      stateForCs.timer = setTimeout(function () {
+        stateForCs.timer = null;
+        runContentSearchForPanelRuntime(scopeForCs);
+      }, CONTENT_SEARCH_DEBOUNCE_MS_FOR_PANEL_RUNTIME);
+    }
+
+    function flushContentSearchForPanelRuntime(scopeForCs) {
+      const stateForCs = getContentSearchStateForPanelRuntime(scopeForCs);
+      if (!stateForCs.timer) return false;
+      clearTimeout(stateForCs.timer);
+      stateForCs.timer = null;
+      runContentSearchForPanelRuntime(scopeForCs);
+      return true;
+    }
+
+    function openContentSearchForPanelRuntime(scopeForCs) {
+      if (!scopeForCs) return;
+      const toggleForCs = scopeForCs.querySelector('.cs-toggle');
+      if (toggleForCs && toggleForCs.classList.contains('hidden')) return;
+      const rowForCs = scopeForCs.querySelector('.cs-row');
+      const inputForCs = scopeForCs.querySelector('.cs-input');
+      if (!rowForCs || !inputForCs) return;
+      rowForCs.classList.remove('hidden');
+      if (toggleForCs) toggleForCs.classList.add('active');
+      const stateForCs = getContentSearchStateForPanelRuntime(scopeForCs);
+      if (!stateForCs.observer && typeof MutationObserver === 'function') {
+        stateForCs.observer = new MutationObserver(function () {
+          if (!contentSearchRowOpenForPanelRuntime(scopeForCs)) return;
+          runContentSearchForPanelRuntime(scopeForCs);
+        });
+      }
+      inputForCs.focus();
+      inputForCs.select();
+      runContentSearchForPanelRuntime(scopeForCs);
+    }
+
+    function closeContentSearchForPanelRuntime(scopeForCs) {
+      if (!scopeForCs) return;
+      const stateForCs = getContentSearchStateForPanelRuntime(scopeForCs);
+      if (stateForCs.timer) { clearTimeout(stateForCs.timer); stateForCs.timer = null; }
+      if (stateForCs.observer) stateForCs.observer.disconnect();
+      clearContentSearchHighlightsForPanelRuntime(resolveContentSearchTargetForPanelRuntime(scopeForCs));
+      stateForCs.matches = [];
+      stateForCs.activeIndex = -1;
+      const rowForCs = scopeForCs.querySelector('.cs-row');
+      const toggleForCs = scopeForCs.querySelector('.cs-toggle');
+      const inputForCs = scopeForCs.querySelector('.cs-input');
+      if (rowForCs) rowForCs.classList.add('hidden');
+      if (toggleForCs) toggleForCs.classList.remove('active');
+      if (inputForCs) inputForCs.value = '';
+      updateContentSearchCountForPanelRuntime(scopeForCs);
+    }
+
+    function toggleContentSearchForPanelRuntime(scopeForCs) {
+      if (contentSearchRowOpenForPanelRuntime(scopeForCs)) closeContentSearchForPanelRuntime(scopeForCs);
+      else openContentSearchForPanelRuntime(scopeForCs);
+    }
+
+    function setContentSearchToggleVisibleForPanelRuntime(scopeForCs, visibleForCs) {
+      const toggleForCs = scopeForCs ? scopeForCs.querySelector('.cs-toggle') : null;
+      if (toggleForCs) toggleForCs.classList.toggle('hidden', !visibleForCs);
+    }
+
+    // Notes and popouts only offer search in preview mode; the rendered preview is the search
+    // target, and the raw textarea in edit mode is not a find-in-page surface.
+    function refreshNoteContentSearchAvailabilityForPanelRuntime(scopeForCs) {
+      if (!scopeForCs) return;
+      const editingForCs = scopeForCs.classList.contains('in-edit-mode');
+      setContentSearchToggleVisibleForPanelRuntime(scopeForCs, !editingForCs);
+      if (editingForCs) closeContentSearchForPanelRuntime(scopeForCs);
+    }
+
+    function isContentSearchAvailableForScopeForPanelRuntime(scopeForCs) {
+      const toggleForCs = scopeForCs ? scopeForCs.querySelector('.cs-toggle') : null;
+      return !!(toggleForCs && toggleForCs.getClientRects().length > 0);
+    }
+
+    // Cmd/Ctrl+F targets the topmost surface that currently shows searchable content.
+    function resolveActiveContentSearchScopeForPanelRuntime(eventTargetForCs) {
+      const apOverlayForCs = root.getElementById('attach-preview-overlay');
+      if (apOverlayForCs && !apOverlayForCs.classList.contains('hidden')
+          && isContentSearchAvailableForScopeForPanelRuntime(apOverlayForCs)) {
+        return apOverlayForCs;
+      }
+      const activeElForCs = root.activeElement;
+      if (activeElForCs && typeof activeElForCs.closest === 'function') {
+        const focusedScopeForCs = activeElForCs.closest('[data-content-search-scope]');
+        if (focusedScopeForCs && isContentSearchAvailableForScopeForPanelRuntime(focusedScopeForCs)) {
+          return focusedScopeForCs;
+        }
+      }
+      if (eventTargetForCs && typeof eventTargetForCs.closest === 'function') {
+        const evtScopeForCs = eventTargetForCs.closest('[data-content-search-scope]');
+        if (evtScopeForCs && isContentSearchAvailableForScopeForPanelRuntime(evtScopeForCs)) {
+          return evtScopeForCs;
+        }
+      }
+      let frontPopoutForCs = null;
+      let frontZForCs = -Infinity;
+      host.querySelectorAll('.note-popout').forEach(function (popoutForCs) {
+        const zForCs = parseInt((popoutForCs.style && popoutForCs.style.zIndex) || '0', 10) || 0;
+        if (zForCs >= frontZForCs) { frontZForCs = zForCs; frontPopoutForCs = popoutForCs; }
+      });
+      if (frontPopoutForCs && isContentSearchAvailableForScopeForPanelRuntime(frontPopoutForCs)) {
+        return frontPopoutForCs;
+      }
+      const noteEditorScopeForCs = root.getElementById('note-editor-form');
+      if (noteEditorScopeForCs && isContentSearchAvailableForScopeForPanelRuntime(noteEditorScopeForCs)) {
+        return noteEditorScopeForCs;
+      }
+      const logScopeIdsForCs = ['logs-detail-overlay', 'pa-logs-detail-overlay'];
+      for (let iForCs = 0; iForCs < logScopeIdsForCs.length; iForCs++) {
+        const logScopeForCs = root.getElementById(logScopeIdsForCs[iForCs]);
+        if (logScopeForCs && !logScopeForCs.classList.contains('hidden')
+            && isContentSearchAvailableForScopeForPanelRuntime(logScopeForCs)) {
+          return logScopeForCs;
+        }
+      }
+      return null;
+    }
+
+    // Enter / Shift+Enter step, Escape closes. Bound on the mount (a descendant of the shadow
+    // root) so it runs before the root-level bubble keyboard isolation, and covers every scope's
+    // .cs-input via delegation, including dynamically created popouts.
+    (function bindContentSearchInputKeysForPanelRuntime() {
+      const mountForCs = root.getElementById('abchat-panel-mount');
+      if (!mountForCs) return;
+      mountForCs.addEventListener('keydown', function (evtForCsKey) {
+        const inputForCsKey = evtForCsKey.target && typeof evtForCsKey.target.closest === 'function'
+          ? evtForCsKey.target.closest('.cs-input')
+          : null;
+        if (!inputForCsKey) return;
+        const scopeForCsKey = inputForCsKey.closest('[data-content-search-scope]');
+        if (!scopeForCsKey) return;
+        if (evtForCsKey.key === 'Enter') {
+          evtForCsKey.preventDefault();
+          // A pending debounce means matches for the current query are not computed yet; flushing
+          // settles on the first match, so only step when the set was already live.
+          const ranForCsKey = flushContentSearchForPanelRuntime(scopeForCsKey);
+          if (!ranForCsKey) stepContentSearchForPanelRuntime(scopeForCsKey, evtForCsKey.shiftKey ? -1 : 1);
+        } else if (evtForCsKey.key === 'Escape') {
+          evtForCsKey.preventDefault();
+          closeContentSearchForPanelRuntime(scopeForCsKey);
+        }
+      });
+    })();
+
+    // Cmd/Ctrl+F opens the active surface's search. Bound on WINDOW at capture, not on the shadow
+    // root: a shadow-root listener only fires while focus is inside the panel, and focus is usually
+    // on the page when the shortcut is pressed, so a root-level binding never saw the event and the
+    // browser's own find always won. Window capture runs before the page's document/window handlers
+    // and before any page keyboard shield installs its no-op preventDefault override at document
+    // capture; we also strip that own-property override defensively, so the native find stays
+    // suppressed. Only Cmd/Ctrl+F over a currently-visible searchable surface is consumed; every
+    // other keydown (and Cmd/F with no such surface) passes straight through to the browser.
+    function handleContentSearchHotkeyForPanelRuntime(evtForFind) {
+      if (isStaleFocusGuardForPanelRuntime()) {
+        window.removeEventListener('keydown', handleContentSearchHotkeyForPanelRuntime, true);
+        return;
+      }
+      if (evtForFind.key !== 'f' && evtForFind.key !== 'F') return;
+      if (!(evtForFind.metaKey || evtForFind.ctrlKey) || evtForFind.altKey || evtForFind.shiftKey) return;
+      const scopeForFind = resolveActiveContentSearchScopeForPanelRuntime(evtForFind.target);
+      if (!scopeForFind) return;
+      if (Object.prototype.hasOwnProperty.call(evtForFind, 'preventDefault')) {
+        try { delete evtForFind.preventDefault; } catch (errForFind) {}
+      }
+      if (typeof evtForFind.stopImmediatePropagation === 'function') evtForFind.stopImmediatePropagation();
+      evtForFind.preventDefault();
+      openContentSearchForPanelRuntime(scopeForFind);
+    }
+    window.addEventListener('keydown', handleContentSearchHotkeyForPanelRuntime, true);
 
     function closePickerModal() {
       pickerOverlay.classList.add('hidden');
@@ -15817,6 +16179,7 @@
 
     function closeLogDetailForPanelRuntime() {
       const overlay = root.getElementById('logs-detail-overlay');
+      closeContentSearchForPanelRuntime(overlay);
       if (overlay) overlay.classList.add('hidden');
       activeLogDetailForPanelRuntime = null;
       activeLogViewRawForPanelRuntime = false;
@@ -16197,6 +16560,7 @@
 
     function closePaLogDetailForPanelRuntime() {
       const overlayForPa = root.getElementById('pa-logs-detail-overlay');
+      closeContentSearchForPanelRuntime(overlayForPa);
       if (overlayForPa) overlayForPa.classList.add('hidden');
       activePaLogDetailForPanelRuntime = null;
       activePaLogViewRawForPanelRuntime = false;
@@ -20799,6 +21163,10 @@
             case 'send-inline-message':  sendInlineMessage(); break;
             case 'close-picker-modal':   closePickerModal(); break;
             case 'close-attach-preview': closeAttachPreview(); break;
+            case 'content-search-toggle': { const scForCs = tgtForRuntime.closest('[data-content-search-scope]'); if (scForCs) toggleContentSearchForPanelRuntime(scForCs); break; }
+            case 'content-search-prev':   { const scForCs = tgtForRuntime.closest('[data-content-search-scope]'); if (scForCs) stepContentSearchForPanelRuntime(scForCs, -1); break; }
+            case 'content-search-next':   { const scForCs = tgtForRuntime.closest('[data-content-search-scope]'); if (scForCs) stepContentSearchForPanelRuntime(scForCs, 1); break; }
+            case 'content-search-close':  { const scForCs = tgtForRuntime.closest('[data-content-search-scope]'); if (scForCs) closeContentSearchForPanelRuntime(scForCs); break; }
             case 'copy-attach-preview': {
               const textForAttachCopy = currentAttachPreviewForPanelRuntime ? String(currentAttachPreviewForPanelRuntime.content || '') : '';
               if (!textForAttachCopy) break;
@@ -20993,6 +21361,11 @@
               filterModelPickerForPanelRuntime(tgtForRuntime.value);
               const wrapForModelSearch = tgtForRuntime.closest('.mp-search-row');
               if (wrapForModelSearch) wrapForModelSearch.classList.toggle('has-value', tgtForRuntime.value.length > 0);
+              break;
+            }
+            case 'content-search-input': {
+              const scForCsInput = tgtForRuntime.closest('[data-content-search-scope]');
+              if (scForCsInput) scheduleContentSearchForPanelRuntime(scForCsInput);
               break;
             }
             case 'count-profile-field':

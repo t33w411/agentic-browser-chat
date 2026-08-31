@@ -3,6 +3,21 @@
   const contentNamespaceForPanelTemplate = globalScopeForPanelTemplate.ABChatContent || {};
   const icForPanelTemplate = contentNamespaceForPanelTemplate.icons || {};
 
+  // Shared find-in-content search bar, used by every large-text surface (attachment preview,
+  // note editor, API and page-action log detail). The matching toggle button and a
+  // [data-content-search-scope] on the surface plus a [data-content-search-target] on the
+  // searchable element are added at each site. Logic lives in panelRuntime.js (CONTENT SEARCH).
+  function contentSearchRowMarkupForPanelTemplate(placeholderForRow) {
+    return '<div class="cs-row hidden">'
+      + '<span class="cs-icon">' + (icForPanelTemplate.search12 || '') + '</span>'
+      + '<input class="cs-input" type="text" placeholder="' + (placeholderForRow || 'Search...') + '" data-action="content-search-input" autocomplete="off" spellcheck="false" />'
+      + '<span class="cs-count"></span>'
+      + '<button class="cs-nav cs-prev" type="button" data-action="content-search-prev" title="Previous match (Shift+Enter)" aria-label="Previous match">' + (icForPanelTemplate.chevronUp12 || '') + '</button>'
+      + '<button class="cs-nav cs-next" type="button" data-action="content-search-next" title="Next match (Enter)" aria-label="Next match">' + (icForPanelTemplate.chevronDown12 || '') + '</button>'
+      + '<button class="cs-close" type="button" data-action="content-search-close" title="Close search (Esc)" aria-label="Close search">' + (icForPanelTemplate.x13 || '') + '</button>'
+      + '</div>';
+  }
+
   const panelMarkupForPanelTemplate = `
 <div class="panel-host mode-expanded header-ctrl-theme" id="panel-host" data-theme="light">
   <div class="panel">
@@ -298,17 +313,20 @@
           </div>
 
           <!-- Actual editor: hidden until a note is selected or New note is clicked -->
-          <div id="note-editor-form" class="hidden" style="display:flex;flex-direction:column;flex:1;overflow:hidden;">
+          <div id="note-editor-form" class="hidden" data-content-search-scope style="display:flex;flex-direction:column;flex:1;overflow:hidden;">
             <div class="ne-header">
               <!-- Preview mode: plain text display -->
               <div class="ne-title-display untitled" id="ne-title-display">Untitled</div>
               <!-- Edit mode: editable input -->
               <input class="ne-title-input" id="ne-title" type="text" placeholder="Note title...">
+              <!-- Search shown in preview mode -->
+              <button class="btn-icon cs-toggle hidden" data-action="content-search-toggle" title="Search (⌘/Ctrl+F)" aria-label="Search note">${icForPanelTemplate.search12}</button>
               <!-- Edit button shown in preview mode -->
               <button class="btn-icon ne-edit-btn" title="Edit note" data-action="enter-note-edit-mode">
                 ${icForPanelTemplate.noteEdit13}
               </button>
             </div>
+            ${contentSearchRowMarkupForPanelTemplate('Search note...')}
             <div class="ne-body">
               <!-- Clip mode only: where this snapshot came from -->
               <div class="ne-clip-source hidden" id="ne-clip-source">
@@ -331,7 +349,7 @@
                 <div class="ne-clip-readonly-note" id="ne-clip-readonly-note"></div>
               </div>
               <!-- Preview mode: rendered output -->
-              <div class="ne-preview" id="ne-preview"></div>
+              <div class="ne-preview" id="ne-preview" data-content-search-target></div>
               <!-- Edit mode: raw text -->
               <div class="ne-body-ta-wrap">
                 <textarea class="ne-body-ta" id="ne-body" rows="8" placeholder="Write anything — plain text, markdown, JSON, code…" data-no-auto-expand="1"></textarea>
@@ -707,15 +725,17 @@
           <div class="logs-empty" id="logs-empty-state">No API logs recorded yet.</div>
         </div>
         <div class="logs-pagination-bar" id="logs-pagination-bar"></div>
-        <div class="logs-detail hidden" id="logs-detail-overlay">
+        <div class="logs-detail hidden" id="logs-detail-overlay" data-content-search-scope>
           <div class="logs-topbar">
             <button class="logs-back-btn" data-action="close-log-detail">&#8592; Back</button>
             <span class="logs-topbar-title">Log Detail</span>
+            <button class="btn-icon cs-toggle" data-action="content-search-toggle" title="Search (⌘/Ctrl+F)" aria-label="Search log">${icForPanelTemplate.search12}</button>
             <button class="btn-ghost btn-sm" data-action="toggle-log-view" id="log-view-toggle-btn">JSON</button>
             <button class="btn-ghost btn-sm hidden" data-action="toggle-log-wrap" id="log-wrap-toggle-btn" aria-pressed="false">Wrap</button>
             <button class="btn-ghost btn-sm" data-action="copy-log-detail">Copy</button>
           </div>
-          <div class="logs-detail-body" id="logs-detail-body"></div>
+          ${contentSearchRowMarkupForPanelTemplate('Search log...')}
+          <div class="logs-detail-body" id="logs-detail-body" data-content-search-target></div>
         </div>
       </div><!-- /view-logs -->
 
@@ -735,16 +755,18 @@
           <div class="logs-empty" id="pa-logs-empty-state">No page action logs recorded yet.</div>
         </div>
         <div class="logs-pagination-bar" id="pa-logs-pagination-bar"></div>
-        <div class="logs-detail hidden" id="pa-logs-detail-overlay">
+        <div class="logs-detail hidden" id="pa-logs-detail-overlay" data-content-search-scope>
           <div class="logs-topbar">
             <button class="logs-back-btn" data-action="close-pa-log-detail">&#8592; Back</button>
             <span class="logs-topbar-title">Page Action Detail</span>
+            <button class="btn-icon cs-toggle" data-action="content-search-toggle" title="Search (⌘/Ctrl+F)" aria-label="Search log">${icForPanelTemplate.search12}</button>
             <button class="btn-ghost btn-sm hidden" data-action="toggle-pa-log-wrap" id="pa-log-wrap-toggle-btn" aria-pressed="false">Wrap</button>
             <button class="btn-ghost btn-sm" data-action="toggle-pa-log-view" id="pa-log-view-toggle-btn">JSON</button>
             <button class="btn-ghost btn-sm" data-action="export-pa-log-run" id="pa-log-export-run-btn">Export run</button>
             <button class="btn-ghost btn-sm" data-action="copy-pa-log-detail">Copy</button>
           </div>
-          <div class="logs-detail-body" id="pa-logs-detail-body"></div>
+          ${contentSearchRowMarkupForPanelTemplate('Search log...')}
+          <div class="logs-detail-body" id="pa-logs-detail-body" data-content-search-target></div>
         </div>
       </div><!-- /view-page-action-logs -->
 
@@ -1117,7 +1139,7 @@
 <!-- ============================================================
      ATTACHMENT PREVIEW OVERLAY
 ============================================================ -->
-<div id="attach-preview-overlay" class="hidden" data-theme="light">
+<div id="attach-preview-overlay" class="hidden" data-theme="light" data-content-search-scope>
   <div class="ap-modal">
     <div class="ap-header">
       <div class="ap-header-left">
@@ -1126,8 +1148,12 @@
         </span>
         <span class="ap-title" id="ap-title"></span>
       </div>
-      <button class="ap-close" data-action="close-attach-preview">${icForPanelTemplate.x13}</button>
+      <div class="ap-header-actions">
+        <button class="cs-toggle hidden" data-action="content-search-toggle" title="Search (⌘/Ctrl+F)" aria-label="Search preview">${icForPanelTemplate.search12}</button>
+        <button class="ap-close" data-action="close-attach-preview">${icForPanelTemplate.x13}</button>
+      </div>
     </div>
+    ${contentSearchRowMarkupForPanelTemplate('Search preview...')}
     <div class="ap-meta hidden" id="ap-meta">
       <div class="ap-meta-row hidden" id="ap-meta-url-row">
         <span class="ap-meta-label">URL</span>
@@ -1139,7 +1165,7 @@
       </div>
     </div>
     <div class="ap-changed-banner hidden" id="ap-changed-banner"></div>
-    <div class="ap-body ne-preview" id="ap-content"></div>
+    <div class="ap-body ne-preview" id="ap-content" data-content-search-target></div>
     <div class="ap-footer hidden" id="ap-footer">
       <span class="ap-counts" id="ap-counts"></span>
       <div class="ap-footer-actions">

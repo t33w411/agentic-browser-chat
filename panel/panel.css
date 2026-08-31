@@ -3640,6 +3640,68 @@ img.ecs-icon {
 }
 .ap-close:hover { background: #f1f5f9; color: #0f172a; }
 #attach-preview-overlay[data-theme="dark"] .ap-close:hover { background: #243147; color: #f1f5f9; }
+.ap-header-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+
+/* ============================================================
+   Shared find-in-content search bar (.cs-*) and match marks
+   (mark.abcs-hl). Used by the attachment preview, note editor,
+   note popouts, and API / page-action log detail. Dark variants
+   use a [data-theme="dark"] ancestor so they apply whether the
+   surface's data-theme sits on #panel-host or on an overlay.
+============================================================ */
+.cs-toggle.hidden { display: none; }
+.cs-toggle:not(.btn-icon) {
+  border: none; background: transparent; cursor: pointer;
+  color: #94a3b8; width: 26px; height: 26px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 5px; transition: background 0.1s, color 0.1s;
+}
+.cs-toggle:not(.btn-icon):hover { background: #f1f5f9; color: #0f172a; }
+.cs-toggle.active { background: #e0edff; color: #2563eb; }
+[data-theme="dark"] .cs-toggle:not(.btn-icon):hover { background: #243147; color: #f1f5f9; }
+[data-theme="dark"] .cs-toggle.active { background: #1e3a5f; color: #93c5fd; }
+.cs-row {
+  flex-shrink: 0;
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 14px;
+  border-bottom: 1px solid #c8d5e3;
+  background: #f8fafc;
+}
+.cs-row.hidden { display: none; }
+[data-theme="dark"] .cs-row { border-color: #3d5272; background: #172033; }
+.cs-icon { color: #94a3b8; display: flex; flex-shrink: 0; }
+.cs-input {
+  flex: 1; min-width: 0;
+  border: 1px solid #cbd5e1; border-radius: 6px;
+  padding: 5px 8px; font-size: 13px; color: #0f172a; background: #fff;
+  outline: none; transition: border-color 0.1s, box-shadow 0.1s;
+}
+.cs-input:focus { border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37,99,235,0.15); }
+[data-theme="dark"] .cs-input { background: #0f172a; border-color: #3d5272; color: #f1f5f9; }
+[data-theme="dark"] .cs-input:focus { border-color: #60a5fa; box-shadow: 0 0 0 2px rgba(96,165,250,0.2); }
+.cs-count {
+  font-size: 12px; color: #64748b; flex-shrink: 0;
+  min-width: 40px; text-align: right; font-variant-numeric: tabular-nums;
+}
+.cs-count.cs-count-empty { color: #dc2626; }
+[data-theme="dark"] .cs-count { color: #94a3b8; }
+[data-theme="dark"] .cs-count.cs-count-empty { color: #f87171; }
+.cs-nav, .cs-close {
+  border: none; background: transparent; cursor: pointer; color: #64748b;
+  width: 24px; height: 24px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 5px; flex-shrink: 0; transition: background 0.1s, color 0.1s;
+}
+.cs-nav:hover, .cs-close:hover { background: #e2e8f0; color: #0f172a; }
+.cs-nav:disabled { opacity: 0.4; cursor: default; }
+.cs-nav:disabled:hover { background: transparent; color: #64748b; }
+[data-theme="dark"] .cs-nav, [data-theme="dark"] .cs-close { color: #94a3b8; }
+[data-theme="dark"] .cs-nav:hover, [data-theme="dark"] .cs-close:hover { background: #243147; color: #f1f5f9; }
+[data-theme="dark"] .cs-nav:disabled:hover { background: transparent; color: #94a3b8; }
+mark.abcs-hl { background: #fde68a; color: #1f2937; border-radius: 2px; padding: 0 1px; }
+mark.abcs-hl-current { background: #f59e0b; color: #1f2937; box-shadow: 0 0 0 1px #b45309; }
+[data-theme="dark"] mark.abcs-hl { background: #78591c; color: #f8fafc; }
+[data-theme="dark"] mark.abcs-hl-current { background: #d97706; color: #1f2937; box-shadow: 0 0 0 1px #f59e0b; }
 .ap-changed-banner {
   flex-shrink: 0;
   margin: 10px 14px 0;

@@ -22,6 +22,7 @@
   var chevronLeftPath = '<polyline points="15 18 9 12 15 6"/>';
   var chevronRightPath = '<polyline points="9 18 15 12 9 6"/>';
   var chevronDownPath = '<polyline points="6 9 12 15 18 9"/>';
+  var chevronUpPath = '<polyline points="18 15 12 9 6 15"/>';
   var arrowDownPath = '<line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/>';
   var searchPaths = '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>';
   var filterPaths = '<polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>';
@@ -80,6 +81,8 @@
   icons.chevronLeft12 = svgForPanelIcon(12, 2.5, chevronLeftPath);
   icons.chevronRight12 = svgForPanelIcon(12, 2.5, chevronRightPath);
   icons.chevronDown10 = svgForPanelIcon(10, 2.5, chevronDownPath);
+  icons.chevronDown12 = svgForPanelIcon(12, 2.5, chevronDownPath);
+  icons.chevronUp12 = svgForPanelIcon(12, 2.5, chevronUpPath);
   icons.arrowDown13 = svgForPanelIcon(13, 2, arrowDownPath);
   icons.modelPickerChevron10 = svgForPanelIcon(10, 2.5, chevronDownPath, 'class="model-picker-chevron"');
   icons.search11 = svgForPanelIcon(11, 2.5, searchPaths);
