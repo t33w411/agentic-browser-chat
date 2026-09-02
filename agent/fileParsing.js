@@ -240,14 +240,51 @@
       .join('\n');
   }
 
-  function parseDocxForFileParsing(arrayBufferForFileParsing) {
-    loadLibraryForFileParsing('lib/mammoth.min.js', 'mammoth');
-    if (!globalScopeForFileParsing.mammoth || typeof globalScopeForFileParsing.mammoth.extractRawText !== 'function') {
+  function getDocxTextFromHtmlForFileParsing() {
+    return (globalScopeForFileParsing.ABChatAgent || {}).docxTextFromHtml || null;
+  }
+
+  function extractDocxRawTextForFileParsing(arrayBufferForFileParsing) {
+    if (typeof globalScopeForFileParsing.mammoth.extractRawText !== 'function') {
       throw new Error('DOCX parser is unavailable.');
     }
     return globalScopeForFileParsing.mammoth.extractRawText({ arrayBuffer: arrayBufferForFileParsing }).then(function (resultForFileParsing) {
       return String((resultForFileParsing && resultForFileParsing.value) || '');
     });
+  }
+
+  // mammoth's extractRawText drops hyperlink hrefs, keeping only the anchor text, so links reach the
+  // model with no URL. convertToHtml preserves them as <a href>, so the attachment body is built
+  // from that HTML and serialized back to text with each external link rendered inline as
+  // "text (url)". extractRawText is the fallback when convertToHtml or the serializer is missing or
+  // throws, so a document still yields text (without link URLs) rather than nothing.
+  function parseDocxForFileParsing(arrayBufferForFileParsing) {
+    loadLibraryForFileParsing('lib/mammoth.min.js', 'mammoth');
+    if (!globalScopeForFileParsing.mammoth) {
+      throw new Error('DOCX parser is unavailable.');
+    }
+    var docxTextFromHtmlForFileParsing = getDocxTextFromHtmlForFileParsing();
+    if (typeof globalScopeForFileParsing.mammoth.convertToHtml !== 'function'
+      || !docxTextFromHtmlForFileParsing
+      || typeof docxTextFromHtmlForFileParsing.htmlToText !== 'function') {
+      return extractDocxRawTextForFileParsing(arrayBufferForFileParsing);
+    }
+    var optionsForDocxText = {};
+    // Blank images so no base64 is built into the intermediate HTML; the serializer drops the
+    // resulting empty <img> tags.
+    if (globalScopeForFileParsing.mammoth.images && typeof globalScopeForFileParsing.mammoth.images.imgElement === 'function') {
+      optionsForDocxText.convertImage = globalScopeForFileParsing.mammoth.images.imgElement(function () {
+        return {};
+      });
+    }
+    return globalScopeForFileParsing.mammoth
+      .convertToHtml({ arrayBuffer: arrayBufferForFileParsing }, optionsForDocxText)
+      .then(function (resultForFileParsing) {
+        return docxTextFromHtmlForFileParsing.htmlToText(String((resultForFileParsing && resultForFileParsing.value) || ''));
+      })
+      .catch(function () {
+        return extractDocxRawTextForFileParsing(arrayBufferForFileParsing);
+      });
   }
 
   function getDocxFormatForFileParsing() {

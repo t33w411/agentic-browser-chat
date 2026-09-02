@@ -2252,28 +2252,21 @@
     function rewriteDollarInlineMathForPanelRuntime(mdText) {
       if (!mdText || mdText.indexOf('$') < 0) return mdText;
       const skipOrCandidateForDollarRewrite = /(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]+`|\$\$[\s\S]*?\$\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\])|\$([^$\n]+?)\$/g;
-      let transformCountForDollarRewrite = 0;
       const tier2PatternForDollarRewrite = /^[A-Za-z(]([A-Za-z0-9\s,+\-*/=<>!|().]*[A-Za-z0-9)])?$/;
-      const rewrittenForDollarRewrite = mdText.replace(skipOrCandidateForDollarRewrite, function (full, skipRegionForDollarRewrite, innerForDollarRewrite) {
+      return mdText.replace(skipOrCandidateForDollarRewrite, function (full, skipRegionForDollarRewrite, innerForDollarRewrite) {
         if (skipRegionForDollarRewrite != null) return full;
         if (innerForDollarRewrite == null) return full;
         if (/[\\^_{}]/.test(innerForDollarRewrite)) {
-          transformCountForDollarRewrite++;
           return '\\(' + innerForDollarRewrite + '\\)';
         }
         if (innerForDollarRewrite.length <= 30
             && !/^\s|\s$/.test(innerForDollarRewrite)
             && !/^\d/.test(innerForDollarRewrite)
             && tier2PatternForDollarRewrite.test(innerForDollarRewrite)) {
-          transformCountForDollarRewrite++;
           return '\\(' + innerForDollarRewrite + '\\)';
         }
         return full;
       });
-      if (transformCountForDollarRewrite > 0) {
-        console.debug('[abchat] rewrote ' + transformCountForDollarRewrite + ' single-dollar inline math span(s) to \\(...\\)');
-      }
-      return rewrittenForDollarRewrite;
     }
 
     function renderMarkdown(mdText) {

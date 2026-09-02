@@ -144,28 +144,36 @@ Inside the **Notes** editor, you can also attach files to the note itself (the s
 
 The agent calls these tools mid-conversation. Grouped by purpose, with safeguards highlighted.
 
-**Filesystem-style operations on the notes corpus**
-- `read`, `write`, `edit` — read, create, and modify note content.
-- `grep`, `ls` — discover notes by regex (content or title scope) or list them.
+The page surface is **ref-based**: the model never writes CSS selectors or fingerprints. `page_observe` numbers every interactive control with an opaque integer `ref`; `page_act` acts by that ref; `page_read` reads text (and its `find_text` mode carries a ref when a hit lands on an interactive control); `page_spreadsheet` drives canvas grids by high-level intent. The runtime keeps a per-tab `ref -> descriptor` registry and resolves under the hood. The older selector-based tools (`page_query`, `page_fill_form`, the selector form of `page_act`, `page_accessibility_tree`) were removed from the model surface; their implementations are retained internally as the engine the ref tools delegate to. Full design and rationale in [`docs/ref-based-page-tools-redesign.md`](docs/ref-based-page-tools-redesign.md).
 
-**Page interaction**
-- `page_query` — query elements on the current page using selectors and return their content or state. Its `select_option` sub-operation also drives custom dropdowns (div/ARIA comboboxes like React Select, MUI, Headless UI): it opens the dropdown and clicks the matching option, handling portal-rendered lists, type-to-filter, and virtualized lists.
-- `page_fill_form` — fill native form fields (inputs, textareas, single `<select>`, checkboxes, radios, contenteditable). Safeguards: never submits, clicks, or navigates; sensitive fields (passwords, OTP/2FA, card numbers, CVV, IBAN, SSN, etc.) plus disabled, readonly, hidden, and invisible fields are blocked; comma-separated and non-unique selectors are rejected; every write is verified by reading the value back. Custom div/ARIA dropdowns are set via `page_query`'s `select_option`, not this tool.
-- `take_screenshot` — capture the current page viewport and get back a vision model's text description of it. A discretionary fallback for when the DOM tools give confusing or insufficient signal, or the problem is inherently visual (an overlay covering a field, a custom widget, a layout glitch). The extension's own panel UI is hidden during capture so it never appears in the shot.
+**Filesystem-style operations on the notes corpus**
+- `read`, `write`, `edit` — read, create, and modify note and task content (and read chats, questions, and file attachments).
+- `grep`, `ls` — discover items by regex (content or title scope) or list them.
+
+**Page interaction (ref-based)**
+- `page_observe` — list the interactive controls on the current page, each tagged with a stable integer `ref` you pass to `page_act`. The primary way to see and drive a page; no CSS selectors or fingerprints. Default omits controls covered by an overlay (counted in `covered_by_overlay`); an open dialog's own controls are always listed.
+- `page_act` — one atomic action by ref: `click`, `type`, `select`, `fill`, `hover`, `press`, `scroll`, `drag`. Returns a fresh snapshot with `new`/`changed` flags so the model never diffs two lists. Safeguards: the `fill` action only writes values, it never submits, clicks, or navigates, and accepts up to 10 related non-sensitive fields from one current form or dialog; sensitive fields (passwords, OTP/2FA, card numbers, CVV, IBAN, SSN, etc.) plus disabled, readonly, hidden, and invisible fields are blocked; every write is verified by reading the value back. Submitting is a separate `click` action the agent takes only when you ask it to; a click whose target reads destructive (delete-style) is refused unless explicitly confirmed. A stale ref does not error: `page_act` returns a fresh snapshot to pick from. A click that navigates returns `{ navigated: true, ... }` under the offscreen loop, which survives the reload.
+- `page_read` — read page content without selectors. Modes: `selection` (current text selection), `context` (title/url plus a heading outline for orientation), `content` (main readable text, 200K cap, with auto-scroll for lazy-loaded or virtualized content), `find_text` (literal substring search; hits on interactive controls carry a `ref` for `page_act`).
+- `page_spreadsheet` — high-level Google Sheets editing that hides the Name-Box keyboard choreography. Google Sheets only. Intents: `set_cell`, `set_range` (fills a block, then reads it back to verify), `read_range`.
+- `take_screenshot` — capture the current page viewport and get back a vision model's text description of it. A discretionary visual fallback for when the ref tools give confusing or insufficient signal, or the problem is inherently visual (an overlay covering a field, a custom widget, a layout glitch). The extension's own panel UI is hidden during capture so it never appears in the shot.
 - `eval` — run JavaScript in a sandboxed QuickJS/WASM engine. Can load exact prior tool results via `vars_from` (by `result_ref` message id), attachment contents via `blob_ids` (injected as a reserved `blobs` array), and emit a downloadable file by returning a `__document__` spec (xlsx / docx / pdf / csv / pptx, built through the same generator as `create_document`). Safeguards: no DOM, no `chrome` APIs, no network, no timers. Hard timeout of 5 to 30 seconds. Output capped at 200 KB; combined `vars` + `vars_from` capped at 1 MB; the `blob_ids` payload and any `__document__` spec each get a separate 50 MB budget.
 
 **Web**
-- `web_search` — search the web. Required gateway: the agent must search before it can fetch any URL it didn't already see.
+- `web_search` — search the web and return a grounded summary plus source URLs. Required gateway: the agent must search before it can fetch any URL it didn't already see.
 - `web_fetch` — fetch a URL and either summarize it or answer a specific prompt against it. Handles HTML, plain text, JSON, images (via a vision model), and documents (PDF, DOCX, XLSX, PPTX). Safeguard: the runtime rejects any URL that did not appear in the conversation context (user message or prior tool result), so the model cannot fabricate a URL and fetch it. 15-second timeout per request.
 
 **Browser tabs**
-- `list_tabs` — list the user's open tabs across all windows (id, title, url, active, window, discarded, plus an `accessible` flag for pages extensions cannot read). Read-only: it never switches, opens, or closes a tab.
+- `list_tabs` — list the user's open tabs across all windows (id, title, url, active, window, discarded, plus an `accessible` flag for pages extensions cannot read). Read-only.
 - `read_tab` — read the live content of one open tab (by id from `list_tabs`) and get back a summary. A fast secondary model answers a supplied prompt or summarizes the whole tab, so a large page is never dumped into context. Unlike `web_fetch` (which makes a fresh network request to a URL), this reads the actual open page, including logged-in and client-rendered state. Reading a sleeping tab wakes it; the returned content is treated as untrusted external data.
+- `switch_tab` — switch this chat's active target tab to another open tab (by id from `list_tabs`). After this, all page tools operate on the newly targeted tab. Only accessible tabs can be targeted.
+- `create_tab` — open a new browser tab and make it the active target. Pass a url to load a specific page, or omit for a blank tab you then drive. Pass `active: false` to open in the background without switching the target.
+- `close_tab` — close a tab. Only a tab created earlier in this chat via `create_tab` can be closed; tabs the user opened cannot. If the closed tab was the active target, the target reverts to the tab the chat started on.
 
 **Generation**
 - `create_document` — generate a downloadable DOCX, XLSX, PDF, PPTX, or CSV file with structured content (headings, bullets, tables, sheets, slides). Files are stored as blobs and displayed inline.
-- `generate_image` — image generation through the configured image model.
-- `generate_questions` — produces quiz items and saves them directly to the Quiz tab.
+- `read_document_structure` — re-read an attached DOCX as structured HTML so the model can edit it while preserving headings, lists, tables, inline bold/italic, and hyperlinks. The intended round-trip is `read_document_structure` → edit the HTML → `create_document` with the edited `html`. Only DOCX is supported.
+- `generate_image` — image generation through the configured image model. Generated images are displayed inline and can be iterated on by passing the prior image's blob id as `source_blob_id`.
+- `generate_questions` — produces quiz items (MCQ or fill-in-the-blank) from source material and saves them directly to the Quiz tab.
 
 **Context awareness**
 - `get_environment` — current date, time, timezone, locale, and OS/platform.
