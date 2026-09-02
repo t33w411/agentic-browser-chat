@@ -13083,7 +13083,7 @@
     var loadedGlobalDefaultModelForPanelRuntime = '';
     var loadedImageModelsForPanelRuntime = [];
     var loadedChatModelsForPanelRuntime = [];
-    const MODEL_CACHE_KEY_FOR_PANEL_RUNTIME = 'abchat_model_cache_v14';
+    const MODEL_CACHE_KEY_FOR_PANEL_RUNTIME = 'abchat_model_cache_v16';
     const ROUTER_EXCEPTION_MODEL_IDS_FOR_PANEL_RUNTIME = ['openrouter/auto', 'openrouter/free'];
     // OpenRouter variant suffixes this extension cannot drive. ':batch' queues the request and
     // returns within 24 hours, which is useless for an interactive streaming agent, and the id
@@ -13095,6 +13095,7 @@
     // ':free' variants cost nothing, so they cannot clear the completion-cost floor that keeps
     // underpowered paid models out of the picker. Exempt them explicitly instead.
     const FREE_MODEL_VARIANT_SUFFIX_FOR_PANEL_RUNTIME = ':free';
+    const MIN_COMPLETION_COST_PER_MILLION_FOR_PANEL_RUNTIME = 0.25;
 
     function isBlockedModelVariantForPanelRuntime(modelForBlockCheck) {
       const idForBlockCheck = String((modelForBlockCheck && modelForBlockCheck.id) || '').toLowerCase();
@@ -13237,7 +13238,7 @@
       }).filter(function (m) {
         if (ROUTER_EXCEPTION_MODEL_IDS_FOR_PANEL_RUNTIME.includes(m.id)) return true;
         if (isFreeModelVariantForPanelRuntime(m)) return true;
-        return m.completionCostPerMillion !== null && m.completionCostPerMillion >= 1;
+        return m.completionCostPerMillion !== null && m.completionCostPerMillion >= MIN_COMPLETION_COST_PER_MILLION_FOR_PANEL_RUNTIME;
       });
     }
 
@@ -18329,8 +18330,13 @@
       try {
         var resultForPanelRuntime = await repoForPanelRuntime.pruneOrphanedBlobs(getPendingBlobIdsForPanelRuntime());
         var deletedCountForPanelRuntime = (resultForPanelRuntime && resultForPanelRuntime.deleted) || 0;
+        var draftsReclaimedForPanelRuntime = (resultForPanelRuntime && resultForPanelRuntime.draftsReclaimed) || 0;
         if (resultElForPanelRuntime) {
-          resultElForPanelRuntime.textContent = deletedCountForPanelRuntime + ' blob(s) removed';
+          var pruneMessageForPanelRuntime = deletedCountForPanelRuntime + ' blob(s) removed';
+          if (draftsReclaimedForPanelRuntime > 0) {
+            pruneMessageForPanelRuntime += ', ' + draftsReclaimedForPanelRuntime + ' stale draft(s) cleared';
+          }
+          resultElForPanelRuntime.textContent = pruneMessageForPanelRuntime;
           setTimeout(function () { resultElForPanelRuntime.textContent = ''; }, 3000);
         }
         loadStorageEstimateForPanelRuntime();

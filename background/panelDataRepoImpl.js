@@ -460,6 +460,7 @@
   var LEGACY_INPUT_DRAFT_STORAGE_KEY_FOR_PANEL_DATA_REPO = 'abchat_input_draft';
   var INPUT_DRAFT_STORAGE_KEY_PREFIX_FOR_PANEL_DATA_REPO = 'abchat_input_draft_sync:';
   var NOTE_DRAFT_STORAGE_KEY_PREFIX_FOR_PANEL_DATA_REPO = 'abchat_note_draft_sync:';
+  var NEW_CHAT_INPUT_DRAFT_SCOPE_FOR_PANEL_DATA_REPO = 'new';
 
   function removeChatInputDraftsForPanelDataRepo(chatIdsForPanelDataRepo) {
     var keysForDraftRemoval = Array.isArray(chatIdsForPanelDataRepo)
@@ -497,6 +498,49 @@
         resolveForStorageRead({});
       }
     });
+  }
+
+  // Drops input-draft keys whose chat no longer exists. The blob reference scan below trusts the
+  // mere presence of an abchat_input_draft_sync:<id> key, so a draft left behind by a chat that was
+  // removed without its draft (a partial delete, or a failed storage.remove) would pin its chips'
+  // blobs forever with nothing left to ever collect them. Running this before the reference scan lets
+  // the same sweep reclaim those blobs. The unsaved new-chat scope has no chat id and is always kept;
+  // a non-numeric or non-positive scope is left alone rather than guessed at.
+  async function reconcileOrphanedChatInputDraftsForPanelDataRepo() {
+    var dbForPanelDataRepo = requireDbForPanelDataRepo();
+    var storedItemsForReconcile = await readAllLocalStorageForPanelDataRepo();
+    var storedKeysForReconcile = Object.keys(storedItemsForReconcile);
+    var candidatesForReconcile = [];
+    for (var keyIndexForReconcile = 0; keyIndexForReconcile < storedKeysForReconcile.length; keyIndexForReconcile++) {
+      var keyForReconcile = storedKeysForReconcile[keyIndexForReconcile];
+      if (keyForReconcile.indexOf(INPUT_DRAFT_STORAGE_KEY_PREFIX_FOR_PANEL_DATA_REPO) !== 0) continue;
+      var scopeForReconcile = keyForReconcile.slice(INPUT_DRAFT_STORAGE_KEY_PREFIX_FOR_PANEL_DATA_REPO.length);
+      if (scopeForReconcile === NEW_CHAT_INPUT_DRAFT_SCOPE_FOR_PANEL_DATA_REPO) continue;
+      var chatIdForReconcile = Number(scopeForReconcile);
+      if (!Number.isInteger(chatIdForReconcile) || chatIdForReconcile <= 0) continue;
+      candidatesForReconcile.push({ key: keyForReconcile, chatId: chatIdForReconcile });
+    }
+    if (candidatesForReconcile.length === 0) return { reclaimed: 0 };
+
+    var chatIdsForReconcile = candidatesForReconcile.map(function (candidateForReconcile) {
+      return candidateForReconcile.chatId;
+    });
+    var existingChatsForReconcile = await dbForPanelDataRepo.chats.bulkGet(chatIdsForReconcile);
+    var staleKeysForReconcile = candidatesForReconcile
+      .filter(function (candidateForReconcile, indexForReconcile) {
+        return !existingChatsForReconcile[indexForReconcile];
+      })
+      .map(function (candidateForReconcile) { return candidateForReconcile.key; });
+    if (staleKeysForReconcile.length === 0) return { reclaimed: 0 };
+
+    await new Promise(function (resolveForReconcile) {
+      try {
+        chrome.storage.local.remove(staleKeysForReconcile, function () { resolveForReconcile(); });
+      } catch (errForReconcile) {
+        resolveForReconcile();
+      }
+    });
+    return { reclaimed: staleKeysForReconcile.length };
   }
 
   function addBlobRefIdsFromEntryListForPanelDataRepo(targetSetForRefIds, entryListForRefIds) {
@@ -615,6 +659,16 @@
 
   async function pruneOrphanedBlobsForPanelDataRepo(protectedBlobIdsForPanelDataRepo) {
     var dbForPanelDataRepo = requireDbForPanelDataRepo();
+
+    // Reclaim stale draft keys first so their chips drop out of the reference set below and this
+    // same sweep frees the blobs they were pinning. A failure here must not stop blob pruning.
+    var reconcileResultForPrune = { reclaimed: 0 };
+    try {
+      reconcileResultForPrune = await reconcileOrphanedChatInputDraftsForPanelDataRepo();
+    } catch (errForReconcilePrune) {
+      reconcileResultForPrune = { reclaimed: 0 };
+    }
+
     var referencedBlobIdsForPrune = await collectReferencedBlobIdsForPanelDataRepo();
     var protectedSetForPrune = buildProtectedBlobIdSetForPanelDataRepo(protectedBlobIdsForPanelDataRepo);
 
@@ -627,7 +681,7 @@
       await dbForPanelDataRepo.attachmentBlobs.bulkDelete(orphanIdsForPrune);
     }
 
-    return { deleted: orphanIdsForPrune.length };
+    return { deleted: orphanIdsForPrune.length, draftsReclaimed: reconcileResultForPrune.reclaimed };
   }
 
   async function deleteChatsOlderThanForPanelDataRepo(daysForPanelDataRepo, protectedBlobIdsForPanelDataRepo) {
