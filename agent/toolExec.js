@@ -3027,11 +3027,21 @@
     if (ariaCheckedForItem && ariaCheckedForItem !== 'false') stateForItem.checked = ariaCheckedForItem === 'mixed' ? 'mixed' : true;
     var ariaExpandedForItem = elForItem.getAttribute && elForItem.getAttribute('aria-expanded');
     if (ariaExpandedForItem === 'true' || ariaExpandedForItem === 'false') stateForItem.expanded = ariaExpandedForItem === 'true';
+    // A control that opens a popup (listbox/menu/dialog): tells the model this is a dropdown-style
+    // trigger to open before its options exist, even when it carries no aria-expanded to read.
+    var ariaHasPopupForItem = elForItem.getAttribute && elForItem.getAttribute('aria-haspopup');
+    if (ariaHasPopupForItem && ariaHasPopupForItem !== 'false') {
+      stateForItem.hasPopup = (ariaHasPopupForItem === 'true') ? true : ariaHasPopupForItem;
+    }
     var ariaPressedForItem = elForItem.getAttribute && elForItem.getAttribute('aria-pressed');
     if (ariaPressedForItem === 'true' || ariaPressedForItem === 'false') stateForItem.pressed = ariaPressedForItem === 'true';
     if (elForItem.getAttribute && elForItem.getAttribute('aria-selected') === 'true') stateForItem.selected = true;
     if (elForItem.disabled === true || (elForItem.getAttribute && elForItem.getAttribute('aria-disabled') === 'true')) stateForItem.disabled = true;
     if (elForItem.required === true) stateForItem.required = true;
+    // Report the one element that holds keyboard focus, so the model can tell whether a
+    // keyboard action (press/type) will land here before sending one. Cheap: activeElement
+    // is a fast getter and the shadow-piercing walk only runs on the focused element itself.
+    if (elForItem === resolveActiveElementForToolExec()) stateForItem.focused = true;
     if (!inViewportForItem) stateForItem.offscreen = true;
     if (Object.keys(stateForItem).length) itemForObserve.state = stateForItem;
     if (!itemForObserve.name && !itemForObserve.value && !itemForObserve.placeholder) {
@@ -3085,11 +3095,13 @@
         if (stForText.checked === 'mixed') flagsForText.push('mixed');
         if (stForText.expanded === true) flagsForText.push('expanded');
         if (stForText.expanded === false) flagsForText.push('collapsed');
+        if (stForText.hasPopup) flagsForText.push('haspopup' + (stForText.hasPopup === true ? '' : ':' + stForText.hasPopup));
         if (stForText.pressed === true) flagsForText.push('pressed');
         if (stForText.pressed === false) flagsForText.push('unpressed');
         if (stForText.selected) flagsForText.push('selected');
         if (stForText.disabled) flagsForText.push('disabled');
         if (stForText.required) flagsForText.push('required');
+        if (stForText.focused) flagsForText.push('focused');
         if (stForText.offscreen) flagsForText.push('offscreen');
         if (flagsForText.length) lineForText += ' {' + flagsForText.join(',') + '}';
       }
@@ -3928,6 +3940,8 @@
   // contains), on visible text or value. Custom comboboxes go through select_option instead.
   function selectNativeOptionForToolExec(selectElForNative, labelForNative) {
     var optionsForNative = selectElForNative.options ? Array.prototype.slice.call(selectElForNative.options) : [];
+    // Disabled options (e.g. a "Choose an option" placeholder) are never selectable targets.
+    var selectableForNative = optionsForNative.filter(function (oForNative) { return !oForNative.disabled; });
     var normLabelForNative = labelForNative.replace(/\s+/g, ' ').trim().toLowerCase();
     var optTextForNative = function (oForNative) { return (oForNative.text || '').replace(/\s+/g, ' ').trim().toLowerCase(); };
     var tiersForNative = [
@@ -3937,18 +3951,58 @@
     ];
     var matchForNative = null;
     for (var tForNative = 0; tForNative < tiersForNative.length && !matchForNative; tForNative++) {
-      for (var oIdxForNative = 0; oIdxForNative < optionsForNative.length; oIdxForNative++) {
-        if (tiersForNative[tForNative](optionsForNative[oIdxForNative])) { matchForNative = optionsForNative[oIdxForNative]; break; }
+      for (var oIdxForNative = 0; oIdxForNative < selectableForNative.length; oIdxForNative++) {
+        if (tiersForNative[tForNative](selectableForNative[oIdxForNative])) { matchForNative = selectableForNative[oIdxForNative]; break; }
       }
     }
     if (!matchForNative) {
-      var availableForNative = optionsForNative.slice(0, 20).map(function (oForNative) { return (oForNative.text || '').trim(); }).filter(Boolean).join(', ');
+      var availableForNative = selectableForNative.slice(0, 20).map(function (oForNative) { return (oForNative.text || '').trim(); }).filter(Boolean).join(', ');
       return { ok: false, error: 'No option matching "' + labelForNative + '" in this select. Available: ' + availableForNative };
     }
-    selectElForNative.value = matchForNative.value;
+    // A React-controlled select ignores a raw `.value =`; route through the prototype value setter
+    // so the framework's change tracking fires, then dispatch input+change as a real selection does.
+    setNativeValueForPageFillForm(selectElForNative, matchForNative.value);
     try { selectElForNative.dispatchEvent(new Event('input', { bubbles: true })); } catch (eInputNative) { /* ignore */ }
     try { selectElForNative.dispatchEvent(new Event('change', { bubbles: true })); } catch (eChangeNative) { /* ignore */ }
-    return { ok: true, summary: 'selected "' + (matchForNative.text || '').trim() + '"' };
+    var committedForNative = selectElForNative.value === matchForNative.value;
+    return {
+      ok: true,
+      committed: committedForNative,
+      summary: 'selected "' + (matchForNative.text || '').trim() + '"'
+        + (committedForNative ? '' : ' (the select did not keep the value; verify)')
+    };
+  }
+
+  // Resolve the real native <select> a select-style ref stands for. Design systems commonly render
+  // a styled, focusable overlay (a <div tabindex="0"> shell) on top of a visually hidden native
+  // <select>; observe surfaces the visible overlay, not the hidden control. Returns the <select>
+  // to drive directly, or null for a genuinely custom widget with no native select behind it.
+  function resolveNativeSelectForToolExec(elForNativeResolve) {
+    if (!elForNativeResolve) return null;
+    if (elForNativeResolve.tagName === 'SELECT') return elForNativeResolve;
+    if (typeof elForNativeResolve.querySelector !== 'function') return null;
+    // 1. A native select the trigger wraps.
+    var directForNativeResolve = elForNativeResolve.querySelector('select');
+    if (directForNativeResolve) return directForNativeResolve;
+    // 2. An explicitly associated select (aria-controls / aria-owns).
+    var ctrlIdsForNativeResolve = (elForNativeResolve.getAttribute
+      && (elForNativeResolve.getAttribute('aria-controls') || elForNativeResolve.getAttribute('aria-owns'))) || '';
+    var idListForNativeResolve = ctrlIdsForNativeResolve.split(/\s+/);
+    for (var ciForNativeResolve = 0; ciForNativeResolve < idListForNativeResolve.length; ciForNativeResolve++) {
+      if (!idListForNativeResolve[ciForNativeResolve]) continue;
+      var byIdForNativeResolve = document.getElementById(idListForNativeResolve[ciForNativeResolve]);
+      if (byIdForNativeResolve && byIdForNativeResolve.tagName === 'SELECT') return byIdForNativeResolve;
+    }
+    // 3. The sole select inside the nearest field wrapper (label + control share a container).
+    //    Bounded to a couple of ancestors and required to be unique, so a broad container (a whole
+    //    form) never hands back an unrelated select.
+    var scopeForNativeResolve = elForNativeResolve.parentElement;
+    for (var upForNativeResolve = 0; upForNativeResolve < 2 && scopeForNativeResolve; upForNativeResolve++, scopeForNativeResolve = scopeForNativeResolve.parentElement) {
+      var selectsForNativeResolve = scopeForNativeResolve.querySelectorAll('select');
+      if (selectsForNativeResolve.length === 1) return selectsForNativeResolve[0];
+      if (selectsForNativeResolve.length > 1) break;
+    }
+    return null;
   }
 
   // True when a failed/unconfirmed synthetic select is worth a trusted open + option click.
@@ -4017,12 +4071,64 @@
     return exactForFind || startsForFind || containsForFind;
   }
 
+  // Trusted keyboard fallback for a custom select whose option list neither the synthetic pointer
+  // open nor a trusted click will reveal, but which opens from the keyboard once focused (the
+  // standard combobox pattern). Focus the trigger, press ArrowDown to open, then match the
+  // now-rendered list and click its exact option. The commit always goes through a verified option
+  // click / select_option retry, never a blind key, so the wrong option is never chosen: if nothing
+  // renders, this reports failure rather than mutating the control. Returns { ok, summary } on a
+  // confirmed commit, else { ok:false }.
+  async function attemptTrustedKeyboardSelectForToolExec(elForKbSel, descriptorForKbSel, argsForKbSel, contextForKbSel) {
+    if (!elForKbSel || typeof elForKbSel.focus !== 'function') return { ok: false };
+    try { elForKbSel.focus({ preventScroll: true }); } catch (eKbFocus) { /* ignore */ }
+    if (resolveActiveElementForToolExec() !== elForKbSel) return { ok: false };
+    var openKbForSel = await pageActToolForToolExec({ action: 'key', keys: 'ArrowDown' }, contextForKbSel);
+    if (!openKbForSel || !openKbForSel.ok) return { ok: false };
+    var optionElForKbSel = findVisibleSelectOptionElForToolExec(argsForKbSel.option);
+    if (optionElForKbSel) {
+      var optionPathForKbSel = buildCssPathForPageQuery(optionElForKbSel);
+      var optionFpForKbSel = getElementFingerprintForPageQuery(optionElForKbSel);
+      if (optionPathForKbSel && optionPathForKbSel.selector) {
+        var pickKbForSel = await pageActToolForToolExec({
+          action: 'click',
+          selector: optionPathForKbSel.selector,
+          expected_fingerprint: optionFpForKbSel
+        }, contextForKbSel);
+        if (pickKbForSel && pickKbForSel.ok) {
+          return { ok: true, summary: 'selected "' + argsForKbSel.option + '" (trusted keyboard open, escalated)' };
+        }
+      }
+    }
+    var retryKbForSel = await pageQueryToolForToolExec({
+      operation: 'findPageElements',
+      category: descriptorForKbSel.category || 'form_fields',
+      selector: descriptorForKbSel.selector,
+      sub_operation: 'select_option',
+      option: argsForKbSel.option,
+      expected_fingerprint: descriptorForKbSel.fingerprint
+    }, contextForKbSel);
+    if (retryKbForSel && retryKbForSel.ok) {
+      return {
+        ok: true,
+        summary: 'selected "' + argsForKbSel.option + '" (trusted keyboard open, escalated)'
+          + (retryKbForSel.committed === false ? ' (commit unconfirmed; verify)' : '')
+      };
+    }
+    return { ok: false };
+  }
+
   async function performRefSelectForToolExec(elForSelect, descriptorForSelect, argsForSelect, contextForSelect) {
     if (typeof argsForSelect.option !== 'string' || !argsForSelect.option.trim()) {
       return { ok: false, error: 'page_act select requires option (the visible label to choose).' };
     }
-    if (elForSelect && elForSelect.tagName === 'SELECT') {
-      return selectNativeOptionForToolExec(elForSelect, argsForSelect.option);
+    // A styled dropdown is very often a real native <select> hidden behind a focusable overlay
+    // (Northstar/UXCore, older MUI, and similar); observe surfaces the visible wrapper, not the
+    // select. Drive the underlying <select> directly whenever one is reachable: it is deterministic
+    // and needs no popup, because a native select never renders a scannable DOM option list for the
+    // synthetic/trusted/keyboard open paths below to match against.
+    var nativeSelectForSelect = resolveNativeSelectForToolExec(elForSelect);
+    if (nativeSelectForSelect) {
+      return selectNativeOptionForToolExec(nativeSelectForSelect, argsForSelect.option);
     }
     var selArgsForSelect = {
       operation: 'findPageElements',
@@ -4092,12 +4198,20 @@
           + (retryForSelect.committed === false ? ' (commit unconfirmed; verify)' : '')
       };
     }
+
+    // Last resort: focus the trigger and open from the keyboard, for widgets that ignore both the
+    // synthetic pointer open and the trusted click but open on ArrowDown once focused.
+    var kbForSelect = await attemptTrustedKeyboardSelectForToolExec(elForSelect, descriptorForSelect, argsForSelect, contextForSelect);
+    if (kbForSelect && kbForSelect.ok) return kbForSelect;
+
     return {
       ok: false,
       error: 'Synthetic select failed (' + synthSelectReasonForSelect + '). Trusted select failed: '
         + ((retryForSelect && retryForSelect.error)
           ? retryForSelect.error
           : 'Could not select that option.')
+        + ' A keyboard open (focus + ArrowDown) did not reveal a matchable option list either. '
+        + 'Drive it manually: page_act click this ref to focus and open it, confirm state.expanded or state.focused on the next snapshot, then page_act press ArrowDown/Enter or select the option.'
     };
   }
 
@@ -4130,12 +4244,27 @@
     return { ok: true, summary: 'scrolled ' + dirForScroll };
   }
 
-  async function performRefPressForToolExec(argsForPress, contextForPress) {
+  async function performRefPressForToolExec(elForPress, descriptorForPress, argsForPress, contextForPress) {
     if (typeof argsForPress.keys !== 'string' || !argsForPress.keys.trim()) {
       return { ok: false, error: 'page_act press requires keys (e.g. "Enter", "Escape", "Ctrl+A").' };
     }
     var prepForPress = await prepareTrustedDelegationForToolExec(contextForPress);
     if (!prepForPress.ok) return { ok: false, consent_required: true, error: prepForPress.error };
+    // A ref was given: move focus to that control first so the key lands on it, not on whatever
+    // happens to hold focus. Without this a stray body focus turns Space/Home/ArrowDown into a page
+    // scroll while the model believes it is driving the ref. Confirm focus actually landed before
+    // dispatching, and refuse with a clear message otherwise rather than keying the wrong element.
+    if (elForPress) {
+      try { if (typeof elForPress.focus === 'function') elForPress.focus({ preventScroll: true }); } catch (eFocusPress) { /* ignore */ }
+      if (resolveActiveElementForToolExec() !== elForPress) {
+        return {
+          ok: false,
+          error: 'Could not move keyboard focus to ref ' + argsForPress.ref + ', so "' + argsForPress.keys
+            + '" was not sent (it would have gone to whatever else holds focus, e.g. scrolling the page). '
+            + 'This control may not accept focus directly: click it first, confirm state.focused on it in the next snapshot, then press.'
+        };
+      }
+    }
     var resForPress = await pageActToolForToolExec({ action: 'key', keys: argsForPress.keys }, contextForPress);
     if (resForPress && resForPress.ok) return { ok: true, summary: 'pressed ' + argsForPress.keys };
     return { ok: false, error: (resForPress && resForPress.error) ? resForPress.error : 'Key press failed.' };
@@ -4727,14 +4856,17 @@
       }
     }
 
-    // press acts on whatever holds focus; scroll may be a page scroll; both can omit a ref.
-    // Models often pass ref:0 to mean "no ref" for page scroll; treat 0 like omit for scroll only.
+    // press with a ref focuses that control before sending the key; scroll may be a page scroll;
+    // both can omit a ref. Models often pass ref:0 to mean "no ref"; treat 0 like omit for both.
     // drag resolves its own two refs; fill resolves its fields array. Every other action targets one ref.
     var effectiveRefForAct = argsForAct.ref;
-    if (actionForAct === 'scroll' && (effectiveRefForAct === 0 || effectiveRefForAct === '0')) {
+    if ((actionForAct === 'scroll' || actionForAct === 'press') && (effectiveRefForAct === 0 || effectiveRefForAct === '0')) {
       effectiveRefForAct = null;
     }
-    var refOptionalForAct = (actionForAct === 'press') || (actionForAct === 'scroll' && effectiveRefForAct == null)
+    // press is ref-optional only when no ref was given: with a ref, resolve it so it can be focused
+    // before the key is sent (and so a stale ref returns a fresh snapshot instead of keying the page).
+    var refOptionalForAct = (actionForAct === 'press' && effectiveRefForAct == null)
+      || (actionForAct === 'scroll' && effectiveRefForAct == null)
       || actionForAct === 'drag' || actionForAct === 'fill';
     var resolvedForAct = null;
     if (!refOptionalForAct) {
@@ -4800,7 +4932,7 @@
       } else if (actionForAct === 'scroll') {
         effectForAct = await performRefScrollForToolExec(elForAct, argsForAct);
       } else if (actionForAct === 'press') {
-        effectForAct = await performRefPressForToolExec(argsForAct, contextForAct);
+        effectForAct = await performRefPressForToolExec(elForAct, descriptorForAct, argsForAct, contextForAct);
       } else if (actionForAct === 'drag') {
         effectForAct = await performRefDragForToolExec(argsForAct, contextForAct);
       }
@@ -6893,26 +7025,43 @@
             }
           }
 
-          // No match: report the visible options and bail.
+          // No match: report the visible options and bail. Distinguish "opened but the option
+          // is not there" from "the dropdown never opened", because the fixes differ: the first
+          // is a label/existence problem, the second means the widget ignored the synthetic open
+          // and needs a real click or the keyboard. Claiming "opened" when zero options rendered
+          // and nothing reads as open sent the model chasing a phantom-open state.
           if (matchForSelect.matches.length === 0) {
             var visibleLabelsForSelect = scanForSelect.options.slice(0, 30).map(function (oForLabels) {
               var fForLabels = getOptionTextFieldsForSelectOption(oForLabels);
               return fForLabels.text || fForLabels.aria || fForLabels.value;
             }).filter(Boolean);
+            var reallyOpenedForSelect = isOpenForSelect();
+            var anyRenderedForSelect = scanForSelect.options.length > 0;
             obsForSelect.drain();
+            var noMatchErrorForSelect;
+            if (!anyRenderedForSelect && !reallyOpenedForSelect) {
+              noMatchErrorForSelect = 'The dropdown did not open: clicking it'
+                + (usedTypeaheadForSelect ? ', typing to filter,' : '')
+                + (usedScrollForSelect ? ' and scrolling' : '')
+                + ' produced no option list, so "' + targetOptionForSelect + '" could not be chosen. '
+                + 'This widget likely opens only from a real click or the keyboard: click its ref to focus and open it, '
+                + 'confirm state.expanded or state.focused on the next snapshot, then select the option (or press ArrowDown/Enter).';
+            } else {
+              noMatchErrorForSelect = 'Opened the dropdown but found no option matching "' + targetOptionForSelect + '"'
+                + (usedTypeaheadForSelect ? ' (after typing to filter)' : '')
+                + (usedScrollForSelect ? ' (after scrolling the list)' : '')
+                + '. Visible options: ' + (visibleLabelsForSelect.length ? JSON.stringify(visibleLabelsForSelect) : '(none detected)')
+                + '. The option may not exist, the labels may differ from what you searched, or the list may need different filter text.';
+            }
             return {
               ok: false,
               operation: operation,
               sub_operation: subOpForFPE,
               selector: selectorForFPE,
-              opened: isOpenForSelect(),
+              opened: reallyOpenedForSelect,
               used_typeahead: usedTypeaheadForSelect,
               used_scroll: usedScrollForSelect,
-              error: 'Opened the dropdown but found no option matching "' + targetOptionForSelect + '"'
-                + (usedTypeaheadForSelect ? ' (after typing to filter)' : '')
-                + (usedScrollForSelect ? ' (after scrolling the list)' : '')
-                + '. Visible options: ' + (visibleLabelsForSelect.length ? JSON.stringify(visibleLabelsForSelect) : '(none detected)')
-                + '. The option may not exist, the labels may differ from what you searched, or the list may need different filter text.'
+              error: noMatchErrorForSelect
             };
           }
 
