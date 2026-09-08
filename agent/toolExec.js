@@ -10060,32 +10060,54 @@ self.onmessage = function (e) {
     if (!imageModel) return { ok: false, error: 'No image model selected. Please choose your preferred image generation model in Settings first.' };
     if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
 
-    // When iterating, load the source blob and send it as a multimodal content part so the model
-    // has visual grounding. Falls back to text-only if the blob is unavailable.
-    var userContentForImage;
-    if (sourceBlobIdForImage !== null) {
-      var repoForImage = getPanelDataRepoForToolExec();
-      var sourceDataUrlForImage = null;
-      if (repoForImage && typeof repoForImage.getAttachmentBlob === 'function') {
-        try {
-          var blobRecordForImage = await repoForImage.getAttachmentBlob(sourceBlobIdForImage);
-          if (blobRecordForImage && typeof blobRecordForImage.dataUrl === 'string' &&
-              blobRecordForImage.dataUrl.indexOf('data:image/') === 0) {
-            sourceDataUrlForImage = blobRecordForImage.dataUrl;
-          }
-        } catch (e) {}
+    // Load any input images and send them as multimodal content parts so the model has visual
+    // grounding: the source_blob_id seed to iterate on first, then up to 3 reference images that
+    // steer a fresh composition. Each blob that is missing or not an image is skipped; if none
+    // resolve the request degrades to a text-only generation from the prompt alone.
+    var MAX_REFERENCE_BLOBS_FOR_IMAGE = 3;
+    var referenceBlobIdsForImage = [];
+    if (Array.isArray(args.reference_blob_ids)) {
+      for (var iRefForImage = 0; iRefForImage < args.reference_blob_ids.length; iRefForImage++) {
+        var rawRefForImage = Number(args.reference_blob_ids[iRefForImage]);
+        if (Number.isInteger(rawRefForImage) && rawRefForImage > 0 &&
+            rawRefForImage !== sourceBlobIdForImage &&
+            referenceBlobIdsForImage.indexOf(rawRefForImage) === -1) {
+          referenceBlobIdsForImage.push(rawRefForImage);
+        }
+        if (referenceBlobIdsForImage.length >= MAX_REFERENCE_BLOBS_FOR_IMAGE) break;
       }
-      if (sourceDataUrlForImage) {
-        userContentForImage = [
-          { type: 'image_url', image_url: { url: sourceDataUrlForImage } },
-          { type: 'text', text: prompt }
-        ];
-      } else {
-        userContentForImage = prompt;
-      }
-    } else {
-      userContentForImage = prompt;
     }
+
+    var repoForImage = getPanelDataRepoForToolExec();
+    async function loadImageDataUrlForImage(blobIdToLoadForImage) {
+      if (!repoForImage || typeof repoForImage.getAttachmentBlob !== 'function') return null;
+      try {
+        var blobRecordForImage = await repoForImage.getAttachmentBlob(blobIdToLoadForImage);
+        if (blobRecordForImage && typeof blobRecordForImage.dataUrl === 'string' &&
+            blobRecordForImage.dataUrl.indexOf('data:image/') === 0) {
+          return blobRecordForImage.dataUrl;
+        }
+      } catch (e) {}
+      return null;
+    }
+
+    var imagePartsForImage = [];
+    if (sourceBlobIdForImage !== null) {
+      var seedDataUrlForImage = await loadImageDataUrlForImage(sourceBlobIdForImage);
+      if (seedDataUrlForImage) {
+        imagePartsForImage.push({ type: 'image_url', image_url: { url: seedDataUrlForImage } });
+      }
+    }
+    for (var jRefForImage = 0; jRefForImage < referenceBlobIdsForImage.length; jRefForImage++) {
+      var refDataUrlForImage = await loadImageDataUrlForImage(referenceBlobIdsForImage[jRefForImage]);
+      if (refDataUrlForImage) {
+        imagePartsForImage.push({ type: 'image_url', image_url: { url: refDataUrlForImage } });
+      }
+    }
+
+    var userContentForImage = imagePartsForImage.length
+      ? imagePartsForImage.concat([{ type: 'text', text: prompt }])
+      : prompt;
 
     const validAspectRatiosForImage = ['1:1', '16:9', '9:16', '4:3', '3:4'];
     if (!args.aspect_ratio || !validAspectRatiosForImage.includes(args.aspect_ratio)) {

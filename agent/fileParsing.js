@@ -722,31 +722,56 @@
     return linesForFileParsing;
   }
 
+  // Items are grouped into contiguous same-link runs. Each run's accumulated text (including the
+  // inter-item spacing that falls inside it) is wrapped by pdfLinks.formatLinkedText, so a link
+  // spanning several text items yields one "text (url)" rather than a suffix after every item.
+  // The spacer between two differently-linked (or link/plain) items stays in its own plain
+  // segment, so the URL parens never swallow the space around them.
   function renderPdfLineForFileParsing(lineForFileParsing) {
-    var partsForFileParsing = [];
-    var previousEndForFileParsing = null;
+    var pdfLinksForFileParsing = getPdfLinksForFileParsing();
     var itemsForFileParsing = lineForFileParsing.items;
+    var segmentsForFileParsing = [];
+    var previousEndForFileParsing = null;
+    var previousStrForFileParsing = '';
     for (var iForFileParsing = 0; iForFileParsing < itemsForFileParsing.length; iForFileParsing++) {
       var itemForFileParsing = itemsForFileParsing[iForFileParsing];
+      var urlForFileParsing = (pdfLinksForFileParsing && itemForFileParsing.linkUrl)
+        ? itemForFileParsing.linkUrl
+        : '';
+      var spacerForFileParsing = '';
       if (previousEndForFileParsing !== null) {
         var gapForFileParsing = itemForFileParsing.x - previousEndForFileParsing;
         var unitForFileParsing = Math.max(1, itemForFileParsing.height);
-        var alreadySpacedForFileParsing = /\s$/.test(partsForFileParsing[partsForFileParsing.length - 1] || '')
+        var alreadySpacedForFileParsing = /\s$/.test(previousStrForFileParsing)
           || /^\s/.test(itemForFileParsing.str);
         if (gapForFileParsing >= PDF_ALIGN_GAP_RATIO_FOR_FILE_PARSING * unitForFileParsing) {
           var spaceCountForFileParsing = Math.min(
             PDF_MAX_ALIGN_SPACES_FOR_FILE_PARSING,
             Math.max(2, Math.round(gapForFileParsing / (unitForFileParsing * 0.5)))
           );
-          partsForFileParsing.push(new Array(spaceCountForFileParsing + 1).join(' '));
+          spacerForFileParsing = new Array(spaceCountForFileParsing + 1).join(' ');
         } else if (gapForFileParsing >= PDF_WORD_GAP_RATIO_FOR_FILE_PARSING * unitForFileParsing && !alreadySpacedForFileParsing) {
-          partsForFileParsing.push(' ');
+          spacerForFileParsing = ' ';
         }
       }
-      partsForFileParsing.push(itemForFileParsing.str);
+      var lastSegmentForFileParsing = segmentsForFileParsing[segmentsForFileParsing.length - 1];
+      if (lastSegmentForFileParsing && lastSegmentForFileParsing.url === urlForFileParsing) {
+        lastSegmentForFileParsing.text += spacerForFileParsing + itemForFileParsing.str;
+      } else {
+        if (spacerForFileParsing) segmentsForFileParsing.push({ url: '', text: spacerForFileParsing });
+        segmentsForFileParsing.push({ url: urlForFileParsing, text: itemForFileParsing.str });
+      }
+      previousStrForFileParsing = itemForFileParsing.str;
       previousEndForFileParsing = itemForFileParsing.end;
     }
-    return partsForFileParsing.join('').replace(/\s+$/, '').replace(/^\s+/, '');
+    var renderedLineForFileParsing = segmentsForFileParsing.map(function (segmentForFileParsing) {
+      if (segmentForFileParsing.url && pdfLinksForFileParsing
+        && typeof pdfLinksForFileParsing.formatLinkedText === 'function') {
+        return pdfLinksForFileParsing.formatLinkedText(segmentForFileParsing.text, segmentForFileParsing.url);
+      }
+      return segmentForFileParsing.text;
+    }).join('');
+    return renderedLineForFileParsing.replace(/\s+$/, '').replace(/^\s+/, '');
   }
 
   // Split a run of lines wherever the vertical gap jumps well above the run's own typical line
@@ -883,6 +908,31 @@
     return renderedForFileParsing.join('\n\n');
   }
 
+  function getPdfLinksForFileParsing() {
+    return (globalScopeForFileParsing.ABChatAgent || {}).pdfLinks || null;
+  }
+
+  // Fetch the page's Link annotations and tag the text items that fall under them, so hyperlink
+  // URLs survive into the rendered text. Non-fatal: pdf.js text extraction never carries link
+  // targets, so any failure here just leaves items untagged and the text is emitted without URLs.
+  function assignPdfLinkUrlsForFileParsing(pageForFileParsing, viewportTransformForFileParsing, itemsForFileParsing) {
+    var pdfLinksForFileParsing = getPdfLinksForFileParsing();
+    if (!pdfLinksForFileParsing
+      || !itemsForFileParsing.length
+      || typeof pageForFileParsing.getAnnotations !== 'function') {
+      return Promise.resolve();
+    }
+    return pageForFileParsing.getAnnotations({ intent: 'display' }).then(function (annotationsForFileParsing) {
+      var linkRectsForFileParsing = pdfLinksForFileParsing.annotationsToLinkRects(
+        annotationsForFileParsing,
+        viewportTransformForFileParsing
+      );
+      if (linkRectsForFileParsing.length) {
+        pdfLinksForFileParsing.assignLinkUrlsToItems(itemsForFileParsing, linkRectsForFileParsing);
+      }
+    }).catch(function () {});
+  }
+
   function ensurePdfLibraryForFileParsing() {
     loadLibraryForFileParsing('lib/pdf.min.js', 'pdfjs');
     if (!globalScopeForFileParsing.pdfjsLib || typeof globalScopeForFileParsing.pdfjsLib.getDocument !== 'function') {
@@ -916,12 +966,18 @@
           var viewportForFileParsing = pageForFileParsing.getViewport({ scale: 1 });
           return pageForFileParsing.getTextContent().then(function (textContentForFileParsing) {
             var itemsForFileParsing = buildPdfItemsForFileParsing(textContentForFileParsing, viewportForFileParsing.transform);
-            pagesForFileParsing.push({
-              page: pageNumberForFileParsing,
-              text: renderPdfRegionForFileParsing(itemsForFileParsing, 0)
+            return assignPdfLinkUrlsForFileParsing(
+              pageForFileParsing,
+              viewportForFileParsing.transform,
+              itemsForFileParsing
+            ).then(function () {
+              pagesForFileParsing.push({
+                page: pageNumberForFileParsing,
+                text: renderPdfRegionForFileParsing(itemsForFileParsing, 0)
+              });
+              if (typeof pageForFileParsing.cleanup === 'function') pageForFileParsing.cleanup();
+              return readNextPageForFileParsing(pageNumberForFileParsing + 1);
             });
-            if (typeof pageForFileParsing.cleanup === 'function') pageForFileParsing.cleanup();
-            return readNextPageForFileParsing(pageNumberForFileParsing + 1);
           });
         });
       }

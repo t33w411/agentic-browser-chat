@@ -458,6 +458,7 @@
           var imageElementNameForContextBuilder = chipTypeForContextBuilder === "screenshot" ? "screenshot" : "image";
           var imageAttrsForContextBuilder = buildXmlAttrsForContextBuilder([
             ["name", chipLabelForContextBuilder],
+            ["blob_id", Number.isFinite(chipRefIdForContextBuilder) ? chipRefIdForContextBuilder : ""],
             ["title", chipForContextBuilder.pageTitle],
             ["url", chipForContextBuilder.pageUrl]
           ]);
