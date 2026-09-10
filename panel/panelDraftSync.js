@@ -102,6 +102,7 @@
   //   baseUpdatedAt  updatedAt of the payload the composer currently reflects
   //   baseVersion    version of that same payload
   //   dirty          the user has edited since the last landed write or apply
+  //   focused        the caret is in this composer right now
   //   chipLoading    an attachment is still uploading or parsing
   //   sendLocked     a submit for this scope is mid-flight
   //   selfSourceId   this tab's draft source id
@@ -116,6 +117,15 @@
   // That is not the same as republishing an incoming payload the tab did NOT adopt: doing that
   // re-stamps old text as newest and defeats the ordering for every tab, so no branch below may
   // write `incoming` back out.
+  //
+  // `focused` gates only the two outcomes that replace what is on screen: applying a newer
+  // foreign draft, and applying a submit's clear that would blank the box. While the caret is in
+  // the composer both become `ignore`, so a backup from another tab never overwrites the text or
+  // moves the caret, even after this tab's own last save has landed and cleared `dirty`. The gate
+  // is deliberately narrow. A deleted chat (`apply-empty`) still clears the box, because that is
+  // structural rather than a content backup; and `reassert` still fires, because republishing
+  // this tab's own content does not disturb the caret. A held tab converges when it loses focus
+  // and reconciles, not while the user is still typing in it.
   function decideIncomingDraftActionForDraftSync(stateForDecide, scopeForDecide, incomingForDecide) {
     const receiverForDecide = stateForDecide || {};
     const mountedScopeForDecide = receiverForDecide.mountedScope == null
@@ -141,7 +151,11 @@
 
     // The record was removed, which only happens when the chat itself was deleted. Never
     // reassert here: that would recreate a draft for a chat that no longer exists.
+    // Read before the content branches but after the removal check above, so a deleted chat is
+    // never held by focus: apply-empty returns first regardless of where the caret is.
     if (!incomingForDecide) return decisionForDraftSync('apply-empty', 'removed');
+
+    const focusedForDecide = Boolean(receiverForDecide.focused);
 
     const baseForDecide = {
       updatedAt: Number(receiverForDecide.baseUpdatedAt) || 0,
@@ -156,6 +170,11 @@
       if (baseForDecide.updatedAt > clearedThroughForDecide) {
         return decisionForDraftSync('reassert', 'cleared-local-newer');
       }
+      // What is on screen was part of the submitted message, so this clear would blank it. While
+      // the caret is in the box, hold instead of blanking under it; the box converges to empty
+      // when the user leaves and reconciles. reassert is wrong here: it would un-clear the sent
+      // message for every tab and invite a duplicate send.
+      if (focusedForDecide) return decisionForDraftSync('ignore', 'focused-cleared');
       return decisionForDraftSync('apply', 'cleared');
     }
 
@@ -164,7 +183,14 @@
     if (receiverForDecide.dirty) return decisionForDraftSync('ignore', 'local-dirty');
 
     const orderForDecide = comparePayloadsForDraftSync(incomingForDecide, baseForDecide);
-    if (orderForDecide > 0) return decisionForDraftSync('apply', 'newer');
+    if (orderForDecide > 0) {
+      // A newer foreign draft would replace what the caret is in. Hold while focused; the box
+      // reconciles to the newest once focus leaves it.
+      if (focusedForDecide) return decisionForDraftSync('ignore', 'focused-newer');
+      return decisionForDraftSync('apply', 'newer');
+    }
+    // reassert and same do not repaint the box, so focus leaves them untouched: a focused tab
+    // still republishes its own newer content so other tabs converge on it.
     if (orderForDecide < 0) return decisionForDraftSync('reassert', 'local-newer');
     return decisionForDraftSync('ignore', 'same');
   }

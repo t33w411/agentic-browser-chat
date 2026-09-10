@@ -18,6 +18,7 @@ function stateForDraftTest(overridesForState) {
     baseUpdatedAt: 0,
     baseVersion: '',
     dirty: false,
+    focused: false,
     chipLoading: false,
     sendLocked: false,
     selfSourceId: 'tab-a'
@@ -125,6 +126,81 @@ test('survives a clear when this tab holds text the submit never saw', function 
     { cleared: true, text: '', updatedAt: 1200, clearedThroughUpdatedAt: 900 }
   );
   assert.strictEqual(decisionForNewerClear.action, 'reassert');
+});
+
+// The focus gate: while the caret is in the composer, a foreign payload may not replace what is
+// on screen. Each case below is paired with its unfocused counterpart, which is the pre-gate
+// behaviour the old rule returned (it read no `focused` field), so these fail against that rule.
+
+test('a focused composer holds a newer foreign payload instead of applying it', function () {
+  assert.strictEqual(
+    decideForDraftTest({ focused: true, baseUpdatedAt: 500 }, { updatedAt: 900 }).action,
+    'ignore'
+  );
+  // Unfocused, the same newer payload is applied as before.
+  assert.strictEqual(
+    decideForDraftTest({ focused: false, baseUpdatedAt: 500 }, { updatedAt: 900 }).action,
+    'apply'
+  );
+});
+
+test('a focused composer still republishes its own newer content', function () {
+  // reassert does not repaint the box, so the gate leaves it: the tab keeps publishing what it
+  // holds so other tabs converge on it.
+  assert.strictEqual(
+    decideForDraftTest(
+      { focused: true, baseUpdatedAt: 2000, baseVersion: 'tab-a:4:2000' },
+      { updatedAt: 900 }
+    ).action,
+    'reassert'
+  );
+});
+
+test('a focused composer is still cleared when the chat itself is deleted', function () {
+  // apply-empty is structural (the chat is gone), not a content backup, so the gate does not
+  // block it even with the caret in the box.
+  assert.strictEqual(decideForDraftTest({ focused: true }, null).action, 'apply-empty');
+});
+
+test('a focused composer holds a submit clear that would blank it', function () {
+  assert.strictEqual(
+    decideForDraftTest(
+      { focused: true, baseUpdatedAt: 800 },
+      { cleared: true, text: '', updatedAt: 1200, clearedThroughUpdatedAt: 900 }
+    ).action,
+    'ignore'
+  );
+  // Unfocused, the same clear empties the composer.
+  assert.strictEqual(
+    decideForDraftTest(
+      { focused: false, baseUpdatedAt: 800 },
+      { cleared: true, text: '', updatedAt: 1200, clearedThroughUpdatedAt: 900 }
+    ).action,
+    'apply'
+  );
+});
+
+test('a focused composer with text newer than a clear still reasserts it', function () {
+  // Text that postdates the submit is republished, not blanked, so focus leaves the reassert
+  // path intact.
+  assert.strictEqual(
+    decideForDraftTest(
+      { focused: true, baseUpdatedAt: 950 },
+      { cleared: true, text: '', updatedAt: 1200, clearedThroughUpdatedAt: 900 }
+    ).action,
+    'reassert'
+  );
+});
+
+test('an unsaved-edit reassert on a clear is unchanged by focus', function () {
+  // dirty is evaluated before focus and already protects and propagates the unsaved text.
+  assert.strictEqual(
+    decideForDraftTest(
+      { focused: true, dirty: true, baseUpdatedAt: 800 },
+      { cleared: true, text: '', updatedAt: 1200, clearedThroughUpdatedAt: 900 }
+    ).action,
+    'reassert'
+  );
 });
 
 test('a delayed payload never wins over one written after it', function () {

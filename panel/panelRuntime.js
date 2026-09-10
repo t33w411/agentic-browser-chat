@@ -14375,6 +14375,19 @@
         });
     }
 
+    // The caret is in the composer when the shadow root's active element is the chat textarea.
+    // Read live at decision time rather than tracked through a focus/blur listener: panel focus
+    // events are stopped at window capture by the focus-steal defense, so such a listener cannot
+    // be relied on, whereas root.activeElement is always current here.
+    function isChatComposerFocusedForPanelRuntime() {
+      try {
+        const taForComposerFocus = root && root.querySelector ? root.querySelector('.chat-textarea') : null;
+        return Boolean(taForComposerFocus && root.activeElement === taForComposerFocus);
+      } catch (errorForComposerFocus) {
+        return false;
+      }
+    }
+
     // Thin adapter over the rules in panelDraftSync.js: gather the receiver's state, ask what to
     // do, do it. No ordering decision belongs here, so that the tested rules are the only ones.
     // In particular nothing in this function may write `incomingForDraft` back to storage: a tab
@@ -14389,6 +14402,7 @@
           baseUpdatedAt: draftUiBaseUpdatedAtForPanelRuntime,
           baseVersion: draftUiBaseVersionForPanelRuntime,
           dirty: draftLocalDirtyForPanelRuntime,
+          focused: isChatComposerFocusedForPanelRuntime(),
           chipLoading: getLoadingInputChipsForPanelRuntime().length > 0,
           sendLocked: draftMountedScopeForPanelRuntime === draftScopeLockedForSendForPanelRuntime,
           selfSourceId: getDraftSyncSourceIdForPanelRuntime()
@@ -21448,6 +21462,13 @@
           }
         });
         chatTaForEnter.addEventListener('input', scheduleDraftSaveForPanelRuntime);
+        // Leaving the composer is the moment a foreign draft the focus gate held back may be
+        // taken. reconcile re-reads storage and applies the newest; it re-checks focus and skips
+        // unsaved edits, so a watchdog re-grab that keeps the caret here still leaves the text
+        // alone, and this never fights an in-progress edit.
+        chatTaForEnter.addEventListener('blur', function () {
+          reconcileMountedInputDraftForPanelRuntime().catch(function () {});
+        });
         bindPasteInterceptForPanelRuntime(chatTaForEnter);
       }
 
