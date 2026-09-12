@@ -3421,6 +3421,22 @@
       } else if (isCoveredForObserve && !includeCoveredForObserve && !isWithinOpenDialogForObserve(elForObserve)) {
         continue;
       }
+
+      // Drop nameless, textless non-field controls before they count as eligible. These are the
+      // offscreen zero-box wrapper elements a cross-origin iframe or a loading skeleton leaves in
+      // the top document: unactionable by a model reasoning about names, and surfacing them is what
+      // invites a guessed ref (the click a page later rejects as "zero bounding box"). Only when
+      // offscreen controls are being included; the default in-viewport path rarely hits them, and
+      // name_filter self-narrows by matched text so it never surfaces a nameless row. A throwaway
+      // ref keeps a suppressed element from claiming a stable number, exactly as the filter probe does.
+      if (includeOffscreenForObserve && !nameFilterAltsForObserve && candForObserve.category !== 'form_fields') {
+        var suppressRulesForObserve = (globalThis.ABChatAgent || {}).embeddedRegions;
+        if (suppressRulesForObserve && typeof suppressRulesForObserve.shouldSuppressUnnamedControlRow === 'function') {
+          var probeRowForObserve = buildObserveItemForToolExec(elForObserve, candForObserve.category, 0, inVpForObserve);
+          if (suppressRulesForObserve.shouldSuppressUnnamedControlRow(probeRowForObserve, candForObserve.category)) continue;
+        }
+      }
+
       eligibleForObserve++;
       if (itemsForObserve.length >= maxItemsForObserve) continue;
 
@@ -3472,6 +3488,22 @@
       resultForObserve.note = 'A dialog/modal is open, so its own controls are included here even where they read as ' +
         'state.covered:true (a just-opened modal is briefly hit-tested as covered). Synthetic page_act (click/type) works ' +
         'on these refs; do NOT dismiss the dialog to "clear" the covered flag.';
+    }
+
+    // A large cross-origin iframe's own controls never appear in the list above (the content
+    // script cannot see into it), so flag it here rather than letting the model read "74 controls,
+    // none of them the tab I want" as its own failure to find them. The note is carried in its own
+    // field, not folded into note, because the service worker is the single writer of the final
+    // embedded-region wording: only it knows whether it merged the embed's controls in as refs, so
+    // the give-up note and the merged-in note can never both reach the model. Not run on the
+    // centered post-action path, which returned earlier.
+    var regionsForObserve = detectEmbeddedCrossOriginRegionsForToolExec();
+    if (regionsForObserve.length) {
+      resultForObserve.embedded_cross_origin_regions = regionsForObserve;
+      var observeRulesForRegions = (globalThis.ABChatAgent || {}).embeddedRegions;
+      var regionNoteForObserve = (observeRulesForRegions && typeof observeRulesForRegions.describeObserveNote === 'function')
+        ? observeRulesForRegions.describeObserveNote(regionsForObserve) : '';
+      if (regionNoteForObserve) resultForObserve.embedded_region_note = regionNoteForObserve;
     }
 
     return resultForObserve;
@@ -5520,6 +5552,18 @@
         var resultObjForRead = { ok: true, mode: 'content', truncated: truncatedForRead, more_content_below: !!moreForRead.more_content_below, text: extractedForRead };
         if (moreForRead.more_content_reason) resultObjForRead.more_content_reason = moreForRead.more_content_reason;
         if (autoScrolledStepsForRead > 0) resultObjForRead.auto_scrolled = autoScrolledStepsForRead;
+        // A large cross-origin iframe renders content this flattened text cannot include; say so
+        // rather than returning silence over it (which reads as "the page is empty/slow"). The
+        // note sits OUTSIDE the [EXTERNAL CONTENT] wrapper because it is the extension speaking,
+        // not page data. Debugger-free; it points the model at take_screenshot, never at automation.
+        var regionsForRead = detectEmbeddedCrossOriginRegionsForToolExec();
+        if (regionsForRead.length) {
+          resultObjForRead.embedded_cross_origin_regions = regionsForRead;
+          var readRulesForRegions = (globalThis.ABChatAgent || {}).embeddedRegions;
+          var readNoteForRegions = (readRulesForRegions && typeof readRulesForRegions.describeReadNote === 'function')
+            ? readRulesForRegions.describeReadNote(regionsForRead) : '';
+          if (readNoteForRegions) resultObjForRead.text = resultObjForRead.text + '\n\n' + readNoteForRegions;
+        }
         return resultObjForRead;
       }
 
@@ -11426,6 +11470,44 @@ self.onmessage = function (e) {
       hopsForScrollProbe++;
     }
     return null;
+  }
+
+  // Read-only scan of the top document for large cross-origin iframes (a micro-frontend or other
+  // embedded app the content script cannot see into). Measures each iframe's visible intersection
+  // with the viewport and defers the keep/drop decision to the pure rule module. Returns
+  // [{ origin, src, fraction }], one entry per distinct origin. Never scrolls, never throws, and
+  // never touches the debugger: this is the debugger-free signal that lets page_read/page_observe
+  // tell the model a visible region is an embedded app rather than returning silence over it.
+  function detectEmbeddedCrossOriginRegionsForToolExec() {
+    var outForRegions = [];
+    if (typeof document === 'undefined' || typeof window === 'undefined' || !document.querySelectorAll) return outForRegions;
+    var rulesForRegions = (globalThis.ABChatAgent || {}).embeddedRegions;
+    if (!rulesForRegions || typeof rulesForRegions.isLargeCrossOriginRegion !== 'function') return outForRegions;
+    var vpWForRegions = window.innerWidth || 0;
+    var vpHForRegions = window.innerHeight || 0;
+    var vpAreaForRegions = vpWForRegions * vpHForRegions;
+    if (vpAreaForRegions <= 0) return outForRegions;
+    var topOriginForRegions = (window.location && window.location.origin) || '';
+    var framesForRegions;
+    try { framesForRegions = document.querySelectorAll('iframe'); } catch (eQueryForRegions) { return outForRegions; }
+    var seenForRegions = {};
+    for (var iForRegions = 0; iForRegions < framesForRegions.length; iForRegions++) {
+      var frameForRegions = framesForRegions[iForRegions];
+      var srcForRegions = (frameForRegions && frameForRegions.getAttribute) ? (frameForRegions.getAttribute('src') || '') : '';
+      if (!srcForRegions) continue;
+      var originForRegions = '';
+      try { originForRegions = new URL(srcForRegions, window.location.href).origin; } catch (eUrlForRegions) { continue; }
+      var rectForRegions = frameForRegions.getBoundingClientRect ? frameForRegions.getBoundingClientRect() : null;
+      if (!rectForRegions) continue;
+      var interWForRegions = Math.max(0, Math.min(rectForRegions.right, vpWForRegions) - Math.max(rectForRegions.left, 0));
+      var interHForRegions = Math.max(0, Math.min(rectForRegions.bottom, vpHForRegions) - Math.max(rectForRegions.top, 0));
+      var fractionForRegions = (interWForRegions * interHForRegions) / vpAreaForRegions;
+      if (!rulesForRegions.isLargeCrossOriginRegion({ topOrigin: topOriginForRegions, srcOrigin: originForRegions, viewportFraction: fractionForRegions })) continue;
+      if (seenForRegions[originForRegions]) continue;
+      seenForRegions[originForRegions] = true;
+      outForRegions.push({ origin: originForRegions, src: srcForRegions, fraction: Math.round(fractionForRegions * 100) / 100 });
+    }
+    return outForRegions;
   }
 
   // Detect, read-only, whether the page likely holds more content that is NOT yet in

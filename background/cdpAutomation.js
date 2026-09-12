@@ -757,6 +757,211 @@
     });
   }
 
+  // ---- Cross-frame (embedded app) support ----
+  //
+  // Reading and clicking inside a cross-origin iframe. The content script cannot see or reach it,
+  // but CDP addresses the whole page's nodes by backend node id regardless of frame, and
+  // Input.dispatchMouseEvent lands at top-level viewport coordinates on whatever pixel is topmost.
+  // The pure role/ref/coordinate helpers live in ABChatBackground.crossFrameAx; these functions are
+  // the CDP glue. Every path degrades to a failure result on any error so the caller can fall back
+  // to the hand-off note rather than break.
+
+  function buildParentOfMapForCdp(frameTreeResultForMap) {
+    var parentOfForMap = {};
+    (function walkForMap(nodeForMap, parentIdForMap) {
+      if (!nodeForMap || !nodeForMap.frame) return;
+      parentOfForMap[nodeForMap.frame.id] = parentIdForMap || null;
+      var childrenForMap = nodeForMap.childFrames || [];
+      for (var iForMap = 0; iForMap < childrenForMap.length; iForMap++) walkForMap(childrenForMap[iForMap], nodeForMap.frame.id);
+    })(frameTreeResultForMap && frameTreeResultForMap.frameTree, null);
+    return parentOfForMap;
+  }
+
+  // Content-box origin of the iframe element that hosts frameId, in ITS parent frame's viewport.
+  // clientLeft/clientTop add the iframe's own border so the offset lands on the child's viewport
+  // origin, not the iframe's border edge.
+  function getFrameOwnerOffsetForCdp(tabIdForOwner, frameIdForOwner) {
+    return sendCommandForCdp(tabIdForOwner, "DOM.getFrameOwner", { frameId: frameIdForOwner }).then(function (ownerForOwner) {
+      var backendForOwner = ownerForOwner && ownerForOwner.backendNodeId;
+      if (!backendForOwner) return Promise.reject(makeCdpErrorForCdp("frame-owner-not-found", "Could not find the iframe that hosts the embedded frame."));
+      return sendCommandForCdp(tabIdForOwner, "DOM.resolveNode", { backendNodeId: backendForOwner }).then(function (resolvedForOwner) {
+        var objForOwner = resolvedForOwner && resolvedForOwner.object;
+        if (!objForOwner || !objForOwner.objectId) return Promise.reject(makeCdpErrorForCdp("node-not-found", "The hosting iframe element could not be resolved."));
+        var fnForOwner = "function () { var r = this.getBoundingClientRect(); return JSON.stringify({ x: r.left + (this.clientLeft || 0), y: r.top + (this.clientTop || 0) }); }";
+        return sendCommandForCdp(tabIdForOwner, "Runtime.callFunctionOn", { objectId: objForOwner.objectId, functionDeclaration: fnForOwner, returnByValue: true }).then(function (callForOwner) {
+          sendCommandForCdp(tabIdForOwner, "Runtime.releaseObject", { objectId: objForOwner.objectId }).catch(function () { /* best-effort */ });
+          var parsedForOwner = null;
+          try { parsedForOwner = JSON.parse(callForOwner && callForOwner.result && callForOwner.result.value); } catch (eForOwner) { parsedForOwner = null; }
+          if (!parsedForOwner) return Promise.reject(makeCdpErrorForCdp("no-rect", "The hosting iframe has no layout box."));
+          return { x: parsedForOwner.x, y: parsedForOwner.y };
+        });
+      });
+    });
+  }
+
+  // Top-level viewport center of a node addressed by backend node id, accounting for the offset of
+  // every ancestor iframe. A node with no frameId (or a root-frame node) needs no offset.
+  function resolveTopViewportCenterForCdp(tabIdForTop, backendNodeIdForTop, frameIdForTop) {
+    var crossFrameAxForTop = (globalScopeForCdp.ABChatBackground || {}).crossFrameAx;
+    return resolveBackendNodeCenterForCdp(tabIdForTop, backendNodeIdForTop).then(function (localForTop) {
+      if (!frameIdForTop || !crossFrameAxForTop) return localForTop;
+      return sendCommandForCdp(tabIdForTop, "Page.getFrameTree", {}).then(function (treeForTop) {
+        var chainForTop = crossFrameAxForTop.frameChainToRoot(frameIdForTop, buildParentOfMapForCdp(treeForTop));
+        if (!chainForTop.length) return localForTop;
+        var offsetsForTop = [];
+        var seqForTop = Promise.resolve();
+        chainForTop.forEach(function (frameInChainForTop) {
+          seqForTop = seqForTop.then(function () {
+            return getFrameOwnerOffsetForCdp(tabIdForTop, frameInChainForTop).then(function (offForTop) { offsetsForTop.push(offForTop); });
+          });
+        });
+        return seqForTop.then(function () { return crossFrameAxForTop.sumFrameChainOffset(localForTop, offsetsForTop); });
+      });
+    });
+  }
+
+  // Collect actionable controls from every frame whose origin is in originsForCollect. Acquires the
+  // lease (which attaches the debugger); the caller must have already confirmed automation is
+  // enabled, since this never opens the consent window. Returns raw controls the caller turns into
+  // refs; keeping the ref registry out of here lets the service worker own ref stability per tab.
+  function collectCrossFrameControlsForCdp(tabIdForCollect, optsForCollect) {
+    optsForCollect = optsForCollect || {};
+    var originsForCollect = Array.isArray(optsForCollect.origins) ? optsForCollect.origins : [];
+    var maxNodesForCollect = optsForCollect.maxNodes || 4000;
+    return (async function () {
+      var crossFrameAxForCollect = (globalScopeForCdp.ABChatBackground || {}).crossFrameAx;
+      if (!crossFrameAxForCollect) return { ok: false, code: "module-unavailable" };
+      if (!originsForCollect.length) return { ok: true, controls: [] };
+      var acquireForCollect = await acquireLeaseForCdp(tabIdForCollect);
+      if (!acquireForCollect || !acquireForCollect.ok) return { ok: false, code: "attach-failed", error: acquireForCollect && acquireForCollect.error };
+      try {
+        await sendCommandForCdp(tabIdForCollect, "Accessibility.enable", {}).catch(function () { /* getFullAXTree usually works without it */ });
+        var treeForCollect = await sendCommandForCdp(tabIdForCollect, "Page.getFrameTree", {});
+        var frameIdsForCollect = [];
+        (function walkFramesForCollect(nodeForWalk) {
+          if (!nodeForWalk || !nodeForWalk.frame) return;
+          var originForWalk = "";
+          try { originForWalk = new URL(nodeForWalk.frame.url || "").origin; } catch (eWalk) { originForWalk = ""; }
+          if (originForWalk && originsForCollect.indexOf(originForWalk) !== -1) frameIdsForCollect.push(nodeForWalk.frame.id);
+          var childrenForWalk = nodeForWalk.childFrames || [];
+          for (var iForWalk = 0; iForWalk < childrenForWalk.length; iForWalk++) walkFramesForCollect(childrenForWalk[iForWalk]);
+        })(treeForCollect && treeForCollect.frameTree);
+        var controlsForCollect = [];
+        for (var fIdxForCollect = 0; fIdxForCollect < frameIdsForCollect.length; fIdxForCollect++) {
+          var frameIdForCollect = frameIdsForCollect[fIdxForCollect];
+          var axForCollect = null;
+          try { axForCollect = await sendCommandForCdp(tabIdForCollect, "Accessibility.getFullAXTree", { frameId: frameIdForCollect }); } catch (eAxForCollect) { axForCollect = null; }
+          var nodesForCollect = (axForCollect && axForCollect.nodes) || [];
+          for (var nIdxForCollect = 0; nIdxForCollect < nodesForCollect.length && controlsForCollect.length < maxNodesForCollect; nIdxForCollect++) {
+            var axNodeForCollect = nodesForCollect[nIdxForCollect];
+            if (!crossFrameAxForCollect.shouldIncludeAxNode(axNodeForCollect)) continue;
+            controlsForCollect.push({ frameId: frameIdForCollect, backendNodeId: axNodeForCollect.backendDOMNodeId, axNode: axNodeForCollect });
+          }
+        }
+        return { ok: true, controls: controlsForCollect };
+      } catch (errForCollect) {
+        return { ok: false, code: (errForCollect && errForCollect.code) || "collect-failed", error: (errForCollect && errForCollect.message) || "Cross-frame collect failed." };
+      } finally {
+        releaseLeaseForCdp(tabIdForCollect);
+      }
+    })();
+  }
+
+  // Trusted click on one embedded-frame control, by backend node id. Cross-frame refs only exist
+  // after a merged observe that already required automation to be enabled, so this assumes consent
+  // and simply fails if the lease cannot be acquired.
+  function clickCrossFrameControlForCdp(tabIdForClick, frameIdForClick, backendNodeIdForClick) {
+    return (async function () {
+      var acquireForClick = await acquireLeaseForCdp(tabIdForClick);
+      if (!acquireForClick || !acquireForClick.ok) return { ok: false, error: (acquireForClick && acquireForClick.error && acquireForClick.error.message) || "Could not attach to the tab to click inside the embedded app." };
+      try {
+        await sendCommandForCdp(tabIdForClick, "DOM.enable", {}).catch(function () { /* getFrameOwner usually works without it */ });
+        var ptForClick = await resolveTopViewportCenterForCdp(tabIdForClick, backendNodeIdForClick, frameIdForClick);
+        if (!ptForClick || typeof ptForClick.x !== "number" || typeof ptForClick.y !== "number") {
+          return { ok: false, error: "Could not work out where the embedded control is on screen." };
+        }
+        await dispatchMouseClickForCdp(tabIdForClick, ptForClick.x, ptForClick.y, "left", 1);
+        return { ok: true, x: ptForClick.x, y: ptForClick.y };
+      } catch (errForClick) {
+        return { ok: false, error: (errForClick && errForClick.message) || "Cross-frame click failed." };
+      } finally {
+        releaseLeaseForCdp(tabIdForClick);
+      }
+    })();
+  }
+
+  // Trusted type into one embedded-frame field. Mirrors the same-frame trusted type: focus with a
+  // click, select-all (Cmd+A on macOS via dispatchKeyComboForCdp), then type the text so it
+  // replaces rather than appends. An empty text clears the field with Backspace.
+  function typeCrossFrameControlForCdp(tabIdForType, frameIdForType, backendNodeIdForType, textForType) {
+    return (async function () {
+      var acquireForType = await acquireLeaseForCdp(tabIdForType);
+      if (!acquireForType || !acquireForType.ok) return { ok: false, error: (acquireForType && acquireForType.error && acquireForType.error.message) || "Could not attach to the tab to type inside the embedded app." };
+      try {
+        await sendCommandForCdp(tabIdForType, "DOM.enable", {}).catch(function () { /* getFrameOwner usually works without it */ });
+        var ptForType = await resolveTopViewportCenterForCdp(tabIdForType, backendNodeIdForType, frameIdForType);
+        if (!ptForType || typeof ptForType.x !== "number" || typeof ptForType.y !== "number") {
+          return { ok: false, error: "Could not work out where the embedded field is on screen." };
+        }
+        await dispatchMouseClickForCdp(tabIdForType, ptForType.x, ptForType.y, "left", 1);
+        await delayForCdp(30);
+        await dispatchKeyComboForCdp(tabIdForType, "Ctrl+A");
+        if (String(textForType) === "") {
+          await dispatchKeyComboForCdp(tabIdForType, "Backspace");
+        } else {
+          await dispatchTypeTextForCdp(tabIdForType, String(textForType), false);
+        }
+        return { ok: true, x: ptForType.x, y: ptForType.y };
+      } catch (errForType) {
+        return { ok: false, error: (errForType && errForType.message) || "Cross-frame type failed." };
+      } finally {
+        releaseLeaseForCdp(tabIdForType);
+      }
+    })();
+  }
+
+  // Trusted select on an embedded-frame dropdown: click the trigger to open it, then re-read the
+  // frame's AX tree (the options render as fresh nodes) and click the option whose name matches.
+  // Returns { ok:false, code:"no-option", opened:true } when the dropdown opened but no option
+  // matched, so the caller can tell the model to observe the now-open list and click it by ref.
+  // A native <select> paints its options in an OS popup outside the DOM, so no option node appears
+  // and this reports no-option; that is the case the two-step fallback is for.
+  function selectCrossFrameControlForCdp(tabIdForSelect, frameIdForSelect, backendNodeIdForSelect, optionForSelect) {
+    return (async function () {
+      var crossFrameAxForSelect = (globalScopeForCdp.ABChatBackground || {}).crossFrameAx;
+      if (!crossFrameAxForSelect || typeof crossFrameAxForSelect.pickOptionControl !== "function") return { ok: false, error: "Selecting inside embedded apps is unavailable in this build." };
+      var acquireForSelect = await acquireLeaseForCdp(tabIdForSelect);
+      if (!acquireForSelect || !acquireForSelect.ok) return { ok: false, error: (acquireForSelect && acquireForSelect.error && acquireForSelect.error.message) || "Could not attach to the tab to use the embedded control." };
+      try {
+        await sendCommandForCdp(tabIdForSelect, "DOM.enable", {}).catch(function () { /* best-effort */ });
+        await sendCommandForCdp(tabIdForSelect, "Accessibility.enable", {}).catch(function () { /* best-effort */ });
+        var triggerPtForSelect = await resolveTopViewportCenterForCdp(tabIdForSelect, backendNodeIdForSelect, frameIdForSelect);
+        if (!triggerPtForSelect || typeof triggerPtForSelect.x !== "number") return { ok: false, error: "Could not work out where the embedded control is on screen." };
+        await dispatchMouseClickForCdp(tabIdForSelect, triggerPtForSelect.x, triggerPtForSelect.y, "left", 1);
+        await delayForCdp(250);
+        var axForSelect = null;
+        try { axForSelect = await sendCommandForCdp(tabIdForSelect, "Accessibility.getFullAXTree", { frameId: frameIdForSelect }); } catch (eAxForSelect) { axForSelect = null; }
+        var nodesForSelect = (axForSelect && axForSelect.nodes) || [];
+        var controlsForSelect = [];
+        for (var nForSelect = 0; nForSelect < nodesForSelect.length; nForSelect++) {
+          var axNodeForSelect = nodesForSelect[nForSelect];
+          if (!crossFrameAxForSelect.shouldIncludeAxNode(axNodeForSelect)) continue;
+          controlsForSelect.push({ frameId: frameIdForSelect, backendNodeId: axNodeForSelect.backendDOMNodeId, axNode: axNodeForSelect });
+        }
+        var matchForSelect = crossFrameAxForSelect.pickOptionControl(controlsForSelect, optionForSelect);
+        if (!matchForSelect) return { ok: false, code: "no-option", opened: true };
+        var optionPtForSelect = await resolveTopViewportCenterForCdp(tabIdForSelect, matchForSelect.backendNodeId, frameIdForSelect);
+        if (!optionPtForSelect || typeof optionPtForSelect.x !== "number") return { ok: false, error: "Found the option but could not work out where it is on screen." };
+        await dispatchMouseClickForCdp(tabIdForSelect, optionPtForSelect.x, optionPtForSelect.y, "left", 1);
+        return { ok: true, x: optionPtForSelect.x, y: optionPtForSelect.y };
+      } catch (errForSelect) {
+        return { ok: false, error: (errForSelect && errForSelect.message) || "Cross-frame select failed." };
+      } finally {
+        releaseLeaseForCdp(tabIdForSelect);
+      }
+    })();
+  }
+
   function dispatchInputForCdp(tabIdForInput, actionParamsForInput) {
     var paramsForInput = actionParamsForInput || {};
     var actionForInput = String(paramsForInput.action || "").toLowerCase();
@@ -886,6 +1091,10 @@
     getSessionState: getSessionStateForCdp,
     sendCommand: sendCommandForCdp,
     performAction: performActionForCdp,
+    collectCrossFrameControls: collectCrossFrameControlsForCdp,
+    clickCrossFrameControl: clickCrossFrameControlForCdp,
+    typeCrossFrameControl: typeCrossFrameControlForCdp,
+    selectCrossFrameControl: selectCrossFrameControlForCdp,
     setNavigationSurvivalPredicate: function (predicateForSet) {
       navigationSurvivalPredicateForCdp = (typeof predicateForSet === "function") ? predicateForSet : null;
     }

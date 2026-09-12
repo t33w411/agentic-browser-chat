@@ -16,6 +16,7 @@ importScripts(
   "./contextMenus.js",
   "./commands.js",
   "./dbHandler.js",
+  "./crossFrameAx.js",
   "./cdpAutomation.js"
 );
 
@@ -32,6 +33,7 @@ const contextMenusForServiceWorker = backgroundNamespaceForServiceWorker.context
 const commandsForServiceWorker = backgroundNamespaceForServiceWorker.commands;
 const dbHandlerForServiceWorker = backgroundNamespaceForServiceWorker.dbHandler;
 const cdpAutomationForServiceWorker = backgroundNamespaceForServiceWorker.cdpAutomation || {};
+const crossFrameAxForServiceWorker = backgroundNamespaceForServiceWorker.crossFrameAx || {};
 const agentNamespaceForServiceWorker = globalThis.ABChatAgent || {};
 const fileParsingForServiceWorker = agentNamespaceForServiceWorker.fileParsing || {};
 const runtimeRequestResponseCacheForServiceWorker = new Map();
@@ -438,6 +440,277 @@ const streamSnapshotsForServiceWorker = new Map();
 // tool calls (delegatePageTool) to the right tab, and (deliberately) NOT kill the run
 // when that tab navigates/reloads. Cleared on stream_end.
 const offscreenRunTargetTabsForServiceWorker = new Map();
+
+// ---- Cross-frame (embedded-app) observation and action ----
+//
+// Refs for controls inside a cross-origin iframe are minted and owned here, not in the content
+// script, which cannot address that frame's nodes. One registry per TAB (a backend node id
+// belongs to a document); reset when the tab navigates so stale ids never resolve.
+const crossFrameRegistriesForServiceWorker = new Map();
+
+// A cross-origin embed is reached into (a CDP accessibility pull) only when it dominates the
+// viewport. Smaller embeds are merely flagged by the C signal; a higher escalation threshold than
+// the C detection threshold keeps a routine observe over a page with a tiny embed from attaching
+// the debugger.
+const CROSS_FRAME_ESCALATION_MIN_FRACTION_FOR_SERVICE_WORKER = 0.5;
+
+function getCrossFrameRegistryForServiceWorker(tabIdForRegistry) {
+  if (typeof crossFrameAxForServiceWorker.createCrossFrameRefRegistry !== "function") return null;
+  let registryForTab = crossFrameRegistriesForServiceWorker.get(tabIdForRegistry);
+  if (!registryForTab) {
+    registryForTab = crossFrameAxForServiceWorker.createCrossFrameRefRegistry();
+    crossFrameRegistriesForServiceWorker.set(tabIdForRegistry, registryForTab);
+  }
+  return registryForTab;
+}
+
+function resetCrossFrameRegistryForServiceWorker(tabIdForReset) {
+  const registryForReset = crossFrameRegistriesForServiceWorker.get(tabIdForReset);
+  if (registryForReset && typeof registryForReset.reset === "function") registryForReset.reset();
+}
+
+// Send one runDelegatedPageTool call to a tab's content script, resolving with { ok, result } or
+// { ok:false, error }. A thin wrapper so the observe-merge and cross-frame page_act paths can drive
+// the content script without duplicating the generic delegate machinery (nav-watch, grace window),
+// which page_observe does not need and a cross-frame click does not trigger.
+function sendRunDelegatedPageToolForServiceWorker(tabIdForSend, toolForSend, argsForSend, chatIdForSend, extraForSend) {
+  return new Promise(function (resolveForSend) {
+    (async function () {
+      try {
+        if (tabMessagingForServiceWorker && typeof tabMessagingForServiceWorker.ensureContentInjected === "function") {
+          await tabMessagingForServiceWorker.ensureContentInjected(tabIdForSend);
+        }
+      } catch (eInjectForSend) { /* proceed; sendMessage reports genuine unreachability */ }
+      const msgForSend = Object.assign(
+        { action: "runDelegatedPageTool", tool: toolForSend, args: argsForSend || {}, chatId: chatIdForSend },
+        extraForSend || {}
+      );
+      chrome.tabs.sendMessage(tabIdForSend, msgForSend, function (respForSend) {
+        if (chrome.runtime.lastError) {
+          resolveForSend({ ok: false, error: chrome.runtime.lastError.message || "The target tab could not be reached." });
+          return;
+        }
+        resolveForSend({ ok: true, result: respForSend });
+      });
+    })();
+  });
+}
+
+// Lowercase "|"-separated fragments of a page_observe name_filter, matching page_observe's own split.
+function nameFilterAltsForServiceWorker(argsForFilter) {
+  const rawForFilter = (argsForFilter && typeof argsForFilter.name_filter === "string") ? argsForFilter.name_filter.trim() : "";
+  if (!rawForFilter) return null;
+  const partsForFilter = rawForFilter.split("|").map(function (pForFilter) { return pForFilter.trim().toLowerCase(); }).filter(Boolean);
+  return partsForFilter.length ? partsForFilter : [rawForFilter.toLowerCase()];
+}
+
+// Pull the dominant cross-origin embed's actionable controls over CDP and merge them into an
+// observe result as ordinary refs. Returns the number of rows merged, or 0 for any bail path (no
+// embed field, nothing dominant, automation off, attach/collect fails, empty tree, no rows).
+// Mutates resultForCollect.items/returned/counts only on success; the caller owns the note.
+function collectAndMergeEmbeddedControlsForServiceWorker(tabIdForCollect, argsForCollect, resultForCollect) {
+  return (async function () {
+    if (!resultForCollect || !Array.isArray(resultForCollect.embedded_cross_origin_regions)) return 0;
+    const dominantForCollect = resultForCollect.embedded_cross_origin_regions.filter(function (rForCollect) {
+      return rForCollect && Number(rForCollect.fraction) >= CROSS_FRAME_ESCALATION_MIN_FRACTION_FOR_SERVICE_WORKER;
+    });
+    if (!dominantForCollect.length) return 0;
+    if (typeof cdpAutomationForServiceWorker.isAutomationEnabled !== "function") return 0;
+    const enabledForCollect = await cdpAutomationForServiceWorker.isAutomationEnabled();
+    if (!enabledForCollect) return 0;
+    const originsForCollect = [];
+    dominantForCollect.forEach(function (rForCollect) {
+      if (rForCollect.origin && originsForCollect.indexOf(rForCollect.origin) === -1) originsForCollect.push(rForCollect.origin);
+    });
+    const collectForCollect = await cdpAutomationForServiceWorker.collectCrossFrameControls(tabIdForCollect, { origins: originsForCollect });
+    if (!collectForCollect || !collectForCollect.ok || !Array.isArray(collectForCollect.controls) || !collectForCollect.controls.length) {
+      return 0;
+    }
+    const registryForCollect = getCrossFrameRegistryForServiceWorker(tabIdForCollect);
+    if (!registryForCollect) return 0;
+    const rowsForCollect = crossFrameAxForServiceWorker.buildCrossFrameRows(collectForCollect.controls, registryForCollect, {
+      maxRows: 120,
+      nameFilterAlts: nameFilterAltsForServiceWorker(argsForCollect)
+    });
+    if (!rowsForCollect.length) return 0;
+    resultForCollect.items = (Array.isArray(resultForCollect.items) ? resultForCollect.items : []).concat(rowsForCollect);
+    resultForCollect.returned = resultForCollect.items.length;
+    if (resultForCollect.counts) {
+      resultForCollect.counts.total_interactive = (resultForCollect.counts.total_interactive || 0) + rowsForCollect.length;
+    }
+    return rowsForCollect.length;
+  })();
+}
+
+// Run the content script's page_observe, then, when the page has a dominant cross-origin embed and
+// advanced automation is on, merge that frame's actionable controls in as ordinary refs. The
+// service worker is the single writer of the embedded-region note: the content script computes the
+// give-up wording but carries it in embedded_region_note rather than applying it, because only the
+// worker knows whether the merge below actually reached the frame's controls. Exactly one note is
+// applied, so the "cannot target these by ref" and "these are refs" wordings can never both reach
+// the model. Any failure leaves the merge at zero rows and the give-up note stands.
+function runMergedObserveForServiceWorker(tabIdForMerged, chatIdForMerged, argsForMerged, extraForMerged) {
+  return (async function () {
+    const baseForMerged = await sendRunDelegatedPageToolForServiceWorker(tabIdForMerged, "page_observe", argsForMerged, chatIdForMerged, extraForMerged);
+    if (!baseForMerged.ok) return baseForMerged;
+    const resultForMerged = baseForMerged.result;
+    if (!resultForMerged || resultForMerged.ok === false) return { ok: true, result: resultForMerged };
+
+    const regionNoteForMerged = typeof resultForMerged.embedded_region_note === "string" ? resultForMerged.embedded_region_note : "";
+    delete resultForMerged.embedded_region_note;
+
+    let mergedRowCountForMerged = 0;
+    try {
+      mergedRowCountForMerged = await collectAndMergeEmbeddedControlsForServiceWorker(tabIdForMerged, argsForMerged, resultForMerged);
+    } catch (eForMerged) {
+      mergedRowCountForMerged = 0;
+    }
+
+    // On a successful merge, say the listed controls are addressable by ref, but do not claim they
+    // verify like same-frame controls: cross-frame rows carry no changed/checked/selected flags, so
+    // route confirmation to take_screenshot rather than the re-observed list. On no merge, the
+    // content script's give-up note (if any) stands.
+    if (mergedRowCountForMerged > 0) {
+      const canNoteForMerged = mergedRowCountForMerged + " control(s) inside the embedded app are listed below " +
+        "with their own refs; click, type into, or select them by ref like any other control. They do not report " +
+        "changed/checked/selected state after an action, so confirm the result with take_screenshot rather than " +
+        "relying on the re-observed list.";
+      resultForMerged.note = resultForMerged.note ? (resultForMerged.note + " " + canNoteForMerged) : canNoteForMerged;
+    } else if (regionNoteForMerged) {
+      resultForMerged.note = resultForMerged.note ? (resultForMerged.note + " " + regionNoteForMerged) : regionNoteForMerged;
+    }
+    return { ok: true, result: resultForMerged };
+  })();
+}
+
+// page_act on an embedded-app ref: resolve it to a CDP target, trusted-click it, and return a
+// page_act-shaped result whose fresh snapshot is a re-merged observe (so the model confirms the
+// outcome from one result, as it does after a same-frame click).
+function runCrossFramePageActForServiceWorker(tabIdForAct, chatIdForAct, argsForAct, extraForAct) {
+  return (async function () {
+    const registryForAct = getCrossFrameRegistryForServiceWorker(tabIdForAct);
+    const actionForAct = String(argsForAct.action || "click");
+
+    // A page_act-shaped result whose fresh snapshot is a re-merged observe, so the model confirms
+    // the outcome from one result, exactly as it does after a same-frame page_act. A single-ref
+    // action (click/type/select) gets an acted field automatically; fill passes field_results.
+    async function withFreshSnapshotForAct(effectForAct, extraForResultAct) {
+      let snapshotForAct = null;
+      try {
+        const mergedForAct = await runMergedObserveForServiceWorker(tabIdForAct, chatIdForAct, {}, extraForAct);
+        if (mergedForAct && mergedForAct.ok && mergedForAct.result && mergedForAct.result.ok !== false) snapshotForAct = mergedForAct.result;
+      } catch (eSnapForAct) { snapshotForAct = null; }
+      const baseExtraForAct = {};
+      const singleRefForAct = Number(argsForAct.ref);
+      if (Number.isFinite(singleRefForAct)) baseExtraForAct.acted = { ref: singleRefForAct, still_connected: true };
+      return { ok: true, result: Object.assign({}, snapshotForAct || {}, { ok: true, action: actionForAct, effect: effectForAct }, baseExtraForAct, extraForResultAct || {}) };
+    }
+
+    // Multi-field fill. Each field carries its own ref, so resolve and drive them one at a time,
+    // stopping at the first failure like the same-frame fill. Fields in a fill belong to one form,
+    // so they are all embedded here; a same-page ref mixed in is a model error, reported per field
+    // rather than silently sent to the wrong place. This never commits or navigates.
+    if (actionForAct === "fill") {
+      const fieldsForFill = Array.isArray(argsForAct.fields) ? argsForAct.fields : [];
+      if (!fieldsForFill.length) return { ok: true, result: { ok: false, action: "fill", error: "fill requires a non-empty fields array." } };
+      const fieldResultsForFill = [];
+      let changedForFill = 0;
+      let lastOkRefForFill = null;
+      for (let iForFill = 0; iForFill < fieldsForFill.length; iForFill++) {
+        const fieldForFill = fieldsForFill[iForFill] || {};
+        const refNumForFill = Number(fieldForFill.ref);
+        if (!crossFrameAxForServiceWorker.isCrossFrameRef(refNumForFill)) {
+          fieldResultsForFill.push({ ref: fieldForFill.ref, status: "failed", error: "This fill mixes an embedded-app field with a same-page field. Fill each group in its own call." });
+          break;
+        }
+        const tgtForFill = (registryForAct && typeof registryForAct.resolve === "function") ? registryForAct.resolve(refNumForFill) : null;
+        if (!tgtForFill) {
+          fieldResultsForFill.push({ ref: refNumForFill, status: "failed", stale_ref: true, error: "Ref is no longer known; call page_observe again." });
+          break;
+        }
+        const hasTextForFill = typeof fieldForFill.text === "string";
+        const optionForFill = (typeof fieldForFill.option === "string") ? fieldForFill.option.trim() : "";
+        const hasOptionForFill = optionForFill !== "";
+        if (hasTextForFill === hasOptionForFill) {
+          fieldResultsForFill.push({ ref: refNumForFill, status: "failed", error: "Each fill field needs exactly one of text or option." });
+          break;
+        }
+        let opForFill;
+        if (hasTextForFill) {
+          opForFill = await cdpAutomationForServiceWorker.typeCrossFrameControl(tabIdForAct, tgtForFill.frameId, tgtForFill.backendNodeId, fieldForFill.text);
+        } else {
+          opForFill = await cdpAutomationForServiceWorker.selectCrossFrameControl(tabIdForAct, tgtForFill.frameId, tgtForFill.backendNodeId, optionForFill);
+        }
+        if (opForFill && opForFill.ok) {
+          fieldResultsForFill.push({ ref: refNumForFill, status: "ok", effect: hasTextForFill ? "typed" : ('selected "' + optionForFill + '"') });
+          changedForFill++;
+          lastOkRefForFill = refNumForFill;
+        } else {
+          const errForFill = (opForFill && opForFill.code === "no-option")
+            ? ('Opened the dropdown but no option named "' + optionForFill + '" was found; select it separately by ref.')
+            : ((opForFill && opForFill.error) || "The field could not be changed.");
+          fieldResultsForFill.push({ ref: refNumForFill, status: "failed", error: errForFill });
+          break;
+        }
+      }
+      const allOkForFill = changedForFill === fieldsForFill.length;
+      const wrapForFill = await withFreshSnapshotForAct(
+        allOkForFill
+          ? ("filled " + changedForFill + " field(s) (trusted; inside the embedded app)")
+          : ("filled " + changedForFill + " of " + fieldsForFill.length + " field(s) (trusted; inside the embedded app)"),
+        { field_results: fieldResultsForFill, last_successful_ref: lastOkRefForFill }
+      );
+      if (wrapForFill && wrapForFill.result) {
+        wrapForFill.result.ok = allOkForFill;
+        wrapForFill.result.partial = changedForFill > 0 && !allOkForFill;
+        if (!allOkForFill) wrapForFill.result.error = "The fill stopped at the first field that could not be changed.";
+      }
+      return wrapForFill;
+    }
+
+    const targetForAct = (registryForAct && typeof registryForAct.resolve === "function") ? registryForAct.resolve(Number(argsForAct.ref)) : null;
+    if (!targetForAct) {
+      return { ok: true, result: { ok: false, stale_ref: true, error: "Ref " + argsForAct.ref + " is from an embedded app and is no longer known (the page changed). Call page_observe again and act on a ref from the fresh result." } };
+    }
+
+    if (actionForAct === "click") {
+      if (typeof cdpAutomationForServiceWorker.clickCrossFrameControl !== "function") return { ok: true, result: { ok: false, error: "Acting inside embedded apps is unavailable in this build." } };
+      const clickForAct = await cdpAutomationForServiceWorker.clickCrossFrameControl(tabIdForAct, targetForAct.frameId, targetForAct.backendNodeId);
+      if (!clickForAct || !clickForAct.ok) return { ok: true, result: { ok: false, action: "click", error: (clickForAct && clickForAct.error) || "The embedded control could not be clicked." } };
+      return withFreshSnapshotForAct("clicked (trusted; inside the embedded app)");
+    }
+
+    if (actionForAct === "type") {
+      if (typeof argsForAct.text !== "string") return { ok: true, result: { ok: false, action: "type", error: "type requires a 'text' string." } };
+      if (typeof cdpAutomationForServiceWorker.typeCrossFrameControl !== "function") return { ok: true, result: { ok: false, error: "Typing inside embedded apps is unavailable in this build." } };
+      const typeForAct = await cdpAutomationForServiceWorker.typeCrossFrameControl(tabIdForAct, targetForAct.frameId, targetForAct.backendNodeId, argsForAct.text);
+      if (!typeForAct || !typeForAct.ok) return { ok: true, result: { ok: false, action: "type", error: (typeForAct && typeForAct.error) || "The embedded field could not be typed into." } };
+      return withFreshSnapshotForAct("typed (trusted; inside the embedded app)");
+    }
+
+    if (actionForAct === "select") {
+      const optionForAct = (typeof argsForAct.option === "string") ? argsForAct.option.trim() : "";
+      if (!optionForAct) return { ok: true, result: { ok: false, action: "select", error: "select requires a non-empty 'option' label." } };
+      if (typeof cdpAutomationForServiceWorker.selectCrossFrameControl !== "function") return { ok: true, result: { ok: false, error: "Selecting inside embedded apps is unavailable in this build." } };
+      const selectForAct = await cdpAutomationForServiceWorker.selectCrossFrameControl(tabIdForAct, targetForAct.frameId, targetForAct.backendNodeId, optionForAct);
+      if (selectForAct && selectForAct.ok) return withFreshSnapshotForAct('selected "' + optionForAct + '" (trusted; inside the embedded app)');
+      // Opened but nothing matched (a custom list with different wording, or a native <select> whose
+      // options live in an OS popup). Hand back the now-open list so the model can click the option
+      // by ref, which is the reliable two-step path.
+      if (selectForAct && selectForAct.code === "no-option") {
+        const openedForAct = await withFreshSnapshotForAct('opened the dropdown (trusted; inside the embedded app)');
+        if (openedForAct && openedForAct.result) {
+          openedForAct.result.ok = false;
+          openedForAct.result.error = 'Opened the control, but no option named "' + optionForAct + '" was found. If its options are in the list now, click the right one by ref; if not, this is a native dropdown that only the user can complete.';
+        }
+        return openedForAct;
+      }
+      return { ok: true, result: { ok: false, action: "select", error: (selectForAct && selectForAct.error) || "The embedded control could not be selected." } };
+    }
+
+    return { ok: true, result: { ok: false, error: 'Inside embedded apps, page_act supports click, type, select, and fill. "' + actionForAct + '" is not available there; for anything else, tell the user what to do and ask them to do it.' } };
+  })();
+}
 
 // chatId -> initiatorTabId: the tab whose panel started the run. Unlike the target map above,
 // this is fixed at run start and never changes when the agent switches tabs mid-run. It is
@@ -3463,12 +3736,18 @@ if (chrome.windows && chrome.windows.onFocusChanged) {
 }
 
 chrome.tabs.onUpdated.addListener((tabIdForServiceWorker, changeInfoForServiceWorker, tabForServiceWorker) => {
+  if (changeInfoForServiceWorker.status === "loading") {
+    // A document load invalidates every backend node id from the old document, so drop this tab's
+    // embedded-app ref registry rather than resolve a stale id against the new page.
+    resetCrossFrameRegistryForServiceWorker(tabIdForServiceWorker);
+  }
   if (changeInfoForServiceWorker.status === "complete") {
     enforceStoredPanelVisibilityForServiceWorker();
   }
 });
 
 chrome.tabs.onRemoved.addListener(function (tabIdForStreamCleanup /*, removeInfo */) {
+  crossFrameRegistriesForServiceWorker.delete(tabIdForStreamCleanup);
   pruneAgentCreatedTabOnRemovedForServiceWorker(tabIdForStreamCleanup);
   enforceStoredPanelVisibilityForServiceWorker();
   if (tabIdForStreamCleanup === currentActiveTabIdForServiceWorker) {
@@ -3912,6 +4191,43 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
     if (targetTabIdForDelegate == null) {
       sendResponseForServiceWorker({ ok: false, error: "No target tab is associated with this run." });
       return false;
+    }
+    // B: page_act on an embedded-app ref (a single-ref action, or a fill whose fields include one)
+    // never reaches the content script, which cannot resolve a ref it did not mint. Handle it here
+    // over CDP and reply with the result.
+    const argsForCrossCheckDelegate = messageForServiceWorker.args || {};
+    const isCrossFrameActForDelegate = messageForServiceWorker.tool === "page_act"
+      && crossFrameAxForServiceWorker && typeof crossFrameAxForServiceWorker.isCrossFrameRef === "function"
+      && (
+        crossFrameAxForServiceWorker.isCrossFrameRef(Number(argsForCrossCheckDelegate.ref))
+        || (String(argsForCrossCheckDelegate.action || "") === "fill" && Array.isArray(argsForCrossCheckDelegate.fields)
+            && argsForCrossCheckDelegate.fields.some(function (fForCrossCheckDelegate) {
+              return crossFrameAxForServiceWorker.isCrossFrameRef(Number(fForCrossCheckDelegate && fForCrossCheckDelegate.ref));
+            }))
+      );
+    if (isCrossFrameActForDelegate) {
+      runCrossFramePageActForServiceWorker(
+        targetTabIdForDelegate, chatIdForDelegate, messageForServiceWorker.args || {},
+        {
+          runId: messageForServiceWorker.runId != null ? messageForServiceWorker.runId : null,
+          toolCallId: messageForServiceWorker.toolCallId != null ? messageForServiceWorker.toolCallId : null,
+          iteration: messageForServiceWorker.iteration != null ? messageForServiceWorker.iteration : null
+        }
+      ).then(function (respForCrossAct) { sendResponseForServiceWorker(respForCrossAct); });
+      return true;
+    }
+    // B: page_observe merges embedded-app controls in when the page has a dominant cross-origin
+    // embed and automation is on; otherwise it returns the content script's observe unchanged.
+    if (messageForServiceWorker.tool === "page_observe") {
+      runMergedObserveForServiceWorker(
+        targetTabIdForDelegate, chatIdForDelegate, messageForServiceWorker.args || {},
+        {
+          runId: messageForServiceWorker.runId != null ? messageForServiceWorker.runId : null,
+          toolCallId: messageForServiceWorker.toolCallId != null ? messageForServiceWorker.toolCallId : null,
+          iteration: messageForServiceWorker.iteration != null ? messageForServiceWorker.iteration : null
+        }
+      ).then(function (respForMergedObserve) { sendResponseForServiceWorker(respForMergedObserve); });
+      return true;
     }
     // A click can navigate the page (a link or form submit), which tears down the target tab's
     // content script mid-observation: the in-flight runDelegatedPageTool response is then lost

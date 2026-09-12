@@ -62,6 +62,7 @@
     "agent/tools.js",
     "agent/documentGeneration.js",
     "agent/cdpClient.js",
+    "agent/embeddedRegions.js",
     "agent/toolExec.js",
     "agent/contextBuilder.js",
     "agent/client.js",
