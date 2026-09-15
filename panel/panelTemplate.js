@@ -97,6 +97,9 @@
                 New chat
               </button>
               <button class="favs-btn" id="favs-btn" data-action="toggle-favs">${icForPanelTemplate.starEmpty12} Favs</button>
+              <button class="chat-select-mode-btn hidden" id="chat-select-mode-btn" data-action="toggle-chat-select-mode" title="Select chats" aria-label="Select chats" aria-pressed="false">
+                ${icForPanelTemplate.check14}
+              </button>
               <button class="collapse-btn" data-action="collapse-sidebar" title="Collapse sidebar">
                 ${icForPanelTemplate.chevronLeft12}
               </button>
@@ -116,6 +119,10 @@
               <span class="lfb-icon">${icForPanelTemplate.filter11}</span>
               <span class="lfb-text" id="chat-filter-bar-text"></span>
               <button class="lfb-clear" data-action="clear-list-filters" data-list="chats" title="Clear filters">Clear</button>
+            </div>
+            <div class="chat-bulk-bar hidden" id="chat-bulk-bar">
+              <button class="btn-ghost btn-sm hidden" id="chat-delete-selected-btn" data-action="delete-selected-chats">Delete selected</button>
+              <button class="btn-ghost btn-sm" data-action="exit-chat-select-mode">Done</button>
             </div>
           </div>
           <div class="chat-list">

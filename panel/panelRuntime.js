@@ -454,6 +454,12 @@
     // an in-place item re-render (edit, review, cross-tab sync) keeps the ticks.
     var quizSelectModeForPanelRuntime = false;
     var quizSelectedIdsForPanelRuntime = new Set();
+    // Chat multi-select (bulk delete). Same shape as the quiz pair above: the mode flag gates the
+    // per-row checkbox in syncMainChatListItem, and the Set is the source of truth for checked
+    // state so a paged-in or re-synced row keeps its tick. Recreated per injection, so like the
+    // quiz flags these need no reset entry in main.js.
+    var chatSelectModeForPanelRuntime = false;
+    var chatSelectedIdsForPanelRuntime = new Set();
     // Picker windowing state. Reset each time renderPickerList is called.
     var pickerRenderedCountForPanelRuntime = 0;
     var pickerCurrentItemsForPanelRuntime = [];
@@ -709,6 +715,7 @@
       syncMainChatListItemForPanelRuntime(chatIdForPanelRuntime, prependForPanelRuntime);
       rebuildChatListGroupingForPanelRuntime();
       syncSearchIndexForPanelRuntime('chats', 'update', chatIdForPanelRuntime, CHAT_STORE_FOR_PANEL_RUNTIME[chatIdForPanelRuntime]);
+      refreshChatSelectAffordanceForPanelRuntime();
     }
 
     function refreshChatStoreFromPersistedForPanelRuntime(chatForPanelRuntime, optionsForPanelRuntime) {
@@ -4160,7 +4167,8 @@
       });
     }
 
-    async function reconcileDeletedChatDraftAndViewForPanelRuntime(chatIdForPanelRuntime) {
+    async function reconcileDeletedChatDraftAndViewForPanelRuntime(chatIdForPanelRuntime, optionsForReconcile) {
+      const optsForReconcile = optionsForReconcile || {};
       const numericChatIdForDeleteReconcile = Number(chatIdForPanelRuntime);
       if (!Number.isFinite(numericChatIdForDeleteReconcile)) return;
       await removeInputDraftStorageScopeForPanelRuntime(String(numericChatIdForDeleteReconcile));
@@ -4178,9 +4186,11 @@
         clearSessionTokenCounterForPanelRuntime();
         updateChatBackTitleForPanelRuntime();
       }
-      const repoForDeleteReconcile = getPanelDataRepoForPanelRuntime();
-      if (repoForDeleteReconcile && typeof repoForDeleteReconcile.pruneOrphanedBlobs === 'function') {
-        repoForDeleteReconcile.pruneOrphanedBlobs(getPendingBlobIdsForPanelRuntime()).catch(function () {});
+      if (optsForReconcile.prune !== false) {
+        const repoForDeleteReconcile = getPanelDataRepoForPanelRuntime();
+        if (repoForDeleteReconcile && typeof repoForDeleteReconcile.pruneOrphanedBlobs === 'function') {
+          repoForDeleteReconcile.pruneOrphanedBlobs(getPendingBlobIdsForPanelRuntime()).catch(function () {});
+        }
       }
     }
 
@@ -4201,6 +4211,7 @@
       removeChatUiForPanelRuntime(numericChatIdForPanelRuntime);
       markPendingChipsForDeletedRecordForPanelRuntime('chat', numericChatIdForPanelRuntime, 'chat');
       closeRawViewForPanelRuntime();
+      refreshChatSelectAffordanceForPanelRuntime();
     }
 
     function deleteChatItemFromDropdownForPanelRuntime(btnForPanelRuntime) {
@@ -4215,6 +4226,143 @@
         'Delete',
         async function() { await deleteChatForPanelRuntime(chatIdForConfirm); }
       );
+    }
+
+    // ---- Chat multi-select (bulk delete) ------------------------------------
+    // Modelled on the quiz select-mode pattern. The checkbox is not part of the row
+    // shell; it is added or removed per render so paged-in rows come up correct and a
+    // mode toggle can flip every rendered row through redrawChatSelectCheckboxes.
+
+    function applyChatSelectCheckboxForRowForPanelRuntime(chatItemForCheckbox, numericChatIdForCheckbox) {
+      if (!chatItemForCheckbox) return;
+      let checkboxForCheckbox = chatItemForCheckbox.querySelector('.ci-select-cb');
+      if (chatSelectModeForPanelRuntime) {
+        if (!checkboxForCheckbox) {
+          checkboxForCheckbox = document.createElement('input');
+          checkboxForCheckbox.type = 'checkbox';
+          checkboxForCheckbox.className = 'ci-select-cb';
+          checkboxForCheckbox.dataset.action = 'toggle-chat-select';
+          chatItemForCheckbox.insertBefore(checkboxForCheckbox, chatItemForCheckbox.firstChild);
+        }
+        checkboxForCheckbox.dataset.chatId = String(numericChatIdForCheckbox);
+        checkboxForCheckbox.checked = chatSelectedIdsForPanelRuntime.has(numericChatIdForCheckbox);
+        chatItemForCheckbox.classList.add('ci-select-mode');
+      } else {
+        if (checkboxForCheckbox) checkboxForCheckbox.remove();
+        chatItemForCheckbox.classList.remove('ci-select-mode');
+      }
+    }
+
+    function redrawChatSelectCheckboxesForPanelRuntime() {
+      const chatListForRedraw = root.querySelector('.chat-list');
+      if (!chatListForRedraw) return;
+      chatListForRedraw.querySelectorAll('.chat-item').forEach(function (itemForRedraw) {
+        applyChatSelectCheckboxForRowForPanelRuntime(itemForRedraw, Number(itemForRedraw.dataset.chatId));
+      });
+    }
+
+    // The Select toggle (an icon in the sidebar top row) is only offered when the current
+    // filter shows more than three chats; below that, per-row delete is enough. It stays
+    // shown while select mode is active so the user always has a way back out even if they
+    // narrow the list. The Delete selected / Done bar is a separate row governed only by
+    // select mode, so it never occupies space when the feature is idle.
+    function refreshChatSelectAffordanceForPanelRuntime(visibleCountForAffordance) {
+      const modeBtnForAffordance = root.getElementById('chat-select-mode-btn');
+      if (!modeBtnForAffordance) return;
+      let countForAffordance = visibleCountForAffordance;
+      if (typeof countForAffordance !== 'number') {
+        countForAffordance = computeVisibleChatIdsForPanelRuntime(getActiveChatFilterStateForPanelRuntime()).size;
+      }
+      const showForAffordance = countForAffordance > 3 || chatSelectModeForPanelRuntime;
+      modeBtnForAffordance.classList.toggle('hidden', !showForAffordance);
+    }
+
+    function setChatSelectModeForPanelRuntime(enabledForSelectMode) {
+      const nextModeForSelectMode = Boolean(enabledForSelectMode);
+      if (chatSelectModeForPanelRuntime === nextModeForSelectMode) return;
+      chatSelectModeForPanelRuntime = nextModeForSelectMode;
+      chatSelectedIdsForPanelRuntime.clear();
+      const modeBtnForSelectMode = root.getElementById('chat-select-mode-btn');
+      if (modeBtnForSelectMode) {
+        modeBtnForSelectMode.classList.toggle('active', nextModeForSelectMode);
+        modeBtnForSelectMode.setAttribute('aria-pressed', nextModeForSelectMode ? 'true' : 'false');
+      }
+      const bulkBarForSelectMode = root.getElementById('chat-bulk-bar');
+      if (bulkBarForSelectMode) bulkBarForSelectMode.classList.toggle('hidden', !nextModeForSelectMode);
+      redrawChatSelectCheckboxesForPanelRuntime();
+      updateChatSelectionControlsForPanelRuntime();
+      refreshChatSelectAffordanceForPanelRuntime();
+    }
+
+    function toggleChatSelectModeForPanelRuntime() {
+      setChatSelectModeForPanelRuntime(!chatSelectModeForPanelRuntime);
+    }
+
+    function updateChatSelectionControlsForPanelRuntime() {
+      const deleteBtnForControls = root.getElementById('chat-delete-selected-btn');
+      const countForControls = chatSelectedIdsForPanelRuntime.size;
+      if (deleteBtnForControls) {
+        deleteBtnForControls.classList.toggle('hidden', countForControls === 0);
+        deleteBtnForControls.textContent = 'Delete selected (' + countForControls + ')';
+      }
+    }
+
+    function toggleChatSelectForPanelRuntime(checkboxForSelect) {
+      if (!checkboxForSelect) return;
+      const idForSelect = Number(checkboxForSelect.dataset.chatId);
+      if (!Number.isFinite(idForSelect)) return;
+      if (checkboxForSelect.checked) chatSelectedIdsForPanelRuntime.add(idForSelect);
+      else chatSelectedIdsForPanelRuntime.delete(idForSelect);
+      updateChatSelectionControlsForPanelRuntime();
+    }
+
+    function toggleChatSelectByRowForPanelRuntime(rowForToggle) {
+      if (!rowForToggle) return;
+      const checkboxForToggle = rowForToggle.querySelector('.ci-select-cb');
+      if (!checkboxForToggle) return;
+      checkboxForToggle.checked = !checkboxForToggle.checked;
+      toggleChatSelectForPanelRuntime(checkboxForToggle);
+    }
+
+    function confirmDeleteSelectedChatsForPanelRuntime() {
+      const countForConfirm = chatSelectedIdsForPanelRuntime.size;
+      if (countForConfirm === 0) return;
+      const containerForConfirm = root.querySelector('.panel-content');
+      if (!containerForConfirm) return;
+      showConfirmPromptForPanelRuntime(
+        containerForConfirm,
+        countForConfirm + ' chat' + (countForConfirm === 1 ? '' : 's') + ' will be permanently deleted and cannot be recovered.',
+        'Delete',
+        function () { doDeleteSelectedChatsForPanelRuntime(); }
+      );
+    }
+
+    async function doDeleteSelectedChatsForPanelRuntime() {
+      const idsForDelete = Array.from(chatSelectedIdsForPanelRuntime).filter(function (idForDelete) {
+        return CHAT_STORE_FOR_PANEL_RUNTIME[idForDelete] != null;
+      });
+      if (idsForDelete.length === 0) {
+        setChatSelectModeForPanelRuntime(false);
+        return;
+      }
+      const repoForDelete = getPanelDataRepoForPanelRuntime();
+      if (!repoForDelete || typeof repoForDelete.deleteChats !== 'function') return;
+      try {
+        // One blob-prune sweep for the whole batch, not one per chat.
+        await repoForDelete.deleteChats(idsForDelete, getPendingBlobIdsForPanelRuntime());
+      } catch (errorForDelete) {
+        return;
+      }
+      for (let iForDelete = 0; iForDelete < idsForDelete.length; iForDelete++) {
+        // The batch prune already ran; the per-chat reconcile only resets view/draft state.
+        await reconcileDeletedChatDraftAndViewForPanelRuntime(idsForDelete[iForDelete], { prune: false });
+        removeChatFromRuntimeStoreForPanelRuntime(idsForDelete[iForDelete]);
+        removeChatUiForPanelRuntime(idsForDelete[iForDelete]);
+        markPendingChipsForDeletedRecordForPanelRuntime('chat', idsForDelete[iForDelete], 'chat');
+      }
+      closeRawViewForPanelRuntime();
+      setChatSelectModeForPanelRuntime(false);
+      applyChatListFilterForPanelRuntime();
     }
 
     async function openRawChatViewForPanelRuntime(btn) {
@@ -8400,6 +8548,7 @@
         starButtonForSync.title = starTitleForSync;
         starButtonForSync.innerHTML = starGlyphForSync;
       }
+      applyChatSelectCheckboxForRowForPanelRuntime(chatItemForSync, Number(chatIdForSync));
     }
 
     function removeMainNoteListItemForPanelRuntime(noteIdForPanelRuntime) {
@@ -12839,6 +12988,20 @@
 
       syncSearchWrapValueStateForPanelRuntime('chat-search-input');
       updateChatFilterBarForPanelRuntime(filterStateForApply, visibleIdsForApply.size);
+
+      // Drop any selected chat that the active filter now hides, so a bulk delete can
+      // never remove a chat the user cannot currently see.
+      if (chatSelectModeForPanelRuntime && chatSelectedIdsForPanelRuntime.size) {
+        let selectionChangedForApply = false;
+        chatSelectedIdsForPanelRuntime.forEach(function (idForApplySel) {
+          if (!visibleIdsForApply.has(idForApplySel)) {
+            chatSelectedIdsForPanelRuntime.delete(idForApplySel);
+            selectionChangedForApply = true;
+          }
+        });
+        if (selectionChangedForApply) updateChatSelectionControlsForPanelRuntime();
+      }
+      refreshChatSelectAffordanceForPanelRuntime(visibleIdsForApply.size);
     }
 
     function updateChatFilterBarForPanelRuntime(filterStateForBar, visibleCountForBar) {
@@ -20916,7 +21079,14 @@
             case 'expand-notes-sidebar':   expandNotesSidebar(); break;
             case 'set-chat-type':        setChatType(tgtForRuntime.dataset.chatType); break;
             case 'set-note-type':        setNoteType(tgtForRuntime.dataset.noteType); break;
-            case 'select-chat':          selectChat(Number(tgtForRuntime.dataset.chatId)); break;
+            case 'select-chat':
+              if (chatSelectModeForPanelRuntime) { toggleChatSelectByRowForPanelRuntime(tgtForRuntime); break; }
+              selectChat(Number(tgtForRuntime.dataset.chatId));
+              break;
+            case 'toggle-chat-select-mode': toggleChatSelectModeForPanelRuntime(); break;
+            case 'exit-chat-select-mode':   setChatSelectModeForPanelRuntime(false); break;
+            case 'toggle-chat-select':      toggleChatSelectForPanelRuntime(tgtForRuntime); break;
+            case 'delete-selected-chats':   confirmDeleteSelectedChatsForPanelRuntime(); break;
             case 'toggle-message-dropdown': toggleMessageDropdown(tgtForRuntime); evtForRuntime.stopPropagation(); break;
             case 'toggle-msg-sources': {
               const sourcesWrapForToggle = tgtForRuntime.closest('.msg-sources');
@@ -21716,6 +21886,7 @@
         syncMainChatListItemForPanelRuntime(CHAT_ORDER_FOR_PANEL_RUNTIME[iForChatInit]);
       }
       rebuildChatListGroupingForPanelRuntime();
+      refreshChatSelectAffordanceForPanelRuntime();
       setupListSentinelForPanelRuntime(chatListElForInit, renderNextChatPageForPanelRuntime);
     })();
     (function initNoteListForPanelRuntime() {

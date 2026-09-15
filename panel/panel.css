@@ -685,6 +685,27 @@
 .ci-btn:hover { background: var(--abchat-border); color: var(--abchat-text-primary); }
 .ci-btn.starred { color: #f59e0b; }
 
+/* Chat multi-select (bulk delete) */
+.chat-select-mode-btn {
+  border: 1px solid var(--abchat-border);
+  border-radius: var(--abchat-r-sm);
+  padding: 6px 8px;
+  background: transparent;
+  color: var(--abchat-text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.1s, color 0.1s;
+}
+.chat-select-mode-btn:hover { background: var(--abchat-bg-chip); color: var(--abchat-text-primary); }
+.chat-select-mode-btn.active { background: var(--abchat-bg-active); border-color: var(--abchat-border-med); color: var(--abchat-text-accent); }
+.chat-bulk-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ci-select-cb { flex-shrink: 0; margin: 0; cursor: pointer; }
+/* In select mode the whole row toggles the checkbox, so hide the hover star/dropdown. */
+.chat-list .chat-item.ci-select-mode .chat-item-meta {
+  opacity: 0; max-width: 0; pointer-events: none;
+}
+
 .ci-dropdown-wrap { position: relative; }
 .ci-dropdown {
   position: absolute; top: calc(100% + 4px); right: 0;

@@ -454,6 +454,32 @@
     return true;
   }
 
+  // Bulk sibling of deleteChat for the panel's multi-select delete. Deletes every chat's
+  // messages and record in one transaction and runs the orphaned-blob sweep exactly once,
+  // rather than one full sweep per chat.
+  async function deleteChatsForPanelDataRepo(idsForPanelDataRepo, protectedBlobIdsForPanelDataRepo) {
+    var dbForPanelDataRepo = requireDbForPanelDataRepo();
+    var numericIdsForPanelDataRepo = (Array.isArray(idsForPanelDataRepo) ? idsForPanelDataRepo : [])
+      .map(Number)
+      .filter(function (idForPanelDataRepo) { return Number.isFinite(idForPanelDataRepo); })
+      .filter(function (idForPanelDataRepo, indexForPanelDataRepo, allIdsForPanelDataRepo) {
+        return allIdsForPanelDataRepo.indexOf(idForPanelDataRepo) === indexForPanelDataRepo;
+      });
+
+    if (numericIdsForPanelDataRepo.length > 0) {
+      await dbForPanelDataRepo.transaction('rw', dbForPanelDataRepo.chats, dbForPanelDataRepo.messages, async function () {
+        for (var iForPanelDataRepo = 0; iForPanelDataRepo < numericIdsForPanelDataRepo.length; iForPanelDataRepo++) {
+          await dbForPanelDataRepo.messages.where('chatId').equals(numericIdsForPanelDataRepo[iForPanelDataRepo]).delete();
+        }
+        await dbForPanelDataRepo.chats.bulkDelete(numericIdsForPanelDataRepo);
+      });
+      await removeChatInputDraftsForPanelDataRepo(numericIdsForPanelDataRepo);
+    }
+
+    var pruneResultForPanelDataRepo = await pruneOrphanedBlobsForPanelDataRepo(protectedBlobIdsForPanelDataRepo);
+    return { deleted: numericIdsForPanelDataRepo.length, blobsDeleted: pruneResultForPanelDataRepo.deleted };
+  }
+
   // Draft keys in chrome.storage.local that carry blob references. Kept in step with the panel
   // constants of the same value: one input draft per chat (chips[].refId) and one key per note
   // being edited (attachments[].refId). The legacy input key remains readable during migration.
@@ -1326,6 +1352,7 @@
     createChat:                   createChatForPanelDataRepo,
     updateChat:                   updateChatForPanelDataRepo,
     deleteChat:                   deleteChatForPanelDataRepo,
+    deleteChats:                  deleteChatsForPanelDataRepo,
     listMessagesByChatId:         listMessagesByChatIdForPanelDataRepo,
     getMessage:                   getMessageForPanelDataRepo,
     createMessage:                createMessageForPanelDataRepo,
