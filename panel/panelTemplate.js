@@ -221,7 +221,21 @@
                     <div class="mp-filter-row">
                       <button type="button" class="mp-filter-chip" id="mp-reasoning-filter" data-action="toggle-reasoning-filter" aria-pressed="false" title="Show only models with reasoning on by default">${icForPanelTemplate.brain13}<span>Reasoning</span></button>
                       <button type="button" class="mp-filter-chip mp-vision-filter" id="mp-vision-filter" data-action="toggle-vision-filter" aria-label="Filter by vision: showing all models" title="Filter by vision support">${icForPanelTemplate.eye13}<span>Vision</span></button>
+                      <button type="button" class="mp-filter-chip mp-price-toggle" id="mp-price-filter" data-action="toggle-price-filter" aria-expanded="false" aria-controls="mp-price-row" title="Filter by price">${icForPanelTemplate.dollar13}<span>Price</span><span class="mp-price-caret">${icForPanelTemplate.chevronDown10}</span></button>
                       <span class="mp-filter-count hidden" id="model-picker-count" role="status" aria-live="polite"></span>
+                    </div>
+                    <div class="mp-price-row hidden" id="mp-price-row">
+                      <label class="mp-price-field">
+                        <span class="mp-price-label">Input &#8804; $</span>
+                        <input type="number" class="mp-price-input" id="mp-max-input-cost" data-action="filter-input-cost" min="0" step="0.1" inputmode="decimal" placeholder="any" autocomplete="off" aria-label="Maximum input cost in USD per 1M tokens" />
+                        <span class="mp-price-suffix">/1M</span>
+                      </label>
+                      <label class="mp-price-field">
+                        <span class="mp-price-label">Output &#8804; $</span>
+                        <input type="number" class="mp-price-input" id="mp-max-output-cost" data-action="filter-output-cost" min="0" step="0.1" inputmode="decimal" placeholder="any" autocomplete="off" aria-label="Maximum output cost in USD per 1M tokens" />
+                        <span class="mp-price-suffix">/1M</span>
+                      </label>
+                      <button type="button" class="mp-price-clear" id="mp-price-clear" data-action="clear-price-filters" title="Clear price caps" aria-label="Clear price caps">${icForPanelTemplate.x10}</button>
                     </div>
                     <div class="mp-list" id="model-picker-list"></div>
                     <div class="mp-empty" id="model-picker-empty" hidden>No matching models</div>

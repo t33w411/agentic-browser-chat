@@ -5403,6 +5403,10 @@
     let reasoningFilterActiveForPanelRuntime = false;
     // Tri-state vision filter: 'all' -> 'vision' (image-input only) -> 'novision' (text/tools only).
     let visionFilterStateForPanelRuntime = 'all';
+    // Independent per-axis price caps in USD per 1M tokens; null means no cap on that axis. A row
+    // with an unknown cost on a capped axis is hidden, since the cap cannot be honored for it.
+    let maxInputCostPerMillionForModelPicker = null;
+    let maxOutputCostPerMillionForModelPicker = null;
 
     function toggleModelPickerForPanelRuntime() {
       const wasOpen = preclickOpenStateForPanelRuntime;
@@ -5422,6 +5426,17 @@
         }
         visionFilterStateForPanelRuntime = 'all';
         renderVisionFilterChipForPanelRuntime();
+        maxInputCostPerMillionForModelPicker = null;
+        maxOutputCostPerMillionForModelPicker = null;
+        const maxInputCostFieldForOpen = root.getElementById('mp-max-input-cost');
+        if (maxInputCostFieldForOpen) maxInputCostFieldForOpen.value = '';
+        const maxOutputCostFieldForOpen = root.getElementById('mp-max-output-cost');
+        if (maxOutputCostFieldForOpen) maxOutputCostFieldForOpen.value = '';
+        const priceRowForOpen = root.getElementById('mp-price-row');
+        if (priceRowForOpen) priceRowForOpen.classList.add('hidden');
+        const priceChipForOpen = root.getElementById('mp-price-filter');
+        if (priceChipForOpen) priceChipForOpen.setAttribute('aria-expanded', 'false');
+        syncPriceFilterChipActiveForPanelRuntime();
         const searchForOpen = root.getElementById('model-picker-search');
         if (searchForOpen) {
           searchForOpen.value = '';
@@ -5507,6 +5522,10 @@
           btn.dataset.reasoningDefaultOn = m.reasoningDefaultOn ? '1' : '0';
           const noVisionForItem = m.supportsVision === false;
           btn.dataset.supportsVision = noVisionForItem ? '0' : '1';
+          const promptCostForItem = Number(m.promptCostPerMillion);
+          if (Number.isFinite(promptCostForItem)) btn.dataset.promptCost = String(promptCostForItem);
+          const completionCostForItem = Number(m.completionCostPerMillion);
+          if (Number.isFinite(completionCostForItem)) btn.dataset.completionCost = String(completionCostForItem);
           const displayNameForItem = getDisplayName(m, providerKey, models);
           const namePart = escHtml(displayNameForItem);
           const tierForBtn = getModelTierForPanelRuntime(m);
@@ -5536,6 +5555,9 @@
       const queryForFilter = String(rawQueryForFilter || '').trim().toLowerCase();
       const reasoningOnlyForFilter = reasoningFilterActiveForPanelRuntime;
       const visionStateForFilter = visionFilterStateForPanelRuntime;
+      const maxInputCostForFilter = maxInputCostPerMillionForModelPicker;
+      const maxOutputCostForFilter = maxOutputCostPerMillionForModelPicker;
+      const priceCapActiveForFilter = maxInputCostForFilter !== null || maxOutputCostForFilter !== null;
       let totalVisibleForFilter = 0;
       let totalItemsForFilter = 0;
       listForFilter.querySelectorAll('.mp-group').forEach(function (groupForFilter) {
@@ -5549,7 +5571,18 @@
           const matchesVisionForFilter = visionStateForFilter === 'all'
             || (visionStateForFilter === 'vision' && supportsVisionForFilter)
             || (visionStateForFilter === 'novision' && !supportsVisionForFilter);
-          const matchesForFilter = matchesQueryForFilter && matchesReasoningForFilter && matchesVisionForFilter;
+          let matchesPriceForFilter = true;
+          if (maxInputCostForFilter !== null) {
+            const rawInCostForFilter = itemForFilter.dataset.promptCost;
+            const inCostForFilter = (rawInCostForFilter === undefined || rawInCostForFilter === '') ? NaN : Number(rawInCostForFilter);
+            matchesPriceForFilter = Number.isFinite(inCostForFilter) && inCostForFilter <= maxInputCostForFilter;
+          }
+          if (matchesPriceForFilter && maxOutputCostForFilter !== null) {
+            const rawOutCostForFilter = itemForFilter.dataset.completionCost;
+            const outCostForFilter = (rawOutCostForFilter === undefined || rawOutCostForFilter === '') ? NaN : Number(rawOutCostForFilter);
+            matchesPriceForFilter = Number.isFinite(outCostForFilter) && outCostForFilter <= maxOutputCostForFilter;
+          }
+          const matchesForFilter = matchesQueryForFilter && matchesReasoningForFilter && matchesVisionForFilter && matchesPriceForFilter;
           itemForFilter.style.display = matchesForFilter ? '' : 'none';
           if (matchesForFilter) visibleInGroupForFilter++;
         });
@@ -5561,7 +5594,7 @@
       const countForFilter = root.getElementById('model-picker-count');
       if (countForFilter) {
         const narrowedForFilter =
-          (Boolean(queryForFilter) || reasoningOnlyForFilter || visionStateForFilter !== 'all') && totalItemsForFilter > 0;
+          (Boolean(queryForFilter) || reasoningOnlyForFilter || visionStateForFilter !== 'all' || priceCapActiveForFilter) && totalItemsForFilter > 0;
         countForFilter.textContent = narrowedForFilter
           ? totalVisibleForFilter + ' of ' + totalItemsForFilter
           : '';
@@ -5606,6 +5639,55 @@
       renderVisionFilterChipForPanelRuntime();
       const searchForVisionFilter = root.getElementById('model-picker-search');
       filterModelPickerForPanelRuntime(searchForVisionFilter ? searchForVisionFilter.value : '');
+    }
+
+    // The Price chip goes accent whenever a cap is set, matching the reasoning/vision chips'
+    // "a filter is narrowing the list" meaning, so a collapsed-but-active price filter stays visible.
+    function syncPriceFilterChipActiveForPanelRuntime() {
+      const chipForActive = root.getElementById('mp-price-filter');
+      if (!chipForActive) return;
+      const activeForChip = maxInputCostPerMillionForModelPicker !== null || maxOutputCostPerMillionForModelPicker !== null;
+      chipForActive.classList.toggle('active', activeForChip);
+    }
+
+    // Shows or hides the price-cap row without touching the caps themselves; the chevron and
+    // aria-expanded follow, and expanding focuses the first field. Collapsing keeps any active cap.
+    function togglePriceFilterRowForPanelRuntime() {
+      const rowForToggle = root.getElementById('mp-price-row');
+      const chipForToggle = root.getElementById('mp-price-filter');
+      if (!rowForToggle || !chipForToggle) return;
+      const willExpandForToggle = rowForToggle.classList.contains('hidden');
+      rowForToggle.classList.toggle('hidden', !willExpandForToggle);
+      chipForToggle.setAttribute('aria-expanded', willExpandForToggle ? 'true' : 'false');
+      if (willExpandForToggle) {
+        const firstFieldForToggle = root.getElementById('mp-max-input-cost');
+        if (firstFieldForToggle) setTimeout(function () { try { firstFieldForToggle.focus(); } catch (e) {} }, 0);
+      }
+    }
+
+    // Reads a price-cap number field into a non-negative cap (null when blank/invalid/negative),
+    // then re-runs the picker filter with the current search text. Mirrors the reasoning/vision
+    // toggles, which also read the search box rather than owning the query.
+    function applyPriceCapInputForModelPickerForPanelRuntime(whichAxisForCap, rawValueForCap) {
+      const parsedForCap = parseFloat(rawValueForCap);
+      const capForCap = (Number.isFinite(parsedForCap) && parsedForCap >= 0) ? parsedForCap : null;
+      if (whichAxisForCap === 'input') maxInputCostPerMillionForModelPicker = capForCap;
+      else maxOutputCostPerMillionForModelPicker = capForCap;
+      syncPriceFilterChipActiveForPanelRuntime();
+      const searchForCap = root.getElementById('model-picker-search');
+      filterModelPickerForPanelRuntime(searchForCap ? searchForCap.value : '');
+    }
+
+    function clearPriceCapsForModelPickerForPanelRuntime() {
+      maxInputCostPerMillionForModelPicker = null;
+      maxOutputCostPerMillionForModelPicker = null;
+      const inFieldForClear = root.getElementById('mp-max-input-cost');
+      if (inFieldForClear) inFieldForClear.value = '';
+      const outFieldForClear = root.getElementById('mp-max-output-cost');
+      if (outFieldForClear) outFieldForClear.value = '';
+      syncPriceFilterChipActiveForPanelRuntime();
+      const searchForPriceClear = root.getElementById('model-picker-search');
+      filterModelPickerForPanelRuntime(searchForPriceClear ? searchForPriceClear.value : '');
     }
 
     // The chat model currently staged in the picker. Falls back to the global default so a gate
@@ -21059,6 +21141,8 @@
             case 'toggle-model-picker':  toggleModelPickerForPanelRuntime(); evtForRuntime.stopPropagation(); break;
             case 'toggle-reasoning-filter': toggleReasoningFilterForPanelRuntime(); break;
             case 'toggle-vision-filter': toggleVisionFilterForPanelRuntime(); break;
+            case 'toggle-price-filter': togglePriceFilterRowForPanelRuntime(); break;
+            case 'clear-price-filters': clearPriceCapsForModelPickerForPanelRuntime(); break;
             case 'select-model':         selectModelForPanelRuntime(tgtForRuntime.dataset.modelId); break;
             case 'open-image-upload':    openImageUploadForPanelRuntime(); break;
             case 'capture-screenshot':   captureScreenshotForPanelRuntime(); break;
@@ -21376,6 +21460,8 @@
               if (wrapForModelSearch) wrapForModelSearch.classList.toggle('has-value', tgtForRuntime.value.length > 0);
               break;
             }
+            case 'filter-input-cost': applyPriceCapInputForModelPickerForPanelRuntime('input', tgtForRuntime.value); break;
+            case 'filter-output-cost': applyPriceCapInputForModelPickerForPanelRuntime('output', tgtForRuntime.value); break;
             case 'content-search-input': {
               const scForCsInput = tgtForRuntime.closest('[data-content-search-scope]');
               if (scForCsInput) scheduleContentSearchForPanelRuntime(scForCsInput);

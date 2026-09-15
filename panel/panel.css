@@ -1666,6 +1666,35 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 .mp-filter-chip:hover { background: var(--abchat-bg-hover); color: var(--abchat-text-primary); }
 .mp-filter-chip.active { background: var(--abchat-accent); border-color: var(--abchat-accent); color: #fff; }
 .mp-filter-chip.mp-vision-filter.active.novision { background: #dc2626; border-color: #dc2626; color: #fff; }
+.mp-price-caret { display: inline-flex; align-items: center; transition: transform 0.15s ease; }
+.mp-price-toggle[aria-expanded="true"] .mp-price-caret { transform: rotate(180deg); }
+.mp-price-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; flex-shrink: 0; margin-bottom: 6px; }
+.mp-price-field {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; font-weight: 600; color: var(--abchat-text-secondary);
+  white-space: nowrap; cursor: text;
+}
+.mp-price-input {
+  width: 54px; box-sizing: border-box;
+  border: 1px solid var(--abchat-border); border-radius: var(--abchat-r-sm);
+  padding: 3px 6px; background: var(--abchat-bg-input);
+  color: var(--abchat-text-primary); font-family: var(--abchat-font);
+  font-size: 12px; font-weight: 600; outline: none;
+}
+.mp-price-input::placeholder { color: var(--abchat-text-secondary); font-weight: 400; }
+.mp-price-input:focus { border-color: var(--abchat-accent); }
+.mp-price-input::-webkit-outer-spin-button,
+.mp-price-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.mp-price-suffix { color: var(--abchat-text-secondary); font-weight: 400; }
+.mp-price-clear {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; padding: 0; margin-left: auto;
+  border: 1px solid var(--abchat-border); border-radius: var(--abchat-r-sm);
+  background: var(--abchat-bg-input); color: var(--abchat-text-secondary);
+  cursor: pointer; transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.mp-price-clear:hover { background: var(--abchat-bg-hover); color: var(--abchat-text-primary); }
+.mp-price-clear svg { flex-shrink: 0; }
 .mp-list { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
 .mp-empty { padding: 10px 8px; text-align: center; font-size: 13px; color: var(--abchat-text-secondary); }
 .mp-filter-count {

@@ -70,6 +70,7 @@
   var eyeOffPaths = '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>';
   var historyPaths = '<path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/>';
   var micPaths = '<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/>';
+  var dollarPaths = '<line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>';
 
   icons.x10 = svgForPanelIcon(10, 2.5, xPaths);
   icons.x12 = svgForPanelIcon(12, 2.5, xPaths);
@@ -148,6 +149,7 @@
   icons.brain13 = svgForPanelIcon(13, 2, brainPaths);
   icons.eye13 = svgForPanelIcon(13, 2, eyePaths);
   icons.eyeOff13 = svgForPanelIcon(13, 2, eyeOffPaths);
+  icons.dollar13 = svgForPanelIcon(13, 2, dollarPaths);
   icons.history12 = svgForPanelIcon(12, 2, historyPaths);
   icons.mic16 = svgForPanelIcon(16, 2, micPaths);
   icons.bookmark10 = svgForPanelIcon(10, 2.5, bookmarkPaths);
