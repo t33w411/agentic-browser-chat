@@ -6748,17 +6748,12 @@
         }
       }
 
-      if (inlineContentForPanelRuntime.trim()) {
-        if (isHtmlMimeTypeForPanelRuntime) {
-          return { previewType: 'code', content: inlineContentForPanelRuntime };
-        }
-        return { previewType: 'markdown', content: inlineContentForPanelRuntime };
-      }
-
-      if (chipMetaForPanelRuntime.preview && chipMetaForPanelRuntime.preview.trim()) {
-        return { previewType: 'text', content: chipMetaForPanelRuntime.preview.trim() };
-      }
-
+      // Chat chips are promoted above the generic inline-content and preview branches for the same
+      // reason as note chips: a composer chat chip carries only the short picker excerpt in
+      // `preview`, which would short-circuit below and hide the transcript. Resolving the chat here
+      // shows the whole conversation and lets the sourceChanged / sourceMissing banner reach the
+      // modal, matching how a sent chat chip (whose `preview` is never persisted) already resolves.
+      // The excerpt stays a fallback via the preview branch when this lookup fails or comes back empty.
       if (chipTypeForPanelRuntime === 'chat' && Number.isFinite(Number(chipMetaForPanelRuntime.refId))) {
         var repoForChatPreview = getPanelDataRepoForPanelRuntime();
         if (repoForChatPreview && typeof repoForChatPreview.listMessagesByChatId === 'function') {
@@ -6790,6 +6785,17 @@
             }
           } catch (eForChatPreview) { /* fall through */ }
         }
+      }
+
+      if (inlineContentForPanelRuntime.trim()) {
+        if (isHtmlMimeTypeForPanelRuntime) {
+          return { previewType: 'code', content: inlineContentForPanelRuntime };
+        }
+        return { previewType: 'markdown', content: inlineContentForPanelRuntime };
+      }
+
+      if (chipMetaForPanelRuntime.preview && chipMetaForPanelRuntime.preview.trim()) {
+        return { previewType: 'text', content: chipMetaForPanelRuntime.preview.trim() };
       }
 
       if (blobTextContentForPanelRuntime) {
