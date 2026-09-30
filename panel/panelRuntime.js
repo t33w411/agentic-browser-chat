@@ -4004,6 +4004,13 @@
       });
     }
 
+    // Every open state closeAllDropdownsForPanelRuntime clears. Esc reads it to decide whether a
+    // dropdown is the top layer, so a dropdown added there and not here makes Esc hide the panel
+    // instead of closing the dropdown.
+    const OPEN_DROPDOWN_SELECTOR_FOR_PANEL_RUNTIME =
+      '.ci-dropdown.open, .ni-dropdown.open, .msg-options-wrap.open, #attach-picker.open, ' +
+      '#model-picker-dropdown.open, #new-menu-dropdown.open';
+
     function closeAllDropdownsForPanelRuntime(evtForCloseDropdowns) {
       root.querySelectorAll('.ci-dropdown.open').forEach(function(d) {
         d.classList.remove('open');
@@ -12787,12 +12794,153 @@
       }
     }
 
-    document.addEventListener('keydown', e => {
-      if (e.key === 'Escape') {
-        closeInlineChat();
-        closePickerModal();
+    /* ============================================================
+      PANEL KEYBOARD SHORTCUTS
+    ============================================================ */
+    function isShownForShortcutForPanelRuntime(elForShortcut) {
+      return Boolean(elForShortcut) && elForShortcut.getClientRects().length > 0;
+    }
+
+    function findShownConfirmPromptForPanelRuntime(scopeForPrompt) {
+      if (!scopeForPrompt) return null;
+      const promptsForScope = Array.from(scopeForPrompt.querySelectorAll('.confirm-prompt'))
+        .filter(isShownForShortcutForPanelRuntime);
+      return promptsForScope.length ? promptsForScope[promptsForScope.length - 1] : null;
+    }
+
+    // Goes through No so the prompt runs its own cancel path. An info prompt has no No button
+    // and its only button just removes it.
+    function cancelConfirmPromptForPanelRuntime(promptForCancel) {
+      const noBtnForCancel = promptForCancel.querySelector('.confirm-prompt-no');
+      if (noBtnForCancel) noBtnForCancel.click();
+      else promptForCancel.remove();
+    }
+
+    // The full-viewport modal overlays, in their panel.css z-index order, highest first. A
+    // confirm prompt sits above the surface it was opened in, so it is cancelled before that
+    // surface closes. Reports whether anything was open.
+    function closeTopModalOverlayForPanelRuntime() {
+      const overlayLayersForEscape = [
+        { id: 'note-history-overlay', close: closeNoteVersionHistoryForPanelRuntime },
+        { id: 'attach-preview-overlay', close: closeAttachPreview },
+        { id: 'picker-overlay', close: closePickerModal },
+        { id: 'inline-overlay', close: closeInlineChat }
+      ];
+      for (let iForLayer = 0; iForLayer < overlayLayersForEscape.length; iForLayer++) {
+        const overlayForLayer = root.getElementById(overlayLayersForEscape[iForLayer].id);
+        if (!isShownForShortcutForPanelRuntime(overlayForLayer)) continue;
+        const promptInOverlayForLayer = findShownConfirmPromptForPanelRuntime(overlayForLayer);
+        if (promptInOverlayForLayer) cancelConfirmPromptForPanelRuntime(promptInOverlayForLayer);
+        else overlayLayersForEscape[iForLayer].close();
+        return true;
       }
-    });
+      return false;
+    }
+
+    // Closes the topmost open layer and reports whether there was one.
+    function closeTopPanelLayerForPanelRuntime() {
+      if (root.querySelector(OPEN_DROPDOWN_SELECTOR_FOR_PANEL_RUNTIME)) {
+        closeAllDropdownsForPanelRuntime();
+        return true;
+      }
+      if (closeTopModalOverlayForPanelRuntime()) return true;
+      const promptInPanelForLayer = findShownConfirmPromptForPanelRuntime(host);
+      if (promptInPanelForLayer) {
+        cancelConfirmPromptForPanelRuntime(promptInPanelForLayer);
+        return true;
+      }
+      if (isShownForShortcutForPanelRuntime(root.getElementById('pause-dialog'))) {
+        closePauseDialog();
+        return true;
+      }
+      return false;
+    }
+
+    // Same call as the header close button, so nothing is lost: the host is only display:none'd,
+    // and drafts, editors and modals are all still there when the panel reopens.
+    function hidePanelFromShortcutForPanelRuntime() {
+      const panelNsForShortcut =
+        globalThis.ABChatContent && globalThis.ABChatContent.ui && globalThis.ABChatContent.ui.panel;
+      if (!panelNsForShortcut || typeof panelNsForShortcut.setVisible !== 'function') return false;
+      if (typeof panelNsForShortcut.isPanelOpen === 'function' && !panelNsForShortcut.isPanelOpen()) return false;
+      panelNsForShortcut.setVisible(false);
+      return true;
+    }
+
+    // Cmd/Ctrl+Enter clicks the Save button of the editor holding focus, so it runs exactly the
+    // button's path and does nothing while that button is hidden or disabled.
+    const EDITOR_SAVE_BUTTONS_FOR_PANEL_RUNTIME = [
+      { scope: '#note-editor-form', button: '[data-action="save-note"]' },
+      { scope: '.note-popout', button: '.note-popout-save-btn' },
+      { scope: '#task-editor-form', button: '[data-action="save-task"]' },
+      { scope: '#quiz-editor-form', button: '[data-action="save-question"]' },
+      { scope: '#skill-editor-overlay', button: '[data-action="skill-editor-save"]' },
+      { scope: '#memory-editor-overlay', button: '[data-action="memory-editor-save"]' },
+      { scope: '.msg-wrap.is-editing', button: '[data-action="save-chat-edit"]' }
+    ];
+
+    function findEditorSaveButtonForPanelRuntime(targetForSave) {
+      if (!targetForSave || typeof targetForSave.closest !== 'function') return null;
+      for (let iForSave = 0; iForSave < EDITOR_SAVE_BUTTONS_FOR_PANEL_RUNTIME.length; iForSave++) {
+        const entryForSave = EDITOR_SAVE_BUTTONS_FOR_PANEL_RUNTIME[iForSave];
+        const scopeForSave = targetForSave.closest(entryForSave.scope);
+        if (!scopeForSave) continue;
+        const buttonForSave = scopeForSave.querySelector(entryForSave.button);
+        if (!buttonForSave || buttonForSave.disabled || !isShownForShortcutForPanelRuntime(buttonForSave)) return null;
+        return buttonForSave;
+      }
+      return null;
+    }
+
+    // Bound on the mount, below the shadow root, so it only hears keys pressed with focus inside
+    // the panel and never takes a key from the page. It runs after the content search handler
+    // bound on the same node above; that handler and the chat rename input claim Esc for
+    // themselves (preventDefault, stopPropagation), which is why a prevented event is skipped.
+    (function bindPanelShortcutKeysForPanelRuntime() {
+      const mountForShortcuts = root.getElementById('abchat-panel-mount');
+      if (!mountForShortcuts) return;
+      mountForShortcuts.addEventListener('keydown', function (evtForShortcut) {
+        if (evtForShortcut.defaultPrevented) return;
+        // An IME uses Esc and Enter to cancel or commit a candidate.
+        if (evtForShortcut.isComposing || evtForShortcut.keyCode === 229) return;
+        const hasModifierForShortcut =
+          evtForShortcut.metaKey || evtForShortcut.ctrlKey || evtForShortcut.altKey || evtForShortcut.shiftKey;
+        if (evtForShortcut.key === 'Escape') {
+          // A held Esc would otherwise walk down every layer and then hide the panel.
+          if (hasModifierForShortcut || evtForShortcut.repeat) return;
+          if (closeTopPanelLayerForPanelRuntime() || hidePanelFromShortcutForPanelRuntime()) {
+            evtForShortcut.preventDefault();
+          }
+          return;
+        }
+        if (evtForShortcut.key === 'Enter' && (evtForShortcut.metaKey || evtForShortcut.ctrlKey)
+            && !evtForShortcut.altKey && !evtForShortcut.shiftKey) {
+          const saveButtonForShortcut = findEditorSaveButtonForPanelRuntime(evtForShortcut.target);
+          if (!saveButtonForShortcut) return;
+          evtForShortcut.preventDefault();
+          saveButtonForShortcut.click();
+        }
+      });
+    })();
+
+    // Esc pressed with focus outside the panel still closes a modal overlay when one is showing.
+    // Each covers the whole viewport, so while one is up the user is not working in the page;
+    // this is also how Esc reaches an overlay after closing its content search bar, which
+    // leaves focus on the page body. It never hides the panel, which needs focus inside it.
+    // Keys from inside the panel belong to the mount handler above.
+    function handlePageEscapeForPanelRuntime(evtForPageEscape) {
+      if (isStaleFocusGuardForPanelRuntime()) {
+        document.removeEventListener('keydown', handlePageEscapeForPanelRuntime);
+        return;
+      }
+      if (evtForPageEscape.key !== 'Escape' || evtForPageEscape.isComposing) return;
+      const originForPageEscape = typeof evtForPageEscape.composedPath === 'function'
+        ? evtForPageEscape.composedPath()[0]
+        : evtForPageEscape.target;
+      if (isNodeWithinPanelForPanelRuntime(originForPageEscape)) return;
+      closeTopModalOverlayForPanelRuntime();
+    }
+    document.addEventListener('keydown', handlePageEscapeForPanelRuntime);
 
     /* ============================================================
       SEARCH / FILTER
@@ -21716,6 +21864,8 @@
       const chatTaForEnter = root.querySelector('.chat-textarea');
       if (chatTaForEnter) {
         chatTaForEnter.addEventListener('keydown', function (evtForEnter) {
+          // The Enter that commits an IME candidate must not send the half-typed message.
+          if (evtForEnter.isComposing || evtForEnter.keyCode === 229) return;
           if (evtForEnter.key === 'Enter' && !evtForEnter.shiftKey) {
             evtForEnter.preventDefault();
             // Do not submit while dictation is recording.
@@ -21738,6 +21888,7 @@
       const inlineTaForEnter = root.getElementById('im-ta');
       if (inlineTaForEnter) {
         inlineTaForEnter.addEventListener('keydown', function (evtForInlineEnter) {
+          if (evtForInlineEnter.isComposing || evtForInlineEnter.keyCode === 229) return;
           if (evtForInlineEnter.key === 'Enter' && !evtForInlineEnter.shiftKey) {
             evtForInlineEnter.preventDefault();
             sendInlineMessage();
