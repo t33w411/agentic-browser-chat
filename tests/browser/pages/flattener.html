@@ -1,0 +1,232 @@
+<!doctype html><html><head><meta charset="utf-8">
+<script>
+// flattenedContent.js and toolExec.js only need these stubs to load. web_fetch's request to the
+// background is answered here with the case's own HTML, so both copies of the flattener (the page
+// one and the web_fetch one) can be checked against the same input. Fields in fetchFixtureExtra are
+// added to that reply, to stand in for a page the background cut at its size limit.
+window.chrome = window.chrome || {};
+try {
+  window.chrome.runtime = {
+    id: 'probe',
+    onMessage: { addListener() {} },
+    sendMessage(msg, cb) {
+      const reply = msg && msg.action === 'agentWebFetch'
+        ? Object.assign({ ok: true, isHtml: true, url: msg.url, title: 'Fixture', content: window.fetchFixtureHtml || '' }, window.fetchFixtureExtra || {})
+        : { ok: false, error: 'not stubbed' };
+      setTimeout(() => { if (cb) cb(reply); }, 0);
+    }
+  };
+} catch (e) {}
+window.ABChatContent = { registerActionHandler() {}, state: {} };
+</script>
+</head><body><pre id="out"></pre><div id="root"></div>
+<script>
+const params = new URLSearchParams(location.search); const kase = params.get('case');
+const base = '../../../';
+// Source indentation between children. Outside <pre> it must still collapse to one space.
+const NL = '\n      ';
+const py = (name) => '<pre><code>def ' + name + '(r):\n    if r == 0:\n        return 0\n    return 3.14 * r * r</code></pre>';
+const pyLines = (name) => 'def ' + name + '(r):\n    if r == 0:\n        return 0\n    return 3.14 * r * r';
+const highlighted = '<pre class="language-python"><code><span class="token keyword">def</span> <span class="token function">volume</span><span class="token punctuation">(</span>r<span class="token punctuation">)</span><span class="token punctuation">:</span>\n    <span class="token keyword">return</span> <span class="token number">4.19</span> <span class="token operator">*</span> r <span class="token operator">*</span> r <span class="token operator">*</span> r</code></pre>';
+// Chroma (Hugo sites) wraps every line break and run of spaces in an element of its own.
+const chroma = '<pre class="chroma"><code class="language-yaml"><span class="line"><span class="cl"><span class="nt">spec</span><span class="p">:</span><span class="w">\n</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">replicas</span><span class="p">:</span><span class="w"> </span><span class="m">3</span><span class="w">\n</span></span></span></code></pre>';
+const brLines = '<pre>first line<br>  second line, indented<br><button>Copy</button></pre>';
+const optionsTable = '<table><thead><tr><th>Option</th><th>Default</th></tr></thead><tbody><tr><td>timeout</td><td>5000</td></tr><tr><td>retries</td><td>3</td></tr></tbody></table>';
+const planTable = '<table><tbody>' + Array.from({ length: 6 }, (_, j) => '<tr><td>Plan ' + j + '</td><td>$' + (j * 9 + 5) + '</td></tr>').join('') + '</tbody></table>';
+const card = (i) => '<div class="card"><h3 class="title">Card ' + i + '</h3><span class="price">$' + (i * 37 % 200) + '.00</span><span class="rating">' + (i % 5) + ' stars</span></div>';
+const OPTIONAL_TAGS = ['em', 'strong', 'small', 'time', 'mark', 'b', 'i', 'u'];
+// Each card has its own mix of optional parts, so no shape is shared by 30 cards.
+const variedCard = (i) => '<div class="card"><h3>Card ' + i + '</h3>' + OPTIONAL_TAGS.filter((t, b) => (i >> b) & 1).map((t) => '<' + t + '>' + t + ' ' + i + '</' + t + '>').join('') + '</div>';
+const CASES = {
+  article: () => {
+    const h = [];
+    for (let i = 0; i < 120; i++) {
+      if (i === 10) h.push(chroma);
+      else if (i === 12) h.push(brLines);
+      else if (i === 20) h.push(py('early'));
+      else if (i === 70) h.push(py('middle'));
+      else if (i === 75) h.push(highlighted);
+      else if (i === 80) h.push(optionsTable);
+      else if (i === 90) h.push('<ul><li>First step</li><li>Second step</li></ul>');
+      else if (i === 95) h.push('<blockquote><p>Quoted advice.</p><p>Second line of the quote.</p></blockquote>');
+      else h.push('<p>Paragraph ' + i + ' explains a detail of the API.</p>');
+    }
+    return '<main><article>' + NL + h.join(NL) + '\n    </article></main>';
+  },
+  sections: () => {
+    const h = [];
+    for (let i = 0; i < 200; i++) {
+      const middle = i === 120 ? planTable : '<p class="text">Text ' + i + ' explains the option.</p>';
+      h.push('<div class="border-b py-4"><h3>Setting ' + i + '</h3>' + middle + '<div class="meta">Updated 3 days ago</div></div>');
+    }
+    return '<main><div class="stack">' + h.join(NL) + '</div></main>';
+  },
+  codeTutorial: () => {
+    const h = [];
+    for (let i = 0; i < 300; i++) h.push(i % 7 === 3 ? py('step_' + i) : '<p>Step ' + i + ' is explained here.</p>');
+    return '<main><article>' + h.join(NL) + '</article></main>';
+  },
+  snippetFeed: () => '<main><div class="results">' + Array.from({ length: 300 }, (_, i) => '<div class="snippet"><h3>Snippet ' + i + '</h3>' + py('snippet_' + i) + '</div>').join(NL) + '</div></main>',
+  feed: () => '<main><h2>Feed</h2><div class="grid">' + Array.from({ length: 3000 }, (_, i) => card(i)).join(NL) + '</div></main>',
+  table: () => '<main><h2>Orders</h2><table><thead><tr><th>Id</th><th>Who</th><th>Amount</th><th>Status</th></tr></thead><tbody>' + Array.from({ length: 6000 }, (_, i) => '<tr><td>#' + i + '</td><td><a href="#">Customer ' + i + '</a></td><td>$' + (i * 37 % 900) + '.00</td><td><span>Paid</span></td></tr>').join('') + '</tbody></table></main>',
+  variedFeed: () => '<main><div class="grid">' + Array.from({ length: 3000 }, (_, i) => variedCard(i)).join(NL) + '</div></main>',
+  // Sixty alike sections sit directly in <body>, the root the flattener is given, and one of them
+  // holds a 5,000-item list. That list has to be shortened before its section is cut to text.
+  bodyRoot: () => Array.from({ length: 60 }, (_, i) => '<section><h2>Day ' + i + '</h2><ul>'
+    + Array.from({ length: i === 50 ? 5000 : 2 }, (_, j) => '<li>Event ' + j + ' took ' + (j % 97) + ' ms</li>').join('')
+    + '</ul></section>').join(NL),
+  // 100,000 rows in one parent, each holding a hidden part. The flattener checks every element it
+  // copies for hidden styles, marking the hidden ones for a moment, so the number of marks shows
+  // how much of the page it copied.
+  // 4,000 paragraphs, all kept, flatten to well over 200,000 characters. The page has no API key
+  // here, so web_fetch gets no summary and returns the page text itself.
+  longProse: () => '<main><article>' + Array.from({ length: 4000 }, (_, i) => '<p>Paragraph ' + i + ' of a long reference page, kept whole because paragraphs always are.</p>').join(NL) + '</article></main>',
+  hugeRun: () => '<main><h2>Log</h2><div class="log">' + Array.from({ length: 100000 }, (_, i) => '<div class="row"><span>Row ' + i + '</span><span style="display:none">detail</span></div>').join('') + '</div><p>After the log.</p></main>'
+};
+
+const count = (s, re) => (s.match(re) || []).length;
+// The flattened HTML without the "Note / Page Title / Page URL" lines or the web_fetch wrapper.
+const bodyOf = (s) => { if (s.indexOf('Page URL:') === -1) return s; const from = s.indexOf('\n\n', s.indexOf('Page URL:')); let b = s.slice(from + 2); const end = b.indexOf('\n[END EXTERNAL CONTENT]'); if (end !== -1) b = b.slice(0, end); return b; };
+const outsidePre = (s) => s.replace(/<pre(?:\s[^>]*)?>[\s\S]*?<\/pre>/gi, '<pre/>');
+const omitted = (s) => { const m = s.match(/<!-- (\d+) items? omitted -->/); return m ? +m[1] : 0; };
+
+const CHECKS = {
+  article: (s, check, which) => {
+    check('a code block near the top keeps its line breaks and indentation', s.includes(pyLines('early')));
+    check('a code block in the middle stays a code block with its line breaks', s.includes('<pre><code>' + pyLines('middle') + '</code></pre>'));
+    if (which !== 'raw') {
+      check('highlighted code comes through as plain text with its indentation', s.includes('<pre><code>def volume(r):\n    return 4.19 * r * r * r</code></pre>'));
+      check('code whose line breaks and spaces are elements of their own keeps them', s.includes('<pre><code>spec:\n  replicas: 3\n</code></pre>'));
+      check('a <br> in a code block is a line break, and a button in it is left out', s.includes('<pre>first line\n  second line, indented\n</pre>'));
+    }
+    check('a table in the middle keeps its rows and cells', s.includes('<tr><td>timeout</td><td>5000</td></tr>'));
+    check('a list in the middle keeps its items', s.includes('<li>First step</li><li>Second step</li>'));
+    check('a quote in the middle keeps its paragraphs', s.includes('<p>Quoted advice.</p><p>Second line of the quote.</p>'));
+    check('every paragraph is kept', count(s, /explains a detail of the API/g) === 112);
+    check('whitespace outside code blocks is still collapsed', !/\n|\s\s/.test(outsidePre(bodyOf(s))));
+  },
+  sections: (s, check) => {
+    check('the section holding a table keeps the table', s.includes('<td>Plan 3</td><td>$32</td>'));
+    check('alike sections in the middle are still cut to text', s.includes('Setting 100 Text 100 explains the option. Updated 3 days ago') && !s.includes('<h3>Setting 100</h3>'));
+    check('the first sections stay whole', s.includes('<h3>Setting 10</h3>'));
+  },
+  codeTutorial: (s, check) => {
+    const blocks = count(s, /def step_\d+/g);
+    check('all 43 code blocks are present', blocks === 43);
+    check('every code block keeps its line breaks', count(s, /def step_\d+\(r\):\n    if r == 0:\n        return 0/g) === blocks);
+  },
+  snippetFeed: (s, check) => {
+    const blocks = count(s, /def snippet_\d+/g);
+    check('no code block is cut to one line', blocks > 50 && count(s, /def snippet_\d+\(r\):\n    if r == 0:/g) === blocks);
+    check('snippets past the budget are dropped with a count', omitted(s) > 0 && blocks + omitted(s) === 300);
+    check('the output stays bounded', s.length < 40000);
+  },
+  feed: (s, check) => {
+    check('cards at the start stay whole', s.includes('<h3>Card 0</h3>'));
+    check('cards in the middle are cut to text', /Card 100 \$100\.00 0 stars/.test(s) && !s.includes('<h3>Card 100</h3>'));
+    check('the rest are dropped with a count', omitted(s) > 2000);
+    check('the output stays bounded', s.length < 40000);
+  },
+  table: (s, check) => {
+    check('the header and first rows stay whole', s.includes('<th>Amount</th>') && s.includes('<td>#0</td>'));
+    check('rows in the middle are cut to text', /<tr>#100 Customer 100 \$100\.00 Paid<\/tr>/.test(s));
+    check('the rest are dropped with a count', omitted(s) > 4000);
+    check('the output stays bounded', s.length < 40000);
+  },
+  variedFeed: (s, check) => {
+    check('the rest are dropped with a count', omitted(s) > 2000);
+    check('the output stays bounded', s.length < 40000);
+  },
+  longProse: (s, check, which) => {
+    if (which === 'page') check('every paragraph is kept', count(s, /<p>Paragraph \d+ of a long/g) === 4000);
+    if (which === 'fetch') {
+      const inner = s.slice(s.indexOf('\n') + 1, s.indexOf('\n[END EXTERNAL CONTENT]'));
+      check('with no summary, the page text is cut to 200,000 characters', inner.length === 200000);
+      check('and a note after the content says so', /cut to its first 200,000 of [\d,]+ characters/.test(s.slice(s.indexOf('[END EXTERNAL CONTENT]'))));
+    }
+  },
+  hugeRun: (s, check) => {
+    check('every row is either in the result or counted as omitted', count(s, /Row \d+/g) + omitted(s) === 100000);
+    check('the content after the run is kept', s.includes('<p>After the log.</p>'));
+  },
+  bodyRoot: (s, check) => {
+    check('a long list in a middle child of the root is shortened before the child is cut to text', count(s, /Event \d+ took/g) < 2000);
+    const day50 = (s.match(/<section>Day 50 [\s\S]*?<\/section>/) || [''])[0];
+    check('the list, cut to text with its section, still says how many items it left out', omitted(day50) > 0 && count(day50, /Event \d+ took/g) + omitted(day50) === 5000);
+    check('the output stays bounded', s.length < 40000);
+    check('the sections at the start stay whole', s.includes('<h2>Day 0</h2><ul><li>Event 0 took 0 ms</li>'));
+  }
+};
+
+if (!kase) {
+  document.getElementById('out').textContent = JSON.stringify({ cases: Object.keys(CASES) });
+} else {
+  const html = CASES[kase]();
+  if (kase === 'bodyRoot') document.body.insertAdjacentHTML('beforeend', html);
+  else document.getElementById('root').innerHTML = html;
+  window.fetchFixtureHtml = '<!doctype html><html><head><title>Fixture</title></head><body>' + html + '</body></html>';
+  function load(src) { return new Promise((res, rej) => { const s = document.createElement('script'); s.src = base + src; s.onload = res; s.onerror = () => rej(new Error('could not load ' + src)); document.head.appendChild(s); }); }
+  load('tools/flattenedContent.js').then(() => load('agent/toolExec.js')).then(async () => {
+    const checks = [];
+    const out = { case: kase };
+    const run = (which, s) => CHECKS[kase](s, (name, ok) => checks.push({ name: which + ': ' + name, ok: !!ok }), which);
+    let hiddenMarks = 0;
+    const markObserver = new MutationObserver((records) => { hiddenMarks += records.length; });
+    markObserver.observe(document.body, { subtree: true, attributes: true, attributeFilter: ['data-abchat-hidden-marker'] });
+    const t0 = performance.now();
+    const page = window.ABChatContent.tools.flattenedContent.getFullPageContent();
+    out.pageMs = Math.round(performance.now() - t0);
+    hiddenMarks += markObserver.takeRecords().length;
+    markObserver.disconnect();
+    const pageText = page && page.ok ? page.result : '';
+    out.pageChars = pageText.length;
+    run('page', pageText);
+    const t1 = performance.now();
+    const fetched = await window.ABChatAgent.executeTool('web_fetch', { url: 'https://example.test/' }, { apiKey: '' });
+    out.fetchMs = Math.round(performance.now() - t1);
+    const fetchText = fetched && fetched.ok ? fetched.content : '';
+    out.fetchChars = fetchText.length;
+    run('fetch', fetchText);
+    if (kase === 'article') {
+      run('raw', window.ABChatContent.tools.flattenedContent.buildRawHtml(document.getElementById('root')) || '');
+      window.fetchFixtureExtra = { truncated: true, truncationNote: 'the first 10 MB' };
+      const cut = await window.ABChatAgent.executeTool('web_fetch', { url: 'https://example.test/' }, { apiKey: '' });
+      window.fetchFixtureExtra = null;
+      const cutText = cut && cut.ok ? cut.content : '';
+      const afterContent = cutText.slice(cutText.indexOf('[END EXTERNAL CONTENT]'));
+      checks.push({ name: 'fetch: a page cut at the size limit says so after the content', ok: afterContent.includes('this page was too large to read in full, so only the first 10 MB was read') && afterContent.includes('Counts of omitted items cover only the part that was read') });
+      window.fetchFixtureExtra = { truncated: true, timedOut: true, truncationNote: 'the first 2.4 MB (all that arrived within 30 seconds)' };
+      const slow = await window.ABChatAgent.executeTool('web_fetch', { url: 'https://example.test/' }, { apiKey: '' });
+      window.fetchFixtureExtra = null;
+      const slowText = slow && slow.ok ? slow.content : '';
+      const afterSlow = slowText.slice(slowText.indexOf('[END EXTERNAL CONTENT]'));
+      checks.push({ name: 'fetch: a page cut by the body timeout says so, and that another try may get more', ok: afterSlow.includes('so only the first 2.4 MB (all that arrived within 30 seconds) was read') && afterSlow.includes('Fetching it again may get more') && !afterSlow.includes('not retrievable') });
+    }
+    if (kase === 'longProse') {
+      // With a key and the summarizer answering (the endpoint is stubbed here), the summary is what
+      // comes back, and the summarizer's log record keeps only the start of the page.
+      const logged = [];
+      window.ABChatContent.apiLogger = { writeLog(record) { logged.push(record); return Promise.resolve(); } };
+      const realFetch = window.fetch;
+      window.fetch = (url, opts) => String(url).startsWith('https://openrouter.ai/')
+        ? Promise.resolve(new Response(JSON.stringify({ model: 'stub/model', choices: [{ message: { content: 'Stub summary.' } }], usage: {} }), { status: 200, headers: { 'content-type': 'application/json' } }))
+        : realFetch(url, opts);
+      const summarized = await window.ABChatAgent.executeTool('web_fetch', { url: 'https://example.test/' }, { apiKey: 'sk-test-not-used' });
+      window.fetch = realFetch;
+      delete window.ABChatContent.apiLogger;
+      const summaryLog = logged.find((r) => r.requestType === 'web-fetch-summary');
+      const loggedUser = summaryLog && summaryLog.requestMessages && summaryLog.requestMessages[1] ? summaryLog.requestMessages[1].content : '';
+      checks.push({ name: 'fetch: with a summary, the page is not cut and the result has no note', ok: !!summarized && summarized.ok && summarized.content.includes('Stub summary.') && !summarized.content.includes('[Note:') });
+      checks.push({ name: 'fetch: the summarizer log keeps the first 5,000 characters of the page and the instruction after it', ok: loggedUser.length > 5000 && loggedUser.length < 6000 && /\[\.\.\. [\d,]+ more characters not kept in the log\]/.test(loggedUser) && loggedUser.endsWith('make decisions based on it.') });
+    }
+    if (kase === 'hugeRun') {
+      checks.push({ name: 'page: only the copied part of a long run is checked for hidden styles', ok: hiddenMarks < 50000 });
+      const whole = window.ABChatContent.tools.flattenedContent.buildCleanHtml(document.getElementById('root'), { skipTruncate: true, removeStructuralElements: false }) || '';
+      checks.push({ name: 'page: with the cut turned off, every row is copied', ok: count(whole, /Row \d+/g) === 100000 });
+      out.hiddenMarks = hiddenMarks;
+    }
+    out.checks = checks;
+    document.getElementById('out').textContent = JSON.stringify(out);
+  }).catch((e) => { document.getElementById('out').textContent = JSON.stringify({ case: kase, error: String(e && e.stack || e) }); });
+}
+</script></body></html>

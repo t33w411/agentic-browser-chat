@@ -1,0 +1,259 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>page_layout harness</title>
+<style>
+  body { margin: 0; font: 14px sans-serif; }
+  header.top { position: fixed; top: 0; left: 0; right: 0; height: 50px; background: #eee; z-index: 5; }
+  aside.side { position: absolute; left: 0; top: 60px; width: 200px; height: 900px; background: #f7f7f7; }
+  main { margin-left: 220px; padding-top: 60px; }
+  .grid { display: flex; flex-wrap: wrap; width: 880px; gap: 10px; }
+  .card { width: 200px; height: 120px; border: 1px solid #ccc; box-sizing: border-box; padding: 4px; }
+  .card h3 { margin: 0; font-size: 14px; }
+  .card span { display: block; }
+  table { margin-top: 20px; border-collapse: collapse; }
+  td, th { border: 1px solid #ccc; padding: 4px 10px; }
+  section.results { margin-top: 20px; }
+  li.result { height: 30px; }
+</style>
+<script>
+  // Stand-ins for what the content-script world provides.
+  window.chrome = window.chrome || {};
+  try { window.chrome.runtime = { id: 'harness' }; } catch (e) {}
+  // Test-only: keep a handle on the chip's closed shadow root so the harness can click its buttons.
+  (function () {
+    const nativeAttach = Element.prototype.attachShadow;
+    Element.prototype.attachShadow = function (init) {
+      const root = nativeAttach.call(this, init);
+      if (this.id === 'abchat-layout-host') window.__chipRoot = root;
+      return root;
+    };
+  })();
+</script>
+</head>
+<body>
+<header class="top"><nav aria-label="Top menu"><a href="#">Home</a> <a href="#">Trending</a></nav></header>
+<aside class="side" id="guide"><h2>Library</h2><p>Subscriptions and playlists</p></aside>
+<main>
+  <h2>Recommended</h2>
+  <div class="grid" id="grid"></div>
+  <h2>Prices</h2>
+  <table id="prices">
+    <thead><tr><th>Name</th><th>Price</th></tr></thead>
+    <tbody id="price-body">
+      <tr><th>Fruit</th><th>Cost</th></tr>
+      <tr><td>Apple</td><td>$3.50</td></tr>
+      <tr><td>Banana</td><td>$0.99</td></tr>
+      <tr><td>Cherry</td><td>$12.00</td></tr>
+      <tr><td>Date</td><td>$1,299.99</td></tr>
+      <tr><td>Elder</td><td>$45</td></tr>
+    </tbody>
+  </table>
+  <div id="result-groups">
+    <section class="results"><ul class="list">
+      <li class="result"><a class="t" href="#">Result A</a> <span class="score">score 3</span></li>
+      <li class="result"><a class="t" href="#">Result B</a> <span class="score">score 9</span></li>
+      <li class="result"><a class="t" href="#">Result C</a> <span class="score">score 1</span></li>
+    </ul></section>
+    <section class="results"><ul class="list">
+      <li class="result"><a class="t" href="#">Result D</a> <span class="score">score 4</span></li>
+      <li class="result"><a class="t" href="#">Result E</a> <span class="score">score 8</span></li>
+      <li class="result"><a class="t" href="#">Result F</a> <span class="score">score 2</span></li>
+    </ul></section>
+  </div>
+</main>
+<pre id="out"></pre>
+<script>
+  const CARDS = [
+    ['Card 1', '1.2M views', '3 weeks ago', '12:04'],
+    ['Card 2', '340K views', '2 days ago', '3:10'],
+    ['Card 3', 'No views', '1 hour ago', '4:59'],
+    ['Card 4', '12K views', '1 year ago', '25:00'],
+    ['Card 5', '5.6M views', '4 months ago', '1:02:03'],
+    ['Card 6', '980 views', '5 days ago', '0:45'],
+    ['Card 7', '2.1M views', '2 weeks ago', '8:00'],
+    ['Card 8', '45K views', '6 days ago', '5:00'],
+    ['Card 9', '7.7K views', '3 days ago', '2:30'],
+    ['Card 10', '1M views', '1 month ago', '15:15'],
+    ['Card 11', '300K views', '2 months ago', '6:06'],
+    ['Card 12', null, 'Streaming now', 'LIVE']
+  ];
+  function makeCard(data) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.dataset.name = data[0];
+    card.innerHTML = '<h3 class="title"></h3>' + (data[1] ? '<span class="views"></span>' : '') + '<span class="age"></span><span class="dur"></span>';
+    card.querySelector('.title').textContent = data[0];
+    if (data[1]) card.querySelector('.views').textContent = data[1];
+    card.querySelector('.age').textContent = data[2];
+    card.querySelector('.dur').textContent = data[3];
+    return card;
+  }
+  const grid = document.getElementById('grid');
+  CARDS.forEach(function (c) { grid.appendChild(makeCard(c)); });
+</script>
+<script src="../../../tools/pageLayoutRules.js"></script>
+<script src="../../../tools/pageLayout.js"></script>
+<script>
+(async function () {
+  const out = { checks: [], log: [] };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  function check(name, ok, detail) { out.checks.push({ name, ok: !!ok, detail: detail === undefined ? '' : detail }); }
+  const run = (args) => window.ABChatContent.pageLayout.run(args);
+  function visualCardOrder() {
+    return Array.from(grid.querySelectorAll('.card'))
+      .filter((c) => c.getClientRects().length)
+      .map((c) => ({ n: c.dataset.name, r: c.getBoundingClientRect() }))
+      .sort((a, b) => (a.r.top - b.r.top) || (a.r.left - b.r.left))
+      .map((x) => x.n);
+  }
+  const rowsText = () => Array.from(document.querySelectorAll('#price-body tr')).map((tr) => tr.cells[0].textContent);
+  const styleSnapshot = new Map();
+  document.querySelectorAll('*').forEach((el) => styleSnapshot.set(el, el.getAttribute('style') || ''));
+
+  try {
+    // ---- scan
+    const scan = run({ operation: 'scan' });
+    out.scan = scan;
+    check('scan ok', scan.ok, scan.error);
+    const cardCollection = scan.collections.find((c) => c.fields.length >= 3 && c.fields.some((f) => (f.examples || f.values || []).some((e) => /views/.test(e))));
+    check('video cards found as a collection', cardCollection && cardCollection.items === 12, cardCollection);
+    const viewsField = cardCollection.fields.find((f) => (f.examples || f.values || []).some((e) => /views/.test(e)));
+    const durField = cardCollection.fields.find((f) => (f.examples || f.values || []).some((e) => /^\d+:\d\d/.test(e)));
+    check('views field kind is compact_number', viewsField && viewsField.kind === 'compact_number', viewsField);
+    check('duration field kind is duration', durField && durField.kind === 'duration', durField);
+    const tableCollection = scan.collections.find((c) => c.fields.length >= 2 && c.fields.some((f) => (f.examples || f.values || []).some((e) => /\$/.test(e))));
+    check('table rows found, th-only row excluded', tableCollection && tableCollection.items === 5, tableCollection);
+    const resultCollection = scan.collections.find((c) => c.fields.length >= 2 && c.fields.some((f) => (f.examples || f.values || []).some((e) => /score/.test(e))));
+    check('grouped list found across both sections', resultCollection && resultCollection.items === 6, resultCollection);
+    const headerRegion = scan.regions.find((r) => r.kind === 'header');
+    const sideRegion = scan.regions.find((r) => r.kind === 'sidebar');
+    check('fixed header reported as pinned', headerRegion && headerRegion.pinned === 'fixed', headerRegion);
+    check('sidebar region found', !!sideRegion, scan.regions);
+    check('no field-level or cell-level noise collections', scan.collections.length === 3, scan.collections.map((c) => c.id + ':' + c.items + ':' + (c.label || '')));
+    check('cards labelled by the heading above them', cardCollection && cardCollection.label === 'Recommended', cardCollection && cardCollection.label);
+    check('table rows labelled by the heading above the table', tableCollection && tableCollection.label === 'Prices', tableCollection && tableCollection.label);
+    check('untitled list does not borrow a neighbour\'s heading', resultCollection && !resultCollection.label, resultCollection && resultCollection.label);
+    const gridRegion = scan.regions.find((r) => r.label === '#grid' || r.size === '880x380');
+    check('grid region not labelled with a card title', !gridRegion || gridRegion.label === 'Recommended', gridRegion);
+
+    // ---- sort cards (flex parent, CSS order)
+    const sortRes = run({ operation: 'apply', changes: [{ action: 'sort', collection: cardCollection.id, field: viewsField.field, order: 'desc', label: 'Videos sorted by views' }] });
+    check('sort applied', sortRes.ok, sortRes);
+    const expectedDesc = ['Card 5', 'Card 7', 'Card 1', 'Card 10', 'Card 2', 'Card 11', 'Card 8', 'Card 4', 'Card 9', 'Card 6', 'Card 3', 'Card 12'];
+    check('cards visually sorted by views, missing last', JSON.stringify(visualCardOrder()) === JSON.stringify(expectedDesc), visualCardOrder());
+    check('flex sort did not move DOM nodes', grid.firstElementChild.dataset.name === 'Card 1');
+    check('sort reports unparsed item', sortRes.applied[0] && /1 item/.test(sortRes.applied[0].note), sortRes.applied[0] && sortRes.applied[0].note);
+
+    // ---- filter short videos
+    const filterRes = run({ operation: 'apply', changes: [{ action: 'filter', collection: cardCollection.id, field: durField.field, op: 'lt', value: '5:00', label: 'Hid videos under 5 minutes' }] });
+    check('filter applied', filterRes.ok && filterRes.applied[0].hidden === 4, filterRes);
+    check('filter left the sort in place', JSON.stringify(visualCardOrder()) === JSON.stringify(expectedDesc.filter((n) => ['Card 2', 'Card 3', 'Card 6', 'Card 9'].indexOf(n) === -1)), visualCardOrder());
+
+    // ---- lazy-loaded cards are sorted and filtered in
+    [['Card 13', '3M views', '1 day ago', '10:00'], ['Card 14', '10 views', '1 day ago', '1:00'], ['Card 15', '800K views', '1 day ago', '7:00']]
+      .forEach((c) => grid.appendChild(makeCard(c)));
+    await wait(1000);
+    const afterLoad = visualCardOrder();
+    check('new cards sorted in and filtered', JSON.stringify(afterLoad) === JSON.stringify(['Card 5', 'Card 13', 'Card 7', 'Card 1', 'Card 10', 'Card 15', 'Card 11', 'Card 8', 'Card 4', 'Card 12']), afterLoad);
+
+    // ---- table sort (block parent, DOM moves within tbody)
+    const tableSort = run({ operation: 'apply', changes: [{ action: 'sort', collection: tableCollection.id, field: tableCollection.fields[1].field, order: 'asc' }] });
+    check('table sort applied', tableSort.ok, tableSort);
+    check('table rows sorted by price, th row kept on top', JSON.stringify(rowsText()) === JSON.stringify(['Fruit', 'Banana', 'Apple', 'Cherry', 'Elder', 'Date']), rowsText());
+
+    // ---- grouped list sorts within each section
+    const groupSort = run({ operation: 'apply', changes: [{ action: 'sort', collection: resultCollection.id, field: resultCollection.fields[1].field, order: 'desc' }] });
+    const groupNames = Array.from(document.querySelectorAll('li.result a.t')).map((a) => a.textContent);
+    check('grouped list sorted per section, nothing crossed sections', JSON.stringify(groupNames) === JSON.stringify(['Result B', 'Result A', 'Result C', 'Result E', 'Result D', 'Result F']), groupNames);
+    check('grouped sort says so', groupSort.ok && /2 separate groups/.test(groupSort.applied[0].note), groupSort.applied && groupSort.applied[0].note);
+
+    // ---- region hide and style
+    const header = document.querySelector('header.top');
+    const side = document.getElementById('guide');
+    const regionRes = run({ operation: 'apply', changes: [
+      { action: 'style', target: headerRegion.id, css: { position: 'static', 'font-size': '20px' } },
+      { action: 'hide', target: sideRegion.id },
+      { action: 'style', target: headerRegion.id, css: { background: 'url(https://example.com/x.png)' } },
+      { action: 'style', target: headerRegion.id, css: { position: 'fixed' } }
+    ] });
+    check('header unstuck', getComputedStyle(header).position === 'static' && getComputedStyle(header).fontSize === '20px', getComputedStyle(header).position);
+    check('sidebar hidden', getComputedStyle(side).display === 'none');
+    check('url() style refused', regionRes.failed && regionRes.failed.some((f) => f.index === 2 && /url/.test(f.error)), regionRes.failed);
+    check('position fixed refused', regionRes.failed && regionRes.failed.some((f) => f.index === 3 && /position/.test(f.error)), regionRes.failed);
+
+    // ---- chip
+    const host = document.getElementById('abchat-layout-host');
+    check('undo chip shown', !!host && !!window.__chipRoot);
+    const chipTitle = window.__chipRoot && window.__chipRoot.querySelector('.lx-title');
+    out.chipTitle = chipTitle && chipTitle.textContent;
+    window.__chipRoot.querySelector('[data-action="layout-undo-last"]').click();
+    check('chip Undo reverses the latest change (sidebar hide)', getComputedStyle(side).display !== 'none');
+    window.__chipRoot.querySelector('[data-action="layout-toggle-list"]').click();
+    const rows = window.__chipRoot.querySelectorAll('.lx-item');
+    check('chip list shows every active change', rows.length === run({ operation: 'scan' }).active_changes.length, rows.length);
+    const headerRow = Array.from(rows).find((r) => /Restyled/.test(r.textContent));
+    headerRow.querySelector('[data-action="layout-undo-change"]').click();
+    check('chip per-change Undo restores header', getComputedStyle(header).position === 'fixed' && getComputedStyle(header).fontSize !== '20px');
+
+    // ---- undo by id: table sort back to natural order
+    const tableChangeId = tableSort.applied[0].change_id;
+    const undoRes = run({ operation: 'undo', change_id: tableChangeId });
+    check('undo table sort restores original row order', undoRes.ok && JSON.stringify(rowsText()) === JSON.stringify(['Fruit', 'Apple', 'Banana', 'Cherry', 'Date', 'Elder']), rowsText());
+
+    // ---- undo the filter: hidden cards come back and are sorted in
+    const filterId = filterRes.applied[0].change_id;
+    run({ operation: 'undo', change_id: filterId });
+    const afterUnfilter = visualCardOrder();
+    check('undoing the filter re-sorts the revealed cards', afterUnfilter.length === 15 && afterUnfilter[0] === 'Card 5' && afterUnfilter[afterUnfilter.length - 1] === 'Card 12', afterUnfilter);
+
+    // ---- a page that fights the sort gets left alone
+    const body = document.getElementById('price-body');
+    const natural = Array.from(body.children);
+    let fights = 0;
+    new MutationObserver(function () {
+      const now = Array.from(body.children);
+      if (now.some((el, i) => el !== natural[i])) {
+        fights++;
+        natural.forEach((el) => body.appendChild(el));
+      }
+    }).observe(body, { childList: true });
+    run({ operation: 'scan' });
+    const rescan = run({ operation: 'scan' });
+    const tableAgain = rescan.collections.find((c) => c.fields.length >= 2 && c.fields.some((f) => (f.examples || f.values || []).some((e) => /\$/.test(e))));
+    const fightSort = run({ operation: 'apply', changes: [{ action: 'sort', collection: tableAgain.id, field: tableAgain.fields[1].field, order: 'desc' }] });
+    await wait(15000);
+    const fightState = run({ operation: 'scan' }).active_changes.find((c) => c.change_id === fightSort.applied[0].change_id);
+    check('sort that the page keeps reverting is paused', fightState && fightState.paused === true, { fights, fightState });
+    check('pause stopped the tug of war', fights <= 25, fights);
+
+    // ---- reset restores every inline style
+    const resetRes = run({ operation: 'reset' });
+    check('reset ok', resetRes.ok, resetRes);
+    await wait(500);
+    let styleDiffs = [];
+    styleSnapshot.forEach((before, el) => { const now = el.getAttribute('style') || ''; if (now !== before) styleDiffs.push(el.tagName + '.' + el.className + ': ' + JSON.stringify(before) + ' -> ' + JSON.stringify(now)); });
+    check('reset restored every original inline style', styleDiffs.length === 0, styleDiffs.slice(0, 5));
+    check('chip removed when nothing is changed', !document.getElementById('abchat-layout-host'));
+
+    // ---- re-injection tears down the previous copy's changes
+    run({ operation: 'apply', changes: [{ action: 'hide', target: run({ operation: 'scan' }).regions.find((r) => r.kind === 'sidebar').id }] });
+    check('hide before re-injection', getComputedStyle(side).display === 'none');
+    await new Promise((resolve) => {
+      const s = document.createElement('script');
+      s.src = '../../../tools/pageLayout.js';
+      s.onload = resolve;
+      document.body.appendChild(s);
+    });
+    check('re-injected copy reverted the old copy\'s changes', getComputedStyle(side).display !== 'none' && !document.getElementById('abchat-layout-host'));
+  } catch (e) {
+    out.error = String(e && e.stack || e);
+  }
+  out.passed = out.checks.filter((c) => c.ok).length;
+  out.failed = out.checks.filter((c) => !c.ok);
+  document.getElementById('out').textContent = JSON.stringify(out);
+})();
+</script>
+</body>
+</html>

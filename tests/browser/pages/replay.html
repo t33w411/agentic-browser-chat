@@ -1,0 +1,178 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>page_layout replay harness</title>
+<style>
+  body { margin: 0; font: 14px/1.5 sans-serif; }
+  aside.side { position: absolute; left: 0; top: 0; width: 200px; height: 900px; background: #f7f7f7; }
+  main { margin-left: 220px; padding-top: 10px; }
+  .grid { display: flex; flex-wrap: wrap; width: 880px; gap: 10px; }
+  .card { width: 200px; height: 120px; border: 1px solid #ccc; box-sizing: border-box; padding: 4px; }
+  .card h3 { margin: 0; font-size: 14px; }
+  .card span { display: block; }
+  .status { display: inline-block; }
+</style>
+<script>
+  window.chrome = window.chrome || {};
+  try { window.chrome.runtime = { id: 'harness' }; } catch (e) {}
+  (function () {
+    const nativeAttach = Element.prototype.attachShadow;
+    Element.prototype.attachShadow = function (init) {
+      const root = nativeAttach.call(this, init);
+      if (this.id === 'abchat-layout-host') window.__chipRoot = root;
+      return root;
+    };
+  })();
+</script>
+</head>
+<body>
+<div id="app"></div>
+<pre id="out"></pre>
+<script>
+  // Builds the page from data, the way a fresh visit (or a single-page app re-render) would: new
+  // elements, the same structure. The second visit has one more video and different counts.
+  function renderApp(cards) {
+    const app = document.getElementById('app');
+    app.innerHTML = '<aside class="side" id="guide"><h2>Library</h2><p>Subscriptions</p></aside><main><h2>Recommended</h2><div class="grid" id="grid"></div></main>';
+    const grid = document.getElementById('grid');
+    cards.forEach(function (c) {
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.dataset.name = c[0];
+      card.innerHTML = '<h3 class="title"></h3><span class="views"></span><span class="status ' + (c[2] === 'Live' ? 'status-live' : 'status-vod') + '"></span>';
+      card.querySelector('.title').textContent = c[0];
+      card.querySelector('.views').textContent = c[1];
+      card.querySelector('.status').textContent = c[2];
+      grid.appendChild(card);
+    });
+  }
+  window.FIRST_VISIT = [['Boat', '1.2M views', 'Video'], ['Routine', '340K views', 'Video'], ['Rain', '12K views', 'Live'], ['Pasta', '5.6M views', 'Video'], ['Clip', '980 views', 'Video']];
+  window.SECOND_VISIT = [['Boat', '1.3M views', 'Video'], ['Routine', '350K views', 'Video'], ['Rain', '15K views', 'Live'], ['Pasta', '5.7M views', 'Video'], ['Clip', '990 views', 'Video'], ['Guitar', '45K views', 'Live']];
+  renderApp(window.FIRST_VISIT);
+</script>
+<script src="../../../tools/pageLayoutRules.js"></script>
+<script src="../../../tools/pageLayout.js"></script>
+<script>
+(async function () {
+  const out = { checks: [] };
+  function check(name, ok, detail) { out.checks.push({ name, ok: !!ok, detail: detail === undefined ? '' : detail }); }
+  const layout = window.ABChatContent.pageLayout;
+  const rules = window.ABChatContent.pageLayoutRules;
+  const order = () => Array.from(document.querySelectorAll('.card')).filter((c) => c.getClientRects().length)
+    .map((c) => ({ n: c.dataset.name, r: c.getBoundingClientRect() })).sort((a, b) => (a.r.top - b.r.top) || (a.r.left - b.r.left)).map((x) => x.n).join(',');
+  const hiddenCards = () => Array.from(document.querySelectorAll('.card')).filter((c) => getComputedStyle(c).display === 'none').map((c) => c.dataset.name).join(',');
+  const sideShown = () => getComputedStyle(document.getElementById('guide')).display !== 'none';
+  const listed = (f) => f.values || f.examples || [];
+  let notifications = 0;
+  layout.subscribe(function () { notifications++; });
+  try {
+    const scan = layout.run({ operation: 'scan' });
+    const cards = scan.collections.find((c) => c.items === 5);
+    const views = cards.fields.find((f) => f.kind === 'compact_number');
+    const status = cards.fields.find((f) => listed(f).indexOf('Live') !== -1);
+    const side = scan.regions.find((r) => r.kind === 'sidebar');
+    check('status variants merged into one field', status && listed(status).indexOf('Video') !== -1, cards.fields);
+    const apply = layout.run({ operation: 'apply', changes: [
+      { action: 'sort', collection: cards.id, field: views.field, order: 'desc', label: 'Most viewed first' },
+      { action: 'filter', collection: cards.id, field: status.field, op: 'contains', value: 'Live', mode: 'hide', label: 'Hide live streams' },
+      { action: 'hide', target: side.id, label: 'Hide the sidebar' },
+      { action: 'style', target: cards.id, part: 'items', css: { 'border-color': 'red' }, label: 'Red borders' }
+    ] }, { chatId: 7, toolCallId: 'call_abc' });
+    const record = apply._pageChanges;
+    check('apply returns a page-change record for the chat', record && record.op === 'apply' && record.items.length === 4 && record.origin === location.origin && record.session, record);
+    check('records carry keys from the tool call id', record && record.items.map((i) => i.key).join(',') === 'call_abc:0,call_abc:1,call_abc:2,call_abc:3', record && record.items.map((i) => i.key));
+    check('the record is plain JSON', record && JSON.stringify(JSON.parse(JSON.stringify(record))) === JSON.stringify(record));
+    check('the model-facing note mentions the chat', /from the chat/.test(apply.note || ''), apply.note);
+    check('first visit sorted, filtered, sidebar hidden', order() === 'Pasta,Boat,Routine,Clip' && hiddenCards() === 'Rain' && !sideShown(), { order: order(), hidden: hiddenCards() });
+    check('the chat can see its changes', layout.listChatChanges(7).length === 4 && layout.listChatChanges('7').length === 4 && layout.listChatChanges(8).length === 0);
+    check('changes notify the chat', notifications > 0, notifications);
+
+    const undoRecord = layout.run({ operation: 'undo', change_id: apply.applied[3].change_id });
+    check('undo returns a record naming the change', undoRecord._pageChanges && undoRecord._pageChanges.op === 'undo' && undoRecord._pageChanges.changeIds[0] === apply.applied[3].change_id, undoRecord._pageChanges);
+    // This check and the ones below on keys, missing targets, the 60-change quick check and the
+    // page limit were verified against the runtime from before records carried keys. All seven fail
+    // there, and the other checks in this page still pass.
+    check('the undo record names the change by its key too', undoRecord._pageChanges && Array.isArray(undoRecord._pageChanges.keys) && undoRecord._pageChanges.keys[0] === 'call_abc:3', undoRecord._pageChanges);
+    const net = rules.netPageChanges([record, undoRecord._pageChanges]);
+    check('the reply keeps three changes after its undo', net.length === 3 && net.map((i) => i.key).join(',') === 'call_abc:0,call_abc:1,call_abc:2', net.map((i) => i.key));
+
+    // A later visit: everything reset, the DOM rebuilt with new elements and new data.
+    layout.run({ operation: 'reset' });
+    renderApp(window.SECOND_VISIT);
+    check('reset and re-render leave nothing applied', layout.listChatChanges(7).length === 0 && sideShown() && hiddenCards() === '');
+    const items = net.map((i) => ({ key: i.key, spec: i.spec }));
+    const found = layout.checkReplay(items);
+    check('the quick check finds every target on the new page', found.every((f) => f.found), found);
+    check('the quick check changed nothing', sideShown() && hiddenCards() === '' && !document.getElementById('abchat-layout-host'));
+    const replay = layout.replay(items, { chatId: 7 });
+    check('replay applies all three', replay.ok && replay.applied === 3, replay);
+    check('replay sorts the new data, hides the live ones, and the sidebar', order() === 'Pasta,Boat,Routine,Clip' && hiddenCards() === 'Rain,Guitar' && !sideShown(), { order: order(), hidden: hiddenCards() });
+    check('replayed changes are listed under the chat with the same keys', layout.listChatChanges(7).map((c) => c.key).sort().join(',') === 'call_abc:0,call_abc:1,call_abc:2');
+    check('replayed changes keep the original descriptions', layout.listChatChanges(7).map((c) => c.description).join('|') === 'Most viewed first|Hide live streams|Hide the sidebar', layout.listChatChanges(7));
+    const again = layout.replay(items, { chatId: 7 });
+    check('replaying twice does not stack changes', again.applied === 3 && layout.listChatChanges(7).length === 3 && layout.run({ operation: 'scan' }).active_changes.length === 3);
+    const undone = layout.undoChatChanges(7, ['call_abc:1']);
+    check('chat undo removes one change by key', undone === 1 && hiddenCards() === '' && !sideShown() && layout.listChatChanges(7).length === 2);
+    layout.undoChatChanges(7, ['call_abc:0', 'call_abc:2']);
+    check('chat undo of the rest restores the page', sideShown() && layout.listChatChanges(7).length === 0 && !document.getElementById('abchat-layout-host'));
+
+    // The model sorts a list whose sort the chat applied again. The replaced sort has an id from
+    // this page load, not the one in the reply's record, so the record names it by key as well.
+    layout.replay(items.slice(0, 1), { chatId: 7 });
+    const rescan = layout.run({ operation: 'scan' });
+    const newCards = rescan.collections.find((c) => c.items === 6);
+    const newViews = newCards && newCards.fields.find((f) => f.kind === 'compact_number');
+    const resort = layout.run({ operation: 'apply', changes: [{ action: 'sort', collection: newCards && newCards.id, field: newViews && newViews.field, order: 'asc', label: 'Least viewed first' }] }, { chatId: 7, toolCallId: 'call_def' });
+    const resortItem = resort._pageChanges && resort._pageChanges.items[0];
+    check('a sort that replaces a re-applied sort names the replaced key', resortItem && resortItem.replaces_key === 'call_abc:0', resortItem);
+    const chatNet = rules.netPageChanges([record, undoRecord._pageChanges, resort._pageChanges]);
+    check('the chat-wide set drops the replaced sort', chatNet.map((i) => i.key).join(',') === 'call_abc:1,call_abc:2,call_def:0', chatNet.map((i) => i.key));
+    const resetRecord = layout.run({ operation: 'reset' })._pageChanges;
+    check('a reset record names each change by its key', resetRecord && Array.isArray(resetRecord.keys) && resetRecord.keys.join(',') === 'call_def:0', resetRecord);
+
+    // A whole chat's changes can be checked at once, past the 40 a page can hold at one time.
+    const manyChecks = layout.checkReplay(Array.from({ length: 60 }, (_, i) => ({ key: 'many-check:' + i, spec: items[0].spec })));
+    check('the quick check answers for every change it is given', manyChecks.length === 60 && manyChecks.every((f) => f.found), manyChecks.length);
+
+    // Targets that are gone.
+    document.getElementById('app').innerHTML = '<p>Nothing here</p>';
+    const gone = layout.checkReplay(items);
+    check('the quick check reports missing targets', gone.every((f) => !f.found), gone);
+    const goneReplay = layout.replay(items, { chatId: 7 });
+    check('replay of missing targets applies nothing and says why', !goneReplay.ok && goneReplay.applied === 0 && /not here/.test(goneReplay.results[0].error), goneReplay);
+    check('a target that is not on the page is marked missing', goneReplay.results.every((r) => r.missing === true), goneReplay.results);
+
+    // A tampered record still goes through the CSS allowlist.
+    renderApp(window.FIRST_VISIT);
+    const tampered = layout.replay([{ key: 'bad:0', spec: { action: 'style', region: net[2].spec.region, css: { background: 'url(https://example.com/x.png)' } } }], { chatId: 7 });
+    check('a tampered style is refused on replay', !tampered.ok && !document.getElementById('guide').getAttribute('style'), tampered);
+    const unknown = layout.replay([{ key: 'bad:1', spec: { action: 'eval', code: 'alert(1)' } }], { chatId: 7 });
+    check('an unknown action is refused on replay', !unknown.ok && unknown.results[0].ok === false, unknown);
+
+    // More changes than a page holds: the ones past the limit are refused one by one, not dropped
+    // without a word.
+    const tooMany = layout.replay(Array.from({ length: 45 }, (_, i) => ({ key: 'many:' + i, spec: { action: 'style', region: net[2].spec.region, css: { 'padding-top': i + 'px' } } })), { chatId: 7 });
+    check('changes past the page limit are refused and reported', tooMany.applied === 40 && tooMany.results.length === 45
+      && tooMany.results.slice(40).every((r) => !r.ok && !r.missing && /Too many/.test(r.error)), { applied: tooMany.applied, results: tooMany.results.length });
+    layout.run({ operation: 'reset' });
+
+    // The on-page bar can be closed and stays closed until reload.
+    layout.replay(items.slice(2), { chatId: 7 });
+    const closeBtn = window.__chipRoot && window.__chipRoot.querySelector('[data-action="layout-dismiss"]');
+    check('the bar has a close button', !!closeBtn);
+    if (closeBtn) closeBtn.click();
+    check('closing hides the bar and keeps the change', !document.getElementById('abchat-layout-host') && !sideShown());
+    layout.replay(items.slice(0, 1), { chatId: 7 });
+    check('the bar stays closed when another change is applied', !document.getElementById('abchat-layout-host') && layout.listChatChanges(7).length === 2);
+    layout.run({ operation: 'reset' });
+  } catch (e) {
+    out.error = String(e && e.stack || e);
+  }
+  out.passed = out.checks.filter((c) => c.ok).length;
+  out.failed = out.checks.filter((c) => !c.ok);
+  document.getElementById('out').textContent = JSON.stringify(out);
+})();
+</script>
+</body>
+</html>

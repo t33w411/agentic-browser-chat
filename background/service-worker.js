@@ -17,7 +17,8 @@ importScripts(
   "./commands.js",
   "./dbHandler.js",
   "./crossFrameAx.js",
-  "./cdpAutomation.js"
+  "./cdpAutomation.js",
+  "./fetchBody.js"
 );
 
 const sharedNamespaceForServiceWorker = globalThis.ABChatShared || {};
@@ -34,6 +35,7 @@ const commandsForServiceWorker = backgroundNamespaceForServiceWorker.commands;
 const dbHandlerForServiceWorker = backgroundNamespaceForServiceWorker.dbHandler;
 const cdpAutomationForServiceWorker = backgroundNamespaceForServiceWorker.cdpAutomation || {};
 const crossFrameAxForServiceWorker = backgroundNamespaceForServiceWorker.crossFrameAx || {};
+const fetchBodyForServiceWorker = backgroundNamespaceForServiceWorker.fetchBody || {};
 const agentNamespaceForServiceWorker = globalThis.ABChatAgent || {};
 const fileParsingForServiceWorker = agentNamespaceForServiceWorker.fileParsing || {};
 const runtimeRequestResponseCacheForServiceWorker = new Map();
@@ -1775,66 +1777,17 @@ async function setSessionValueForServiceWorker(keyForServiceWorker, valueForServ
   });
 }
 
-async function syncModeVisualsForServiceWorker(
-  tabIdForServiceWorker,
-  shouldInvalidateListenersForServiceWorker
-) {
-  if (typeof tabIdForServiceWorker !== "number") {
-    return false;
-  }
-
-  return new Promise((resolveForServiceWorker) => {
-    chrome.scripting.executeScript(
-      {
-        target: { tabId: tabIdForServiceWorker },
-        func: (shouldInvalidateListenersForServiceWorkerArg) => {
-          if (shouldInvalidateListenersForServiceWorkerArg) {
-            // Invalidate old generation-bound listeners from the previous extension context.
-            window.abchatListenerGeneration = (window.abchatListenerGeneration || 0) + 1;
-
-            var globalStateForServiceWorkerSync = globalThis.ABChatContent && globalThis.ABChatContent.state
-              ? globalThis.ABChatContent.state
-              : null;
-            if (globalStateForServiceWorkerSync) {
-              globalStateForServiceWorkerSync.contextMenuTrackingBoundForFlattenedContent = false;
-              globalStateForServiceWorkerSync.contextMenuTrackingBoundForContentSelector = false;
-            }
-          }
-        },
-        args: [Boolean(shouldInvalidateListenersForServiceWorker)]
-      },
-      () => {
-        resolveForServiceWorker(!chrome.runtime.lastError);
-      }
-    );
-  });
-}
-
-async function syncModeVisualsAcrossSupportedTabsForServiceWorker(
-  shouldInvalidateListenersForServiceWorker
-) {
-  const allTabsForServiceWorker = await queryTabsForServiceWorker({});
-  for (const tabForServiceWorker of allTabsForServiceWorker) {
-    if (!tabMessagingForServiceWorker.isSupportedUrl(tabForServiceWorker.url || "")) {
-      continue;
-    }
-    try {
-      await syncModeVisualsForServiceWorker(
-        tabForServiceWorker.id,
-        shouldInvalidateListenersForServiceWorker
-      );
-    } catch (errorForServiceWorker) {
-      // Skip tabs that cannot be scripted.
-    }
-  }
-}
-
 // Recovery design notes:
-// - Clear visible stale effects on the active tab first (fast UX path).
-// - Then run all-tab reinjection + visual synchronization for consistency.
+// - Re-inject the active tab first (fast UX path), then every other supported tab.
 // - Keep this idempotent and bounded with timeouts to avoid stuck worker runs.
-async function runReloadRecoveryPassForServiceWorker(shouldForceDisableModesForServiceWorker) {
-  if (shouldForceDisableModesForServiceWorker) {
+// - Never write window.abchatListenerGeneration from here; content/preInit.js owns it. After a
+//   reload the new content scripts run in a fresh isolated world, so a bump from here cannot reach
+//   the old listeners, which are already cut off (chrome.runtime.id is gone in the old world). All
+//   it can do is land in a world where this build's scripts have already run, such as a tab that
+//   loaded during install or a restored tab at browser startup. Every listener there then fails its
+//   stale check, and the tab answers no message until it is reloaded.
+async function runReloadRecoveryPassForServiceWorker(isFirstPassForServiceWorker) {
+  if (isFirstPassForServiceWorker) {
     try {
       var activeTabForServiceWorker = await tabMessagingForServiceWorker.queryActiveTab();
       if (
@@ -1842,13 +1795,6 @@ async function runReloadRecoveryPassForServiceWorker(shouldForceDisableModesForS
         typeof activeTabForServiceWorker.id === "number" &&
         tabMessagingForServiceWorker.isSupportedUrl(activeTabForServiceWorker.url || "")
       ) {
-        // Fast path: clear visible stale effects immediately on the active tab,
-        // then continue deeper reinjection/readiness recovery in background.
-        await syncModeVisualsForServiceWorker(
-          activeTabForServiceWorker.id,
-          true
-        );
-
         var didInjectActiveTabForServiceWorker = await Promise.race([
           tabMessagingForServiceWorker.ensureContentInjected(activeTabForServiceWorker.id),
           new Promise((resolveForServiceWorker) => {
@@ -1862,13 +1808,6 @@ async function runReloadRecoveryPassForServiceWorker(shouldForceDisableModesForS
           await tabMessagingForServiceWorker.checkContentReady(
             activeTabForServiceWorker.id,
             5
-          );
-        }
-
-        if (shouldForceDisableModesForServiceWorker) {
-          await syncModeVisualsForServiceWorker(
-            activeTabForServiceWorker.id,
-            false
           );
         }
       }
@@ -1889,26 +1828,11 @@ async function runReloadRecoveryPassForServiceWorker(shouldForceDisableModesForS
   } catch (errorForServiceWorker) {
     // Ignore re-injection failures during lifecycle recovery and continue.
   }
-
-  if (!shouldForceDisableModesForServiceWorker) {
-    return;
-  }
-
-  await Promise.race([
-    syncModeVisualsAcrossSupportedTabsForServiceWorker(
-      false
-    ),
-    new Promise((resolveForServiceWorker) => {
-      setTimeout(() => {
-        resolveForServiceWorker(false);
-      }, 7000);
-    })
-  ]);
 }
 
 // Lessons learned:
 // - Recovery must prioritize the visible tab first to avoid stale UI perception.
-// - Re-injection and visual cleanup can stall on some tabs; bounded timeouts prevent
+// - Re-injection can stall on some tabs; bounded timeouts prevent
 //   the overall recovery sequence from hanging.
 // - Do not run overlapping recovery sequences; a simple in-flight guard avoids races.
 // - Recovery retries must be non-destructive once the user starts interacting with modes.
@@ -2805,6 +2729,12 @@ async function handleAgentWebFetchForServiceWorker(msgForFetch, sendResponseForF
     fetchOptsForFetch.body = bodyForFetch;
   }
 
+  // The 15-second timeout covers only the wait for the response to start. The body gets its own
+  // limit, so a server that sends slowly cannot hold the tool until the agent loop's 90-second
+  // limit on a round of tools, which stops the whole run. 15 + 30 seconds leaves the summarizer or
+  // vision call room inside that.
+  var BODY_TIMEOUT_MS_FOR_FETCH = 30000;
+
   try {
     var controllerForFetch = requestRecordForFetch ? requestRecordForFetch.controller : new AbortController();
     fetchOptsForFetch.signal = controllerForFetch.signal;
@@ -2858,8 +2788,8 @@ async function handleAgentWebFetchForServiceWorker(msgForFetch, sendResponseForF
     var IMAGE_MIMES_FOR_FETCH = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
     if (IMAGE_MIMES_FOR_FETCH.indexOf(mimeTypeBaseForFetch) !== -1) {
       var MAX_IMAGE_BYTES_FOR_FETCH = 10 * 1024 * 1024;
-      var imageBufForFetch;
-      try { imageBufForFetch = await responseForFetch.arrayBuffer(); } catch (e) {
+      var imageBodyForFetch;
+      try { imageBodyForFetch = await fetchBodyForServiceWorker.readBodyWithCap(responseForFetch, MAX_IMAGE_BYTES_FOR_FETCH, { timeoutMs: BODY_TIMEOUT_MS_FOR_FETCH }); } catch (e) {
         sendResponseForFetch({ ok: false, error: 'Failed to read image: ' + (e && e.message || String(e)) });
         return;
       }
@@ -2867,11 +2797,15 @@ async function handleAgentWebFetchForServiceWorker(msgForFetch, sendResponseForF
         sendResponseForFetch({ ok: false, cancelled: true, error: 'Cancelled' });
         return;
       }
-      if (imageBufForFetch.byteLength > MAX_IMAGE_BYTES_FOR_FETCH) {
-        sendResponseForFetch({ ok: false, error: 'Image too large (' + imageBufForFetch.byteLength + ' bytes; max 10 MB).' });
+      if (imageBodyForFetch.timedOut) {
+        sendResponseForFetch({ ok: false, error: 'Fetch timeout: the image did not finish downloading within ' + BODY_TIMEOUT_MS_FOR_FETCH + 'ms' });
         return;
       }
-      var imageBytesForFetch = new Uint8Array(imageBufForFetch);
+      if (imageBodyForFetch.truncated) {
+        sendResponseForFetch({ ok: false, error: 'Image too large (over 10 MB).' });
+        return;
+      }
+      var imageBytesForFetch = imageBodyForFetch.bytes;
       var imageBinaryForFetch = '';
       var CHUNK_FOR_FETCH = 8192;
       for (var ci = 0; ci < imageBytesForFetch.length; ci += CHUNK_FOR_FETCH) {
@@ -2884,7 +2818,7 @@ async function handleAgentWebFetchForServiceWorker(msgForFetch, sendResponseForF
         isImage: true,
         mimeType: mimeTypeBaseForFetch,
         dataUrl: imageDataUrlForFetch,
-        size: imageBufForFetch.byteLength
+        size: imageBytesForFetch.length
       };
       var IMAGE_CACHE_MAX_DATAURL_FOR_FETCH = 2 * 1024 * 1024; // skip cache for dataUrls > 2 MB
       if (methodForFetch === 'GET' && imageDataUrlForFetch.length <= IMAGE_CACHE_MAX_DATAURL_FOR_FETCH) {
@@ -2911,8 +2845,8 @@ async function handleAgentWebFetchForServiceWorker(msgForFetch, sendResponseForF
 
     if (isDocTypeForFetch) {
       var MAX_DOC_BYTES_FOR_FETCH = 50 * 1024 * 1024;
-      var docBufForFetch;
-      try { docBufForFetch = await responseForFetch.arrayBuffer(); } catch (e) {
+      var docBodyForFetch;
+      try { docBodyForFetch = await fetchBodyForServiceWorker.readBodyWithCap(responseForFetch, MAX_DOC_BYTES_FOR_FETCH, { timeoutMs: BODY_TIMEOUT_MS_FOR_FETCH }); } catch (e) {
         sendResponseForFetch({ ok: false, error: 'Failed to read document: ' + (e && e.message || String(e)) });
         return;
       }
@@ -2920,10 +2854,15 @@ async function handleAgentWebFetchForServiceWorker(msgForFetch, sendResponseForF
         sendResponseForFetch({ ok: false, cancelled: true, error: 'Cancelled' });
         return;
       }
-      if (docBufForFetch.byteLength > MAX_DOC_BYTES_FOR_FETCH) {
-        sendResponseForFetch({ ok: false, error: 'Document too large (' + docBufForFetch.byteLength + ' bytes; max 50 MB).' });
+      if (docBodyForFetch.timedOut) {
+        sendResponseForFetch({ ok: false, error: 'Fetch timeout: the document did not finish downloading within ' + BODY_TIMEOUT_MS_FOR_FETCH + 'ms' });
         return;
       }
+      if (docBodyForFetch.truncated) {
+        sendResponseForFetch({ ok: false, error: 'Document too large (over 50 MB).' });
+        return;
+      }
+      var docBufForFetch = docBodyForFetch.bytes.buffer;
       if (!fileParsingForServiceWorker || typeof fileParsingForServiceWorker.parseFileBuffer !== 'function') {
         sendResponseForFetch({ ok: false, error: 'File parser unavailable.' });
         return;
@@ -2988,7 +2927,17 @@ async function handleAgentWebFetchForServiceWorker(msgForFetch, sendResponseForF
       return;
     }
 
-    var rawTextForFetch = await responseForFetch.text();
+    // A page is read up to the size cap or the body timeout and the rest of the download is
+    // cancelled. Unlike an image or a document, the start of a page is still useful, so the cut is
+    // flagged for the tool to tell the model it saw only the start. The cap still leaves a lot. The
+    // first 10 MB of the 15 MB single-page HTML spec flattens to 1.1 million characters.
+    var MAX_TEXT_BYTES_FOR_FETCH = 10 * 1024 * 1024;
+    var textBodyForFetch = await fetchBodyForServiceWorker.readBodyWithCap(responseForFetch, MAX_TEXT_BYTES_FOR_FETCH, { timeoutMs: BODY_TIMEOUT_MS_FOR_FETCH });
+    if (textBodyForFetch.timedOut && !textBodyForFetch.bytes.length) {
+      sendResponseForFetch({ ok: false, error: 'Fetch timeout: no content arrived within ' + BODY_TIMEOUT_MS_FOR_FETCH + 'ms of the response' });
+      return;
+    }
+    var rawTextForFetch = fetchBodyForServiceWorker.decodeUtf8(textBodyForFetch.bytes, textBodyForFetch.truncated);
     if (requestRecordForFetch && requestRecordForFetch.signal.aborted) {
       sendResponseForFetch({ ok: false, cancelled: true, error: 'Cancelled' });
       return;
@@ -3004,7 +2953,19 @@ async function handleAgentWebFetchForServiceWorker(msgForFetch, sendResponseForF
       content: rawTextForFetch,
       isHtml: isHtmlForFetch
     };
-    if (methodForFetch === 'GET') {
+    if (textBodyForFetch.truncated) {
+      var readBytesForFetch = textBodyForFetch.bytes.length;
+      var readSizeForFetch = readBytesForFetch >= 1024 * 1024
+        ? (readBytesForFetch / (1024 * 1024)).toFixed(1).replace(/\.0$/, '') + ' MB'
+        : Math.max(1, Math.round(readBytesForFetch / 1024)) + ' KB';
+      successResponseForFetch.truncated = true;
+      successResponseForFetch.timedOut = textBodyForFetch.timedOut;
+      successResponseForFetch.truncationNote = textBodyForFetch.timedOut
+        ? 'the first ' + readSizeForFetch + ' (all that arrived within ' + (BODY_TIMEOUT_MS_FOR_FETCH / 1000) + ' seconds)'
+        : 'the first ' + readSizeForFetch;
+    }
+    // A page cut short by the timeout is not cached, because the next attempt may get all of it.
+    if (methodForFetch === 'GET' && !textBodyForFetch.timedOut) {
       await setWebFetchCacheEntryForServiceWorker(urlForFetch, successResponseForFetch);
     }
     sendResponseForFetch(successResponseForFetch);
@@ -3886,16 +3847,18 @@ async function fetchImageAsDataUrlForServiceWorker(rawUrlForImageFetch) {
     if (ALLOWED_IMAGE_MIMES_FOR_IMAGE_FETCH.indexOf(contentTypeForImageFetch) === -1) {
       return { ok: false, error: 'Dropped item is not a supported image.' };
     }
-    var bufferForImageFetch;
+    // Read up to the limit and cancel the rest, rather than downloading a larger file in full
+    // only to refuse it. The 15-second timer above still covers the body.
+    var bodyForImageFetch;
     try {
-      bufferForImageFetch = await responseForImageFetch.arrayBuffer();
+      bodyForImageFetch = await fetchBodyForServiceWorker.readBodyWithCap(responseForImageFetch, MAX_IMAGE_BYTES_FOR_IMAGE_FETCH);
     } catch (readErrForImageFetch) {
       return { ok: false, error: 'Could not read image data.' };
     }
-    if (bufferForImageFetch.byteLength > MAX_IMAGE_BYTES_FOR_IMAGE_FETCH) {
+    if (bodyForImageFetch.truncated) {
       return { ok: false, error: 'Image is too large. Max size is 20MB.' };
     }
-    var bytesForImageFetch = new Uint8Array(bufferForImageFetch);
+    var bytesForImageFetch = bodyForImageFetch.bytes;
     var binaryForImageFetch = '';
     var CHUNK_FOR_IMAGE_FETCH = 0x8000;
     for (var offForImageFetch = 0; offForImageFetch < bytesForImageFetch.length; offForImageFetch += CHUNK_FOR_IMAGE_FETCH) {
@@ -3905,7 +3868,7 @@ async function fetchImageAsDataUrlForServiceWorker(rawUrlForImageFetch) {
       ok: true,
       dataUrl: 'data:' + contentTypeForImageFetch + ';base64,' + btoa(binaryForImageFetch),
       mimeType: contentTypeForImageFetch,
-      size: bufferForImageFetch.byteLength
+      size: bytesForImageFetch.length
     };
   } finally {
     clearTimeout(timeoutIdForImageFetch);

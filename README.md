@@ -155,12 +155,13 @@ The page surface is **ref-based**: the model never writes CSS selectors or finge
 - `page_act` — one atomic action by ref: `click`, `type`, `select`, `fill`, `hover`, `press`, `scroll`, `drag`. Returns a fresh snapshot with `new`/`changed` flags so the model never diffs two lists. Safeguards: the `fill` action only writes values, it never submits, clicks, or navigates, and accepts up to 10 related non-sensitive fields from one current form or dialog; sensitive fields (passwords, OTP/2FA, card numbers, CVV, IBAN, SSN, etc.) plus disabled, readonly, hidden, and invisible fields are blocked; every write is verified by reading the value back. Submitting is a separate `click` action the agent takes only when you ask it to; a click whose target reads destructive (delete-style) is refused unless explicitly confirmed. A stale ref does not error: `page_act` returns a fresh snapshot to pick from. A click that navigates returns `{ navigated: true, ... }` under the offscreen loop, which survives the reload.
 - `page_read` — read page content without selectors. Modes: `selection` (current text selection), `context` (title/url plus a heading outline for orientation), `content` (main readable text, 200K cap, with auto-scroll for lazy-loaded or virtualized content), `find_text` (literal substring search; hits on interactive controls carry a `ref` for `page_act`).
 - `page_spreadsheet` — high-level Google Sheets editing that hides the Name-Box keyboard choreography. Google Sheets only. Intents: `set_cell`, `set_range` (fills a block, then reads it back to verify), `read_range`.
+- `page_layout` — change how the current page is displayed: sort or filter a list of repeated items (search results, videos, products, table rows), hide a region, or restyle one. `scan` numbers the page's regions (`r1`, `r2`, ...) and repeated collections (`c1`, `c2`, ...) and labels each item's text fields; `apply` then sorts, filters, hides or styles by those ids. Sorts, filters and item styles keep applying as more items load. Safeguards: the model sends ids and values, never code or selectors; styles are limited to an allowlist of layout and typography properties, and any value containing `url()` or similar is refused; items are never moved out of their own parent. Every change is reversible from the chat, from a bar on the page (which can be closed), or with `undo` and `reset`, and nothing survives a reload. Each reply that changed the page shows its changes under it with Undo, and on a later visit to the same site with Apply, which makes them again without calling the model. When several replies changed the same site, Apply all makes every change the chat left in place in one click, and Undo all removes them.
 - `take_screenshot` — capture the current page viewport and get back a vision model's text description of it. A discretionary visual fallback for when the ref tools give confusing or insufficient signal, or the problem is inherently visual (an overlay covering a field, a custom widget, a layout glitch). The extension's own panel UI is hidden during capture so it never appears in the shot.
 - `eval` — run JavaScript in a sandboxed QuickJS/WASM engine. Can load exact prior tool results via `vars_from` (by `result_ref` message id), attachment contents via `blob_ids` (injected as a reserved `blobs` array), and emit a downloadable file by returning a `__document__` spec (xlsx / docx / pdf / csv / pptx, built through the same generator as `create_document`). Safeguards: no DOM, no `chrome` APIs, no network, no timers. Hard timeout of 5 to 30 seconds. Output capped at 200 KB; combined `vars` + `vars_from` capped at 1 MB; the `blob_ids` payload and any `__document__` spec each get a separate 50 MB budget.
 
 **Web**
 - `web_search` — search the web and return a grounded summary plus source URLs. Required gateway: the agent must search before it can fetch any URL it didn't already see.
-- `web_fetch` — fetch a URL and either summarize it or answer a specific prompt against it. Handles HTML, plain text, JSON, images (via a vision model), and documents (PDF, DOCX, XLSX, PPTX). Safeguard: the runtime rejects any URL that did not appear in the conversation context (user message or prior tool result), so the model cannot fabricate a URL and fetch it. 15-second timeout per request.
+- `web_fetch` — fetch a URL and either summarize it or answer a specific prompt against it. Handles HTML, plain text, JSON, images (via a vision model), and documents (PDF, DOCX, XLSX, PPTX). Safeguard: the runtime rejects any URL that did not appear in the conversation context (user message or prior tool result), so the model cannot fabricate a URL and fetch it. The server has 15 seconds to respond and 30 more to send the body. A page over 10 MB, or one still arriving after those 30 seconds, is read only as far as it got, and the model is told so.
 
 **Browser tabs**
 - `list_tabs` — list the user's open tabs across all windows (id, title, url, active, window, discarded, plus an `accessible` flag for pages extensions cannot read). Read-only.
@@ -204,6 +205,8 @@ In practice:
 A built-in API Logs view captures every request to OpenRouter (prompt, tool calls, raw response, token counts, cost estimate). It's intended as a power-user and debugging feature: useful when an answer is wrong and you want to inspect exactly what the model received, or when you're tuning custom instructions and want to see the assembled system prompt.
 
 Open it from Settings → View API logs. Logs can be viewed as rendered text or raw JSON, and cleared from the same view.
+
+The log keeps the latest 500 calls and no more than 50 MB, dropping the oldest first. Logs saved by an earlier version are brought under these limits when the extension updates. Any single text in a record past 200,000 characters keeps its start and a note of how much was left out, and the summaries behind `web_fetch` and `read_tab` keep the first 5,000 characters of the page they summarized. An agent run's later turns are stored as the messages each one added and shown whole again when you open the record.
 
 ### Cross-tab sync
 
@@ -382,7 +385,8 @@ agentic-browser-chat/
 │   ├── documentGeneration.js  # Generated-doc support
 │   ├── fileParsing.js         # PDF/DOCX/XLSX/etc. parsing pipeline
 │   ├── compactor.js           # History compaction when context fills
-│   └── apiLogger.js           # Client side of the API log
+│   ├── apiLogger.js           # Client side of the API log
+│   └── apiLogTurns.js         # How a run's turns are stored in the API log
 ├── shared/                    # Code used by both content scripts and the service worker
 │   ├── db.js                  # Dexie schema
 │   ├── messages.js            # Message-type constants
@@ -394,7 +398,9 @@ agentic-browser-chat/
 ├── tools/                     # Page-interaction tools
 │   ├── contentSelector.js     # Hover-highlight + click-to-attach
 │   ├── selectionContextActions.js  # Right-click actions on selected text
-│   └── flattenedContent.js    # Clean HTML extraction
+│   ├── flattenedContent.js    # Clean HTML extraction
+│   ├── pageLayoutRules.js     # page_layout value parsers, sort order, CSS allowlist (pure, unit-tested)
+│   └── pageLayout.js          # page_layout runtime: scan, sort/filter/hide/style, undo bar, replay
 ├── ui/                        # Shared UI primitives
 │   ├── floatingPanel.js       # Panel host element + show/hide
 │   └── toast.js               # Toast notifications
@@ -441,6 +447,11 @@ Highlights:
 3. Click the reload icon next to the extension in `chrome://extensions`.
 4. Reload the tab you are testing against.
 5. Open DevTools on the page **and** the service worker (link in `chrome://extensions`) to watch both consoles.
+
+### Tests
+
+- `npm test` runs the unit tests in `tests/*.test.js` with Node's built-in runner. No install, no browser, a second or two.
+- `npm run test:browser` runs the browser suite in `tests/browser/` in a headless Chrome it starts itself: fixture pages for the page layout tool's scan, sort, filter and replay and for the page flattener, then the unpacked extension end to end on a local test site. It needs an installed Chrome (set `CHROME_PATH` if it is not in the default place) and takes about two and a half minutes. `node tests/browser/run.mjs` alone skips the extension suites, and `--only=name,name` picks suites.
 
 ### Architectural rules
 

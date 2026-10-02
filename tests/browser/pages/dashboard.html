@@ -1,0 +1,258 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>page_layout dashboard harness</title>
+<style>
+  body { margin: 0; font: 14px/1.5 sans-serif; }
+  .app { display: flex; }
+  .side { width: 240px; height: 1500px; background: #222; color: #eee; flex-shrink: 0; }
+  .content { flex: 1; min-width: 0; padding: 16px; }
+  .row { display: flex; gap: 16px; margin-bottom: 16px; }
+  .col-7 { flex: 7; min-width: 0; }
+  .col-5 { flex: 5; min-width: 0; }
+  .card { border: 1px solid #ddd; border-radius: 8px; margin-bottom: 16px; }
+  .card-header { display: flex; justify-content: space-between; padding: 12px; border-bottom: 1px solid #eee; }
+  .card-title { margin: 0; font-size: 16px; }
+  .card-body { padding: 12px; }
+  .bar { height: 6px; background: #4a4; margin: 4px 0 10px; }
+  .tiles { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+  .tile { width: 200px; height: 120px; border: 1px solid #ccc; }
+  .tile h4 { margin: 0; }
+  .board { display: flex; gap: 8px; }
+  .stat { width: 180px; height: 60px; border: 1px solid #ccc; }
+  .feed { display: flex; flex-direction: column-reverse; gap: 4px; margin-bottom: 16px; }
+  .entry, .vrow { height: 28px; border: 1px solid #ddd; }
+  .board-list { position: relative; height: 130px; margin-bottom: 16px; }
+  .vrow { position: absolute; left: 0; right: 0; }
+</style>
+<script>
+  window.chrome = window.chrome || {};
+  try { window.chrome.runtime = { id: 'harness' }; } catch (e) {}
+</script>
+</head>
+<body>
+<pre id="out"></pre>
+<!-- The shape of a real dashboard that showed both problems: cards titled in a header row, lists
+     of classless inline-styled rows, and two such lists in neighbouring columns. -->
+<div class="app">
+  <aside class="side"><nav><a href="#">Dashboard</a> <a href="#">Sessions</a></nav></aside>
+  <div class="content">
+    <div class="card">
+      <div class="card-header"><h3 class="card-title"><i></i> Your Score Breakdown</h3><span class="badge">100L</span></div>
+      <div class="card-body">
+        <div class="list">
+          <div><div><span>Attendance</span> <span>42 / 70</span></div><div class="bar"></div></div>
+          <div><div><span>Fellowship Meetings</span> <span>6 / 10</span></div><div class="bar"></div></div>
+          <div><div><span>Final Exam</span> <span>0 / 20</span></div><div class="bar"></div></div>
+        </div>
+        <div class="total"><span>Total</span> <span>48 / 100</span></div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="col-7">
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">Recent Q&amp;A</h3><a href="#">Ask a question</a></div>
+          <div data-test="qaList">
+            <div style="padding:12px;display:flex;gap:12px;border-bottom:1px solid #eee;"><i>?</i><div style="flex:1;min-width:0;"><div>What are the key scriptures for this week?</div><span>2h ago</span></div><span class="badge">Answered</span></div>
+            <div style="padding:12px;display:flex;gap:12px;border-bottom:1px solid #eee;"><i>?</i><div style="flex:1;min-width:0;"><div>Can I make up a missed class?</div><span>1d ago</span></div><span class="badge">Answered</span></div>
+            <div style="padding:12px;display:flex;gap:12px;border-bottom:1px solid #eee;"><i>?</i><div style="flex:1;min-width:0;"><div>When does the assessment open?</div><span>2d ago</span></div><span class="badge">Pending</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="col-5">
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">Upcoming Classes</h3></div>
+          <div data-test="classList">
+            <div style="padding:12px;display:flex;gap:12px;"><div style="width:40px;height:40px;background:#fdd;"></div><div style="flex:1;min-width:0;"><div>Faith and Action</div><div>Sat, Feb 22 · 9:00 AM</div></div></div>
+            <div style="padding:12px;display:flex;gap:12px;"><div style="width:40px;height:40px;background:#eee;"></div><div style="flex:1;min-width:0;"><div>Foundations of Prayer</div><div>Sat, Mar 1 · 9:00 AM</div></div></div>
+            <div style="padding:12px;display:flex;gap:12px;"><div style="width:40px;height:40px;background:#eee;"></div><div style="flex:1;min-width:0;"><div>Spiritual Growth</div><div>Sat, Mar 8 · 9:00 AM</div></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <h2>Recommended</h2>
+    <div class="tiles">
+      <div class="tile"><h4>Tile 1</h4><span>10 views</span></div>
+      <div class="tile"><h4>Tile 2</h4><span>20 views</span></div>
+      <div class="tile"><h4>Tile 3</h4><span>30 views</span></div>
+      <div class="tile"><h4>Tile 4</h4><span>40 views</span></div>
+      <div class="tile"><h4>Tile 5</h4><span>50 views</span></div>
+      <div class="tile"><h4>Tile 6</h4><span>60 views</span></div>
+    </div>
+    <!-- Each stat has a display: contents wrapper of its own, so it is the only item under its
+         parent and a sort has nothing it may move. -->
+    <div class="board">
+      <div style="display:contents"><div class="stat"><b>Stat Alpha</b> <span>30%</span></div></div>
+      <div style="display:contents"><div class="stat"><b>Stat Beta</b> <span>10%</span></div></div>
+      <div style="display:contents"><div class="stat"><b>Stat Gamma</b> <span>20%</span></div></div>
+    </div>
+    <!-- Two rows of two parts: too few rows to be a list, so the parts are the list. One part in
+         each row holds a time. -->
+    <div class="pairs">
+      <div class="pair"><div class="cell">Label one</div><div class="cell">3h ago</div></div>
+      <div class="pair"><div class="cell">Label two</div><div class="cell">4d ago</div></div>
+    </div>
+    <!-- Laid out from the end: the last entry in the DOM is read first. Each block below has a
+         section of its own, so its title is not one more in a run of headings. -->
+    <section><h2>Activity</h2>
+    <div class="feed">
+      <div class="entry"><b>Entry low</b> <span>5 points</span></div>
+      <div class="entry"><b>Entry high</b> <span>50 points</span></div>
+      <div class="entry"><b>Entry mid</b> <span>20 points</span></div>
+    </div></section>
+    <!-- Each row placed by the page at a fixed position, as a virtual list does. -->
+    <section><h2>Board</h2>
+    <div class="board-list">
+      <div class="vrow" style="top:0"><b>Row c</b> <span>3 votes</span></div>
+      <div class="vrow" style="top:40px"><b>Row a</b> <span>1 votes</span></div>
+      <div class="vrow" style="top:80px"><b>Row b</b> <span>2 votes</span></div>
+    </div></section>
+  </div>
+</div>
+<script src="../../../tools/pageLayoutRules.js"></script>
+<script src="../../../tools/pageLayout.js"></script>
+<script>
+// Verified against the runtime from before titled sections and the sort refusals: the section,
+// hide and first refusal checks failed there (7 of 12), while the tile, reverse, neighbouring
+// list, replay and second scan checks passed on both.
+//
+// The checks for split lists, the borrowed title, the page-order refusal, before and after values,
+// label direction, order "reverse", the parts refusal, the reversed and fixed-position layouts,
+// change ids and the titled replay were verified against the runtime from just before them: all 14
+// fail there, and the 12 earlier checks still pass. The class date check fails against the rules
+// from before dates with no year were read: the field is detected as a number there, so the sort
+// puts Feb 22 first.
+(function () {
+  const out = { checks: [] };
+  function check(name, ok, detail) { out.checks.push({ name, ok: !!ok, detail: detail === undefined ? '' : detail }); }
+  const layout = window.ABChatContent.pageLayout;
+  const shown = (el) => !!el && el.getClientRects().length > 0 && getComputedStyle(el).display !== 'none';
+  const visualOrder = (listId) => Array.from(document.querySelector('[data-test="' + listId + '"]').children)
+    .map((el) => ({ t: el.textContent.trim().slice(0, 12), y: el.getBoundingClientRect().top })).sort((a, b) => a.y - b.y).map((x) => x.t).join(' | ');
+  const readOrder = (selector) => Array.from(document.querySelectorAll(selector))
+    .map((el) => ({ t: el.querySelector('b').textContent, y: el.getBoundingClientRect().top })).sort((a, b) => a.y - b.y).map((x) => x.t).join(' | ');
+  const listed = (f) => f.values || f.examples || [];
+  const errorOf = (r) => (r && (r.error || (r.failed && r.failed[0] && r.failed[0].error))) || '';
+  const activeIds = () => layout.run({ operation: 'scan' }).active_changes.map((c) => c.change_id);
+  try {
+    const qaBefore = visualOrder('qaList');
+    const classesBefore = visualOrder('classList');
+    const scan = layout.run({ operation: 'scan' });
+    const summary = scan.collections.map((c) => c.id + ' ' + c.items + ' "' + (c.label || '') + '"');
+    const scoreRegion = scan.regions.find((r) => r.kind === 'section' && r.label === 'Your Score Breakdown');
+    check('the score card is offered as a section region named by its heading', !!scoreRegion, scan.regions);
+    const columnLabels = scan.regions.filter((r) => r.kind === 'section').map((r) => r.label);
+    check('each column card is offered as a section named by its heading', columnLabels.indexOf('Recent Q&A') !== -1 && columnLabels.indexOf('Upcoming Classes') !== -1, columnLabels);
+    check('cards in a grid of alike tiles are not offered as sections', !scan.regions.some((r) => /^Tile/.test(r.label)), scan.regions.map((r) => r.label));
+
+    // The Q&A rows and the class rows share a class-free signature and differ in how they are drawn.
+    const qaLists = scan.collections.filter((c) => c.label === 'Recent Q&A');
+    const classLists = scan.collections.filter((c) => c.label === 'Upcoming Classes');
+    check('the Q&A rows and the class rows are two lists, each named by its card', qaLists.length === 1 && qaLists[0].items === 3 && classLists.length === 1 && classLists[0].items === 3, summary);
+    check('no list is made of the parts inside the Q&A rows', scan.collections.filter((c) => c.fields.some((f) => listed(f).indexOf('2h ago') !== -1)).length === 1, summary);
+    const stats = scan.collections.find((c) => c.fields.some((f) => listed(f).some((v) => /^Stat /.test(v))));
+    check('the stat cards do not borrow a title from the tile grid before them', stats && !/Tile/.test(stats.label || ''), stats);
+
+    const hide = layout.run({ operation: 'apply', changes: [{ action: 'hide', target: scoreRegion && scoreRegion.id }] }, { chatId: 1, toolCallId: 'hide1' });
+    const card = document.querySelector('.card');
+    check('hiding that region hides the whole card, title and total included', hide.ok && !shown(card) && !shown(card.querySelector('.card-title')) && !shown(card.querySelector('.total')), hide);
+    layout.run({ operation: 'reset' });
+
+    const qa = qaLists[0] || scan.collections.find((c) => c.fields.some((f) => listed(f).indexOf('Answered') !== -1));
+    const time = qa && qa.fields.find((f) => f.kind === 'relative_time');
+    const sortQa = (order, label, key) => layout.run({ operation: 'apply', changes: [{ action: 'sort', collection: qa && qa.id, field: time && time.field, order, label }] }, { chatId: 1, toolCallId: key });
+    const sameOrder = sortQa('desc', '', 'sort1');
+    check('a sort that leaves the list in the order it already has is refused', !sameOrder.ok && /already in this order/.test(errorOf(sameOrder)) && /"asc"/.test(errorOf(sameOrder)), sameOrder);
+    check('the refused sort leaves no change behind', activeIds().length === 0 && visualOrder('qaList') === qaBefore);
+
+    // Chat 486: the model reversed the list, then "corrected" it back to the page's own order.
+    const reversed = sortQa('asc', 'Q&A newest first', 'sort2');
+    const reversedOrder = visualOrder('qaList');
+    const applied = reversed.applied && reversed.applied[0];
+    check('the other direction reverses the Q&A list', reversed.ok && reversedOrder === qaBefore.split(' | ').reverse().join(' | '), { reversed, order: reversedOrder });
+    check('the result gives the first values before and after', applied && (applied.before_values || []).join() === '2h ago,1d ago,2d ago' && applied.first_values.join() === '2d ago,1d ago,2h ago', applied);
+    check('a label that names the other direction is not shown', applied && /oldest first$/.test(applied.description) && !/newest/.test(applied.description) && /other direction/.test(applied.note), applied);
+    check('the classes list in the next column keeps its order', visualOrder('classList') === classesBefore, visualOrder('classList'));
+    const back = sortQa('desc', 'Q&A reverse chronological', 'sort3');
+    check('a sort that would only bring back the page order is refused and the earlier sort stays', !back.ok && /order the page has without any sort/.test(errorOf(back))
+      && visualOrder('qaList') === reversedOrder && activeIds().join() === (applied && applied.change_id), { back, active: activeIds() });
+
+    const statField = stats && stats.fields.find((f) => listed(f).some((v) => /^Stat /.test(v)));
+    const lone = layout.run({ operation: 'apply', changes: [{ action: 'sort', collection: stats && stats.id, field: statField && statField.field, order: 'desc', parse: 'text' }] }, { chatId: 1, toolCallId: 'sort4' });
+    check('a sort on items that each sit alone is refused', !lone.ok && /sits alone/.test(errorOf(lone)), { stats, lone });
+    check('the refused lone sort leaves only the earlier sort', activeIds().length === 1);
+
+    // A replay keeps a sort even when the list is already in that order on the later visit.
+    const spec = reversed._pageChanges && reversed._pageChanges.items[0].spec;
+    layout.run({ operation: 'reset' });
+    const replay = spec ? layout.replay([{ key: 'replay:0', spec: Object.assign({}, spec, { order: 'desc' }) }], { chatId: 1 }) : null;
+    check('a replayed sort that moves nothing is still applied', replay && replay.ok && replay.applied === 1, replay);
+    layout.run({ operation: 'reset' });
+
+    const flip = layout.run({ operation: 'apply', changes: [{ action: 'sort', collection: qa && qa.id, order: 'reverse' }] }, { chatId: 1, toolCallId: 'rev1' });
+    check('order "reverse" reverses the list as the page shows it, with no field', flip.ok && visualOrder('qaList') === qaBefore.split(' | ').reverse().join(' | '), flip);
+    const flipBack = layout.run({ operation: 'apply', changes: [{ action: 'sort', collection: qa && qa.id, order: 'reverse' }] }, { chatId: 1, toolCallId: 'rev2' });
+    check('reversing it again is refused and points to undo', !flipBack.ok && /reversing it again/.test(errorOf(flipBack)) && /undo L\d+/.test(errorOf(flipBack)) && activeIds().length === 1, flipBack);
+    layout.run({ operation: 'reset' });
+
+    const rescan = layout.run({ operation: 'scan' });
+    const pairs = rescan.collections.find((c) => c.fields.some((f) => listed(f).indexOf('Label one') !== -1));
+    const pairsSort = layout.run({ operation: 'apply', changes: [{ action: 'sort', collection: pairs && pairs.id, field: 'a', order: 'desc', parse: 'relative_time' }] }, { chatId: 1, toolCallId: 'pairs1' });
+    check('a sort where no row holds two values to compare is refused without a direction hint', !pairsSort.ok && /No row or section/.test(errorOf(pairsSort)) && !/reverse/.test(errorOf(pairsSort)), { pairs, pairsSort });
+
+    const feed = rescan.collections.find((c) => c.label === 'Activity');
+    const points = feed && feed.fields.find((f) => f.kind === 'number');
+    const feedSort = layout.run({ operation: 'apply', changes: [{ action: 'sort', collection: feed && feed.id, field: points && points.field, order: 'desc' }] }, { chatId: 1, toolCallId: 'feed1' });
+    check('in a list laid out from the end, the highest is read first after a desc sort', feedSort.ok && readOrder('.entry') === 'Entry high | Entry mid | Entry low', { feedSort, order: readOrder('.entry') });
+    const feedFlip = layout.run({ operation: 'apply', changes: [{ action: 'sort', collection: feed && feed.id, order: 'reverse' }] }, { chatId: 1, toolCallId: 'feed2' });
+    check('order "reverse" on a sorted list sorts the same field the other way', feedFlip.ok && feedFlip.applied[0].order === 'asc' && readOrder('.entry') === 'Entry low | Entry mid | Entry high' && /the other way/.test(feedFlip.applied[0].note), { feedFlip, order: readOrder('.entry') });
+    layout.run({ operation: 'reset' });
+
+    // An id given out and then taken back by a change that did nothing is used by the next change.
+    const board = layout.run({ operation: 'scan' }).collections.find((c) => c.label === 'Board');
+    const votes = board && board.fields.find((f) => f.kind === 'number');
+    const probe = layout.run({ operation: 'apply', changes: [{ action: 'hide', target: scoreRegion && scoreRegion.id }] }, { chatId: 1, toolCallId: 'probe' });
+    const probeNumber = probe.ok ? Number(probe.applied[0].change_id.slice(1)) : NaN;
+    layout.run({ operation: 'undo' });
+    const boardBefore = readOrder('.vrow');
+    const boardSort = layout.run({ operation: 'apply', changes: [
+      { action: 'sort', collection: board && board.id, field: votes && votes.field, order: 'asc' },
+      { action: 'hide', target: scoreRegion && scoreRegion.id }
+    ] }, { chatId: 1, toolCallId: 'board1' });
+    check('a sort the page does not show is refused and leaves the rows where they were', boardSort.failed && /did not move on screen/.test(boardSort.failed[0].error) && readOrder('.vrow') === boardBefore && activeIds().length === 1, { boardSort, order: readOrder('.vrow') });
+    const boardHide = (boardSort.applied || []).find((a) => a.action === 'hide');
+    check('the id of a change taken back goes to the next change', boardHide && boardHide.change_id === 'L' + (probeNumber + 1), { probe: probe.applied, boardSort: boardSort.applied });
+    layout.run({ operation: 'reset' });
+
+    // The class dates are written the way the real page writes them, with no year and a dot before the time.
+    const classes = layout.run({ operation: 'scan' }).collections.find((c) => c.label === 'Upcoming Classes');
+    const when = classes && classes.fields.find((f) => listed(f).some((v) => /Feb 22/.test(v)));
+    const byDate = layout.run({ operation: 'apply', changes: [{ action: 'sort', collection: classes && classes.id, field: when && when.field, order: 'desc' }] }, { chatId: 1, toolCallId: 'dates1' });
+    check('dates with no year and a dot before the time are read as dates and sort newest first', when && when.kind === 'date' && byDate.ok
+      && visualOrder('classList') === classesBefore.split(' | ').reverse().join(' | '), { when, byDate, order: visualOrder('classList') });
+    layout.run({ operation: 'reset' });
+
+    // A saved change names the list by its card's title, so a replay leaves the other card alone.
+    const qaHide = layout.run({ operation: 'apply', changes: [{ action: 'hide', target: qa && qa.id }] }, { chatId: 1, toolCallId: 'qahide' });
+    const qaHideSpec = qaHide._pageChanges && qaHide._pageChanges.items[0].spec;
+    layout.run({ operation: 'reset' });
+    const qaReplay = qaHideSpec ? layout.replay([{ key: 'replay:qa', spec: qaHideSpec }], { chatId: 1 }) : null;
+    const qaRows = Array.from(document.querySelector('[data-test="qaList"]').children);
+    const classRows = Array.from(document.querySelector('[data-test="classList"]').children);
+    check('replaying a hide of the Q&A list hides only the Q&A rows', qaReplay && qaReplay.ok && qaRows.every((el) => !shown(el)) && classRows.every(shown), { spec: qaHideSpec, qaReplay });
+    layout.run({ operation: 'reset' });
+
+    const recheck = layout.run({ operation: 'scan' });
+    check('a second scan offers the same section regions', recheck.regions.filter((r) => r.kind === 'section').map((r) => r.label).join('|') === scan.regions.filter((r) => r.kind === 'section').map((r) => r.label).join('|'));
+    layout.run({ operation: 'reset' });
+  } catch (e) {
+    out.error = String(e && e.stack || e);
+  }
+  out.passed = out.checks.filter((c) => c.ok).length;
+  out.failed = out.checks.filter((c) => !c.ok);
+  document.getElementById('out').textContent = JSON.stringify(out);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,137 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>page_layout variants harness</title>
+<style>
+  body { margin: 0; font: 14px/1.5 sans-serif; }
+  main { padding: 20px; width: 1000px; }
+  .d-flex { display: flex; }
+  .flex-column { flex-direction: column; }
+  .gap-3 { gap: 12px; }
+  .ds-badge { display: inline-block; padding: 2px 8px; }
+  .products { display: flex; flex-wrap: wrap; gap: 8px; }
+  .product { width: 180px; height: 80px; border: 1px solid #ccc; }
+  .row { display: flex; gap: 8px; margin-bottom: 8px; }
+  .tile { width: 200px; height: 60px; border: 1px solid #ddd; }
+  td { padding: 4px 10px; }
+</style>
+<script>
+  window.chrome = window.chrome || {};
+  try { window.chrome.runtime = { id: 'harness' }; } catch (e) {}
+</script>
+</head>
+<body>
+<main>
+  <h2>My Questions</h2>
+  <div class="ds-card"><div class="d-flex flex-column" id="qa-list"></div></div>
+  <h2>Orders</h2>
+  <table id="orders"><tbody id="orders-body"></tbody></table>
+  <h2>Products</h2>
+  <div class="products" id="products"></div>
+  <h2>Leaderboard</h2>
+  <div id="tiles"></div>
+</main>
+<pre id="out"></pre>
+<script>
+  // Mirrors the Q&A page: a question line and a date line that are both bare divs, and a status
+  // badge whose second class names its colour. Item 23 has a status the first 20 items never show.
+  const qaList = document.getElementById('qa-list');
+  for (let i = 0; i < 25; i++) {
+    const status = i === 23 ? 'closed' : (i % 4 === 2 ? 'pending' : 'answered');
+    const badge = status === 'closed' ? '<span class="ds-badge ds-badge-gray">Closed</span>'
+      : status === 'pending' ? '<span class="ds-badge ds-badge-yellow">Pending</span>'
+      : '<span class="ds-badge ds-badge-green">Answered</span>';
+    const item = document.createElement('div');
+    item.className = 'qa-item';
+    item.dataset.status = status;
+    item.dataset.n = String(i);
+    item.innerHTML = '<div style="padding:1rem 1.25rem;cursor:pointer;" id="qaRow' + i + '">'
+      + '<div class="d-flex align-items-start gap-3"><i class="bi bi-question-circle-fill flex-shrink-0 mt-1"></i>'
+      + '<div style="flex:1;min-width:0;"><div style="font-size:.9375rem;">Question number ' + i + ' about the course?</div>'
+      + '<div style="font-size:.75rem;"><i class="bi bi-calendar3 me-1"></i>Feb ' + (i + 1) + ', 2026 · 2:30 PM &nbsp;·&nbsp; <i class="bi bi-collection me-1"></i>100L — January–March 2026</div></div>'
+      + '<div class="d-flex align-items-center gap-2 flex-shrink-0">' + badge + '<i class="bi bi-chevron-down"></i></div></div></div>'
+      + '<div id="qaAnswer' + i + '" style="display:none;">An answer that is not shown.</div>';
+    qaList.appendChild(item);
+  }
+  const ordersBody = document.getElementById('orders-body');
+  [['Order A', '$30'], ['Order B', '$10'], ['Order C', '$50'], ['Order D', '$20'], ['Order E', '$60'], ['Order F', '$40']].forEach(function (row, i) {
+    const tr = document.createElement('tr');
+    tr.className = i % 2 ? 'even' : 'odd';
+    tr.innerHTML = '<td>' + row[0] + '</td><td>' + row[1] + '</td>';
+    ordersBody.appendChild(tr);
+  });
+  const products = document.getElementById('products');
+  [['Lamp', '$25'], ['Desk', '$150'], ['Chair', '$90'], ['Rug', '$300'], ['Shelf', '$60'], ['Clock', '$35']].forEach(function (p, i) {
+    const el = document.createElement('div');
+    el.className = i === 3 ? 'product product--featured' : 'product';
+    el.dataset.name = p[0];
+    el.innerHTML = '<h4 class="name">' + p[0] + '</h4><span class="price">' + p[1] + '</span>';
+    products.appendChild(el);
+  });
+  const tiles = document.getElementById('tiles');
+  for (let r = 0; r < 4; r++) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    for (let c = 0; c < 2; c++) {
+      const n = r * 2 + c;
+      row.insertAdjacentHTML('beforeend', '<div class="tile"><h5 class="who">Player ' + n + '</h5><span class="pts">' + (n * 7 % 11) + ' points</span></div>');
+    }
+    tiles.appendChild(row);
+  }
+</script>
+<script src="../../../tools/pageLayoutRules.js"></script>
+<script src="../../../tools/pageLayout.js"></script>
+<script>
+(async function () {
+  const out = { checks: [] };
+  function check(name, ok, detail) { out.checks.push({ name, ok: !!ok, detail: detail === undefined ? '' : detail }); }
+  const run = (args) => window.ABChatContent.pageLayout.run(args);
+  const hiddenQa = () => Array.from(document.querySelectorAll('.qa-item')).filter((el) => getComputedStyle(el).display === 'none').map((el) => el.dataset.status + el.dataset.n);
+  const listed = (f) => f.values || f.examples || [];
+  try {
+    const scan = run({ operation: 'scan' });
+    out.scan = scan;
+    check('scan ok', scan.ok, scan.error);
+    const qa = scan.collections.find((c) => c.items === 25);
+    check('questions found as one collection of 25', !!qa, scan.collections.map((c) => c.id + ':' + c.items));
+    const status = qa && qa.fields.find((f) => listed(f).indexOf('Answered') !== -1);
+    check('status badge variants are one field', status && listed(status).indexOf('Pending') !== -1, qa && qa.fields);
+    check('status field lists its values', status && Array.isArray(status.values) && !status.examples, status);
+    check('question and date lines are not a collection of their own', !scan.collections.some((c) => c.items === 50), scan.collections.map((c) => c.id + ':' + c.items));
+    const orders = scan.collections.find((c) => c.fields.some((f) => listed(f).some((v) => /^Order [A-F]$/.test(v))));
+    check('zebra rows are one collection', orders && orders.items === 6, scan.collections.map((c) => c.id + ':' + c.items));
+    const prods = scan.collections.find((c) => c.fields.some((f) => listed(f).indexOf('Lamp') !== -1 || listed(f).indexOf('Desk') !== -1));
+    check('BEM-modified product stays in the product collection', prods && prods.items === 6, scan.collections.map((c) => c.id + ':' + c.items));
+    const tileCol = scan.collections.find((c) => c.items === 8);
+    check('cards two to a row stay a collection', !!tileCol, scan.collections.map((c) => c.id + ':' + c.items));
+
+    const hidePending = run({ operation: 'apply', changes: [{ action: 'filter', collection: qa.id, field: status.field, op: 'contains', value: 'Pending', mode: 'hide' }] });
+    const pendingCount = Array.from(document.querySelectorAll('.qa-item')).filter((el) => el.dataset.status === 'pending').length;
+    const afterPending = hiddenQa();
+    check('filter hides exactly the pending questions', hidePending.ok && hidePending.applied[0].hidden === pendingCount && afterPending.length === pendingCount && afterPending.every((x) => x.indexOf('pending') === 0), { hidePending, afterPending });
+    const hideClosed = run({ operation: 'apply', changes: [{ action: 'filter', collection: qa.id, field: status.field, op: 'contains', value: 'Closed', mode: 'hide' }] });
+    check('a status first seen after the sampled items is still read', hideClosed.ok && hideClosed.applied[0].hidden === 1 && hiddenQa().indexOf('closed23') !== -1, { hideClosed, hidden: hiddenQa() });
+    run({ operation: 'reset' });
+    check('reset shows every question again', hiddenQa().length === 0, hiddenQa());
+
+    const priceField = prods.fields.find((f) => listed(f).some((v) => /^\$/.test(v)));
+    const sortProds = run({ operation: 'apply', changes: [{ action: 'sort', collection: prods.id, field: priceField.field, order: 'desc' }] });
+    const visualOrder = Array.from(products.children).map((el) => ({ n: el.dataset.name, r: el.getBoundingClientRect() }))
+      .sort((a, b) => (a.r.top - b.r.top) || (a.r.left - b.r.left)).map((x) => x.n);
+    check('featured product sorts in with the rest', sortProds.ok && visualOrder.join(',') === 'Rug,Desk,Chair,Shelf,Clock,Lamp', { sortProds, visualOrder });
+    const amount = orders.fields.find((f) => listed(f).some((v) => /^\$/.test(v)));
+    const sortOrders = run({ operation: 'apply', changes: [{ action: 'sort', collection: orders.id, field: amount.field, order: 'asc' }] });
+    const orderRows = Array.from(document.querySelectorAll('#orders-body tr')).map((tr) => tr.cells[0].textContent).join(',');
+    check('zebra table sorts as one list', sortOrders.ok && orderRows === 'Order B,Order D,Order A,Order F,Order C,Order E', { sortOrders, orderRows });
+    run({ operation: 'reset' });
+  } catch (e) {
+    out.error = String(e && e.stack || e);
+  }
+  out.passed = out.checks.filter((c) => c.ok).length;
+  out.failed = out.checks.filter((c) => !c.ok);
+  document.getElementById('out').textContent = JSON.stringify(out);
+})();
+</script>
+</body>
+</html>

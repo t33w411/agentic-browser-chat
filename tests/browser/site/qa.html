@@ -1,0 +1,59 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Q &amp; A</title>
+<style>
+  body { margin: 0; font: 16px/1.5 sans-serif; color: #1f2937; }
+  .page { max-width: 960px; margin: 24px auto; padding: 0 16px; }
+  .d-flex { display: flex; }
+  .align-items-start { align-items: flex-start; }
+  .align-items-center { align-items: center; }
+  .gap-2 { gap: 8px; }
+  .gap-3 { gap: 16px; }
+  .flex-shrink-0 { flex-shrink: 0; }
+  .ds-card { border: 1px solid #e5e7eb; border-radius: 8px; background: #fff; }
+  .ds-badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: .75rem; font-weight: 600; }
+  .ds-badge-green { background: #dcfce7; color: #166534; }
+  .ds-badge-amber { background: #fef3c7; color: #92400e; }
+  .bi { display: inline-block; width: 1em; height: 1em; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Questions</h1>
+  <div class="ds-card" id="qaList"></div>
+</div>
+<script>
+  // Four questions in the shape of a common Bootstrap page: the question and date lines are
+  // classless divs styled inline, and the status badge changes its colour class with the status.
+  const QUESTIONS = [
+    ['answered', 'How should the reading plan be split across the term?', 'Mar 3, 2026 · 9:15 AM'],
+    ['answered', 'Is the midterm open book or closed book?', 'Mar 5, 2026 · 4:40 PM'],
+    ['pending', 'Can the group project be submitted a day late?', 'Mar 9, 2026 · 11:02 AM'],
+    ['answered', 'Where are last week\'s slides posted?', 'Mar 10, 2026 · 8:30 AM']
+  ];
+  const listForQa = document.getElementById('qaList');
+  if (listForQa) {
+    listForQa.innerHTML = QUESTIONS.map(function (q, i) {
+      const answered = q[0] === 'answered';
+      return '<div class="qa-item" data-status="' + q[0] + '" style="border-bottom:1px solid #f0f0f2;">'
+        + '<div style="padding:1rem 1.25rem;cursor:pointer;">'
+        + '<div class="d-flex align-items-start gap-3">'
+        + '<i class="bi bi-question-circle-fill flex-shrink-0"></i>'
+        + '<div style="flex:1;min-width:0;">'
+        + '<div style="font-size:.9375rem;font-weight:500;margin-bottom:.3rem;">' + q[1] + '</div>'
+        + '<div style="font-size:.75rem;color:#6b7280;"><i class="bi bi-calendar3"></i>' + q[2] + ' &nbsp;·&nbsp; <i class="bi bi-collection"></i>Term 1 study group</div>'
+        + '</div>'
+        + '<div class="d-flex align-items-center gap-2 flex-shrink-0">'
+        + '<span class="ds-badge ' + (answered ? 'ds-badge-green">Answered' : 'ds-badge-amber">Pending') + '</span>'
+        + '<i class="bi bi-chevron-down"></i>'
+        + '</div></div></div>'
+        + '<div id="qaAnswer' + (i + 1) + '" style="display:none;background:#f9fafb;padding:1rem 1.25rem;">'
+        + (answered ? 'The course lead replied with the details.' : 'Awaiting a reply.')
+        + '</div></div>';
+    }).join('');
+  }
+</script>
+</body>
+</html>

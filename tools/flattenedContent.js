@@ -373,6 +373,9 @@
     }
 
     commentNodesForFlattenedContent.forEach((nodeForFlattenedContent) => {
+      if (copyNotesForFlattenedContent.has(nodeForFlattenedContent)) {
+        return;
+      }
       if (nodeForFlattenedContent && nodeForFlattenedContent.parentNode) {
         nodeForFlattenedContent.parentNode.removeChild(nodeForFlattenedContent);
       }
@@ -893,7 +896,22 @@
       /<(img_[a-z0-9]+)((?:\s[^>]*)?)><\/\1>/gi,
       "<$1$2>"
     );
-    return stripInvisibleCharsForFlattenedContent(collapsedHtmlForFlattenedContent).replace(/\s+/g, " ").trim();
+    return collapseWhitespaceOutsidePreForFlattenedContent(
+      stripInvisibleCharsForFlattenedContent(collapsedHtmlForFlattenedContent)
+    );
+  }
+
+  // Line breaks and indentation inside <pre> are part of the content (Python and YAML change
+  // meaning without them), so whitespace is collapsed only between <pre> blocks.
+  // Sync with: collapseWhitespaceOutsidePreForFetch in agent/toolExec.js
+  function collapseWhitespaceOutsidePreForFlattenedContent(htmlForCollapse) {
+    return htmlForCollapse
+      .split(/(<pre(?:\s[^>]*)?>[\s\S]*?<\/pre>)/i)
+      .map((partForCollapse, indexForCollapse) =>
+        indexForCollapse % 2 ? partForCollapse : partForCollapse.replace(/\s+/g, " ")
+      )
+      .join("")
+      .trim();
   }
 
   // Sync with: getMeaningfulChildNodesForFetch in agent/toolExec.js
@@ -969,34 +987,139 @@
     return tagForFlattenedContent === "p" || /^h[1-6]$/.test(tagForFlattenedContent);
   }
 
-  // Sync with: collectSpacedTextForFetch in agent/toolExec.js
-  function collectSpacedTextForFlattenedContent(nodeForFlattenedContent) {
-    if (!nodeForFlattenedContent || !nodeForFlattenedContent.childNodes) {
-      return "";
-    }
-    let outForFlattenedContent = "";
-    const kidsForFlattenedContent = nodeForFlattenedContent.childNodes;
-    for (let iForFlattenedContent = 0; iForFlattenedContent < kidsForFlattenedContent.length; iForFlattenedContent++) {
-      const kidForFlattenedContent = kidsForFlattenedContent[iForFlattenedContent];
-      if (kidForFlattenedContent.nodeType === Node.TEXT_NODE) {
-        outForFlattenedContent += kidForFlattenedContent.nodeValue || "";
-      } else if (kidForFlattenedContent.nodeType === Node.ELEMENT_NODE) {
-        outForFlattenedContent += " " + collectSpacedTextForFlattenedContent(kidForFlattenedContent) + " ";
+  // Collects a node's text with a space at every element boundary, into pieces split at the
+  // "items omitted" notes (comment nodes) inside it.
+  // Sync with: collectCutPiecesForFetch in agent/toolExec.js
+  function collectCutPiecesForFlattenedContent(nodeForPieces, piecesForCut) {
+    for (let kidForPieces = nodeForPieces.firstChild; kidForPieces; kidForPieces = kidForPieces.nextSibling) {
+      if (kidForPieces.nodeType === Node.TEXT_NODE) {
+        piecesForCut[piecesForCut.length - 1] += kidForPieces.nodeValue || "";
+      } else if (kidForPieces.nodeType === Node.COMMENT_NODE) {
+        piecesForCut.push(kidForPieces, "");
+      } else if (kidForPieces.nodeType === Node.ELEMENT_NODE) {
+        piecesForCut[piecesForCut.length - 1] += " ";
+        collectCutPiecesForFlattenedContent(kidForPieces, piecesForCut);
+        piecesForCut[piecesForCut.length - 1] += " ";
       }
     }
-    return outForFlattenedContent;
   }
 
+  // Replaces a child's markup with its text and returns how many characters of text it kept. A
+  // list inside it that was already shortened keeps its "items omitted" note where the items were,
+  // so the text does not read as the whole list. A child with no text is removed.
+  // Sync with: cutToTextForFetch in agent/toolExec.js
+  function cutToTextForFlattenedContent(childForCut) {
+    const piecesForCut = [""];
+    collectCutPiecesForFlattenedContent(childForCut, piecesForCut);
+    const lastIndexForCut = piecesForCut.length - 1;
+    let charsForCut = 0;
+    piecesForCut.forEach((pieceForCut, indexForCut) => {
+      if (typeof pieceForCut !== "string") {
+        return;
+      }
+      let textForPiece = stripInvisibleCharsForFlattenedContent(pieceForCut).replace(/\s+/g, " ");
+      if (indexForCut === 0) textForPiece = textForPiece.trimStart();
+      if (indexForCut === lastIndexForCut) textForPiece = textForPiece.trimEnd();
+      piecesForCut[indexForCut] = textForPiece;
+      charsForCut += textForPiece.trim().length;
+    });
+    if (!charsForCut) {
+      childForCut.remove();
+      return 0;
+    }
+    childForCut.textContent = "";
+    piecesForCut.forEach((pieceForCut) => {
+      if (typeof pieceForCut !== "string") {
+        childForCut.appendChild(pieceForCut);
+      } else if (pieceForCut) {
+        childForCut.appendChild(childForCut.ownerDocument.createTextNode(pieceForCut));
+      }
+    });
+    return charsForCut;
+  }
+
+  // Sync with: omittedCountFromNoteForFetch in agent/toolExec.js
+  function omittedCountFromNoteForFlattenedContent(noteForCount) {
+    const matchForCount = /^ (\d+) items? omitted $/.exec(noteForCount.nodeValue || "");
+    return matchForCount ? Number(matchForCount[1]) : 0;
+  }
+
+  // A code block's text, with <br> read as a line break and hidden parts and buttons left out.
+  // Sync with: collectPreTextForFetch in agent/toolExec.js
+  function collectPreTextForFlattenedContent(nodeForPreText) {
+    let outForPreText = "";
+    const kidsForPreText = nodeForPreText.childNodes;
+    for (let iForPreText = 0; iForPreText < kidsForPreText.length; iForPreText++) {
+      const kidForPreText = kidsForPreText[iForPreText];
+      if (kidForPreText.nodeType === Node.TEXT_NODE) {
+        outForPreText += kidForPreText.nodeValue || "";
+      } else if (kidForPreText.nodeType === Node.ELEMENT_NODE && !kidForPreText.hasAttribute("hidden")) {
+        const tagForPreText = kidForPreText.tagName.toLowerCase();
+        if (tagForPreText === "br") {
+          outForPreText += "\n";
+        } else if (tagForPreText !== "button") {
+          outForPreText += collectPreTextForFlattenedContent(kidForPreText);
+        }
+      }
+    }
+    return outForPreText;
+  }
+
+  // Reduces every <pre> to its plain text, inside one <code> when it had one. Highlighters wrap
+  // each token in an element, and some (Chroma, used by Hugo sites) also wrap each line break and
+  // run of spaces in one, which the empty-tag pass would delete along with the code's layout.
+  // Sync with: flattenPreBlocksForFetch in agent/toolExec.js
+  function flattenPreBlocksForFlattenedContent(rootNodeForPre) {
+    if (!rootNodeForPre || !rootNodeForPre.querySelectorAll) {
+      return;
+    }
+    const presForFlatten = Array.from(rootNodeForPre.querySelectorAll("pre"));
+    if (rootNodeForPre.tagName && rootNodeForPre.tagName.toLowerCase() === "pre") {
+      presForFlatten.unshift(rootNodeForPre);
+    }
+    presForFlatten.forEach((preForFlatten) => {
+      const textForPre = collectPreTextForFlattenedContent(preForFlatten);
+      const codeForPre = preForFlatten.querySelector("code");
+      preForFlatten.textContent = "";
+      if (codeForPre) {
+        codeForPre.textContent = textForPre;
+        preForFlatten.appendChild(codeForPre);
+      } else {
+        preForFlatten.textContent = textForPre;
+      }
+    });
+  }
+
+  // A child's tag followed by its own children's tags in order. Siblings that share a key are
+  // copies of one item (table rows, feed cards).
+  // Sync with: repeatKeyForFetch in agent/toolExec.js
+  function repeatKeyForFlattenedContent(elementForKey) {
+    let keyForFlattenedContent = elementForKey.tagName + "|";
+    const kidsForKey = elementForKey.children;
+    for (let iForKey = 0; iForKey < kidsForKey.length; iForKey++) {
+      keyForFlattenedContent += kidsForKey[iForKey].tagName + ",";
+    }
+    return keyForFlattenedContent;
+  }
+
+  // Shortens every parent with more than 50 children. The first 45 and the last 5 stay whole, and
+  // so do paragraphs and headings anywhere. A child in between is cut to its text only when at
+  // least 30 of the parent's children share its key, which makes it one of a run of rows or cards.
+  // Any other child (a table, list or quote among paragraphs) stays whole, and so does a child
+  // holding a <pre>, whose whitespace would be lost as text. Cut text and whole children draw on
+  // one budget, and the children after it runs out are dropped behind an "N items omitted" comment.
   // Sync with: truncateOverloadedChildrenForFetch in agent/toolExec.js
   const MIDDLE_TEXT_BUDGET_FOR_FLATTENED_CONTENT = 20000;
+  const MIN_REPEATS_TO_SHORTEN_FOR_FLATTENED_CONTENT = 30;
   function truncateOverloadedChildrenForFlattenedContent(rootNodeForFlattenedContent) {
     if (!rootNodeForFlattenedContent || !rootNodeForFlattenedContent.querySelectorAll || !document || !document.createComment) {
       return;
     }
 
-    const elementsForFlattenedContent = [rootNodeForFlattenedContent].concat(
-      Array.from(rootNodeForFlattenedContent.querySelectorAll("*")).reverse()
-    );
+    // Deepest first, root last, so a long list inside a middle child is already shortened by the
+    // time that child is measured or cut to text.
+    const elementsForFlattenedContent = Array.from(rootNodeForFlattenedContent.querySelectorAll("*")).reverse();
+    elementsForFlattenedContent.push(rootNodeForFlattenedContent);
 
     elementsForFlattenedContent.forEach((elForFlattenedContent) => {
       if (!elForFlattenedContent || !elForFlattenedContent.children) {
@@ -1008,30 +1131,50 @@
         return;
       }
 
-      const middleForFlattenedContent = childrenForFlattenedContent.slice(45, childrenForFlattenedContent.length - 5);
+      const keysForFlattenedContent = childrenForFlattenedContent.map(repeatKeyForFlattenedContent);
+      const keyCountsForFlattenedContent = new Map();
+      keysForFlattenedContent.forEach((keyForCount) => {
+        keyCountsForFlattenedContent.set(keyForCount, (keyCountsForFlattenedContent.get(keyForCount) || 0) + 1);
+      });
 
       let budgetUsedForFlattenedContent = 0;
       const omittedForFlattenedContent = [];
 
-      middleForFlattenedContent.forEach((childForFlattenedContent) => {
+      for (
+        let indexForMiddle = 45;
+        indexForMiddle < childrenForFlattenedContent.length - 5;
+        indexForMiddle++
+      ) {
+        const childForFlattenedContent = childrenForFlattenedContent[indexForMiddle];
         if (isProtectedChildForFlattenedContent(childForFlattenedContent)) {
-          return;
+          continue;
         }
-        if (budgetUsedForFlattenedContent < MIDDLE_TEXT_BUDGET_FOR_FLATTENED_CONTENT) {
-          const textForChildForFlattenedContent = stripInvisibleCharsForFlattenedContent(collectSpacedTextForFlattenedContent(childForFlattenedContent)).replace(/\s+/g, " ").trim();
-          if (textForChildForFlattenedContent) {
-            childForFlattenedContent.textContent = textForChildForFlattenedContent;
-            budgetUsedForFlattenedContent += textForChildForFlattenedContent.length;
-          } else {
-            childForFlattenedContent.remove();
-          }
-        } else {
+        if (budgetUsedForFlattenedContent >= MIDDLE_TEXT_BUDGET_FOR_FLATTENED_CONTENT) {
           omittedForFlattenedContent.push(childForFlattenedContent);
+          continue;
         }
-      });
+        const isRepeatForFlattenedContent =
+          keyCountsForFlattenedContent.get(keysForFlattenedContent[indexForMiddle]) >=
+            MIN_REPEATS_TO_SHORTEN_FOR_FLATTENED_CONTENT &&
+          childForFlattenedContent.tagName.toLowerCase() !== "pre" &&
+          !childForFlattenedContent.querySelector("pre");
+        if (!isRepeatForFlattenedContent) {
+          budgetUsedForFlattenedContent += childForFlattenedContent.outerHTML.replace(/\s+/g, " ").length;
+          continue;
+        }
+        budgetUsedForFlattenedContent += cutToTextForFlattenedContent(childForFlattenedContent);
+      }
 
       if (omittedForFlattenedContent.length) {
-        const omittedCountForFlattenedContent = omittedForFlattenedContent.length;
+        // A note left by the copy for the children it skipped joins this one, so the list has one
+        // count. Page comments are gone by now, so every comment here is such a note.
+        let omittedCountForFlattenedContent = omittedForFlattenedContent.length;
+        Array.from(elForFlattenedContent.childNodes).forEach((nodeForNote) => {
+          if (nodeForNote.nodeType === Node.COMMENT_NODE) {
+            omittedCountForFlattenedContent += omittedCountFromNoteForFlattenedContent(nodeForNote);
+            nodeForNote.remove();
+          }
+        });
         const markerForFlattenedContent = document.createComment(
           " " + omittedCountForFlattenedContent + " item" + (omittedCountForFlattenedContent !== 1 ? "s" : "") + " omitted "
         );
@@ -1041,6 +1184,153 @@
         });
       }
     });
+  }
+
+  // Copying a page and only then cutting its long runs spends nearly all the time on elements
+  // that are thrown away: on a package index of 900,000 links, 10 of 11 seconds. So the copy
+  // already leaves most of a long run out. Under a parent with more than 50 children it copies
+  // the first 45, the last 10 and every paragraph and heading, and the other children in between
+  // only until their text passes four times the cut's budget or 20,000 of them are copied. That
+  // margin leaves the cut room to make the same choices as before, with one difference: a kind of
+  // child too rare among the copied part to count as a repeat is kept whole instead of cut to
+  // text. Text is counted without script, style and SVG text, which never reaches the result, and
+  // without the whitespace around it.
+  // Sync with: pruneLongRunsForFetch in agent/toolExec.js
+  const COPY_TEXT_LIMIT_FOR_FLATTENED_CONTENT = 4 * MIDDLE_TEXT_BUDGET_FOR_FLATTENED_CONTENT;
+  const COPY_MIDDLE_LIMIT_FOR_FLATTENED_CONTENT = 20000;
+  // Children the pipeline removes before the cut, so they do not count as positions in a run.
+  const COPY_UNCOUNTED_TAGS_FOR_FLATTENED_CONTENT = {
+    script: true, style: true, noscript: true, meta: true, link: true, canvas: true, slot: true
+  };
+  // The children the cut always keeps whole (see isProtectedChildForFlattenedContent), by local
+  // name, because the plan checks every child of a long run.
+  const COPY_ALWAYS_KEPT_TAGS_FOR_FLATTENED_CONTENT = {
+    p: true, h1: true, h2: true, h3: true, h4: true, h5: true, h6: true
+  };
+  const COPY_TEXTLESS_TAGS_FOR_FLATTENED_CONTENT = {
+    script: true, style: true, noscript: true, template: true, svg: true, canvas: true
+  };
+  // Notes the copy leaves for skipped children. The comment pass removes every other comment.
+  const copyNotesForFlattenedContent = new WeakSet();
+
+  function liveTextLengthForFlattenedContent(nodeForText, limitForText) {
+    let totalForText = 0;
+    const stackForText = [nodeForText];
+    while (stackForText.length && totalForText < limitForText) {
+      const currentForText = stackForText.pop();
+      for (let kidForText = currentForText.firstChild; kidForText; kidForText = kidForText.nextSibling) {
+        if (kidForText.nodeType === Node.TEXT_NODE) {
+          totalForText += (kidForText.nodeValue || "").trim().length;
+        } else if (
+          kidForText.nodeType === Node.ELEMENT_NODE &&
+          !COPY_TEXTLESS_TAGS_FOR_FLATTENED_CONTENT[kidForText.localName]
+        ) {
+          stackForText.push(kidForText);
+        }
+      }
+    }
+    return totalForText;
+  }
+
+  // Plans which children of one live parent the copy leaves out, or returns null when it copies
+  // them all. The children from firstSkipped up to resumeAt (the first of the last 10) are left
+  // out, except the paragraphs and headings among them, which are in keptInRange; skippedCount
+  // counts the rest for the note. A parent with a shadow root is copied whole, because its shadow
+  // children join its light ones in the copy.
+  function planChildrenCopyForFlattenedContent(parentForPlan) {
+    if (parentForPlan.childElementCount <= 50 || parentForPlan.shadowRoot) {
+      return null;
+    }
+    let resumeAtForPlan = null;
+    let tailCountedForPlan = 0;
+    for (
+      let kidForPlan = parentForPlan.lastElementChild;
+      kidForPlan && tailCountedForPlan < 10;
+      kidForPlan = kidForPlan.previousElementSibling
+    ) {
+      if (!COPY_UNCOUNTED_TAGS_FOR_FLATTENED_CONTENT[kidForPlan.localName]) {
+        tailCountedForPlan += 1;
+        resumeAtForPlan = kidForPlan;
+      }
+    }
+    let countedForPlan = 0;
+    let textUsedForPlan = 0;
+    let copiedForPlan = 0;
+    let isFullForPlan = false;
+    let firstSkippedForPlan = null;
+    let skippedCountForPlan = 0;
+    const keptInRangeForPlan = new Set();
+    for (
+      let kidForPlan = parentForPlan.firstElementChild;
+      kidForPlan && kidForPlan !== resumeAtForPlan;
+      kidForPlan = kidForPlan.nextElementSibling
+    ) {
+      if (COPY_UNCOUNTED_TAGS_FOR_FLATTENED_CONTENT[kidForPlan.localName]) {
+        continue;
+      }
+      countedForPlan += 1;
+      if (countedForPlan <= 45) {
+        continue;
+      }
+      if (COPY_ALWAYS_KEPT_TAGS_FOR_FLATTENED_CONTENT[kidForPlan.localName]) {
+        if (firstSkippedForPlan) keptInRangeForPlan.add(kidForPlan);
+        continue;
+      }
+      if (isFullForPlan) {
+        if (!firstSkippedForPlan) firstSkippedForPlan = kidForPlan;
+        skippedCountForPlan += 1;
+        continue;
+      }
+      textUsedForPlan += liveTextLengthForFlattenedContent(kidForPlan, COPY_TEXT_LIMIT_FOR_FLATTENED_CONTENT - textUsedForPlan);
+      copiedForPlan += 1;
+      isFullForPlan =
+        textUsedForPlan >= COPY_TEXT_LIMIT_FOR_FLATTENED_CONTENT ||
+        copiedForPlan >= COPY_MIDDLE_LIMIT_FOR_FLATTENED_CONTENT;
+    }
+    // The cut leaves a parent of 50 children or fewer alone, so the copy does too.
+    if (!firstSkippedForPlan || countedForPlan + tailCountedForPlan <= 50) {
+      return null;
+    }
+    return {
+      firstSkipped: firstSkippedForPlan,
+      resumeAt: resumeAtForPlan,
+      keptInRange: keptInRangeForPlan,
+      skippedCount: skippedCountForPlan
+    };
+  }
+
+  // Visits every element the copy will take, including inside open shadow roots other than the
+  // panel's. Given a Map, it plans each parent's children into it before visiting them and passes
+  // over the ones left out; without one it visits everything.
+  function walkCopiedElementsForFlattenedContent(rootNodeForWalk, plansForWalk, visitForWalk) {
+    const stackForWalk = [rootNodeForWalk];
+    while (stackForWalk.length) {
+      const nodeForWalk = stackForWalk.pop();
+      let planForWalk = null;
+      if (nodeForWalk.nodeType === Node.ELEMENT_NODE) {
+        visitForWalk(nodeForWalk);
+        if (plansForWalk) {
+          planForWalk = planChildrenCopyForFlattenedContent(nodeForWalk);
+          if (planForWalk) plansForWalk.set(nodeForWalk, planForWalk);
+        }
+        if (nodeForWalk.shadowRoot && nodeForWalk.id !== "abchat-panel-shadow-host") {
+          stackForWalk.push(nodeForWalk.shadowRoot);
+        }
+      }
+      // A planned parent's children: up to the first one left out, the paragraphs and headings
+      // among the ones left out, then from the tail on, without stepping through the rest.
+      let kidForWalk = nodeForWalk.firstElementChild;
+      if (planForWalk) {
+        for (; kidForWalk !== planForWalk.firstSkipped; kidForWalk = kidForWalk.nextElementSibling) {
+          stackForWalk.push(kidForWalk);
+        }
+        planForWalk.keptInRange.forEach((keptForWalk) => stackForWalk.push(keptForWalk));
+        kidForWalk = planForWalk.resumeAt;
+      }
+      for (; kidForWalk; kidForWalk = kidForWalk.nextElementSibling) {
+        stackForWalk.push(kidForWalk);
+      }
+    }
   }
 
   // Sync with: removeEmptyTagsForFetch in agent/toolExec.js
@@ -1103,7 +1393,9 @@
   }
 
   // Sync with: removeHiddenElementsForFetch in agent/toolExec.js (live-DOM version; uses getComputedStyle instead of inline style/attr checks)
-  function markHiddenElementsForFlattenedContent(rootNodeForFlattenedContent) {
+  // With plansForCopy, it also plans which children the copy leaves out (see
+  // planChildrenCopyForFlattenedContent) and does not check those.
+  function markHiddenElementsForFlattenedContent(rootNodeForFlattenedContent, plansForCopy) {
     if (
       !rootNodeForFlattenedContent ||
       !rootNodeForFlattenedContent.querySelectorAll ||
@@ -1114,18 +1406,16 @@
       return [];
     }
     const markedForFlattenedContent = [];
-    [rootNodeForFlattenedContent]
-      .concat(getAllElementsIncludingShadowsForFlattenedContent(rootNodeForFlattenedContent))
-      .forEach((nodeForFlattenedContent) => {
-        if (!nodeForFlattenedContent || !nodeForFlattenedContent.tagName) return;
-        try {
-          const csForFlattenedContent = window.getComputedStyle(nodeForFlattenedContent);
-          if (csForFlattenedContent.display === "none" || csForFlattenedContent.visibility === "hidden") {
-            nodeForFlattenedContent.setAttribute("data-abchat-hidden-marker", "1");
-            markedForFlattenedContent.push(nodeForFlattenedContent);
-          }
-        } catch (errForFlattenedContent) {}
-      });
+    walkCopiedElementsForFlattenedContent(rootNodeForFlattenedContent, plansForCopy || null, (nodeForFlattenedContent) => {
+      if (!nodeForFlattenedContent || !nodeForFlattenedContent.tagName) return;
+      try {
+        const csForFlattenedContent = window.getComputedStyle(nodeForFlattenedContent);
+        if (csForFlattenedContent.display === "none" || csForFlattenedContent.visibility === "hidden") {
+          nodeForFlattenedContent.setAttribute("data-abchat-hidden-marker", "1");
+          markedForFlattenedContent.push(nodeForFlattenedContent);
+        }
+      } catch (errForFlattenedContent) {}
+    });
     return markedForFlattenedContent;
   }
 
@@ -1188,23 +1478,6 @@
         nodeForFlattenedContent.setAttribute("hidden", "");
       }
     });
-  }
-
-  function getAllElementsIncludingShadowsForFlattenedContent(rootNodeForFlattenedContent) {
-    const resultForFlattenedContent = [];
-    const stackForFlattenedContent = [rootNodeForFlattenedContent];
-    while (stackForFlattenedContent.length) {
-      const currentForFlattenedContent = stackForFlattenedContent.pop();
-      if (!currentForFlattenedContent || !currentForFlattenedContent.querySelectorAll) continue;
-      const childrenForFlattenedContent = Array.from(currentForFlattenedContent.querySelectorAll("*"));
-      childrenForFlattenedContent.forEach(function (elForFlattenedContent) {
-        resultForFlattenedContent.push(elForFlattenedContent);
-        if (elForFlattenedContent.shadowRoot && elForFlattenedContent.id !== "abchat-panel-shadow-host") {
-          stackForFlattenedContent.push(elForFlattenedContent.shadowRoot);
-        }
-      });
-    }
-    return resultForFlattenedContent;
   }
 
   // Elements are created in a browsing-context-less document so custom elements defined on the
@@ -1301,7 +1574,10 @@
     } catch (errForStampForFlattenedContent) {}
   }
 
-  function cloneNodeWithShadowsForFlattenedContent(liveNodeForFlattenedContent, stampFormStateForFlattenedContent) {
+  // plansForCopy, when given, maps a parent to the children planned out of the copy. They become
+  // one "items omitted" note where the first of them was, and the whitespace after each of them
+  // goes with it. Text with words in it stays, as it would without the plan.
+  function cloneNodeWithShadowsForFlattenedContent(liveNodeForFlattenedContent, stampFormStateForFlattenedContent, plansForCopy) {
     if (!liveNodeForFlattenedContent || !document || !document.createElement) {
       return null;
     }
@@ -1328,17 +1604,46 @@
     if (stampFormStateForFlattenedContent) {
       stampLiveFormStateForFlattenedContent(liveNodeForFlattenedContent, clonedElForFlattenedContent);
     }
-    Array.from(liveNodeForFlattenedContent.childNodes || []).forEach(function (childForFlattenedContent) {
-      const clonedChildForFlattenedContent = cloneNodeWithShadowsForFlattenedContent(childForFlattenedContent, stampFormStateForFlattenedContent);
+    const planForCopy = plansForCopy ? plansForCopy.get(liveNodeForFlattenedContent) : null;
+    let isSkippingForCopy = false;
+    let isAfterSkippedForCopy = false;
+    for (
+      let childForFlattenedContent = liveNodeForFlattenedContent.firstChild;
+      childForFlattenedContent;
+      childForFlattenedContent = childForFlattenedContent.nextSibling
+    ) {
+      if (planForCopy) {
+        if (childForFlattenedContent === planForCopy.firstSkipped) {
+          isSkippingForCopy = true;
+          const noteForCopy = document.createComment(
+            " " + planForCopy.skippedCount + " item" + (planForCopy.skippedCount !== 1 ? "s" : "") + " omitted "
+          );
+          copyNotesForFlattenedContent.add(noteForCopy);
+          clonedElForFlattenedContent.appendChild(noteForCopy);
+        } else if (childForFlattenedContent === planForCopy.resumeAt) {
+          isSkippingForCopy = false;
+        }
+        if (childForFlattenedContent.nodeType === Node.ELEMENT_NODE) {
+          isAfterSkippedForCopy = isSkippingForCopy && !planForCopy.keptInRange.has(childForFlattenedContent);
+          if (isAfterSkippedForCopy) continue;
+        } else if (
+          isAfterSkippedForCopy &&
+          childForFlattenedContent.nodeType === Node.TEXT_NODE &&
+          !/\S/.test(childForFlattenedContent.nodeValue || "")
+        ) {
+          continue;
+        }
+      }
+      const clonedChildForFlattenedContent = cloneNodeWithShadowsForFlattenedContent(childForFlattenedContent, stampFormStateForFlattenedContent, plansForCopy);
       if (clonedChildForFlattenedContent) {
         try {
           clonedElForFlattenedContent.appendChild(clonedChildForFlattenedContent);
         } catch (errForAppendChild) {}
       }
-    });
+    }
     if (liveNodeForFlattenedContent.shadowRoot && liveNodeForFlattenedContent.id !== "abchat-panel-shadow-host") {
       Array.from(liveNodeForFlattenedContent.shadowRoot.childNodes || []).forEach(function (shadowChildForFlattenedContent) {
-        const clonedShadowChildForFlattenedContent = cloneNodeWithShadowsForFlattenedContent(shadowChildForFlattenedContent, stampFormStateForFlattenedContent);
+        const clonedShadowChildForFlattenedContent = cloneNodeWithShadowsForFlattenedContent(shadowChildForFlattenedContent, stampFormStateForFlattenedContent, plansForCopy);
         if (clonedShadowChildForFlattenedContent) {
           try {
             clonedElForFlattenedContent.appendChild(clonedShadowChildForFlattenedContent);
@@ -1477,7 +1782,7 @@
       return "";
     }
 
-    return stripInvisibleCharsForFlattenedContent(rawHtmlForRaw).replace(/\s+/g, " ").trim();
+    return collapseWhitespaceOutsidePreForFlattenedContent(stripInvisibleCharsForFlattenedContent(rawHtmlForRaw));
   }
 
   // Adapted into flattenFetchedHtmlForToolExec in agent/toolExec.js (for web_fetch on remote HTML).
@@ -1492,11 +1797,16 @@
     const removeStructuralElementsForFlattenedContent =
       optionsForFlattenedContent && optionsForFlattenedContent.removeStructuralElements === true;
 
+    const willCutForFlattenedContent = !optionsForFlattenedContent || !optionsForFlattenedContent.skipTruncate;
+    const plansForCopy = willCutForFlattenedContent ? new Map() : null;
     const shouldTrackHiddenForFlattenedContent = hiddenElementModeForFlattenedContent !== "unmarked";
     const markedHiddenForFlattenedContent = shouldTrackHiddenForFlattenedContent
-      ? markHiddenElementsForFlattenedContent(targetRootForFlattenedContent)
+      ? markHiddenElementsForFlattenedContent(targetRootForFlattenedContent, plansForCopy)
       : [];
-    let clonedRootForFlattenedContent = cloneNodeWithShadowsForFlattenedContent(targetRootForFlattenedContent, true)
+    if (plansForCopy && !shouldTrackHiddenForFlattenedContent) {
+      walkCopiedElementsForFlattenedContent(targetRootForFlattenedContent, plansForCopy, () => {});
+    }
+    let clonedRootForFlattenedContent = cloneNodeWithShadowsForFlattenedContent(targetRootForFlattenedContent, true, plansForCopy)
       || targetRootForFlattenedContent.cloneNode(true);
     unmarkHiddenElementsForFlattenedContent(markedHiddenForFlattenedContent);
     const isFragmentRootForFlattenedContent =
@@ -1516,8 +1826,9 @@
     const imageCandidatesForFlattenedContent =
       replaceImagesWithPlaceholderForFlattenedContent(clonedRootForFlattenedContent);
     stripAttributesForFlattenedContent(clonedRootForFlattenedContent);
+    flattenPreBlocksForFlattenedContent(clonedRootForFlattenedContent);
     flattenNestedWrappersForFlattenedContent(clonedRootForFlattenedContent, ["div", "span"], 8);
-    if (!optionsForFlattenedContent || !optionsForFlattenedContent.skipTruncate) {
+    if (willCutForFlattenedContent) {
       truncateOverloadedChildrenForFlattenedContent(clonedRootForFlattenedContent);
     }
     removeEmptyTagsForFlattenedContent(clonedRootForFlattenedContent);

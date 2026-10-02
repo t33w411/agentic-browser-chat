@@ -12,8 +12,8 @@
   <!-- Agent run loop host. The orchestration loop runs here (not in the page content
        script) so an in-flight run survives a page reload. Scripts are loaded in the
        same dependency order the manifest uses for the content script. Page-DOM-bound
-       tools (page_observe, page_act, page_read, page_spreadsheet, take_screenshot
-       capture) are delegated back to the target tab's content script; everything else
+       tools (page_observe, page_act, page_read, page_spreadsheet, page_layout,
+       take_screenshot capture) are delegated back to the target tab's content script; everything else
        runs here. -->
   <script src="../shared/messages.js"></script>
   <script src="../shared/agentRunStop.js"></script>
@@ -23,6 +23,7 @@
   <script src="../lib/jszip.min.js"></script>
   <script src="../lib/xlsx.min.js"></script>
   <script src="../agent/apiLogger.js"></script>
+  <script src="../agent/apiLogTurns.js"></script>
 
   <!-- Scanned-PDF transcription. Hosted here rather than in the service worker because it is a
        network-bound job that can run for minutes, which a service worker's idle timer does not

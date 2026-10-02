@@ -1,0 +1,86 @@
+<!doctype html><html><head><meta charset="utf-8">
+<style>
+body{margin:0;font:14px sans-serif}
+.wrap{display:flex} main{flex:1;min-width:0;margin-left:20px}
+aside.side{width:260px;height:900px;background:#eee}
+.card{width:280px;height:80px;margin:4px;display:inline-block;vertical-align:top}
+.card span{display:block}
+footer.site{height:200px;background:#ddd}
+.scroller{height:600px;overflow:auto}
+li.dept{padding:4px}
+</style>
+<script>window.chrome = window.chrome || {}; try { window.chrome.runtime = { id: 'probe' }; } catch (e) {}</script>
+</head><body><pre id="out"></pre><div id="root"></div>
+<script>
+const params = new URLSearchParams(location.search);
+const kase = params.get('case');
+const code = '../../../tools/';
+const cards = (n, cls) => Array.from({ length: n }, (_, i) => '<div class="card ' + (cls || '') + '"><h3 class="title">Card ' + i + '</h3><span class="price">$' + (i * 37 % 200) + '.00</span><span class="rating">' + (i % 5) + ' stars</span></div>').join('');
+const depts = (n) => '<ul class="depts">' + Array.from({ length: n }, (_, i) => '<li class="dept"><a href="#">Dept ' + i + '</a> <span class="n">' + (i * 7 + 3) + ' items</span></li>').join('') + '</ul>';
+const rows = (n) => '<table class="orders"><tbody>' + Array.from({ length: n }, (_, i) => '<tr class="row"><td class="id">#' + i + '</td><td class="who"><a href="#">Customer ' + i + '</a></td><td class="amt">$' + (i * 37 % 900) + '.00</td><td class="st"><span class="badge">Paid</span></td></tr>').join('') + '</tbody></table>';
+const visible5 = '<section aria-label="Shown"><div class="grid shown">' + cards(5, 'shown') + '</div></section>';
+const CASES = {
+  menu: () => { const h = ['<nav class="mega" style="display:none" aria-label="All departments">']; for (let i = 0; i < 8000; i++) h.push('<div class="col"><ul class="links"><li class="l"><a href="#">Dept ' + i + '</a></li><li class="l"><a href="#">Sub ' + i + '</a></li></ul></div>'); h.push('</nav><div class="wrap"><main><h2>Results</h2><div class="grid">' + cards(30) + '</div></main><aside class="side"><h2>Filters</h2><p>Brand</p></aside></div><footer class="site">Footer</footer>'); return h.join(''); },
+  table: () => '<div class="wrap"><main><h2>Orders</h2>' + rows(6000) + '</main><aside class="side"><h2>Summary</h2></aside></div><footer class="site">Footer</footer>',
+  tableInner: () => '<div class="scroller"><h2>Orders</h2>' + rows(6000) + '</div>',
+  detailsList: () => '<details class="menu"><summary>All departments</summary>' + depts(10) + '</details>' + visible5,
+  faq: () => '<main><h2>Help</h2><div class="faq">' + Array.from({ length: 12 }, (_, i) => '<details class="q"><summary>Question ' + i + '</summary><div class="answer"><span class="who">Staff ' + i + '</span><span class="when">' + (i + 1) + ' days ago</span><span class="votes">' + (i * 13) + ' votes</span></div></details>').join('') + '</div></main>',
+  untilFound: () => '<div hidden="until-found">' + depts(10) + '</div>' + visible5,
+  cvSized: () => '<div style="content-visibility:hidden;height:300px">' + depts(10) + '</div>' + visible5,
+  contents: () => '<div class="grid">' + Array.from({ length: 4 }, () => '<div class="row" style="display:contents">' + cards(3) + '</div>').join('') + '</div><div style="display:contents">' + depts(6) + '</div>',
+  openDetails: () => '<details open><summary>All departments</summary>' + depts(10) + '</details>',
+  cvAuto: () => '<div style="height:3000px">top</div><div style="content-visibility:auto">' + depts(10) + '</div>',
+  truncEmpty: () => '<p>' + Array.from({ length: 31000 }, () => '<i>x</i> ').join('') + '</p>'
+};
+if (!kase) {
+  document.getElementById('out').textContent = JSON.stringify({ cases: Object.keys(CASES) });
+} else {
+document.getElementById('root').innerHTML = CASES[kase]();
+function load(src) { return new Promise((res, rej) => { const s = document.createElement('script'); s.src = code + src; s.onload = res; s.onerror = rej; document.head.appendChild(s); }); }
+load('pageLayoutRules.js').then(() => load('pageLayout.js')).then(() => {
+  const run = (a) => window.ABChatContent.pageLayout.run(a);
+  const scan = run({ operation: 'scan' });
+  const checks = [];
+  const check = (name, ok, detail) => checks.push({ name, ok: !!ok, detail: ok ? undefined : detail });
+  const cols = scan.collections || []; const regs = scan.regions || []; const note = scan.note || '';
+  const brief = { note, regions: regs.map((r) => r.kind + ':' + r.label), collections: cols.map((c) => c.id + ' ' + (c.label || '') + ' items=' + c.items + ' fields=' + c.fields.map((f) => (f.examples || f.values || []).join('/')).join(' | ')) };
+  const has = (n) => cols.some((c) => c.items === n);
+  if (kase === 'menu') {
+    check('30-card grid found behind a hidden 40,000-element menu', has(30), brief);
+    check('sidebar after the menu found', regs.some((r) => r.label === 'Filters'), brief);
+    check('footer found', regs.some((r) => r.kind === 'footer'), brief);
+    check('no cut-off note (hidden menu costs no budget)', !note, brief);
+  } else if (kase === 'table') {
+    check('long table no longer cuts the scan off', !note, brief);
+    check('sidebar and footer after the table found', regs.some((r) => r.label === 'Summary') && regs.some((r) => r.kind === 'footer'), brief);
+    check('items is the full 6000 rows', has(6000), brief);
+  } else if (kase === 'tableInner') {
+    check('inner-scroller table no longer cuts the scan off', !note, brief);
+    check('items is the full 6000 rows', has(6000), brief);
+  } else if (kase === 'truncEmpty') {
+    check('31,000 inline repeats no longer cut the scan off', !/scan stopped/.test(note), brief);
+  } else if (kase === 'detailsList' || kase === 'untilFound' || kase === 'cvSized') {
+    check('hidden 10-item list is not offered', !has(10), brief);
+    check('visible 5-card list still found', has(5), brief);
+  } else if (kase === 'faq') {
+    const faq = cols.find((c) => c.items === 12);
+    check('FAQ list found', faq, brief);
+    check('no field taken from the closed answers', faq && !faq.fields.some((f) => (f.examples || f.values || []).some((e) => /Staff|votes|days ago/.test(e))), brief);
+  } else if (kase === 'contents') {
+    check('cards inside display: contents rows found as one list', has(12), brief);
+    check('list inside a display: contents wrapper found', has(6), brief);
+  } else if (kase === 'openDetails') {
+    check('list inside an open details found', has(10), brief);
+  } else if (kase === 'cvAuto') {
+    check('off-screen content-visibility: auto list found', has(10), brief);
+  }
+  if (cols[0] && (kase === 'detailsList' || kase === 'faq')) {
+    const f = cols[0].fields[0];
+    const s = run({ operation: 'apply', changes: [{ action: 'sort', collection: cols[0].id, field: f.field, order: 'desc' }] });
+    check('sort on a visible list still works', s.ok, s);
+    run({ operation: 'reset' });
+  }
+  document.getElementById('out').textContent = JSON.stringify({ case: kase, checks });
+}).catch((e) => { document.getElementById('out').textContent = JSON.stringify({ case: kase, error: String(e) }); });
+}
+</script></body></html>

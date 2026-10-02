@@ -58,6 +58,7 @@
     "panel/panelComposerCopy.js",
     "panel/panelSpeechChunk.js",
     "agent/apiLogger.js",
+    "agent/apiLogTurns.js",
     "agent/pageActionLogger.js",
     "agent/tools.js",
     "agent/documentGeneration.js",
@@ -78,6 +79,8 @@
     "tools/selectionContextActions.js",
     "tools/flattenedContent.js",
     "tools/contentSelector.js",
+    "tools/pageLayoutRules.js",
+    "tools/pageLayout.js",
     "content/main.js"
   ];
 

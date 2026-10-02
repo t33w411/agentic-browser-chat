@@ -237,6 +237,21 @@
     return { url: urlForPageContext, title: titleForPageContext };
   }
 
+  // page_layout's record of what one tool call changed on the page, kept on its tool message for the
+  // chat's per-reply Apply and Undo buttons. Only the envelope is checked here; the page runtime
+  // checks every change again before it replays one. A malformed or oversized record is dropped
+  // whole rather than cut, since a cut record could replay part of a change.
+  var MAX_PAGE_CHANGES_CHARS_FOR_PANEL_DATA_REPO = 64000;
+  function normalizePageChangesForPanelDataRepo(valueForPageChanges) {
+    if (!valueForPageChanges || typeof valueForPageChanges !== 'object' || Array.isArray(valueForPageChanges)) return undefined;
+    var opForPageChanges = valueForPageChanges.op;
+    if (opForPageChanges !== 'apply' && opForPageChanges !== 'undo' && opForPageChanges !== 'reset') return undefined;
+    var jsonForPageChanges;
+    try { jsonForPageChanges = JSON.stringify(valueForPageChanges); } catch (errForPageChanges) { return undefined; }
+    if (!jsonForPageChanges || jsonForPageChanges.length > MAX_PAGE_CHANGES_CHARS_FOR_PANEL_DATA_REPO) return undefined;
+    return JSON.parse(jsonForPageChanges);
+  }
+
   function normalizeMessageRecordForPanelDataRepo(chatIdForPanelDataRepo, messageInputForPanelDataRepo, fallbackTimestampForPanelDataRepo) {
     var inputForPanelDataRepo = messageInputForPanelDataRepo || {};
     var normalizedRoleForPanelDataRepo = normalizeMessageRoleForPanelDataRepo(inputForPanelDataRepo.role);
@@ -254,6 +269,7 @@
       pageContext: normalizePageContextForPanelDataRepo(inputForPanelDataRepo.pageContext),
       tool_calls: Array.isArray(inputForPanelDataRepo.tool_calls) ? inputForPanelDataRepo.tool_calls : undefined,
       tool_call_id: inputForPanelDataRepo.tool_call_id != null ? String(inputForPanelDataRepo.tool_call_id) : undefined,
+      pageChanges: normalizePageChangesForPanelDataRepo(inputForPanelDataRepo.pageChanges),
       isHidden: Boolean(inputForPanelDataRepo.isHidden),
       usagePromptTokens: Number.isFinite(Number(inputForPanelDataRepo.usagePromptTokens)) ? Number(inputForPanelDataRepo.usagePromptTokens) : 0,
       usageCompletionTokens: Number.isFinite(Number(inputForPanelDataRepo.usageCompletionTokens)) ? Number(inputForPanelDataRepo.usageCompletionTokens) : 0,

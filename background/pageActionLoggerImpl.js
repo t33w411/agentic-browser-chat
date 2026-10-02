@@ -3,9 +3,10 @@
 // scripts (they use the agent/pageActionLogger.js proxy). When adding a new function here, also add a
 // matching proxy entry in agent/pageActionLogger.js.
 //
-// This is a separate database from ABChatApiLogs on purpose: that store trims by record count (500),
-// which would evict the LLM logs within a couple of runs once bulky DOM records share it. This store
-// trims by total bytes and age instead, so a light user does not silently retain months of capture.
+// This is a separate database from ABChatApiLogs on purpose: that store keeps at most 500 records
+// and 50 MB, and bulky DOM records sharing it would evict the LLM logs within a couple of runs. This
+// store trims by total bytes and age instead, so a light user does not silently retain months of
+// capture.
 (function () {
   const globalScopeForPageActionLogger = globalThis;
   const nsForPageActionLogger = globalScopeForPageActionLogger.ABChatContent || {};

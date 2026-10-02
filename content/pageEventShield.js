@@ -19,6 +19,7 @@
   var extensionHostIdsForPageEventShield = {
     "abchat-panel-shadow-host": true,
     "abchat-toast-host": true,
+    "abchat-layout-host": true,
     "abchat-quick-question-overlay": true,
     "abchat-content-selector-menu-host": true
   };

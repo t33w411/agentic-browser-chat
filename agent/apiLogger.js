@@ -25,11 +25,13 @@
   }
 
   nsForApiLogger.apiLogger = {
-    writeLog:    function (record)         { return sendApiLogOpForApiLogger('writeLog',    [record]); },
-    getLogs:     function (limit, offset)  { return sendApiLogOpForApiLogger('getLogs',     [limit, offset]); },
-    getLogCount: function ()               { return sendApiLogOpForApiLogger('getLogCount', []); },
-    deleteLogs:  function (ids)            { return sendApiLogOpForApiLogger('deleteLogs',  [ids]); },
-    clearLogs:   function ()               { return sendApiLogOpForApiLogger('clearLogs',   []); }
+    writeLog:        function (record)        { return sendApiLogOpForApiLogger('writeLog',        [record]); },
+    getLogs:         function (limit, offset) { return sendApiLogOpForApiLogger('getLogs',         [limit, offset]); },
+    getLogSummaries: function (limit, offset) { return sendApiLogOpForApiLogger('getLogSummaries', [limit, offset]); },
+    getLog:          function (id)            { return sendApiLogOpForApiLogger('getLog',          [id]); },
+    getLogCount:     function ()              { return sendApiLogOpForApiLogger('getLogCount',     []); },
+    deleteLogs:      function (ids)           { return sendApiLogOpForApiLogger('deleteLogs',      [ids]); },
+    clearLogs:       function ()              { return sendApiLogOpForApiLogger('clearLogs',       []); }
   };
 
   globalScopeForApiLogger.ABChatContent = nsForApiLogger;

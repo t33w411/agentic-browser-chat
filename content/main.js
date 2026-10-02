@@ -148,7 +148,8 @@
       // This cancels pending timers and removes the storage listener so they cannot
       // fire against the stale shadow DOM after re-injection.
       // REGRESSION RISK: if you add a new long-lived resource in panelRuntime.js (timer,
-      // storage listener, MutationObserver, etc.) you must also cancel it in teardown().
+      // storage listener, MutationObserver, etc.) you must also cancel it in
+      // teardownForPanelRuntime, which the exported teardown() relays to.
       var oldPanelRuntimeForContentMain = oldUiForContentMain.panelRuntime;
       if (oldPanelRuntimeForContentMain && typeof oldPanelRuntimeForContentMain.teardown === 'function') {
         try { oldPanelRuntimeForContentMain.teardown(); } catch (e) {}
@@ -522,7 +523,7 @@
     if (messageForContentMain.action === (actionsForContentMain.runDelegatedPageTool || "runDelegatedPageTool")) {
       var delegatedToolForContentMain = messageForContentMain.tool;
       var delegatedArgsForContentMain = messageForContentMain.args || {};
-      var domToolsForDelegate = { page_observe: 1, page_act: 1, page_read: 1, page_spreadsheet: 1 };
+      var domToolsForDelegate = { page_observe: 1, page_act: 1, page_read: 1, page_spreadsheet: 1, page_layout: 1 };
       if (domToolsForDelegate[delegatedToolForContentMain]) {
         var agentNsForDelegate = (typeof globalThis !== 'undefined' ? globalThis : self).ABChatAgent || {};
         if (typeof agentNsForDelegate.executeTool !== 'function') {
@@ -533,8 +534,9 @@
         // live page. No tabId is passed, so the unbound CDP client lets the service worker resolve
         // the target tab from sender.tab (this tab). The trusted page tools (page_act,
         // page_spreadsheet) also need the chat id so their session-scoped state shares a key with
-        // the screenshot capture; the read-only tools (page_observe, page_read) do not.
-        var chatScopedDelegateTools = { page_act: 1, page_spreadsheet: 1 };
+        // the screenshot capture; the read-only tools (page_observe, page_read) do not. page_layout
+        // needs the run identity so its page-action log record joins back to the LLM turn.
+        var chatScopedDelegateTools = { page_act: 1, page_spreadsheet: 1, page_layout: 1 };
         var delegateCtxForContentMain = chatScopedDelegateTools[delegatedToolForContentMain]
           ? {
               chatId: messageForContentMain.chatId,

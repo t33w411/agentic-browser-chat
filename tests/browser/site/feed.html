@@ -1,0 +1,49 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Video feed</title>
+<style>
+  body { margin: 0; font: 14px sans-serif; }
+  header.top { position: sticky; top: 0; height: 50px; background: #eee; }
+  aside.side { position: absolute; left: 0; top: 60px; width: 200px; height: 900px; background: #f7f7f7; }
+  main { margin-left: 220px; padding-top: 10px; }
+  .grid { display: flex; flex-wrap: wrap; width: 880px; gap: 10px; }
+  .card { width: 200px; height: 120px; border: 1px solid #ccc; box-sizing: border-box; padding: 4px; }
+  .card h3 { margin: 0; font-size: 14px; }
+  .card span { display: block; }
+</style>
+</head>
+<body>
+<header class="top"><nav aria-label="Top menu"><a href="#">Home</a> <a href="#">Trending</a></nav></header>
+<aside class="side"><h2>Library</h2><p>Subscriptions</p></aside>
+<main>
+  <h2>Recommended</h2>
+  <div class="grid" id="grid"></div>
+</main>
+<script>
+  const CARDS = [
+    ['How I built a boat', '1.2M views', '3 weeks ago', '12:04'],
+    ['Morning routine', '340K views', '2 days ago', '3:10'],
+    ['Quiet rain sounds', 'No views', '1 hour ago', '4:59'],
+    ['Cooking pasta at home', '12K views', '1 year ago', '25:00'],
+    ['The whole documentary', '5.6M views', '4 months ago', '1:02:03'],
+    ['A tiny clip', '980 views', '5 days ago', '0:45'],
+    ['Travel diary: Lisbon', '2.1M views', '2 weeks ago', '8:00'],
+    ['Guitar lesson', '45K views', '6 days ago', '5:00']
+  ];
+  const grid = document.getElementById('grid');
+  CARDS.forEach(function (c) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.dataset.name = c[0];
+    card.innerHTML = '<h3 class="title"></h3><span class="views"></span><span class="age"></span><span class="dur"></span>';
+    card.querySelector('.title').textContent = c[0];
+    card.querySelector('.views').textContent = c[1];
+    card.querySelector('.age').textContent = c[2];
+    card.querySelector('.dur').textContent = c[3];
+    grid.appendChild(card);
+  });
+</script>
+</body>
+</html>

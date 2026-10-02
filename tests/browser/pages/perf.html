@@ -1,0 +1,32 @@
+<!doctype html><html><head><meta charset="utf-8">
+<style>.grid{display:flex;flex-wrap:wrap;width:1200px}.card{width:280px;height:120px;margin:4px}.card img{width:60px;height:40px;display:block}span{display:block}</style>
+<script>window.chrome = window.chrome || {}; try { window.chrome.runtime = { id: 'perf' }; } catch (e) {}</script>
+</head><body><main><h2>Feed</h2><div class="grid" id="grid"></div></main><pre id="out"></pre>
+<script>
+const grid = document.getElementById('grid');
+const frag = document.createDocumentFragment();
+for (let i = 0; i < 3000; i++) {
+  const c = document.createElement('div'); c.className = 'card';
+  c.innerHTML = '<a class="thumb" href="#"><img alt=""></a><div class="meta"><h3 class="title">Video number ' + i + ' about things</h3><div class="line"><span class="views">' + ((i * 7919) % 5000) / 10 + 'K views</span><span class="age">' + (1 + i % 11) + ' weeks ago</span><span class="dur">' + (1 + i % 30) + ':' + String(i % 60).padStart(2, '0') + '</span></div></div>';
+  frag.appendChild(c);
+}
+grid.appendChild(frag);
+</script>
+<script src="../../../tools/pageLayoutRules.js"></script>
+<script src="../../../tools/pageLayout.js"></script>
+<script>
+const run = (a) => window.ABChatContent.pageLayout.run(a);
+const t = {}; let t0;
+t0 = performance.now(); const scan = run({ operation: 'scan' }); t.scanMs = Math.round(performance.now() - t0);
+const col = scan.collections[0];
+const views = col.fields.find((f) => f.kind === 'compact_number');
+const dur = col.fields.find((f) => f.kind === 'duration');
+t0 = performance.now(); const s = run({ operation: 'apply', changes: [{ action: 'sort', collection: col.id, field: views.field, order: 'desc' }] }); t.sortMs = Math.round(performance.now() - t0);
+t0 = performance.now(); const f = run({ operation: 'apply', changes: [{ action: 'filter', collection: col.id, field: dur.field, op: 'lt', value: '5:00' }] }); t.filterMs = Math.round(performance.now() - t0);
+t0 = performance.now(); run({ operation: 'apply', changes: [{ action: 'sort', collection: col.id, field: views.field, order: 'asc' }] }); t.resortMs = Math.round(performance.now() - t0);
+t0 = performance.now(); run({ operation: 'reset' }); t.resetMs = Math.round(performance.now() - t0);
+t.elements = document.querySelectorAll('*').length;
+t.items = col.items; t.sortOk = s.ok; t.hidden = f.ok && f.applied[0].hidden; t.firstValues = s.applied && s.applied[0].first_values;
+t.scanChars = JSON.stringify(scan).length;
+document.getElementById('out').textContent = JSON.stringify({ timings: t });
+</script></body></html>

@@ -50,6 +50,7 @@
   var _exposedSetChatSearchQueryForPanelRuntime = null;
   var _exposedSetNotesSearchQueryForPanelRuntime = null;
   var _exposedSetTaskSearchQueryForPanelRuntime = null;
+  var _exposedTeardownForPanelRuntime = null;
 
   function initializePanelRuntimeForPanel() {
     if (globalScopeForPanelRuntime.__abchatPanelRuntimeInitialized) {
@@ -561,6 +562,11 @@
           : null,
         tool_calls: Array.isArray(safeMessageForPanelRuntime.tool_calls) ? safeMessageForPanelRuntime.tool_calls : undefined,
         tool_call_id: safeMessageForPanelRuntime.tool_call_id != null ? String(safeMessageForPanelRuntime.tool_call_id) : undefined,
+        pageChanges: (safeMessageForPanelRuntime.pageChanges
+          && typeof safeMessageForPanelRuntime.pageChanges === 'object'
+          && !Array.isArray(safeMessageForPanelRuntime.pageChanges))
+          ? safeMessageForPanelRuntime.pageChanges
+          : undefined,
         isHidden: Boolean(safeMessageForPanelRuntime.isHidden),
         usagePromptTokens: Number.isFinite(Number(safeMessageForPanelRuntime.usagePromptTokens)) ? Number(safeMessageForPanelRuntime.usagePromptTokens) : 0,
         usageCompletionTokens: Number.isFinite(Number(safeMessageForPanelRuntime.usageCompletionTokens)) ? Number(safeMessageForPanelRuntime.usageCompletionTokens) : 0,
@@ -1350,10 +1356,28 @@
     // does not read the animation's intermediate positions as the user detaching.
     let chatSmoothScrollActiveForPanelRuntime = false;
     let chatSmoothScrollGuardTimerForPanelRuntime = null;
+    // Per-reply page-change rows (page_layout). Declared up here because renderChatMessages reads
+    // them. Message id of a reply's last bubble -> { chatId, items }, reassigned on every render so
+    // a row's id never resolves against an older chat. The chat-wide row's { chatId, items,
+    // anchorMsgId } is reassigned with it, and is null when fewer than two replies changed this site.
+    let pageChangeGroupsForPanelRuntime = new Map();
+    let chatPageChangesForPanelRuntime = null;
+    let pageChangeChatIdForPanelRuntime = null;
+    let pageChangeRefreshTimerForPanelRuntime = null;
+    let pageChangeRetryTimersForPanelRuntime = [];
+    let pageChangeNoticeTimerForPanelRuntime = null;
+    let pageChangeSubscribedRuntimeForPanelRuntime = null;
+    let pageChangeUnsubscribeForPanelRuntime = null;
+    // Keyed by a reply's message id, or by CHAT_PAGE_CHANGES_NOTICE_KEY_FOR_PANEL_RUNTIME for the
+    // chat-wide row.
+    const pageChangeNoticeByRowForPanelRuntime = new Map();
+    const PAGE_CHANGE_NOTICE_MS_FOR_PANEL_RUNTIME = 6000;
+    const CHAT_PAGE_CHANGES_NOTICE_KEY_FOR_PANEL_RUNTIME = 'chat';
 
     let apiLogsPageForPanelRuntime = 0;
     let apiLogsCacheForPanelRuntime = [];
     let activeLogDetailForPanelRuntime = null;
+    let logDetailRequestSeqForPanelRuntime = 0;
     let activeLogViewRawForPanelRuntime = false;
     let activeLogViewWrapForPanelRuntime = false;
     let rawChatViewWrapForPanelRuntime = false;
@@ -3049,6 +3073,11 @@
       // when one or more of those tool calls actually fired this turn.
       let memoryActionsSinceLastUserMsgForRender = { memory: false, skill: false };
 
+      const pageChangesForRender = buildPageChangeGroupsForPanelRuntime(messages, S.activeChatId);
+      pageChangeGroupsForPanelRuntime = pageChangesForRender.groups;
+      chatPageChangesForPanelRuntime = pageChangesForRender.chat;
+      pageChangeChatIdForPanelRuntime = S.activeChatId;
+
       // Buffer for merging consecutive assistant text messages into one bubble.
       let asstMergeBuffer = [];
       function flushAsstBuffer() {
@@ -3113,6 +3142,14 @@
         const footerHtmlForFlush = (readAloudBtnHtmlForFlush || timestampHtmlForFlush)
           ? '<div class="msg-footer">' + readAloudBtnHtmlForFlush + timestampHtmlForFlush + '</div>'
           : '';
+        // Filled in by refreshPageChangeControlsForPanelRuntime once the page runtime has been asked.
+        // The chat-wide row sits under the latest reply that changed this site.
+        const pageChangesRowHtmlForFlush = (pageChangeGroupsForPanelRuntime.has(Number(last.msgId))
+          ? '<div class="msg-page-changes" data-page-changes-msg-id="' + Number(last.msgId) + '" hidden></div>'
+          : '')
+          + (chatPageChangesForPanelRuntime && chatPageChangesForPanelRuntime.anchorMsgId === Number(last.msgId)
+            ? '<div class="msg-page-changes" data-page-changes-scope="chat" hidden></div>'
+            : '');
         html +=
           '<div class="msg-wrap">' +
             '<div class="msg-bubble asst has-options">' +
@@ -3123,6 +3160,7 @@
               sourcesHtml +
             '</div>' +
             footerHtmlForFlush +
+            pageChangesRowHtmlForFlush +
           '</div>';
         asstMergeBuffer = [];
       }
@@ -3292,7 +3330,356 @@
 
       container.innerHTML = html;
       hydrateGeneratedImagesForPanelRuntime(container);
+      schedulePageChangeControlsRefreshForPanelRuntime(true);
       return hydrateRenderedMarkdownForPanelRuntime(container);
+    }
+
+    // ---- Page changes per reply (page_layout) ----
+    // A reply that changed the page gets a row under its bubble: Undo while its changes are on this
+    // page, Apply when they are not and at least one of their targets is here. Only changes made on
+    // this tab's origin are offered. The rendered HTML holds an empty placeholder; its state comes
+    // from the page runtime, which runs in this same content-script world, and is refreshed after
+    // each render and whenever the set of changes on the page changes.
+    //
+    // When two or more replies changed this site, a chat-wide row under the latest of them offers
+    // Apply all and Undo all. Its changes are netted over the whole chat's records in order, not
+    // joined from each reply's own set, so a later reply's undo or replacing sort removes an earlier
+    // reply's change.
+
+    function getPageLayoutRuntimeForPanelRuntime() {
+      const runtimeForPageChanges = (globalThis.ABChatContent || {}).pageLayout;
+      return runtimeForPageChanges && typeof runtimeForPageChanges.checkReplay === 'function' ? runtimeForPageChanges : null;
+    }
+
+    // A reply is everything between two user messages. Its tool messages carry page_layout's
+    // records, and its last text message is the bubble the row goes under. Returns the per-reply
+    // groups and the chat-wide row's data (null when fewer than two replies changed this site).
+    function buildPageChangeGroupsForPanelRuntime(messagesForGroups, chatIdForGroups) {
+      const groupsForPageChanges = new Map();
+      const resultForGroups = { groups: groupsForPageChanges, chat: null };
+      const rulesForGroups = (globalThis.ABChatContent || {}).pageLayoutRules;
+      if (!rulesForGroups || typeof rulesForGroups.netPageChanges !== 'function' || !Array.isArray(messagesForGroups)) return resultForGroups;
+      const allRecordsForChat = [];
+      const turnByKeyForChat = new Map();
+      let turnIndexForGroups = 0;
+      let recordsForTurn = [];
+      let lastReplyIdForTurn = null;
+      function closeTurnForGroups() {
+        if (recordsForTurn.length && lastReplyIdForTurn != null && Number.isFinite(Number(lastReplyIdForTurn))) {
+          const itemsForTurn = rulesForGroups.netPageChanges(recordsForTurn);
+          if (itemsForTurn.length) groupsForPageChanges.set(Number(lastReplyIdForTurn), { chatId: chatIdForGroups, items: itemsForTurn });
+        }
+        recordsForTurn = [];
+        lastReplyIdForTurn = null;
+        turnIndexForGroups++;
+      }
+      messagesForGroups.forEach(function (messageForGroups) {
+        if (!messageForGroups) return;
+        if (messageForGroups.role === 'user') {
+          closeTurnForGroups();
+          return;
+        }
+        if (messageForGroups.role === 'tool') {
+          const recordForGroups = messageForGroups.pageChanges;
+          if (recordForGroups) {
+            recordsForTurn.push(recordForGroups);
+            allRecordsForChat.push(recordForGroups);
+            if (recordForGroups.op === 'apply' && Array.isArray(recordForGroups.items)) {
+              recordForGroups.items.forEach(function (itemForTurn) {
+                if (itemForTurn && typeof itemForTurn.key === 'string') turnByKeyForChat.set(itemForTurn.key, turnIndexForGroups);
+              });
+            }
+          }
+          return;
+        }
+        const hasToolCallsForGroups = Array.isArray(messageForGroups.tool_calls) && messageForGroups.tool_calls.length > 0;
+        if (messageForGroups.role === 'assistant' && !hasToolCallsForGroups && !messageForGroups.systemNotice
+          && String(messageForGroups.md || messageForGroups.content || '').trim()) {
+          lastReplyIdForTurn = messageForGroups.id;
+        }
+      });
+      closeTurnForGroups();
+
+      const originForChat = location.origin;
+      const itemsHereForChat = rulesForGroups.netPageChanges(allRecordsForChat).filter(function (itemForChat) {
+        return itemForChat.origin === originForChat;
+      });
+      const turnsHereForChat = new Set();
+      itemsHereForChat.forEach(function (itemForTurnCount) {
+        if (turnByKeyForChat.has(itemForTurnCount.key)) turnsHereForChat.add(turnByKeyForChat.get(itemForTurnCount.key));
+      });
+      let anchorMsgIdForChat = null;
+      groupsForPageChanges.forEach(function (groupForAnchor, msgIdForAnchor) {
+        if (groupForAnchor.items.some(function (itemForAnchor) { return itemForAnchor.origin === originForChat; })) anchorMsgIdForChat = msgIdForAnchor;
+      });
+      if (turnsHereForChat.size >= 2 && anchorMsgIdForChat != null) {
+        resultForGroups.chat = { chatId: chatIdForGroups, items: itemsHereForChat, anchorMsgId: anchorMsgIdForChat };
+      }
+      return resultForGroups;
+    }
+
+    function pageChangeItemsHereForPanelRuntime(groupForHere) {
+      if (!groupForHere) return [];
+      const originForHere = location.origin;
+      return groupForHere.items.filter(function (itemForHere) { return itemForHere.origin === originForHere; });
+    }
+
+    function ensurePageLayoutSubscriptionForPanelRuntime(runtimeForSubscribe) {
+      if (!runtimeForSubscribe || runtimeForSubscribe === pageChangeSubscribedRuntimeForPanelRuntime) return;
+      if (pageChangeUnsubscribeForPanelRuntime) {
+        try { pageChangeUnsubscribeForPanelRuntime(); } catch (e) {}
+      }
+      pageChangeSubscribedRuntimeForPanelRuntime = runtimeForSubscribe;
+      pageChangeUnsubscribeForPanelRuntime = runtimeForSubscribe.subscribe(function () {
+        schedulePageChangeControlsRefreshForPanelRuntime(false);
+      });
+    }
+
+    function schedulePageChangeControlsRefreshForPanelRuntime(isNewRenderForSchedule) {
+      if (pageChangeRefreshTimerForPanelRuntime) clearTimeout(pageChangeRefreshTimerForPanelRuntime);
+      pageChangeRefreshTimerForPanelRuntime = setTimeout(function () {
+        pageChangeRefreshTimerForPanelRuntime = null;
+        refreshPageChangeControlsForPanelRuntime();
+      }, 50);
+      if (!isNewRenderForSchedule) return;
+      pageChangeRetryTimersForPanelRuntime.forEach(function (timerForRetry) { clearTimeout(timerForRetry); });
+      pageChangeRetryTimersForPanelRuntime = [];
+      if (!pageChangeGroupsForPanelRuntime.size) return;
+      // A page that builds its list after load (a single-page app) may have nothing to match yet
+      // when the chat is opened, so look again twice.
+      pageChangeRetryTimersForPanelRuntime = [1500, 5000].map(function (delayForRetry) {
+        return setTimeout(refreshPageChangeControlsForPanelRuntime, delayForRetry);
+      });
+    }
+
+    function setPageChangeNoticeForPanelRuntime(rowKeyForNotice, textForNotice) {
+      if (textForNotice) pageChangeNoticeByRowForPanelRuntime.set(rowKeyForNotice, textForNotice);
+      else pageChangeNoticeByRowForPanelRuntime.delete(rowKeyForNotice);
+      if (pageChangeNoticeTimerForPanelRuntime) clearTimeout(pageChangeNoticeTimerForPanelRuntime);
+      pageChangeNoticeTimerForPanelRuntime = null;
+      if (!pageChangeNoticeByRowForPanelRuntime.size) return;
+      pageChangeNoticeTimerForPanelRuntime = setTimeout(function () {
+        pageChangeNoticeTimerForPanelRuntime = null;
+        pageChangeNoticeByRowForPanelRuntime.clear();
+        refreshPageChangeControlsForPanelRuntime();
+      }, PAGE_CHANGE_NOTICE_MS_FOR_PANEL_RUNTIME);
+    }
+
+    // Writes a row's contents, or hides it when there is nothing to show. Unchanged rows are left
+    // alone, so a focused button keeps focus through a refresh. Returns whether the row was shown,
+    // hidden or rewritten, any of which can change its height.
+    function paintPageChangeRowForPanelRuntime(rowForPaint, htmlForPaint, isActiveForPaint) {
+      if (!htmlForPaint) {
+        const changedForHide = !rowForPaint.hidden || !!rowForPaint.innerHTML;
+        rowForPaint.hidden = true;
+        rowForPaint.className = 'msg-page-changes';
+        if (rowForPaint.innerHTML) rowForPaint.innerHTML = '';
+        return changedForHide;
+      }
+      const changedForShow = rowForPaint.hidden || rowForPaint.innerHTML !== htmlForPaint;
+      rowForPaint.className = 'msg-page-changes' + (isActiveForPaint ? ' is-active' : '');
+      rowForPaint.hidden = false;
+      if (rowForPaint.innerHTML !== htmlForPaint) rowForPaint.innerHTML = htmlForPaint;
+      return changedForShow;
+    }
+
+    function pageChangeButtonHtmlForPanelRuntime(actionForButton, labelForButton, summaryForButton, isPrimaryForButton, msgIdForButton) {
+      return '<button type="button" class="mpc-btn' + (isPrimaryForButton ? ' mpc-btn-primary' : '') + '"'
+        + ' data-action="' + actionForButton + '"'
+        + (msgIdForButton != null ? ' data-page-changes-msg-id="' + msgIdForButton + '"' : '')
+        + ' aria-label="' + escHtml(labelForButton + ': ' + summaryForButton) + '">'
+        + escHtml(labelForButton) + '</button>';
+    }
+
+    function refreshPageChangeControlsForPanelRuntime() {
+      try {
+        const rowsForRefresh = Array.from(root.querySelectorAll('.msg-page-changes[data-page-changes-msg-id]'));
+        const chatRowForRefresh = root.querySelector('.msg-page-changes[data-page-changes-scope="chat"]');
+        if (!rowsForRefresh.length && !chatRowForRefresh) return;
+        const runtimeForRefresh = getPageLayoutRuntimeForPanelRuntime();
+        ensurePageLayoutSubscriptionForPanelRuntime(runtimeForRefresh);
+        const rowItemsForRefresh = rowsForRefresh.map(function (rowForItems) {
+          return pageChangeItemsHereForPanelRuntime(pageChangeGroupsForPanelRuntime.get(Number(rowForItems.dataset.pageChangesMsgId)));
+        });
+        const chatForRefresh = chatRowForRefresh ? chatPageChangesForPanelRuntime : null;
+        const chatItemsForRefresh = chatForRefresh ? chatForRefresh.items : [];
+        let rowsChangedForRefresh = false;
+
+        // Every row needs to know which of this chat's changes are on the page now, and which of
+        // the rest can be found here. Both are asked once for all rows, so a long chat costs one
+        // lookup per list or region rather than one per reply.
+        let activeKeysForRefresh = new Set();
+        const foundKeysForRefresh = new Set();
+        if (runtimeForRefresh) {
+          activeKeysForRefresh = new Set(runtimeForRefresh.listChatChanges(pageChangeChatIdForPanelRuntime).map(function (changeForKey) { return changeForKey.key; }));
+          const toCheckForRefresh = new Map();
+          rowItemsForRefresh.forEach(function (itemsForRow) {
+            // A row with a change on the page shows Undo and needs no check.
+            if (itemsForRow.some(function (itemForActive) { return activeKeysForRefresh.has(itemForActive.key); })) return;
+            itemsForRow.forEach(function (itemForCheck) { if (!toCheckForRefresh.has(itemForCheck.key)) toCheckForRefresh.set(itemForCheck.key, itemForCheck); });
+          });
+          chatItemsForRefresh.forEach(function (itemForCheck) {
+            if (!activeKeysForRefresh.has(itemForCheck.key) && !toCheckForRefresh.has(itemForCheck.key)) toCheckForRefresh.set(itemForCheck.key, itemForCheck);
+          });
+          if (toCheckForRefresh.size) {
+            runtimeForRefresh.checkReplay(Array.from(toCheckForRefresh.values())).forEach(function (checkForFound) {
+              if (checkForFound.found) foundKeysForRefresh.add(checkForFound.key);
+            });
+          }
+        }
+
+        rowsForRefresh.forEach(function (rowForRefresh, indexForRow) {
+          const msgIdForRow = Number(rowForRefresh.dataset.pageChangesMsgId);
+          const itemsHereForRow = rowItemsForRefresh[indexForRow];
+          let stateForRow = 'none';
+          let itemsShownForRow = [];
+          if (runtimeForRefresh && itemsHereForRow.length) {
+            const activeItemsForRow = itemsHereForRow.filter(function (itemForActive) { return activeKeysForRefresh.has(itemForActive.key); });
+            if (activeItemsForRow.length) {
+              stateForRow = 'active';
+              itemsShownForRow = activeItemsForRow;
+            } else {
+              itemsShownForRow = itemsHereForRow.filter(function (itemForFound) { return foundKeysForRefresh.has(itemForFound.key); });
+              if (itemsShownForRow.length) stateForRow = 'available';
+            }
+          }
+          const noticeForRow = pageChangeNoticeByRowForPanelRuntime.get(msgIdForRow) || '';
+          let htmlForRow = '';
+          if (stateForRow !== 'none') {
+            const firstDescriptionForRow = itemsShownForRow[0].description || 'Page change';
+            const summaryForRow = itemsShownForRow.length > 1
+              ? firstDescriptionForRow + ' and ' + (itemsShownForRow.length - 1) + ' more'
+              : firstDescriptionForRow;
+            const tooltipForRow = (stateForRow === 'active' ? 'On this page now:\n' : 'Can be applied to this page again:\n')
+              + itemsShownForRow.map(function (itemForTip) { return itemForTip.description; }).join('\n');
+            const isPartialForRow = stateForRow === 'available' && itemsShownForRow.length < itemsHereForRow.length;
+            const buttonLabelForRow = stateForRow === 'active'
+              ? 'Undo'
+              : (isPartialForRow ? 'Apply ' + itemsShownForRow.length + ' of ' + itemsHereForRow.length : 'Apply');
+            htmlForRow += '<span class="mpc-dot" aria-hidden="true"></span>'
+              + '<span class="mpc-text" title="' + escHtml(tooltipForRow) + '">' + escHtml(summaryForRow) + '</span>'
+              + pageChangeButtonHtmlForPanelRuntime(stateForRow === 'active' ? 'page-changes-undo' : 'page-changes-apply',
+                buttonLabelForRow, summaryForRow, stateForRow === 'available', msgIdForRow);
+          }
+          if (noticeForRow) htmlForRow += '<span class="mpc-notice" role="status">' + escHtml(noticeForRow) + '</span>';
+          if (paintPageChangeRowForPanelRuntime(rowForRefresh, htmlForRow, stateForRow === 'active')) rowsChangedForRefresh = true;
+        });
+
+        if (chatRowForRefresh) {
+          let htmlForChat = '';
+          let isActiveForChat = false;
+          if (runtimeForRefresh && chatItemsForRefresh.length) {
+            // Apply all re-applies every change it can find, in order, including any already on the
+            // page, because a later change can depend on being on top of an earlier one (two styles
+            // on one element). Undo all removes every change this chat has on the page.
+            const applicableForChat = chatItemsForRefresh.filter(function (itemForChat) {
+              return activeKeysForRefresh.has(itemForChat.key) || foundKeysForRefresh.has(itemForChat.key);
+            });
+            const canApplyForChat = chatItemsForRefresh.some(function (itemForChat) {
+              return !activeKeysForRefresh.has(itemForChat.key) && foundKeysForRefresh.has(itemForChat.key);
+            });
+            const canUndoForChat = activeKeysForRefresh.size > 0;
+            if (canApplyForChat || canUndoForChat) {
+              const summaryForChat = chatItemsForRefresh.length + ' page changes from this chat';
+              const tooltipForChat = 'From this chat, in order:\n' + chatItemsForRefresh.map(function (itemForTip) {
+                const statusForTip = activeKeysForRefresh.has(itemForTip.key) ? 'on the page' : (foundKeysForRefresh.has(itemForTip.key) ? 'can be applied' : 'not on this page');
+                return itemForTip.description + ' (' + statusForTip + ')';
+              }).join('\n');
+              const applyLabelForChat = applicableForChat.length < chatItemsForRefresh.length
+                ? 'Apply ' + applicableForChat.length + ' of ' + chatItemsForRefresh.length
+                : 'Apply all';
+              htmlForChat = '<span class="mpc-dot" aria-hidden="true"></span>'
+                + '<span class="mpc-text" title="' + escHtml(tooltipForChat) + '">' + escHtml(summaryForChat) + '</span>'
+                + (canApplyForChat ? pageChangeButtonHtmlForPanelRuntime('page-changes-apply-all', applyLabelForChat, summaryForChat, true, null) : '')
+                + (canUndoForChat ? pageChangeButtonHtmlForPanelRuntime('page-changes-undo-all', 'Undo all', summaryForChat, false, null) : '');
+              isActiveForChat = !canApplyForChat;
+            }
+          }
+          const noticeForChat = pageChangeNoticeByRowForPanelRuntime.get(CHAT_PAGE_CHANGES_NOTICE_KEY_FOR_PANEL_RUNTIME) || '';
+          if (noticeForChat) htmlForChat += '<span class="mpc-notice" role="status">' + escHtml(noticeForChat) + '</span>';
+          if (paintPageChangeRowForPanelRuntime(chatRowForRefresh, htmlForChat, isActiveForChat)) rowsChangedForRefresh = true;
+        }
+        // The rows are filled in after the render has scrolled the chat to its newest message, so
+        // a row that appears or grows there would sit under the composer. This keeps the chat at
+        // the bottom when it was there, and leaves a reader who scrolled up where they are.
+        if (rowsChangedForRefresh) maybeScrollChatToBottomForPanelRuntime();
+      } catch (errForPageChangeRefresh) {
+        // The rows are an extra; a failure here must not break the chat.
+      }
+    }
+
+    // Replays items in order and returns the notice to show beside the row. It is empty when all of
+    // them applied, and otherwise says how many did and why the rest did not.
+    function replayPageChangeItemsForPanelRuntime(runtimeForReplay, itemsForReplay, chatIdForReplay) {
+      let resultForReplay;
+      try {
+        resultForReplay = runtimeForReplay.replay(itemsForReplay.map(function (itemForReplay) {
+          return { key: itemForReplay.key, spec: itemForReplay.spec };
+        }), { chatId: chatIdForReplay });
+      } catch (errForReplay) {
+        resultForReplay = { ok: false, applied: 0, results: [], error: (errForReplay && errForReplay.message) || 'The page could not be changed.' };
+      }
+      const appliedCountForReplay = Number(resultForReplay && resultForReplay.applied) || 0;
+      const failuresForReplay = ((resultForReplay && resultForReplay.results) || []).filter(function (resultForFailure) {
+        return resultForFailure && !resultForFailure.ok;
+      });
+      if (!appliedCountForReplay) {
+        const firstErrorForReplay = failuresForReplay.map(function (resultForError) { return resultForError.error; }).filter(Boolean)[0]
+          || (resultForReplay && resultForReplay.error) || 'Nothing here matches this change now.';
+        return 'Not applied. ' + firstErrorForReplay;
+      }
+      if (appliedCountForReplay >= itemsForReplay.length) return '';
+      // A change refused for a reason other than its target being gone (the page's limit on
+      // changes, a list grown too long) says so, since "not on this page" would be wrong.
+      const refusalForReplay = failuresForReplay.find(function (resultForRefusal) { return !resultForRefusal.missing && resultForRefusal.error; });
+      return 'Applied ' + appliedCountForReplay + ' of ' + itemsForReplay.length + '. '
+        + (refusalForReplay ? refusalForReplay.error : 'The rest is not on this page now.');
+    }
+
+    function applyPageChangesForPanelRuntime(msgIdForApply) {
+      const groupForApply = pageChangeGroupsForPanelRuntime.get(msgIdForApply);
+      const runtimeForApply = getPageLayoutRuntimeForPanelRuntime();
+      const itemsForApply = pageChangeItemsHereForPanelRuntime(groupForApply);
+      if (!runtimeForApply || !itemsForApply.length) return;
+      setPageChangeNoticeForPanelRuntime(msgIdForApply, replayPageChangeItemsForPanelRuntime(runtimeForApply, itemsForApply, groupForApply.chatId));
+      schedulePageChangeControlsRefreshForPanelRuntime(false);
+    }
+
+    function undoPageChangesForPanelRuntime(msgIdForUndo) {
+      const groupForUndo = pageChangeGroupsForPanelRuntime.get(msgIdForUndo);
+      const runtimeForUndo = getPageLayoutRuntimeForPanelRuntime();
+      const itemsForUndo = pageChangeItemsHereForPanelRuntime(groupForUndo);
+      if (!runtimeForUndo || !itemsForUndo.length) return;
+      try {
+        runtimeForUndo.undoChatChanges(groupForUndo.chatId, itemsForUndo.map(function (itemForUndo) { return itemForUndo.key; }));
+      } catch (errForUndo) {
+        // A failed undo leaves the row in its current state; the refresh below shows the truth.
+      }
+      setPageChangeNoticeForPanelRuntime(msgIdForUndo, '');
+      schedulePageChangeControlsRefreshForPanelRuntime(false);
+    }
+
+    function applyAllPageChangesForPanelRuntime() {
+      const chatForApplyAll = chatPageChangesForPanelRuntime;
+      const runtimeForApplyAll = getPageLayoutRuntimeForPanelRuntime();
+      if (!runtimeForApplyAll || !chatForApplyAll || !chatForApplyAll.items.length) return;
+      setPageChangeNoticeForPanelRuntime(CHAT_PAGE_CHANGES_NOTICE_KEY_FOR_PANEL_RUNTIME,
+        replayPageChangeItemsForPanelRuntime(runtimeForApplyAll, chatForApplyAll.items, chatForApplyAll.chatId));
+      schedulePageChangeControlsRefreshForPanelRuntime(false);
+    }
+
+    function undoAllPageChangesForPanelRuntime() {
+      const runtimeForUndoAll = getPageLayoutRuntimeForPanelRuntime();
+      const chatIdForUndoAll = pageChangeChatIdForPanelRuntime;
+      if (!runtimeForUndoAll || chatIdForUndoAll == null) return;
+      try {
+        const keysForUndoAll = runtimeForUndoAll.listChatChanges(chatIdForUndoAll).map(function (changeForKey) { return changeForKey.key; });
+        if (keysForUndoAll.length) runtimeForUndoAll.undoChatChanges(chatIdForUndoAll, keysForUndoAll);
+      } catch (errForUndoAll) {
+        // As for one reply's Undo, the refresh below shows what is on the page.
+      }
+      setPageChangeNoticeForPanelRuntime(CHAT_PAGE_CHANGES_NOTICE_KEY_FOR_PANEL_RUNTIME, '');
+      schedulePageChangeControlsRefreshForPanelRuntime(false);
     }
 
     function startChatEditForPanelRuntime(msgId) {
@@ -15681,6 +16068,28 @@
             default:           return 'Editing spreadsheet';
           }
         }
+        case 'page_layout': {
+          switch (args.operation) {
+            case 'scan':  return 'Scanning page layout';
+            case 'undo':  return 'Undoing layout change';
+            case 'reset': return 'Resetting page layout';
+            case 'apply': {
+              var layoutChangesForLt = Array.isArray(args.changes) ? args.changes : [];
+              var firstLayoutChangeForLt = layoutChangesForLt[0] || {};
+              var layoutLabelForLt = firstLayoutChangeForLt.label != null ? String(firstLayoutChangeForLt.label).trim() : '';
+              if (layoutChangesForLt.length === 1 && layoutLabelForLt) return trunc(layoutLabelForLt, 32);
+              if (layoutChangesForLt.length > 1) return 'Changing page layout';
+              switch (firstLayoutChangeForLt.action) {
+                case 'sort':   return 'Sorting items';
+                case 'filter': return 'Filtering items';
+                case 'hide':   return 'Hiding part of the page';
+                case 'style':  return 'Restyling the page';
+                default:       return 'Changing page layout';
+              }
+            }
+            default:      return 'Changing page layout';
+          }
+        }
         case 'take_screenshot': {
           var shotPromptForLt = args.prompt != null ? String(args.prompt).trim() : '';
           if (shotPromptForLt) {
@@ -16548,7 +16957,8 @@
       }
 
       const total = await apiLogger.getLogCount();
-      const logs = await apiLogger.getLogs(API_LOGS_PAGE_SIZE_FOR_PANEL_RUNTIME, apiLogsPageForPanelRuntime * API_LOGS_PAGE_SIZE_FOR_PANEL_RUNTIME);
+      // Rows are built from summaries; the full record is fetched when one is opened.
+      const logs = await apiLogger.getLogSummaries(API_LOGS_PAGE_SIZE_FOR_PANEL_RUNTIME, apiLogsPageForPanelRuntime * API_LOGS_PAGE_SIZE_FOR_PANEL_RUNTIME);
       apiLogsCacheForPanelRuntime = logs;
       apiSelectedLogIdsForPanelRuntime.clear();
       updateApiLogSelectionControlsForPanelRuntime();
@@ -16572,13 +16982,33 @@
       }
     }
 
-    function showLogDetailForPanelRuntime(logId) {
+    async function showLogDetailForPanelRuntime(logId) {
       const numId = Number(logId);
-      const log = apiLogsCacheForPanelRuntime.find(function (l) { return l.id === numId; });
-      if (!log) return;
+      const summaryForDetail = apiLogsCacheForPanelRuntime.find(function (l) { return l.id === numId; });
+      if (!summaryForDetail) return;
       const overlay = root.getElementById('logs-detail-overlay');
       const body = root.getElementById('logs-detail-body');
       if (!overlay || !body) return;
+      const requestForDetail = ++logDetailRequestSeqForPanelRuntime;
+      const apiLoggerForDetail = (globalThis.ABChatContent || {}).apiLogger;
+      let log = null;
+      try {
+        log = apiLoggerForDetail && typeof apiLoggerForDetail.getLog === 'function' ? await apiLoggerForDetail.getLog(numId) : null;
+      } catch (eForDetail) {
+        return;
+      }
+      // A later click won the race; its record is the one to show.
+      if (requestForDetail !== logDetailRequestSeqForPanelRuntime) return;
+      // Trimmed since the list loaded, so reloading the list drops the stale row.
+      if (!log) {
+        loadApiLogsViewForPanelRuntime();
+        return;
+      }
+      // Chat turns are stored as the messages each turn added; the detail view needs them whole.
+      const apiLogTurnsForDetail = (globalThis.ABChatContent || {}).apiLogTurns;
+      if (Array.isArray(log.turns) && apiLogTurnsForDetail && typeof apiLogTurnsForDetail.expandTurns === 'function') {
+        log = Object.assign({}, log, { turns: apiLogTurnsForDetail.expandTurns(log.turns) });
+      }
       activeLogDetailForPanelRuntime = log;
       body.innerHTML = renderLogDetailForPanelRuntime(log);
       overlay.classList.remove('hidden');
@@ -21268,6 +21698,20 @@
               readMessageAloudForPanelRuntime(Number(tgtForRuntime.dataset.messageId));
               break;
             }
+            // Apply and Apply all change the page, so they need a real user click. The panel's
+            // shadow root is open, and a page script could otherwise click the button itself.
+            case 'page-changes-apply':
+              if (evtForRuntime.isTrusted) applyPageChangesForPanelRuntime(Number(tgtForRuntime.dataset.pageChangesMsgId));
+              break;
+            case 'page-changes-undo':
+              undoPageChangesForPanelRuntime(Number(tgtForRuntime.dataset.pageChangesMsgId));
+              break;
+            case 'page-changes-apply-all':
+              if (evtForRuntime.isTrusted) applyAllPageChangesForPanelRuntime();
+              break;
+            case 'page-changes-undo-all':
+              undoAllPageChangesForPanelRuntime();
+              break;
             case 'copy-inline-message': {
               const textForInlineCopy = tgtForRuntime.dataset.copyText || '';
               if (!textForInlineCopy) break;
@@ -22765,6 +23209,66 @@
     _exposedSetNotesSearchQueryForPanelRuntime = setNotesSearchQueryForMirrorForPanelRuntime;
     _exposedSetTaskSearchQueryForPanelRuntime = setTaskSearchQueryForMirrorForPanelRuntime;
 
+    // Cancels this runtime's timers and listeners so they cannot fire against the old shadow DOM
+    // after a re-injection. It has to live in here to reach them; the exported teardown relays to it.
+    _exposedTeardownForPanelRuntime = function teardownForPanelRuntime() {
+      if (draftSaveTimerForPanelRuntime) {
+        clearTimeout(draftSaveTimerForPanelRuntime);
+        draftSaveTimerForPanelRuntime = null;
+      }
+      if (chatSmoothScrollGuardTimerForPanelRuntime) {
+        clearTimeout(chatSmoothScrollGuardTimerForPanelRuntime);
+        chatSmoothScrollGuardTimerForPanelRuntime = null;
+      }
+      draftLoadGenerationForPanelRuntime += 1;
+      if (draftStorageSyncListenerForPanelRuntime) {
+        try { chrome.storage.onChanged.removeListener(draftStorageSyncListenerForPanelRuntime); } catch (e) {}
+        draftStorageSyncListenerForPanelRuntime = null;
+      }
+      if (noteDraftStorageSyncListenerForPanelRuntime) {
+        try { chrome.storage.onChanged.removeListener(noteDraftStorageSyncListenerForPanelRuntime); } catch (e) {}
+        noteDraftStorageSyncListenerForPanelRuntime = null;
+      }
+      if (themeStorageSyncListenerForPanelRuntime) {
+        try { chrome.storage.onChanged.removeListener(themeStorageSyncListenerForPanelRuntime); } catch (e) {}
+        themeStorageSyncListenerForPanelRuntime = null;
+      }
+      if (transparencyStorageSyncListenerForPanelRuntime) {
+        try { chrome.storage.onChanged.removeListener(transparencyStorageSyncListenerForPanelRuntime); } catch (e) {}
+        transparencyStorageSyncListenerForPanelRuntime = null;
+      }
+      if (profileFieldsStorageSyncListenerForPanelRuntime) {
+        try { chrome.storage.onChanged.removeListener(profileFieldsStorageSyncListenerForPanelRuntime); } catch (e) {}
+        profileFieldsStorageSyncListenerForPanelRuntime = null;
+      }
+      Object.keys(noteDraftSyncTimersForPanelRuntime).forEach(function (timerKeyForNoteDraft) {
+        clearTimeout(noteDraftSyncTimersForPanelRuntime[timerKeyForNoteDraft]);
+      });
+      noteDraftSyncTimersForPanelRuntime = {};
+      const syncNsForTeardown =
+        globalThis.ABChatContent &&
+        globalThis.ABChatContent.ui &&
+        globalThis.ABChatContent.ui.panelStateSync;
+      if (syncNsForTeardown && typeof syncNsForTeardown.teardown === 'function') {
+        syncNsForTeardown.teardown();
+      }
+      if (pageChangeRefreshTimerForPanelRuntime) {
+        clearTimeout(pageChangeRefreshTimerForPanelRuntime);
+        pageChangeRefreshTimerForPanelRuntime = null;
+      }
+      pageChangeRetryTimersForPanelRuntime.forEach(function (timerForPageChangeRetry) { clearTimeout(timerForPageChangeRetry); });
+      pageChangeRetryTimersForPanelRuntime = [];
+      if (pageChangeNoticeTimerForPanelRuntime) {
+        clearTimeout(pageChangeNoticeTimerForPanelRuntime);
+        pageChangeNoticeTimerForPanelRuntime = null;
+      }
+      if (pageChangeUnsubscribeForPanelRuntime) {
+        try { pageChangeUnsubscribeForPanelRuntime(); } catch (e) {}
+        pageChangeUnsubscribeForPanelRuntime = null;
+      }
+      pageChangeSubscribedRuntimeForPanelRuntime = null;
+    };
+
     // Kick off the libs ready gate as the final step of initialisation so all
     // other setup (event bindings, MutationObserver, etc.) is complete before
     // we hand control back to the user.
@@ -22926,53 +23430,14 @@
     setTaskSearchQuery: function setTaskSearchQueryRelayForPanelRuntime(queryForRelay) {
       if (_exposedSetTaskSearchQueryForPanelRuntime) _exposedSetTaskSearchQueryForPanelRuntime(queryForRelay);
     },
-    // Called by content/main.js before the shadow host is removed on extension reload.
-    // Cancels pending timers and removes the storage listener so they do not fire
-    // against a stale DOM after re-injection.
+    // Called by content/main.js before the shadow host is removed on a re-injection. The work is
+    // done by teardownForPanelRuntime inside initializePanelRuntimeForPanel, because every timer
+    // and listener it cancels is declared there; code out here cannot see them.
     // REGRESSION RISK: any new persistent resource (timer, listener, observer) allocated
-    // inside initializePanelRuntimeForPanel must be cancelled here, or it will leak
-    // across extension reloads and may interact with the new panel instance.
+    // inside initializePanelRuntimeForPanel must be cancelled in teardownForPanelRuntime, or it
+    // will leak across extension reloads and may interact with the new panel instance.
     teardown: function teardownRelayForPanelRuntime() {
-      if (draftSaveTimerForPanelRuntime) {
-        clearTimeout(draftSaveTimerForPanelRuntime);
-        draftSaveTimerForPanelRuntime = null;
-      }
-      if (chatSmoothScrollGuardTimerForPanelRuntime) {
-        clearTimeout(chatSmoothScrollGuardTimerForPanelRuntime);
-        chatSmoothScrollGuardTimerForPanelRuntime = null;
-      }
-      draftLoadGenerationForPanelRuntime += 1;
-      if (draftStorageSyncListenerForPanelRuntime) {
-        try { chrome.storage.onChanged.removeListener(draftStorageSyncListenerForPanelRuntime); } catch (e) {}
-        draftStorageSyncListenerForPanelRuntime = null;
-      }
-      if (noteDraftStorageSyncListenerForPanelRuntime) {
-        try { chrome.storage.onChanged.removeListener(noteDraftStorageSyncListenerForPanelRuntime); } catch (e) {}
-        noteDraftStorageSyncListenerForPanelRuntime = null;
-      }
-      if (themeStorageSyncListenerForPanelRuntime) {
-        try { chrome.storage.onChanged.removeListener(themeStorageSyncListenerForPanelRuntime); } catch (e) {}
-        themeStorageSyncListenerForPanelRuntime = null;
-      }
-      if (transparencyStorageSyncListenerForPanelRuntime) {
-        try { chrome.storage.onChanged.removeListener(transparencyStorageSyncListenerForPanelRuntime); } catch (e) {}
-        transparencyStorageSyncListenerForPanelRuntime = null;
-      }
-      if (profileFieldsStorageSyncListenerForPanelRuntime) {
-        try { chrome.storage.onChanged.removeListener(profileFieldsStorageSyncListenerForPanelRuntime); } catch (e) {}
-        profileFieldsStorageSyncListenerForPanelRuntime = null;
-      }
-      Object.keys(noteDraftSyncTimersForPanelRuntime).forEach(function (timerKeyForNoteDraft) {
-        clearTimeout(noteDraftSyncTimersForPanelRuntime[timerKeyForNoteDraft]);
-      });
-      noteDraftSyncTimersForPanelRuntime = {};
-      const syncNsForTeardown =
-        globalThis.ABChatContent &&
-        globalThis.ABChatContent.ui &&
-        globalThis.ABChatContent.ui.panelStateSync;
-      if (syncNsForTeardown && typeof syncNsForTeardown.teardown === 'function') {
-        syncNsForTeardown.teardown();
-      }
+      if (_exposedTeardownForPanelRuntime) _exposedTeardownForPanelRuntime();
     }
   };
 

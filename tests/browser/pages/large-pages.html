@@ -1,0 +1,221 @@
+<!doctype html><html><head><meta charset="utf-8">
+<style>body{margin:0;font:14px sans-serif}.wrap{display:flex}main{flex:1;min-width:0;margin-left:20px}aside.side{width:260px;height:900px;background:#eee}
+.card{width:280px;height:80px;margin:4px;display:inline-block;vertical-align:top}.card span{display:block}footer.site{height:200px;background:#ddd}td{padding:2px}</style>
+<script>window.chrome = window.chrome || {}; try { window.chrome.runtime = { id: 'probe' }; } catch (e) {}</script>
+</head><body><pre id="out"></pre><div id="root"></div>
+<script>
+const params = new URLSearchParams(location.search); const kase = params.get('case');
+const base = '../../../tools/';
+const cards = (n) => Array.from({ length: n }, (_, i) => '<div class="card"><h3 class="title">Card ' + i + '</h3><span class="price">$' + (i * 37 % 200) + '.00</span><span class="rating">' + (i % 5) + ' stars</span></div>').join('');
+const rows = (n) => { const h = ['<table class="orders"><tbody>']; for (let i = 0; i < n; i++) h.push('<tr class="row"><td class="id">#' + i + '</td><td class="who"><a href="#">Customer ' + i + '</a></td><td class="amt">$' + (i * 37 % 900) + '.00</td><td class="st"><span class="badge">Paid</span></td></tr>'); h.push('</tbody></table>'); return h.join(''); };
+const divRows = (n) => { const h = ['<div class="log">']; for (let i = 0; i < n; i++) h.push('<div class="entry"><span class="t">Event ' + i + '</span> <span class="n">' + (i % 97) + ' ms</span></div>'); h.push('</div>'); return h.join(''); };
+const lis = (n) => { const h = ['<ul class="log">']; for (let i = 0; i < n; i++) h.push('<li class="entry"><span class="t">Event ' + i + '</span><span class="n">' + (i % 97) + ' ms</span></li>'); h.push('</ul>'); return h.join(''); };
+const tail = '</main><aside class="side"><h2>Summary</h2><p>Totals</p></aside></div><footer class="site">Footer</footer>';
+const tbl = (cls) => '<table class="' + cls + '"><tbody>' + Array.from({ length: 8 }, (_, j) => '<tr class="' + cls + '-row"><td>Plan ' + j + '</td><td>$' + (j * 9 + 5) + '</td></tr>').join('') + '</tbody></table>';
+const CASES = {
+  table: () => '<div class="wrap"><main><h2>Orders</h2>' + rows(6000) + tail,
+  big: () => '<div class="wrap"><main><h2>Orders</h2>' + rows(60000) + tail,
+  huge: () => '<div class="wrap"><main><h2>Log</h2>' + lis(300000) + tail,
+  feed: () => '<div class="wrap"><main><h2>Feed</h2><div class="grid">' + cards(3000) + '</div>' + tail,
+  headersThenCards: () => '<div class="wrap"><main><div class="grid">' + Array.from({ length: 20 }, (_, i) => '<h2 class="section-title">Section ' + i + '</h2>').join('') + cards(3000) + '</div>' + tail,
+  tailwind: () => { const h = ['<main><div class="stack">']; for (let i = 0; i < 80; i++) { if (i === 60) h.push('<div class="border-b py-4"><h3>Setting ' + i + '</h3><div class="body"><p>Text ' + i + '</p></div>' + tbl('direct') + '</div>'); else if (i === 62) h.push('<div class="border-b py-4"><h3>Setting ' + i + '</h3><div class="body">' + tbl('nested') + '</div></div>'); else h.push('<div class="border-b py-4"><h3>Setting ' + i + '</h3><div class="body"><p>Text ' + i + ' explains the option.</p></div></div>'); } h.push('</div></main>'); return h.join(''); },
+  sameCount: () => { const h = ['<main><div class="stack">']; for (let i = 0; i < 80; i++) { if (i === 60) h.push('<div class="border-b py-4"><h3>Setting ' + i + '</h3>' + tbl('direct') + '<div class="meta">m</div></div>'); else if (i === 62) h.push('<div class="border-b py-4"><h3>Setting ' + i + '</h3><p class="text">Text ' + i + '</p><div class="meta">' + tbl('nested') + '</div></div>'); else h.push('<div class="border-b py-4"><h3>Setting ' + i + '</h3><p class="text">Text ' + i + ' explains the option.</p><div class="meta">m</div></div>'); } h.push('</div></main>'); return h.join(''); },
+  mixedFeed: () => '<div class="wrap"><main><h2>Feed</h2><div class="grid">' + Array.from({ length: 9000 }, (_, i) => '<div class="card"><h3 class="title">Card ' + i + '</h3>' + ((i * 7919) % 13 < 6 ? '<span class="badge">New</span>' : '') + '<span class="price">$' + (i * 37 % 200) + '.00</span><span class="rating">' + (i % 5) + ' stars</span></div>').join('') + '</div>' + tail,
+  textLines: () => { const h = ['<div class="wrap"><main><h2>Log</h2><div class="log">']; for (let i = 0; i < 60000; i++) h.push('<div class="line">Line ' + i + ' took ' + (i % 97) + ' ms</div>'); h.push('</div>'); return h.join('') + tail; },
+  tooManyToSort: () => '<main><h2>Log</h2>' + lis(25000) + '</main>',
+  underLimit: () => '<main><h2>Log</h2>' + divRows(19000) + '</main>',
+  listItemsOverLimit: () => '<main><h2>Log</h2>' + lis(6000) + '</main>',
+  listItemsUnderLimit: () => '<main><h2>Log</h2>' + lis(4900) + '</main>',
+  hideListContainer: () => '<main><h2>Log</h2>' + lis(20000) + '</main>',
+  hideMixedTooMany: () => '<main><h2>Log</h2>' + lis(6000).replace('<ul class="log">', '<ul class="log"><li class="note">Pinned note</li>') + '</main>',
+  hideMixedSmall: () => '<main><h2>Log</h2>' + lis(300).replace('<ul class="log">', '<ul class="log"><li class="note">Pinned note</li>') + '</main>',
+  hideTableBody: () => '<main><h2>Orders</h2>' + rows(6000).replace('<table class="orders"><tbody>', '<table class="orders"><thead><tr><th>Id</th><th>Who</th><th>Amount</th><th>Status</th></tr></thead><tbody>') + '</main>',
+  hideSections: () => '<main>' + [1, 2, 3].map((k) => '<section><h3>Week ' + k + '</h3>' + lis(20).replace(/Event /g, 'W' + k + ' event ') + '</section>').join('') + '</main>',
+  flexListItems: () => '<main><h2>Log</h2>' + lis(6000).replace('<ul class="log">', '<ul class="log" style="display:flex;flex-direction:column">') + '</main>',
+  growsPastLimit: () => '<main><h2>Log</h2>' + divRows(19950) + '</main>',
+  replayTooMany: () => '<main><h2>Log</h2>' + lis(100) + '</main>',
+  nestedLinks: () => '<main><h2>Registry</h2><table class="reg"><tbody>' + Array.from({ length: 120 }, (_, i) => '<tr class="svc"><td class="name">svc' + i + '</td><td class="port">' + (1000 + i) + '</td><td class="who"><a class="person" href="#">Alice ' + i + '</a> <a class="person" href="#">Bob ' + i + '</a></td></tr>').join('') + '</tbody></table></main>',
+  uniqueNodes: () => { const h = ['<div class="wrap"><main>']; for (let i = 0; i < 900; i++) { h.push('<section class="s' + i + '"><h3>Part ' + i + '</h3>'); for (let j = 0; j < 40; j++) h.push('<span class="w' + j + '">w</span> '); h.push('</section>'); } return h.join('') + tail; }
+};
+if (!kase) {
+  document.getElementById('out').textContent = JSON.stringify({ cases: Object.keys(CASES) });
+} else {
+document.getElementById('root').innerHTML = CASES[kase]();
+document.body.getBoundingClientRect();
+function load(src) { return new Promise((res, rej) => { const s = document.createElement('script'); s.src = base + src; s.onload = res; s.onerror = rej; document.head.appendChild(s); }); }
+load('pageLayoutRules.js').then(() => load('pageLayout.js')).then(() => {
+  const t0 = performance.now(); const scan = window.ABChatContent.pageLayout.run({ operation: 'scan' }); const ms = Math.round(performance.now() - t0);
+  const out = { case: kase, elements: document.querySelectorAll('*').length, ms, note: scan.note ? scan.note.slice(0, 90) : '',
+    regions: scan.regions.map((r) => r.kind + ':' + r.label).join(', '),
+    collections: scan.collections.map((c) => (c.label || '?') + '=' + c.items + (c.items_at_least ? '+' : '')).join(', ') };
+  const cols = scan.collections; const regs = scan.regions; const checks = [];
+  const check = (name, ok) => checks.push({ name, ok: !!ok });
+  const found = (kind, label) => regs.some((r) => r.kind === kind && (!label || r.label === label));
+  const planTables = cols.filter((c) => c.items === 8 && (c.fields[0].examples || c.fields[0].values || []).some((e) => /Plan/.test(e))).length;
+  const listOf = (n, atLeast) => cols.some((c) => (atLeast ? c.items >= n && c.items_at_least : c.items === n && !c.items_at_least));
+  const pct = scan.note && (scan.note.match(/about (\d+)%/) || [])[1];
+  const runChecksForCase = ({
+    table: () => { check('no cut-off', !scan.note); check('footer found', found('footer')); check('sidebar after the table found', found('sidebar', 'Summary')); check('6000 rows exact', listOf(6000)); },
+    big: () => { check('no cut-off', !scan.note); check('footer found', found('footer')); check('sidebar found', found('sidebar', 'Summary')); check('60000 rows exact', listOf(60000)); },
+    feed: () => { check('3000 cards exact', listOf(3000)); check('sidebar found', found('sidebar', 'Summary')); },
+    headersThenCards: () => { check('3000 cards exact', listOf(3000)); check('20 headings still a list', listOf(20)); },
+    tailwind: () => { check('direct-child table found', planTables >= 1); },
+    sameCount: () => { check('middle-child table found', planTables >= 1); },
+    uniqueNodes: () => { check('cut-off note', /scan stopped/.test(scan.note || '')); check('note has a position', pct || /partway|near the top/.test(scan.note || '')); },
+    huge: () => { check('cut off by the skip budget', /scan stopped/.test(scan.note || '')); check('position is well down the page', pct && +pct >= 20); check('count is marked at least and >= 100000', listOf(100000, true)); },
+    mixedFeed: () => { check('cut off by the element budget', /scan stopped/.test(scan.note || '')); check('9000 cards exact via the recount', listOf(9000)); },
+    nestedLinks: () => { check('120 rows exact', listOf(120)); check('240 links in the rows exact', listOf(240)); },
+    tooManyToSort: () => {
+      const PL = window.ABChatContent.pageLayout;
+      const log = cols.find((c) => c.items > 20000);
+      const n = log && log.fields.find((f) => f.kind === 'number' || f.kind === 'duration');
+      const firstBefore = document.querySelector('li.entry').textContent;
+      const t0 = performance.now();
+      const sort = PL.run({ operation: 'apply', changes: [{ action: 'sort', collection: log && log.id, field: n && n.field, order: 'desc' }] });
+      out.refuseMs = Math.round(performance.now() - t0);
+      const filter = PL.run({ operation: 'apply', changes: [{ action: 'filter', collection: log && log.id, field: n && n.field, op: 'gt', value: 50 }] });
+      const sortError = sort.ok ? '' : (sort.error || (sort.failed && sort.failed[0] && sort.failed[0].error) || '');
+      const filterError = filter.ok ? '' : (filter.error || (filter.failed && filter.failed[0] && filter.failed[0].error) || '');
+      check('sort on 25,000 list items is refused, pointing at the site\'s own control', /more than 5,000 items loaded/.test(sortError) && /site's own sort/.test(sortError));
+      check('filter on 25,000 list items is refused, pointing at the site\'s own control', /more than 5,000 items loaded/.test(filterError) && /site's own filter or search/.test(filterError));
+      check('refusing is quick (under 2 s)', out.refuseMs < 2000);
+      const after = PL.run({ operation: 'scan' });
+      check('nothing is left applied or moved', after.active_changes.length === 0 && document.querySelector('li.entry').textContent === firstBefore && !document.querySelector('li.entry[style]'));
+    },
+    underLimit: () => {
+      const PL = window.ABChatContent.pageLayout;
+      const log = cols.find((c) => c.items === 19000);
+      const n = log && log.fields.find((f) => f.kind === 'number' || f.kind === 'duration');
+      const t0 = performance.now();
+      const sort = PL.run({ operation: 'apply', changes: [{ action: 'sort', collection: log && log.id, field: n && n.field, order: 'desc' }] });
+      out.sortMs = Math.round(performance.now() - t0);
+      check('sort on 19,000 div rows still works', sort.ok && sort.applied[0].items === 19000);
+      PL.run({ operation: 'reset' });
+    },
+    listItemsOverLimit: () => {
+      const PL = window.ABChatContent.pageLayout;
+      const log = cols.find((c) => c.items === 6000);
+      const n = log && log.fields.find((f) => f.kind === 'number' || f.kind === 'duration');
+      const sort = PL.run({ operation: 'apply', changes: [{ action: 'sort', collection: log && log.id, field: n && n.field, order: 'desc' }] });
+      const sortError = sort.ok ? '' : (sort.error || (sort.failed && sort.failed[0] && sort.failed[0].error) || '');
+      check('sort on 6,000 list items is refused at the 5,000 limit', /more than 5,000 items loaded/.test(sortError));
+      const filter = PL.run({ operation: 'apply', changes: [{ action: 'filter', collection: log && log.id, field: n && n.field, op: 'gt', value: 50 }] });
+      const filterError = filter.ok ? '' : (filter.error || (filter.failed && filter.failed[0] && filter.failed[0].error) || '');
+      check('filter on the same 6,000 list items is refused at the 5,000 limit', /more than 5,000 items loaded/.test(filterError));
+      PL.run({ operation: 'reset' });
+    },
+    hideListContainer: () => {
+      const PL = window.ABChatContent.pageLayout;
+      const log = cols.find((c) => c.items === 20000);
+      const t0 = performance.now();
+      const hide = PL.run({ operation: 'apply', changes: [{ action: 'hide', target: log && log.id }] });
+      document.body.getBoundingClientRect();
+      out.hideWithLayoutMs = Math.round(performance.now() - t0);
+      const ul = document.querySelector('ul.log');
+      check('hiding 20,000 list items hides their list once', hide.ok && hide.applied[0].elements === 20000 && ul.style.display === 'none' && !document.querySelector('li.entry[style]'));
+      check('it takes under half a second including layout', out.hideWithLayoutMs < 500);
+      ul.insertAdjacentHTML('beforeend', '<li class="entry"><span class="t">Event late</span> <span class="n">5 ms</span></li>');
+      return new Promise((resolve) => setTimeout(() => {
+        check('an item added to the hidden list later is hidden too', !ul.lastElementChild.checkVisibility());
+        PL.run({ operation: 'undo' });
+        check('undo shows the list again', ul.style.display === '' && document.querySelector('li.entry').checkVisibility());
+        resolve();
+      }, 600));
+    },
+    hideMixedTooMany: () => {
+      const PL = window.ABChatContent.pageLayout;
+      const log = cols.find((c) => c.items === 6000);
+      const hide = PL.run({ operation: 'apply', changes: [{ action: 'hide', target: log && log.id }] });
+      const error = hide.ok ? '' : (hide.error || (hide.failed && hide.failed[0] && hide.failed[0].error) || '');
+      check('6,000 list items sharing their list with other content are refused', /more than 5,000 items loaded that would have to be hidden one by one/.test(error) && /region/.test(error));
+      check('nothing was hidden', !document.querySelector('ul.log[style], li[style]'));
+    },
+    hideMixedSmall: () => {
+      const PL = window.ABChatContent.pageLayout;
+      const log = cols.find((c) => c.items === 300);
+      const hide = PL.run({ operation: 'apply', changes: [{ action: 'hide', target: log && log.id }] });
+      check('300 list items sharing their list are hidden one by one', hide.ok && hide.applied[0].elements === 300 && document.querySelectorAll('li.entry[style*="none"]').length === 300);
+      check('the list and its other content stay visible', document.querySelector('ul.log').style.display === '' && document.querySelector('li.note').checkVisibility());
+      PL.run({ operation: 'reset' });
+    },
+    hideTableBody: () => {
+      const PL = window.ABChatContent.pageLayout;
+      const rowsCol = cols.find((c) => c.items === 6000);
+      const hide = PL.run({ operation: 'apply', changes: [{ action: 'hide', target: rowsCol && rowsCol.id }] });
+      check('hiding 6,000 table rows hides the table body once', hide.ok && document.querySelector('tbody').style.display === 'none' && !document.querySelector('tr.row[style]'));
+      check('the header row stays visible', document.querySelector('thead th').checkVisibility());
+      PL.run({ operation: 'reset' });
+    },
+    hideSections: () => {
+      const PL = window.ABChatContent.pageLayout;
+      const list = cols.find((c) => c.items === 60);
+      const hide = PL.run({ operation: 'apply', changes: [{ action: 'hide', target: list && list.id }] });
+      const lists = Array.from(document.querySelectorAll('ul.log'));
+      check('a list split into sections hides each section\'s list', hide.ok && hide.applied[0].elements === 60 && lists.length === 3 && lists.every((ul) => ul.style.display === 'none'));
+      check('the section headings stay visible', Array.from(document.querySelectorAll('section h3')).every((h) => h.checkVisibility()));
+      PL.run({ operation: 'reset' });
+    },
+    flexListItems: () => {
+      const PL = window.ABChatContent.pageLayout;
+      const log = cols.find((c) => c.items === 6000);
+      const n = log && log.fields.find((f) => f.kind === 'number' || f.kind === 'duration');
+      const sort = PL.run({ operation: 'apply', changes: [{ action: 'sort', collection: log && log.id, field: n && n.field, order: 'desc' }] });
+      check('sort on 6,000 list items in a flex list works (CSS order moves nothing)', sort.ok && sort.applied[0].items === 6000);
+      const filter = PL.run({ operation: 'apply', changes: [{ action: 'filter', collection: log && log.id, field: n && n.field, op: 'gt', value: 50 }] });
+      const filterError = filter.ok ? '' : (filter.error || (filter.failed && filter.failed[0] && filter.failed[0].error) || '');
+      check('filter on them is still refused (hiding list items is the slow part)', /more than 5,000 items loaded/.test(filterError));
+      PL.run({ operation: 'reset' });
+    },
+    listItemsUnderLimit: () => {
+      const PL = window.ABChatContent.pageLayout;
+      const log = cols.find((c) => c.items === 4900);
+      const n = log && log.fields.find((f) => f.kind === 'number' || f.kind === 'duration');
+      const t0 = performance.now();
+      const sort = PL.run({ operation: 'apply', changes: [{ action: 'sort', collection: log && log.id, field: n && n.field, order: 'desc' }] });
+      out.sortMs = Math.round(performance.now() - t0);
+      check('sort on 4,900 list items, reversing them, still works', sort.ok && sort.applied[0].items === 4900 && document.querySelector('li.entry').textContent.indexOf('Event 4899') === 0);
+      PL.run({ operation: 'reset' });
+      const t1 = performance.now();
+      const filter = PL.run({ operation: 'apply', changes: [{ action: 'filter', collection: log && log.id, field: n && n.field, op: 'gt', value: 490, parse: 'number' }] });
+      document.body.getBoundingClientRect();
+      out.filterWithLayoutMs = Math.round(performance.now() - t1);
+      check('filter hiding a run of 4,409 list items still works', filter.ok && filter.applied[0].hidden === 4409);
+      PL.run({ operation: 'reset' });
+    },
+    growsPastLimit: () => {
+      const PL = window.ABChatContent.pageLayout;
+      const log = cols.find((c) => c.items === 19950);
+      const n = log && log.fields.find((f) => f.kind === 'number' || f.kind === 'duration');
+      const sort = PL.run({ operation: 'apply', changes: [{ action: 'sort', collection: log && log.id, field: n && n.field, order: 'desc' }] });
+      check('sort on 19,950 div rows applies', sort.ok);
+      document.querySelector('div.log').insertAdjacentHTML('beforeend', Array.from({ length: 100 }, (_, i) => '<div class="entry"><span class="t">Late ' + i + '</span> <span class="n">' + (i % 97) + ' ms</span></div>').join(''));
+      return new Promise((resolve) => setTimeout(() => {
+        const active = PL.run({ operation: 'scan' }).active_changes;
+        check('growing past 20,000 items pauses the sort', active.length === 1 && active[0].paused === true);
+        PL.run({ operation: 'reset' });
+        resolve();
+      }, 1200));
+    },
+    replayTooMany: () => {
+      const PL = window.ABChatContent.pageLayout;
+      const log = cols.find((c) => c.items === 100);
+      const n = log && log.fields.find((f) => f.kind === 'number' || f.kind === 'duration');
+      const apply = PL.run({ operation: 'apply', changes: [{ action: 'sort', collection: log && log.id, field: n && n.field, order: 'desc' }] }, { chatId: 7, toolCallId: 'call_sort' });
+      const record = apply._pageChanges;
+      check('the sort on 100 items leaves a replay record', apply.ok && record && record.items.length === 1);
+      PL.run({ operation: 'reset' });
+      document.querySelector('ul.log').insertAdjacentHTML('beforeend', Array.from({ length: 20100 }, (_, i) => '<li class="entry"><span class="t">Later ' + i + '</span><span class="n">' + (i % 97) + ' ms</span></li>').join(''));
+      const replay = PL.replay(record.items.map((item) => ({ key: item.key, spec: item.spec })), { chatId: 7 });
+      const error = (replay.results[0] || {}).error || '';
+      check('replaying it on 20,200 list items is refused', !replay.ok && replay.applied === 0);
+      check('the replay message is written for the user', /more than 5,000 items now, too many to sort in the page/.test(error) && !/page_observe/.test(error));
+    },
+    textLines: () => { check('no cut-off', !scan.note); check('footer found', found('footer')); check('60000 text-only lines exact', listOf(60000)); }
+  }[kase] || (() => {}));
+  return Promise.resolve(runChecksForCase()).then(() => {
+    out.checks = checks;
+    document.getElementById('out').textContent = JSON.stringify(out);
+  });
+}).catch((e) => { document.getElementById('out').textContent = JSON.stringify({ case: kase, error: String(e) }); });
+}
+</script></body></html>

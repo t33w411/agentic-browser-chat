@@ -13,7 +13,7 @@
 //
 // What still runs here: context building, the LLM stream, tool execution, DB persistence,
 // the API log, and the CDP run lease. The page tools (page_observe, page_read, page_act,
-// page_spreadsheet) are delegated to the target tab's content script, which reads the live
+// page_spreadsheet, page_layout) are delegated to the target tab's content script, which reads the live
 // DOM directly and, for trusted input, reaches the page through cdpClient (bound to the tab id).
 //
 // Known Phase-1 limitations (page_act from offscreen; tracked for focus-check delegation):
@@ -61,8 +61,8 @@
   // Tools whose successful execution is a real state change (a create/edit, a generated artifact,
   // or a page mutation), as opposed to a read. A successful mutating call is what makes the neutral
   // "I took some actions" completion truthful; a turn where only reads succeeded, or where every
-  // mutation failed, must not claim action was taken. memory always writes; skill mutates only
-  // for specific operations.
+  // mutation failed, must not claim action was taken. memory always writes; skill and page_layout
+  // mutate only for specific operations.
   var MUTATING_TOOL_NAMES_FOR_AGENT_RUN = {
     write: true, edit: true, create_document: true, generate_image: true,
     generate_questions: true, page_act: true, memory: true, page_spreadsheet: true
@@ -73,6 +73,9 @@
     if (nameForMutCheck === 'skill') {
       var opForMutCheck = String(argsForMutCheck.operation || '');
       return opForMutCheck === 'create' || opForMutCheck === 'update' || opForMutCheck === 'delete';
+    }
+    if (nameForMutCheck === 'page_layout') {
+      return String(argsForMutCheck.operation || '') !== 'scan';
     }
     return false;
   }
@@ -208,7 +211,7 @@
   // work. Run from the offscreen document they would target the empty offscreen DOM instead,
   // so the panel would silently occlude clicks and the observability fields would be meaningless.
   var PAGE_DELEGATED_TOOLS_FOR_AGENT_RUN = {
-    page_observe: true, page_act: true, page_read: true, page_spreadsheet: true
+    page_observe: true, page_act: true, page_read: true, page_spreadsheet: true, page_layout: true
   };
 
   // Order-independent signature of a round's tool calls (name + canonicalized arguments),
@@ -587,6 +590,8 @@
     var logApiParamsForRun = null;
     var logAllToolCallsForRun = [];
     var logTurnsForRun = [];
+    // The previous turn's request, so a turn that only adds messages is logged as those messages.
+    var logPreviousTurnMessagesForRun = null;
     var logFinalResponseForRun = '';
     var logUsageForRun = null;
     var logResolvedModelForRun = null;
@@ -843,14 +848,20 @@
         } while (true);
         clearTimeout(iterStreamTimeoutIdForRun);
 
-        logTurnsForRun.push({
+        var turnMessagesForLog = sanitizeMessagesForLogForAgentRun(apiMessages);
+        var apiLogTurnsForRun = (globalThis.ABChatContent || {}).apiLogTurns;
+        var turnRequestForLog = apiLogTurnsForRun && typeof apiLogTurnsForRun.encodeTurnRequest === 'function'
+          ? apiLogTurnsForRun.encodeTurnRequest(logPreviousTurnMessagesForRun, turnMessagesForLog)
+          : { requestMessages: turnMessagesForLog };
+        logPreviousTurnMessagesForRun = turnMessagesForLog;
+        logTurnsForRun.push(Object.assign({
           turnIndex: iterCount,
-          latencyMs: Date.now() - turnStartTimeForRun,
-          requestMessages: sanitizeMessagesForLogForAgentRun(apiMessages),
+          latencyMs: Date.now() - turnStartTimeForRun
+        }, turnRequestForLog, {
           responseText: resultForLoop && resultForLoop.message ? (resultForLoop.message.content || '') : '',
           responseToolCalls: resultForLoop && resultForLoop.message ? (resultForLoop.message.tool_calls || []) : [],
           usage: resultForLoop ? (resultForLoop.usage || null) : null
-        });
+        }));
 
         if (!resultForLoop || resultForLoop.cancelled) {
           markRunStoppedForRun();
@@ -1098,6 +1109,16 @@
             toolResultForModel = Object.assign({}, toolResultForModel);
             delete toolResultForModel._usage;
           }
+          // page_layout's record of what it changed, for the chat's per-reply Apply and Undo
+          // buttons. It is saved on the tool message beside the result and never sent to the model.
+          var pageChangesForToolMsg = null;
+          if (tcNameForResult === 'page_layout' && toolResult && typeof toolResult === 'object' && toolResult._pageChanges && typeof toolResult._pageChanges === 'object') {
+            pageChangesForToolMsg = toolResult._pageChanges;
+          }
+          if (toolResultForModel && typeof toolResultForModel === 'object' && '_pageChanges' in toolResultForModel) {
+            toolResultForModel = Object.assign({}, toolResultForModel);
+            delete toolResultForModel._pageChanges;
+          }
           if (tcNameForResult === 'web_search' && toolResult && Array.isArray(toolResult.results)) {
             toolResult.results.forEach(function (r) {
               if (r && r.url && !seenSearchUrlsForRun.has(String(r.url))) {
@@ -1117,7 +1138,9 @@
           var toolResultStrForApi = toolResultStr.length > TOOL_RESULT_API_MAX_CHARS_FOR_AGENT_RUN
             ? JSON.stringify({ ok: false, error: 'Tool result too large to send (' + toolResultStr.length + ' bytes; max 500 KB). The tool produced too much output; try a more targeted request.' })
             : toolResultStr;
-          var toolMsgPersisted = await repoForRun.createMessage(chatId, { role: 'tool', tool_call_id: tc.id, content: toolResultStrForApi, md: '' }, { touchChat: false });
+          var toolMsgInputForRun = { role: 'tool', tool_call_id: tc.id, content: toolResultStrForApi, md: '' };
+          if (pageChangesForToolMsg) toolMsgInputForRun.pageChanges = pageChangesForToolMsg;
+          var toolMsgPersisted = await repoForRun.createMessage(chatId, toolMsgInputForRun, { touchChat: false });
           // Stamp result_ref (= message id) so the model can pass it to eval vars_from
           // instead of retyping the payload. Mirror the panel-loop stamp path.
           if (toolMsgPersisted && Number.isFinite(Number(toolMsgPersisted.id))) {
