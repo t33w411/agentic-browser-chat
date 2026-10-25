@@ -301,6 +301,8 @@ Direct integrations with OpenAI, Anthropic, or other provider APIs are not suppo
 
 No API key ships with the extension. Bring your own OpenRouter key.
 
+While a free model is selected (a `:free` variant or the `openrouter/free` router), a notice that cannot be dismissed sits above the message box and in Quick Question. It warns that free models may log prompts and use them for training, so confidential or personal information should not be shared, including page content. It also notes that free models are rate-limited and that one message can use several requests, because every step of an agent run is its own request. The notice links to OpenRouter's privacy settings, where you can block free providers that train on prompts.
+
 ## Permissions: what each one is for
 
 Manifest V3 requires upfront declaration of every permission. Here is the why for each:

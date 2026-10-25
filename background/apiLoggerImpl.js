@@ -21,7 +21,7 @@
   const MAX_STRING_CHARS_FOR_API_LOGGER = 200000;
   // A list row only needs these, so the viewer can page through records without loading each
   // whole conversation. Text fields are cut to what a row preview can show.
-  const SUMMARY_FIELDS_FOR_API_LOGGER = ['id', 'requestType', 'type', 'timestamp', 'model', 'status', 'stopReason', 'stopLimit', 'toolTimeoutMs', 'totalLatencyMs', 'latencyMs', 'iterationCount', 'chatId', 'runId'];
+  const SUMMARY_FIELDS_FOR_API_LOGGER = ['id', 'requestType', 'type', 'timestamp', 'model', 'status', 'stopReason', 'stopLimit', 'timeoutMs', 'toolTimeoutMs', 'totalLatencyMs', 'latencyMs', 'iterationCount', 'chatId', 'runId'];
   const SUMMARY_TEXT_FIELDS_FOR_API_LOGGER = ['errorMessage', 'responseContent', 'rawResponse'];
   const SUMMARY_TEXT_CHARS_FOR_API_LOGGER = 300;
 

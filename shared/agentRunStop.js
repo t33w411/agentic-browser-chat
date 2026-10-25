@@ -2,18 +2,23 @@
   const globalScopeForAgentRunStop = globalThis;
   const nsForAgentRunStop = globalScopeForAgentRunStop.ABChatShared || {};
 
-  function buildNoticeForAgentRunStop(stopReasonForNotice, toolTimeoutMsForNotice, stopLimitForNotice) {
+  // timeoutMsForNotice is the limit a 'total', 'stream' or 'tool' stop ran into. The fallbacks are
+  // the limits in force before runs recorded it, so the API log still describes an older run
+  // correctly.
+  function buildNoticeForAgentRunStop(stopReasonForNotice, timeoutMsForNotice, stopLimitForNotice) {
     if (stopReasonForNotice === 'user') {
       return 'Agent stopped: you cancelled the run.';
     }
     if (stopReasonForNotice === 'total') {
-      return 'Agent stopped: turn exceeded the 10-minute time limit.';
+      var totalMinutesForNotice = Math.round((timeoutMsForNotice || (10 * 60 * 1000)) / 60000);
+      return 'Agent stopped: turn exceeded the ' + totalMinutesForNotice + '-minute time limit.';
     }
     if (stopReasonForNotice === 'stream') {
-      return 'Agent stopped: the model stopped responding (no data for 90s).';
+      var streamSecsForNotice = Math.round((timeoutMsForNotice || (90 * 1000)) / 1000);
+      return 'Agent stopped: the model stopped responding (no output for ' + streamSecsForNotice + 's).';
     }
     if (stopReasonForNotice === 'tool') {
-      var toolSecsForNotice = Math.round((toolTimeoutMsForNotice || (90 * 1000)) / 1000);
+      var toolSecsForNotice = Math.round((timeoutMsForNotice || (90 * 1000)) / 1000);
       var toolLabelForNotice = toolSecsForNotice % 60 === 0
         ? (toolSecsForNotice / 60) + '-minute limit'
         : toolSecsForNotice + '-second limit';
@@ -97,7 +102,9 @@
     if (logForPreview.status === 'error') return logForPreview.errorMessage || 'Error';
     var stopReasonForPreview = logForPreview.stopReason;
     if (stopReasonForPreview) {
-      return buildNoticeForAgentRunStop(stopReasonForPreview, logForPreview.toolTimeoutMs, logForPreview.stopLimit);
+      // Older records kept only a tool stop's limit, under toolTimeoutMs.
+      var timeoutMsForPreview = logForPreview.timeoutMs || logForPreview.toolTimeoutMs;
+      return buildNoticeForAgentRunStop(stopReasonForPreview, timeoutMsForPreview, logForPreview.stopLimit);
     }
     if (logForPreview.status && logForPreview.status !== 'success' && logForPreview.status !== 'success_raw') {
       return getStatusLabelForAgentRunStop(logForPreview.status);

@@ -26,8 +26,10 @@
   var nsForAgentRun = globalScopeForAgentRun.ABChatOffscreen || {};
 
   var STREAM_TEXT_DEBOUNCE_MS_FOR_AGENT_RUN = 200;
-  var TURN_TOTAL_TIMEOUT_MS_FOR_AGENT_RUN = 10 * 60 * 1000;
-  var ITER_STREAM_TIMEOUT_MS_FOR_AGENT_RUN = 90 * 1000;
+  var TURN_TOTAL_TIMEOUT_MS_FOR_AGENT_RUN = 20 * 60 * 1000;
+  // Idle limit: re-armed by every text, tool-call or reasoning chunk, so it measures silence from
+  // the model, not how long a reply takes.
+  var ITER_STREAM_TIMEOUT_MS_FOR_AGENT_RUN = 180 * 1000;
   var ITER_TOOL_STD_TIMEOUT_MS_FOR_AGENT_RUN = 90 * 1000;
   var ITER_TOOL_IMAGE_TIMEOUT_MS_FOR_AGENT_RUN = 3 * 60 * 1000;
   // generate_questions makes up to three rounds of model calls in one tool call: the questions,
@@ -35,7 +37,16 @@
   var ITER_TOOL_QUIZ_TIMEOUT_MS_FOR_AGENT_RUN = 3 * 60 * 1000;
   var SOFT_ITERATION_CHECKPOINT_FOR_AGENT_RUN = 20;
   var ITERATION_EXTENSION_SIZE_FOR_AGENT_RUN = 20;
-  var ABSOLUTE_MAX_ITERATIONS_FOR_AGENT_RUN = 60;
+  // Hard ceilings per run, by the model's cost tier. They exist to stop a runaway loop, and a
+  // runaway on a cheap model costs little, so cheap models get more room. A model with no known
+  // price gets the standard ceilings, because it may be a router such as openrouter/auto that can
+  // hand the run to an expensive model.
+  var RUN_LIMITS_BY_COST_CATEGORY_FOR_AGENT_RUN = {
+    cheap: { maxIterations: 100, maxToolCalls: 100 },
+    standard: { maxIterations: 60, maxToolCalls: 60 },
+    expensive: { maxIterations: 60, maxToolCalls: 60 },
+    extreme: { maxIterations: 60, maxToolCalls: 60 }
+  };
   var PROGRESS_WINDOW_ROUNDS_FOR_AGENT_RUN = 5;
   var MIN_PROGRESS_ROUNDS_FOR_EXTENSION_FOR_AGENT_RUN = 2;
   var MAX_IDENTICAL_TOOL_ROUNDS_FOR_AGENT_RUN = 4;
@@ -458,6 +469,11 @@
     var contextWindowForRun = Number(paramsForRun.contextWindow) || null;
     var pricingForRun = paramsForRun.pricing || {};
     var completionCostPerMillionForRun = Number(pricingForRun.completionCostPerMillion) || 0;
+    // The panel sends null when the price is unknown, so a free model (0) can be told apart from one
+    // whose price never loaded.
+    var completionCostKnownForRun = typeof pricingForRun.completionCostPerMillion === 'number'
+      && Number.isFinite(pricingForRun.completionCostPerMillion)
+      && pricingForRun.completionCostPerMillion >= 0;
     var imageGenCostForRun = Number(pricingForRun.imageGenCost) || 0;
 
     if (!apiKey || !model) { refuseRunForOffscreen('Could not start the agent run: missing API key or model.'); return; }
@@ -493,10 +509,18 @@
       controllerForRun.abort();
     }, TURN_TOTAL_TIMEOUT_MS_FOR_AGENT_RUN);
 
-    function buildTimeoutNoticeForRun(reasonForNotice, toolTimeoutMsForNotice, stopLimitForNotice) {
+    // The limit that a timeout stop reason ran into, for the notice and the API log.
+    function timeoutMsForStopReasonForRun(reasonForTimeout) {
+      if (reasonForTimeout === 'tool') return lastToolTimeoutMsForRun;
+      if (reasonForTimeout === 'stream') return ITER_STREAM_TIMEOUT_MS_FOR_AGENT_RUN;
+      if (reasonForTimeout === 'total') return TURN_TOTAL_TIMEOUT_MS_FOR_AGENT_RUN;
+      return undefined;
+    }
+
+    function buildTimeoutNoticeForRun(reasonForNotice, timeoutMsForNotice, stopLimitForNotice) {
       var agentRunStopForNotice = (globalThis.ABChatShared || {}).agentRunStop;
       if (agentRunStopForNotice && typeof agentRunStopForNotice.buildNotice === 'function') {
-        return agentRunStopForNotice.buildNotice(reasonForNotice, toolTimeoutMsForNotice, stopLimitForNotice);
+        return agentRunStopForNotice.buildNotice(reasonForNotice, timeoutMsForNotice, stopLimitForNotice);
       }
       return '';
     }
@@ -633,6 +657,10 @@
     var toolDefsForRun = (agentNsForRun && typeof agentNsForRun.resolveAgentConfig === 'function')
       ? agentNsForRun.resolveAgentConfig({ costCategory: costCategoryForRun, agentProfile: 'main' }).toolDefs
       : (agentNsForRun.toolDefs || []).slice();
+    var runLimitsForRun = (completionCostKnownForRun && RUN_LIMITS_BY_COST_CATEGORY_FOR_AGENT_RUN[costCategoryForRun])
+      || RUN_LIMITS_BY_COST_CATEGORY_FOR_AGENT_RUN.standard;
+    // Read by the tool-call-cap PostModelResponse hook.
+    if (turnContextForRun) turnContextForRun.maxToolCalls = runLimitsForRun.maxToolCalls;
 
     try {
       var chatRecordForRun = await repoForRun.getChat(chatId);
@@ -727,13 +755,13 @@
       while (!userPromptBlockedForRun) {
         if (iterCount >= currentIterationLimitForRun) {
           var progressRoundCountForExtension = recentProgressRoundsForRun.filter(Boolean).length;
-          var canExtendForRun = currentIterationLimitForRun < ABSOLUTE_MAX_ITERATIONS_FOR_AGENT_RUN
+          var canExtendForRun = currentIterationLimitForRun < runLimitsForRun.maxIterations
             && progressRoundCountForExtension >= MIN_PROGRESS_ROUNDS_FOR_EXTENSION_FOR_AGENT_RUN
             && identicalToolRoundCountForRun < MAX_IDENTICAL_TOOL_ROUNDS_FOR_AGENT_RUN
             && consecutiveEmptyItersForRun < MAX_CONSECUTIVE_ALL_FAILURE_ITERS_FOR_AGENT_RUN;
           if (canExtendForRun) {
             currentIterationLimitForRun = Math.min(
-              ABSOLUTE_MAX_ITERATIONS_FOR_AGENT_RUN,
+              runLimitsForRun.maxIterations,
               currentIterationLimitForRun + ITERATION_EXTENSION_SIZE_FOR_AGENT_RUN
             );
             extensionCountForRun++;
@@ -743,7 +771,7 @@
               + 'You now have up to ' + currentIterationLimitForRun + ' total model steps for this run.'
             );
           } else {
-            logStopReasonForRun = currentIterationLimitForRun >= ABSOLUTE_MAX_ITERATIONS_FOR_AGENT_RUN
+            logStopReasonForRun = currentIterationLimitForRun >= runLimitsForRun.maxIterations
               ? 'iteration-limit'
               : 'no-progress';
             logStopLimitForRun = currentIterationLimitForRun;
@@ -1462,7 +1490,7 @@
           : 'cancelled';
       }
       if (logStopReasonForRun && !stopNoticeAlreadyPersistedForRun) {
-        var stopNoticeTextForRun = buildTimeoutNoticeForRun(logStopReasonForRun, lastToolTimeoutMsForRun, logStopLimitForRun);
+        var stopNoticeTextForRun = buildTimeoutNoticeForRun(logStopReasonForRun, timeoutMsForStopReasonForRun(logStopReasonForRun), logStopLimitForRun);
         if (stopNoticeTextForRun) {
           try {
             var stopNoticeRecordForRun = await repoForRun.createMessage(chatId, {
@@ -1489,7 +1517,7 @@
           stopReason: logStopReasonForRun || undefined,
           stopLimit: logStopLimitForRun || undefined,
           extensionCount: extensionCountForRun || undefined,
-          toolTimeoutMs: logStopReasonForRun === 'tool' ? lastToolTimeoutMsForRun : undefined,
+          timeoutMs: timeoutMsForStopReasonForRun(logStopReasonForRun),
           errorMessage: logErrorMsgForRun,
           requestMessages: logFirstMessagesForRun,
           apiParams: logApiParamsForRun,

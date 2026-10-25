@@ -1390,6 +1390,31 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
   color: #ffffff;
 }
 
+/* Free-model notice: chat composer and Quick Question. Explicit colours, like the other amber
+   banners, so both the panel and the inline overlay resolve them without the theme variables. */
+.free-model-notice {
+  display: flex; align-items: flex-start; gap: 7px;
+  margin-bottom: 8px;
+  padding: 7px 10px;
+  border: 1px solid #f5d58a;
+  border-radius: var(--abchat-r-sm, 6px);
+  background: #fef7e6;
+  color: #92600a;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.free-model-notice-icon { flex: 0 0 auto; display: inline-flex; margin-top: 2px; }
+.free-model-notice-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.free-model-notice-text a { color: inherit; font-weight: 600; text-decoration: underline; text-underline-offset: 2px; }
+.free-model-notice-text a:hover { text-decoration-thickness: 2px; }
+.im-free-model-notice { margin: 10px 12px 0; flex-shrink: 0; }
+.panel-host[data-theme="dark"] .free-model-notice,
+#inline-overlay[data-theme="dark"] .free-model-notice {
+  border-color: #6b551f;
+  background: #33290f;
+  color: #f0cf7f;
+}
+
 .input-chips-bar {
   display: flex; align-items: flex-start; gap: 6px; margin-bottom: 8px;
 }

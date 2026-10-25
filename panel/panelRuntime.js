@@ -5991,6 +5991,7 @@
     }
 
     function syncModelPickerLabelForPanelRuntime() {
+      syncFreeModelNoticeForPanelRuntime();
       const chatSelect = root.getElementById('chat-model-select');
       const label = root.getElementById('model-picker-label');
       if (!chatSelect || !label) return;
@@ -14062,6 +14063,29 @@
       return idForFreeCheck.endsWith(FREE_MODEL_VARIANT_SUFFIX_FOR_PANEL_RUNTIME);
     }
 
+    // A free endpoint is a ':free' variant or the openrouter/free router, which only routes to them.
+    // Decided by id, not price: the logging policy and rate limits come with the free endpoint, and a
+    // zero-price model without the suffix never passes the picker's cost floor anyway.
+    const FREE_ROUTER_MODEL_ID_FOR_PANEL_RUNTIME = 'openrouter/free';
+
+    function isFreeChatModelIdForPanelRuntime(modelIdForFreeNotice) {
+      const idForFreeNotice = String(modelIdForFreeNotice || '').trim().toLowerCase();
+      if (!idForFreeNotice) return false;
+      if (idForFreeNotice === FREE_ROUTER_MODEL_ID_FOR_PANEL_RUNTIME) return true;
+      return isFreeModelVariantForPanelRuntime({ id: idForFreeNotice });
+    }
+
+    // Both notices follow #chat-model-select, which Quick Question also sends to. Called from
+    // syncModelPickerLabelForPanelRuntime, which every write to that select already goes through.
+    function syncFreeModelNoticeForPanelRuntime() {
+      const chatSelectForFreeNotice = root.getElementById('chat-model-select');
+      const showFreeNotice = !!(chatSelectForFreeNotice && isFreeChatModelIdForPanelRuntime(chatSelectForFreeNotice.value));
+      ['chat-free-model-notice', 'im-free-model-notice'].forEach(function (noticeIdForFreeNotice) {
+        const noticeForFreeNotice = root.getElementById(noticeIdForFreeNotice);
+        if (noticeForFreeNotice) noticeForFreeNotice.classList.toggle('hidden', !showFreeNotice);
+      });
+    }
+
     // OpenRouter puts floating aliases ("~anthropic/claude-opus-latest") in a '~' vendor namespace.
     // Each carries its own self-referential canonical_slug, so there is no field that ties one back
     // to the pinned model it tracks and no way to detect it as a duplicate; the '~' prefix is the
@@ -18512,7 +18536,13 @@
       const cachedForCostOffscreen = await getCachedModelsForPanelRuntime();
       const cachedModelsForCostOffscreen = (cachedForCostOffscreen && cachedForCostOffscreen.chatModels) || [];
       const modelObjForCostOffscreen = cachedModelsForCostOffscreen.find(function (m) { return m.id === modelForOffscreen; }) || null;
-      const completionCostPerMillionOffscreen = modelObjForCostOffscreen ? (Number(modelObjForCostOffscreen.completionCostPerMillion) || 0) : 0;
+      // null when the price is unknown (the model is missing from the cache, or its listed price is
+      // absent or negative), so the run can tell it apart from a free model and not give it the
+      // cheap tier's longer limits.
+      const rawCompletionCostOffscreen = modelObjForCostOffscreen ? modelObjForCostOffscreen.completionCostPerMillion : null;
+      const completionCostPerMillionOffscreen = (typeof rawCompletionCostOffscreen === 'number' && Number.isFinite(rawCompletionCostOffscreen) && rawCompletionCostOffscreen >= 0)
+        ? rawCompletionCostOffscreen
+        : null;
       const imageModelObjForCostOffscreen = loadedImageModelsForPanelRuntime.find(function (m) { return m.id === imageModelForOffscreen; }) || null;
       const imageGenCostOffscreen = imageModelObjForCostOffscreen ? (Number(imageModelObjForCostOffscreen.imageCost) || 0) : 0;
 

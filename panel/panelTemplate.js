@@ -178,6 +178,13 @@
                  regardless of the composer's height. Starts hidden; the runtime shows it
                  whenever the messages area is scrolled up away from the bottom. -->
             <button type="button" class="chat-jump-bottom-btn hidden" id="chat-jump-bottom-btn" data-action="jump-to-bottom" aria-label="Jump to latest messages"><span class="chat-jump-bottom-label">Jump to bottom</span>${icForPanelTemplate.arrowDown13}</button>
+            <!-- Shown while the staged chat model is free. Deliberately not dismissible. It sits
+                 inside the composer box rather than above it, where the jump button would cover
+                 it. Visibility belongs to syncFreeModelNoticeForPanelRuntime. -->
+            <div class="free-model-notice hidden" id="chat-free-model-notice" role="note">
+              <span class="free-model-notice-icon" aria-hidden="true">${icForPanelTemplate.shieldAlert13}</span>
+              <span class="free-model-notice-text">Free models may log your prompts and use them for training. Don't share confidential or personal information, including page content. Free models are also rate-limited, and one message can use several requests. <a href="https://openrouter.ai/settings/privacy" target="_blank" rel="noopener noreferrer">OpenRouter privacy settings</a></span>
+            </div>
             <!-- The button is a SIBLING of the chips row, never a child: the row is emptied with
                  innerHTML on every draft apply and composer clear, which would take the button with
                  it. Its visibility rides the row's :empty state in CSS, so no JS has to remember to
@@ -1106,6 +1113,11 @@
     </div>
     <!-- Conversation (hidden until first message sent) -->
     <div class="im-conversation empty" id="im-conversation"></div>
+    <!-- Quick Question sends to the chat composer's model, so it carries the same notice. -->
+    <div class="free-model-notice im-free-model-notice hidden" id="im-free-model-notice" role="note">
+      <span class="free-model-notice-icon" aria-hidden="true">${icForPanelTemplate.shieldAlert13}</span>
+      <span class="free-model-notice-text">Free models may log your prompts and use them for training. Don't share confidential or personal information. <a href="https://openrouter.ai/settings/privacy" target="_blank" rel="noopener noreferrer">OpenRouter privacy settings</a></span>
+    </div>
     <!-- Input area -->
     <div class="im-body">
       <textarea class="im-ta" id="im-ta" placeholder="Ask about the selected text..." rows="2">What is the difference between a closure and a callback?</textarea>

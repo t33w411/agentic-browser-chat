@@ -15,6 +15,14 @@
     }
   }
 
+  // OpenRouter streams thinking as delta.reasoning (text) or delta.reasoning_details (structured,
+  // and an encrypted block carries no text at all). SSE comment lines such as OpenRouter's
+  // keepalive are not counted: they show only that OpenRouter is still waiting on the provider.
+  function hasReasoningDeltaForClient(deltaForReasoning) {
+    if (typeof deltaForReasoning.reasoning === "string" && deltaForReasoning.reasoning) return true;
+    return Array.isArray(deltaForReasoning.reasoning_details) && deltaForReasoning.reasoning_details.length > 0;
+  }
+
   function accumulateToolCallsForClient(accumForClient, deltaToolCallsForClient) {
     if (!Array.isArray(deltaToolCallsForClient)) return;
     for (var i = 0; i < deltaToolCallsForClient.length; i++) {
@@ -225,6 +233,13 @@
           if (typeof onDelta === "function") {
             onDelta({ type: "text", text: textChunkForClient });
           }
+        }
+
+        // Reasoning is neither shown nor kept, but it is the model producing output. A caller that
+        // stops an idle stream has to hear about it, or a model that thinks for longer than the idle
+        // limit before writing is stopped mid-thought.
+        if (hasReasoningDeltaForClient(deltaForClient) && typeof onDelta === "function") {
+          onDelta({ type: "reasoning" });
         }
 
         if (deltaForClient.tool_calls) {

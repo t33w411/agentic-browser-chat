@@ -71,6 +71,7 @@
   var historyPaths = '<path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/>';
   var micPaths = '<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/>';
   var dollarPaths = '<line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>';
+  var shieldAlertPaths = '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>';
 
   icons.x10 = svgForPanelIcon(10, 2.5, xPaths);
   icons.x12 = svgForPanelIcon(12, 2.5, xPaths);
@@ -150,6 +151,7 @@
   icons.eye13 = svgForPanelIcon(13, 2, eyePaths);
   icons.eyeOff13 = svgForPanelIcon(13, 2, eyeOffPaths);
   icons.dollar13 = svgForPanelIcon(13, 2, dollarPaths);
+  icons.shieldAlert13 = svgForPanelIcon(13, 2, shieldAlertPaths);
   icons.history12 = svgForPanelIcon(12, 2, historyPaths);
   icons.mic16 = svgForPanelIcon(16, 2, micPaths);
   icons.bookmark10 = svgForPanelIcon(10, 2.5, bookmarkPaths);

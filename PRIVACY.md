@@ -61,6 +61,8 @@ The extension may also fetch publicly-available resources required for features 
 
 Because your messages and any attached page content are sent to OpenRouter and the underlying model provider, do not attach material that you are not authorized to share with them. The extension cannot inspect or restrict what those services do with the content you submit.
 
+Free models (OpenRouter's `:free` variants and its `openrouter/free` router) need extra care. Many free providers log prompts, and some use them to train models. Which free providers OpenRouter may route you to is controlled by the free-model options in your [OpenRouter privacy settings](https://openrouter.ai/settings/privacy). While a free model is selected, the extension shows a notice above the message box and in Quick Question reminding you not to share confidential or personal information. That includes the content of pages the assistant reads, which reaches the model even when you upload nothing.
+
 ## Children's privacy
 
 The extension is not directed at children under 13 and does not knowingly collect any data from anyone, including children, on a developer-controlled server.
