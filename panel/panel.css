@@ -1738,7 +1738,8 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   transition: background 0.1s;
 }
-.mp-item:hover { background: var(--abchat-bg-hover); }
+/* The pointer and the arrow keys move one highlight between them, so there is no :hover rule. */
+.mp-item.highlighted { background: var(--abchat-bg-hover); }
 .mp-item.active { color: var(--abchat-accent); font-weight: 600; }
 .mp-tier-cheap, .mp-tier-mid, .mp-tier-expensive, .mp-tier-extreme {
   display: inline-block; padding: 1px 5px; border-radius: 3px;

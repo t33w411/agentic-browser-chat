@@ -20,7 +20,7 @@ const onlyArg = argv.find((a) => a.startsWith('--only='));
 const only = onlyArg ? onlyArg.slice('--only='.length).split(',').filter(Boolean) : null;
 
 const PAGE_SUITES = ['scan-basics', 'field-variants', 'replay', 'dashboard', 'hidden-content', 'large-pages', 'flattener', 'perf'];
-const EXTENSION_SUITES = ['feed', 'reload', 'qa', 'panel', 'applyAll', 'apiLogs'];
+const EXTENSION_SUITES = ['feed', 'reload', 'qa', 'panel', 'applyAll', 'apiLogs', 'models'];
 const wanted = (name) => !only || only.includes(name);
 
 const results = [];

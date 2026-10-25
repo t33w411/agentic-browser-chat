@@ -135,8 +135,8 @@ Inside the **Notes** editor, you can also attach files to the note itself (the s
 
 ### Quiz
 
-- Generate questions from any source material (pasted text, an attached note, or a chat) via the `generate_questions` tool.
-- Supports MCQ (multiple choice), FITB (fill-in-the-blank), and a mix of the two.
+- Generate questions from any source material (pasted text, an attached note, or a chat) via the `generate_questions` tool. It makes 5 unless you ask for a number, and at most 10 per call; for a larger set the assistant splits the material across several calls.
+- Supports MCQ (multiple choice), FITB (fill-in-the-blank), and a mix of the two. Multiple-choice options are shuffled when a question is saved. A fill-in-the-blank question lists the other forms of its answer that also count, such as a plural or "3" for "three", because answers are matched exactly apart from case.
 - Optional `focus` parameter scopes generation to a specific topic.
 - Spaced practice: each question has a `pausedUntil` field so you can mark it answered and have it disappear from the active pool for a chosen interval.
 
@@ -173,13 +173,13 @@ The page surface is **ref-based**: the model never writes CSS selectors or finge
 **Generation**
 - `create_document` — generate a downloadable DOCX, XLSX, PDF, PPTX, or CSV file with structured content (headings, bullets, tables, sheets, slides). Files are stored as blobs and displayed inline.
 - `read_document_structure` — re-read an attached DOCX as structured HTML so the model can edit it while preserving headings, lists, tables, inline bold/italic, and hyperlinks. The intended round-trip is `read_document_structure` → edit the HTML → `create_document` with the edited `html`. Only DOCX is supported.
-- `generate_image` — image generation through the configured image model. Generated images are displayed inline and can be iterated on by passing the prior image's blob id as `source_blob_id`.
+- `generate_image` — image generation through the configured image model. Generated images are displayed inline and can be iterated on by passing the prior image's blob id as `source_blob_id`, which also accepts an attached image to edit.
 - `generate_questions` — produces quiz items (MCQ or fill-in-the-blank) from source material and saves them directly to the Quiz tab.
 
 **Context awareness**
 - `get_environment` — current date, time, timezone, locale, and OS/platform.
 - `memory` — read/write the persistent memory note (see below).
-- `skill` — create, read, update, or delete skill notes (see below).
+- `skill` — create, read, update, or delete skill notes (see below), and read the built-in guides.
 
 ### Memory, Skills, and Custom Instructions
 
@@ -199,6 +199,7 @@ In practice:
 - Each of those two has its own switch, so you can turn one off for a while without losing what you wrote. Both are capped at 2,500 characters, since they ride on every single request.
 - **Memory** is for facts the agent should always know about you: *"User's name is Tayo"*, *"User uses VS Code"*, *"User's pets are named Bo and Lyra"*. You ask the agent to remember; it calls the `memory` tool and the entry is appended (phrased in third person). You can also add, edit, and delete entries yourself in Settings → Agent → Manage Memory.
 - **Skills** are for procedures you don't want to retype: a step-by-step process the agent can re-apply on request. You say *"remember how to do X"*; the agent saves a skill. Later you can say *"do X for this data"* and the agent loads `/x` and follows it. You can also create, edit, and delete skills yourself in Settings → Agent → Manage Skills.
+- **Built-in guides** work like skills that ship with the extension. They hold the detailed instructions for some tools, so those instructions are sent only in chats that use the tools rather than with every request. There are four: `builtin-documents`, for creating and editing files; `builtin-page-layout`, for sorting, filtering, hiding, and restyling parts of the page; `builtin-images`, for generating images; and `builtin-spreadsheets`, for reading and writing Google Sheets cells. The agent reads a guide the first time it needs it in a chat. Guides are read-only, and the `builtin-` prefix is reserved, so it cannot be used for a skill's command.
 
 ### API call logs
 

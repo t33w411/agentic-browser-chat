@@ -189,6 +189,11 @@
         if (Number.isFinite(returnedForHooks.block.limit)) {
           combinedForHooks.block.limit = returnedForHooks.block.limit;
         }
+        // PreToolUse only: extra fields for the synthetic tool result, so a long payload (such as a
+        // guide) can reach the model without becoming the short error text the panel shows.
+        if (isPlainObjectForHooks(returnedForHooks.block.result)) {
+          combinedForHooks.block.result = returnedForHooks.block.result;
+        }
         summaryForHooks.block = true;
         firingsForHooks.push(summaryForHooks);
         break;

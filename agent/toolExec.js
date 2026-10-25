@@ -958,9 +958,6 @@
   }
 
   async function skillToolForToolExec(args) {
-    var panelDataRepo = getPanelDataRepoForToolExec();
-    if (!panelDataRepo) return { ok: false, error: 'Database not ready' };
-
     var operation = args.operation;
     var slug = typeof args.slug === 'string' ? args.slug.trim() : '';
     var title = typeof args.title === 'string' ? args.title.trim() : '';
@@ -970,6 +967,21 @@
     if (['create', 'read', 'update', 'delete'].indexOf(operation) === -1) {
       return { ok: false, error: 'Invalid operation "' + operation + '"; valid values are: create, read, update, delete' };
     }
+
+    // Built-in guides ship with the extension and are never stored, so they are served before the
+    // database is consulted and can be neither created nor changed.
+    var builtinGuidesForSkill = (globalScopeForToolExec.ABChatAgent || {}).builtinGuides;
+    if (builtinGuidesForSkill && slug) {
+      if (operation === 'read') {
+        var guideReadForSkill = builtinGuidesForSkill.readResult(slug);
+        if (guideReadForSkill) return guideReadForSkill;
+      } else if (operation === 'create' ? builtinGuidesForSkill.isReservedSlug(slug) : !!builtinGuidesForSkill.get(slug)) {
+        return { ok: false, error: 'Slugs starting with "' + builtinGuidesForSkill.SLUG_PREFIX + '" belong to built-in guides, which are read-only. Use a different slug.' };
+      }
+    }
+
+    var panelDataRepo = getPanelDataRepoForToolExec();
+    if (!panelDataRepo) return { ok: false, error: 'Database not ready' };
 
     var nowForSkill = new Date().toISOString();
 
@@ -10353,7 +10365,7 @@ self.onmessage = function (e) {
     const signal = getAbortSignalForToolExec(context);
     if (!apiKey) return { ok: false, error: 'No API key available for image generation.' };
     if (chatModelForImage === 'openrouter/free') return { ok: false, error: 'Image generation is not supported on the free model. User should switch to a paid model to generate images.' };
-    if (!imageModel) return { ok: false, error: 'No image model selected. Please choose your preferred image generation model in Settings first.' };
+    if (!imageModel) return { ok: false, error: 'No image model is selected, and there is no default. The user has to choose one in Settings, under Models, Image generation model.' };
     if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
 
     // Load any input images and send them as multimodal content parts so the model has visual
@@ -10505,12 +10517,42 @@ self.onmessage = function (e) {
 
   // ---- Tool: generate_questions ----
 
+  var DEFAULT_QUESTION_COUNT_FOR_TOOL_EXEC = 5;
+  // Generation, the self-containment review and any fixes all run inside one tool call, and a tool
+  // call that outlasts its timeout stops the whole agent run.
+  var MAX_QUESTION_COUNT_FOR_TOOL_EXEC = 10;
+
+  // The generator tends to put the correct option where its JSON template does, so options are
+  // shuffled before saving. An option such as "All of the above" refers to the others by position,
+  // so a question that has one keeps its order.
+  function shuffleQuestionOptionsForToolExec(optionsForShuffle) {
+    if (!Array.isArray(optionsForShuffle)) return [];
+    var refersToOthersForShuffle = optionsForShuffle.some(function (optionForShuffle) {
+      return optionForShuffle && typeof optionForShuffle.text === 'string' && /\bof the above\b/i.test(optionForShuffle.text);
+    });
+    var copyForShuffle = optionsForShuffle.slice();
+    if (refersToOthersForShuffle) return copyForShuffle;
+    for (var iForShuffle = copyForShuffle.length - 1; iForShuffle > 0; iForShuffle--) {
+      var jForShuffle = Math.floor(Math.random() * (iForShuffle + 1));
+      var heldForShuffle = copyForShuffle[iForShuffle];
+      copyForShuffle[iForShuffle] = copyForShuffle[jForShuffle];
+      copyForShuffle[jForShuffle] = heldForShuffle;
+    }
+    return copyForShuffle;
+  }
+
   function generateQuestionsToolForToolExec(args, context) {
     var content = typeof args.content === 'string' ? args.content.trim() : '';
-    var count = 1;
+    var count = DEFAULT_QUESTION_COUNT_FOR_TOOL_EXEC;
     if (args.count !== undefined) {
       if (!isPositiveIntegerForToolExec(args.count)) {
         return Promise.resolve({ ok: false, error: 'count must be a positive integer' });
+      }
+      if (args.count > MAX_QUESTION_COUNT_FOR_TOOL_EXEC) {
+        return Promise.resolve({
+          ok: false,
+          error: 'count must be at most ' + MAX_QUESTION_COUNT_FOR_TOOL_EXEC + '. For more questions, make several calls, each with a different section of the material as content or a focus naming what to cover.'
+        });
       }
       count = args.count;
     }
@@ -10544,12 +10586,23 @@ self.onmessage = function (e) {
 
       var questions = Array.isArray(res.questions) ? res.questions : [];
       if (questions.length === 0) { return { ok: false, error: 'No questions returned' }; }
+      // Each entry explains a requested question that was not saved. A question the generator
+      // dropped after failing its checks only explains a shortfall when too few are left.
+      var saveErrors = [];
+      if (questions.length < count) {
+        var droppedReasons = Array.isArray(res.validationWarnings) ? res.validationWarnings : [];
+        saveErrors = droppedReasons.slice();
+        var returnedQuestionCount = questions.length + droppedReasons.length;
+        if (returnedQuestionCount < count) {
+          saveErrors.push('The generator returned ' + returnedQuestionCount + ' questions instead of ' + count + '.');
+        }
+      }
+      if (questions.length > count) questions = questions.slice(0, count);
 
       var now = new Date();
       var dueDate = new Date(now.getTime() + 2 * 86400000).toISOString().split('T')[0];
       var nowStr = now.toISOString();
       var savedTitles = [];
-      var saveErrors = [];
 
       for (var qi = 0; qi < questions.length; qi++) {
         if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
@@ -10562,7 +10615,7 @@ self.onmessage = function (e) {
             title: title,
             questionText: typeof q.questionText === 'string' ? q.questionText : '',
             type: q.type === 'fitb' ? 'fitb' : 'mcq',
-            options: Array.isArray(q.options) ? q.options : [],
+            options: q.type === 'fitb' ? [] : shuffleQuestionOptionsForToolExec(q.options),
             correctAnswer: typeof q.correctAnswer === 'string' ? q.correctAnswer : '',
             alternativeAnswers: Array.isArray(q.alternativeAnswers) ? q.alternativeAnswers : [],
             caseSensitive: Boolean(q.caseSensitive),
@@ -10584,7 +10637,7 @@ self.onmessage = function (e) {
       if (savedTitles.length === 0) {
         return { ok: false, error: 'Failed to save any questions. ' + saveErrors.join('; ') };
       }
-      var result = { ok: true, saved: savedTitles.length, titles: savedTitles };
+      var result = { ok: true, requested: count, saved: savedTitles.length, titles: savedTitles };
       if (saveErrors.length > 0) result.errors = saveErrors;
       return result;
     }).catch(function (e) {

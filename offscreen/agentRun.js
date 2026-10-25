@@ -30,6 +30,9 @@
   var ITER_STREAM_TIMEOUT_MS_FOR_AGENT_RUN = 90 * 1000;
   var ITER_TOOL_STD_TIMEOUT_MS_FOR_AGENT_RUN = 90 * 1000;
   var ITER_TOOL_IMAGE_TIMEOUT_MS_FOR_AGENT_RUN = 3 * 60 * 1000;
+  // generate_questions makes up to three rounds of model calls in one tool call: the questions,
+  // a review of them, and a fix for each one that fails its checks.
+  var ITER_TOOL_QUIZ_TIMEOUT_MS_FOR_AGENT_RUN = 3 * 60 * 1000;
   var SOFT_ITERATION_CHECKPOINT_FOR_AGENT_RUN = 20;
   var ITERATION_EXTENSION_SIZE_FOR_AGENT_RUN = 20;
   var ABSOLUTE_MAX_ITERATIONS_FOR_AGENT_RUN = 60;
@@ -1027,10 +1030,11 @@
           if (rawToolArgsForExec.trim() !== '') {
             try { toolArgs = JSON.parse(rawToolArgsForExec); } catch (parseErrForExec) { toolArgsParseErrorForExec = parseErrForExec; }
           }
-          logAllToolCallsForRun.push({
+          var logToolCallForExec = {
             name: tcNameForExec,
             args: toolArgsParseErrorForExec ? { _rawArguments: rawToolArgsForExec } : toolArgs
-          });
+          };
+          logAllToolCallsForRun.push(logToolCallForExec);
           if (skippedPageMutatorIndicesForRun.has(tcIdxForExec)
               && pageMutatorGateForRun
               && typeof pageMutatorGateForRun.buildSkipResult === 'function') {
@@ -1040,9 +1044,13 @@
             return { ok: false, error: 'Tool call arguments were not valid JSON and could not be parsed: ' + (toolArgsParseErrorForExec.message || String(toolArgsParseErrorForExec)) + '. The "arguments" field must be a single valid JSON object with every string value properly escaped (newlines as \\n, quotes as \\", backslashes as \\\\); do not split strings using + concatenation. Re-issue this tool call with corrected JSON.' };
           }
           var preToolUseResultForRun = await dispatchHookForRun('PreToolUse', {
-            toolName: tcNameForExec, args: toolArgs, callId: tc.id, chatId: chatId, iterIndex: turnContextForRun ? turnContextForRun.iterIndex : 0
+            toolName: tcNameForExec, args: toolArgs, callId: tc.id, chatId: chatId, iterIndex: turnContextForRun ? turnContextForRun.iterIndex : 0,
+            messages: apiMessages
           });
-          if (preToolUseResultForRun && preToolUseResultForRun.block) return { ok: false, error: preToolUseResultForRun.block.reason };
+          if (preToolUseResultForRun && preToolUseResultForRun.block) {
+            logToolCallForExec.blocked = true;
+            return Object.assign({}, preToolUseResultForRun.block.result || {}, { ok: false, error: preToolUseResultForRun.block.reason });
+          }
           return wrapToolPromiseWithAbortForRun(
             executeToolForAgentRun(tcNameForExec, toolArgs, {
               apiKey: apiKey,
@@ -1061,10 +1069,16 @@
           );
         });
 
-        var hasImageGenInBatchForRun = toolCallsForLoop.some(function (tcForTimeout) {
-          return tcForTimeout.function && tcForTimeout.function.name === 'generate_image';
+        // The batch gets the longest timeout any of its calls needs.
+        var toolExecTimeoutMsForRun = ITER_TOOL_STD_TIMEOUT_MS_FOR_AGENT_RUN;
+        toolCallsForLoop.forEach(function (tcForTimeout) {
+          var nameForTimeout = tcForTimeout.function && tcForTimeout.function.name;
+          if (nameForTimeout === 'generate_image') {
+            toolExecTimeoutMsForRun = Math.max(toolExecTimeoutMsForRun, ITER_TOOL_IMAGE_TIMEOUT_MS_FOR_AGENT_RUN);
+          } else if (nameForTimeout === 'generate_questions') {
+            toolExecTimeoutMsForRun = Math.max(toolExecTimeoutMsForRun, ITER_TOOL_QUIZ_TIMEOUT_MS_FOR_AGENT_RUN);
+          }
         });
-        var toolExecTimeoutMsForRun = hasImageGenInBatchForRun ? ITER_TOOL_IMAGE_TIMEOUT_MS_FOR_AGENT_RUN : ITER_TOOL_STD_TIMEOUT_MS_FOR_AGENT_RUN;
         lastToolTimeoutMsForRun = toolExecTimeoutMsForRun;
         var iterToolTimeoutIdForRun = setTimeout(function () {
           if (!timeoutReasonForRun) timeoutReasonForRun = 'tool';

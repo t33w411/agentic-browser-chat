@@ -211,18 +211,14 @@
                   <input type="file" id="chat-file-input" data-action="chat-file-input-change" accept=".txt,.md,.markdown,.json,.csv,.pdf,.docx,.xlsx,.xls,.ods,.pptx,text/*" multiple hidden>
                 </div>
                 <div class="model-wrap">
-                  <select class="model-select" id="chat-model-select" hidden>
-                    <option value="google/gemini-3.1-flash-lite">Gemini 3.1 Flash Lite</option>
-                    <option value="openai/gpt-4.1-mini">GPT-4.1 Mini</option>
-                    <option value="anthropic/claude-haiku-4.5">Claude Haiku 4.5</option>
-                  </select>
+                  <select class="model-select" id="chat-model-select" hidden></select>
                   <button class="model-picker-btn" id="model-picker-btn" data-action="toggle-model-picker" title="Select model">
                     <span class="model-picker-label" id="model-picker-label">Select model</span>
                     ${icForPanelTemplate.modelPickerChevron10}
                   </button>
                   <div class="model-picker-dropdown" id="model-picker-dropdown">
                     <div class="mp-search-row">
-                      <input type="text" class="mp-search" id="model-picker-search" data-action="filter-models" placeholder="Search models" autocomplete="off" spellcheck="false" />
+                      <input type="text" class="mp-search" id="model-picker-search" data-action="filter-models" placeholder="Search models" autocomplete="off" spellcheck="false" role="combobox" aria-label="Search models" aria-controls="model-picker-list" aria-expanded="true" aria-autocomplete="list" />
                       <button class="s-clear mp-search-clear" data-action="clear-search" data-search-id="model-picker-search" title="Clear">${icForPanelTemplate.x10}</button>
                     </div>
                     <div class="mp-filter-row">
@@ -244,7 +240,7 @@
                       </label>
                       <button type="button" class="mp-price-clear" id="mp-price-clear" data-action="clear-price-filters" title="Clear price caps" aria-label="Clear price caps">${icForPanelTemplate.x10}</button>
                     </div>
-                    <div class="mp-list" id="model-picker-list"></div>
+                    <div class="mp-list" id="model-picker-list" role="listbox" aria-label="Models"></div>
                     <div class="mp-empty" id="model-picker-empty" hidden>No matching models</div>
                   </div>
                 </div>
@@ -558,12 +554,7 @@
                 <strong>Default chat model</strong>
                 <span>Used for new conversations</span>
               </div>
-              <select class="stg-select" id="settings-default-model-select" data-action="save-default-model">
-                <option value="anthropic/claude-sonnet-4-5">Claude Sonnet 4.5</option>
-                <option value="openai/gpt-4.1">GPT-4.1</option>
-                <option value="openai/gpt-4.1-mini">GPT-4.1 Mini</option>
-                <option value="google/gemini-2.5-pro">Gemini 2.5 Pro</option>
-              </select>
+              <select class="stg-select" id="settings-default-model-select" data-action="save-default-model"></select>
             </div>
             <div class="stg-row">
               <div class="stg-label">

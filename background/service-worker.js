@@ -2094,6 +2094,25 @@ async function handleAgentWebSearchForServiceWorker(msgForSearch, sendResponseFo
   }
 }
 
+// How to write each question, shared by the generator and the fixer so a fixed question meets the
+// same standard. Neither call needs the source for these.
+var QUESTION_WRITING_RULES_FOR_SERVICE_WORKER = [
+  'Multiple-choice options:',
+  '- Wrong options must be believable to someone who has not learned the material and clearly wrong to someone who has. Draw them from related terms, common misconceptions, or other facts in the same field. No joke options.',
+  '- Options must not overlap or contain one another. For a numeric answer, use distinct values, or ranges that do not overlap.',
+  '- Write all four options in the same grammatical form, at a similar length and level of detail. The correct option must not stand out as the longest, the most specific, or the most carefully qualified, and must not repeat a distinctive word from the question that the wrong options lack.',
+  '- The options are shuffled before the quiz shows them. Never write "all of the above", "none of the above", or an option that refers to another option by its letter or position.',
+  '',
+  'Fill-in-the-blank answers:',
+  '- Blank one key term, name, or number of at most three words, never a common word. The rest of the sentence must leave only one answer that fits.',
+  '- An answer is marked correct only when it matches correctAnswer or an entry in alternativeAnswers exactly, after trimming spaces and, unless caseSensitive is true, ignoring case. Put the most natural form in correctAnswer, and list in alternativeAnswers every other form that a reader who knows the answer might type: singular and plural, with and without a leading "the" or "a", digits and words ("3" and "three"), an abbreviation and its full form, and US and UK spellings. Do not list answers that are close but wrong.',
+  '- Set caseSensitive to true only when case changes the meaning, as with chemical symbols or code. Otherwise set it to false.',
+  '',
+  'Explanation and title:',
+  '- The explanation is shown only after a wrong answer, still without the source, so the self-containment rules apply to it too. In one to three sentences, say why the correct answer is right and, for MCQ, why the most tempting wrong option is wrong. Refer to options by their text, never by letter or position.',
+  '- The title is a short label for the question, used as its display name. It must not contain or hint at the correct answer.'
+];
+
 function validateQuestionForServiceWorker(q) {
   var issues = [];
   if (typeof q.questionText !== 'string' || !q.questionText.trim()) {
@@ -2159,7 +2178,9 @@ function writeSecondaryLlmLogForServiceWorker(entry) {
   } catch (e) { /* silent */ }
 }
 
-async function fixQuestionForServiceWorker(question, issues, apiKey, model) {
+// signal is the generate request's: stopping the run cancels the fix too, so it is not billed for a
+// question nobody will save.
+async function fixQuestionForServiceWorker(question, issues, apiKey, model, signal) {
   var systemPromptForFix = [
     'You are a quiz question fixer. A generated quiz question failed validation. Regenerate the question from scratch, fixing all reported issues while preserving its topic and intent.',
     '',
@@ -2169,12 +2190,12 @@ async function fixQuestionForServiceWorker(question, issues, apiKey, model) {
     'Rules:',
     '- type must be "mcq" or "fitb".',
     '- For MCQ: exactly 4 options, exactly 1 isCorrect:true, empty correctAnswer and alternativeAnswers.',
-    '- For FITB: options:[], non-empty correctAnswer, questionText must contain "___", alternatives in alternativeAnswers.',
-    '- The title must not contain or reveal the correct answer.',
+    '- For FITB: options:[], non-empty correctAnswer, questionText must contain exactly one blank written as "___", alternatives in alternativeAnswers.',
     '- The question must be fully self-contained: it will be attempted with no access to the source material. Embed any needed context in the questionText and name the subject or topic it concerns.',
     '- Do not reference the source or its structure (no "according to the passage", "the text above", "the document", "as mentioned", "the author", etc.), and do not refer to a framework, model, theory, argument, or claim as if the reader already knows it (no bare "this hiring model", "the philosophy", "the stated alternative"); introduce or attribute any such idea inside the question and restate the relevant facts.',
-    '- Do not include any text outside the JSON object.'
-  ].join('\n');
+    '- Do not include any text outside the JSON object.',
+    ''
+  ].concat(QUESTION_WRITING_RULES_FOR_SERVICE_WORKER).join('\n');
   var userMsgForFix = 'Original question:\n' + JSON.stringify(question, null, 2) + '\n\nIssues to fix:\n' + issues.map(function (i) { return '- ' + i; }).join('\n');
   var fixLogStartForServiceWorker = Date.now();
   var fixRequestMessagesForLog = [
@@ -2189,8 +2210,10 @@ async function fixQuestionForServiceWorker(question, issues, apiKey, model) {
     var respForFix = null;
     var lastErrForFix = null;
     for (var retryForFix = 0; retryForFix <= MAX_RETRIES_FOR_FIX; retryForFix++) {
-      if (retryForFix > 0) {
-        await new Promise(function (resolve) { setTimeout(resolve, RETRY_DELAYS_FOR_FIX[retryForFix - 1]); });
+      if (retryForFix > 0) await delayForServiceWorker(RETRY_DELAYS_FOR_FIX[retryForFix - 1], signal);
+      if (signal && signal.aborted) {
+        writeSecondaryLlmLogForServiceWorker({ requestType: 'quiz-fix', startTime: fixLogStartForServiceWorker, model: model, status: 'cancelled', requestMessages: fixRequestMessagesForLog, apiParams: fixApiParamsForLog, responseContent: '' });
+        return null;
       }
       lastErrForFix = null;
       try {
@@ -2209,7 +2232,8 @@ async function fixQuestionForServiceWorker(question, issues, apiKey, model) {
               { role: 'system', content: systemPromptForFix },
               { role: 'user', content: userMsgForFix }
             ]
-          })
+          }),
+          signal: signal || undefined
         });
         if (!respForFix.ok && RETRYABLE_FOR_FIX.indexOf(respForFix.status) !== -1 && retryForFix < MAX_RETRIES_FOR_FIX) {
           lastErrForFix = new Error('HTTP ' + respForFix.status);
@@ -2218,6 +2242,10 @@ async function fixQuestionForServiceWorker(question, issues, apiKey, model) {
         }
         break;
       } catch (fetchErrForFix) {
+        if (signal && signal.aborted) {
+          writeSecondaryLlmLogForServiceWorker({ requestType: 'quiz-fix', startTime: fixLogStartForServiceWorker, model: model, status: 'cancelled', requestMessages: fixRequestMessagesForLog, apiParams: fixApiParamsForLog, responseContent: '' });
+          return null;
+        }
         lastErrForFix = fetchErrForFix;
         if (retryForFix >= MAX_RETRIES_FOR_FIX) break;
       }
@@ -2256,12 +2284,13 @@ async function fixQuestionForServiceWorker(question, issues, apiKey, model) {
     }
     return (parsedForFix && typeof parsedForFix === 'object') ? parsedForFix : null;
   } catch (e) {
+    var cancelledForFix = Boolean(signal && signal.aborted);
     writeSecondaryLlmLogForServiceWorker({
       requestType: 'quiz-fix',
       startTime: fixLogStartForServiceWorker,
       model: model,
-      status: 'error',
-      errorMessage: (e && e.message) || 'Question fix failed.',
+      status: cancelledForFix ? 'cancelled' : 'error',
+      errorMessage: cancelledForFix ? '' : ((e && e.message) || 'Question fix failed.'),
       requestMessages: fixRequestMessagesForLog,
       apiParams: fixApiParamsForLog,
       responseContent: ''
@@ -2440,7 +2469,7 @@ async function reviewQuestionsSelfContainmentForServiceWorker(questions, apiKey,
 
 async function handleAgentGenerateQuestionsForServiceWorker(msgForGenQ, sendResponseForGenQ) {
   var contentForGenQ = typeof msgForGenQ.content === 'string' ? msgForGenQ.content.trim() : '';
-  var countForGenQ = (typeof msgForGenQ.count === 'number' && msgForGenQ.count > 0) ? Math.floor(msgForGenQ.count) : 1;
+  var countForGenQ = (typeof msgForGenQ.count === 'number' && msgForGenQ.count > 0) ? Math.floor(msgForGenQ.count) : 5;
   var focusForGenQ = typeof msgForGenQ.focus === 'string' ? msgForGenQ.focus.trim() : '';
   var validQTypesForGenQ = ['mcq', 'fitb', 'mix'];
   var questionTypeForGenQ = (typeof msgForGenQ.questionType === 'string' && validQTypesForGenQ.indexOf(msgForGenQ.questionType) !== -1) ? msgForGenQ.questionType : 'mix';
@@ -2467,23 +2496,32 @@ async function handleAgentGenerateQuestionsForServiceWorker(msgForGenQ, sendResp
     'Return ONLY a JSON object with this exact shape and no other text:',
     '{"questions":[{"title":"...","type":"mcq","questionText":"...","options":[{"text":"...","isCorrect":false},{"text":"...","isCorrect":true},{"text":"...","isCorrect":false},{"text":"...","isCorrect":false}],"correctAnswer":"","alternativeAnswers":[],"caseSensitive":false,"explanation":"..."}]}',
     '',
-    'Rules:',
+    'Format rules:',
     '- type must be "mcq" or "fitb".',
     '- For MCQ: populate options with exactly 4 entries; set isCorrect:true on exactly one; leave correctAnswer and alternativeAnswers empty.',
-    '- For FITB: set options to []; set correctAnswer to the expected answer; list accepted variants in alternativeAnswers. The questionText MUST contain at least one sequence of three or more underscores (e.g. "___") to mark the blank.',
-    '- title is a short label for the question (used as its display name).',
-    '- explanation briefly explains the correct answer.',
+    '- For FITB: set options to []; set correctAnswer to the expected answer; list accepted variants in alternativeAnswers. The questionText MUST contain exactly one blank, written as three or more underscores (e.g. "___"), because the reader types a single answer.',
+    '- Do not include any text outside the JSON object.',
+    '',
+    'Choosing what to ask:',
+    '- Ask about the ideas that matter most in the material: its key concepts, definitions, causes and effects, distinctions, and the steps of any process. Skip incidental details, such as a number that appears only inside an example, unless the material is about that detail.',
+    '- Spread the questions across the whole material rather than drawing them all from its opening, and make each one test a different fact or idea. Never ask the same thing twice in different words.',
+    '- Where the material allows, include questions that ask the reader to apply an idea to a case or to tell two ideas apart, not only to recall a definition.',
+    '- Use only what the material states. Do not add facts from outside it, and do not correct it from your own knowledge. When it presents an opinion, a prediction, or a disputed claim, attribute that claim in the question to whoever holds it rather than stating it as fact.',
+    '- Each question must have exactly one answer that someone who has learned the material would agree is correct. Ask about one thing per question. Avoid negative questions such as "Which is NOT..."; when one cannot be avoided, write NOT in capitals.',
+    '',
+    'Self-contained questions:',
     '- Each question MUST be fully self-contained: the user attempts it later with NO access to the source material, seeing only the question itself (and, for MCQ, its options). Write every question so it can be understood and answered on its own.',
     '- Embed any context needed to answer directly in the questionText, and name the specific subject, topic, or domain the question concerns so the reader is not left guessing what it is about. For example, prefer "In the HTTP protocol, which status code indicates a requested resource was not found?" over "Which status code indicates a requested resource was not found?".',
     '- Do NOT reference the source material or its structure. This covers two patterns. (1) Document-structure references: avoid phrases such as "according to the passage", "the text above", "in the document", "as mentioned", "the author", "the article", "this section", or "the example shown". (2) Referring to a coined idea, framework, model, theory, argument, or claim as if the reader already knows it: avoid bare phrases such as "in this hiring model", "the philosophy argues", "the framework defines", "the stated alternative", or "the proposed approach". The reader has not seen the source, so a bare "this model" or "the philosophy" means nothing to them.',
     '- Do not handle a source-specific idea (a named framework, model, theory, argument, or claim) by stripping it out; instead introduce or attribute it inside the question stem before asking about it, so the reader knows what is being discussed and the question carries its own premise.',
-    '- Do not include any text outside the JSON object.',
+    ''
+  ].concat(QUESTION_WRITING_RULES_FOR_SERVICE_WORKER, [
     '',
     'Examples of self-contained questions (the bad versions reference unseen material or omit the subject; the good versions stand on their own):',
     'MCQ bad: "According to the text, which layer does this protocol operate at?". MCQ good: "In the OSI networking model, at which layer does the TCP protocol operate?" with options "Transport layer" (correct), "Network layer", "Session layer", and "Application layer".',
-    'FITB bad: "As the passage states, the powerhouse of the cell is the ___.". FITB good: "In biology, the organelle known as the powerhouse of the cell is the ___." with correctAnswer "mitochondrion".',
+    'FITB bad: "As the passage states, the powerhouse of the cell is the ___.". FITB good: "In biology, the organelle known as the powerhouse of the cell is the ___." with correctAnswer "mitochondrion" and alternativeAnswers "mitochondria" and "the mitochondrion".',
     'Source-specific idea bad: "What does AI-mandatory mean in this hiring model?" (assumes the reader already knows the model). Good: "A proposed hiring framework sorts roles by how much they depend on AI tools, using categories such as AI-mandatory. In that framework, what does AI-mandatory mean?" with the four options. Introduce or attribute the framework first so the question stands on its own.'
-  ].filter(function (l) { return l !== null; }).join('\n');
+  ]).filter(function (l) { return l !== null; }).join('\n');
 
   var genQLogStartForServiceWorker = Date.now();
   var genQLoggedForServiceWorker = false;
@@ -2607,31 +2645,37 @@ async function handleAgentGenerateQuestionsForServiceWorker(msgForGenQ, sendResp
       return;
     }
 
-    var validatedForGenQ = [];
-    var validationErrorsForGenQ = [];
-    for (var viForGenQ = 0; viForGenQ < questionsForGenQ.length; viForGenQ++) {
-      var qForGenQ = questionsForGenQ[viForGenQ];
+    // The fixes run in parallel, so several failed questions take as long as one does. Results are
+    // collected in the generator's order.
+    var outcomesForGenQ = await Promise.all(questionsForGenQ.map(async function (qForGenQ, viForGenQ) {
       var idxLabelForGenQ = 'Question ' + (viForGenQ + 1);
       if (!qForGenQ || typeof qForGenQ !== 'object') {
-        validationErrorsForGenQ.push(idxLabelForGenQ + ': not an object');
-        continue;
+        return { error: idxLabelForGenQ + ': not an object' };
       }
       var issuesForGenQ = validateQuestionForServiceWorker(qForGenQ);
-      if (issuesForGenQ.length > 0) {
-        var fixedForGenQ = await fixQuestionForServiceWorker(qForGenQ, issuesForGenQ, apiKeyForGenQ, modelForGenQ);
-        if (!fixedForGenQ) {
-          validationErrorsForGenQ.push(idxLabelForGenQ + ': fix attempt returned no result (original issues: ' + issuesForGenQ.join('; ') + ')');
-          continue;
-        }
-        var retryIssuesForGenQ = validateQuestionForServiceWorker(fixedForGenQ);
-        if (retryIssuesForGenQ.length > 0) {
-          validationErrorsForGenQ.push(idxLabelForGenQ + ': still invalid after fix attempt (' + retryIssuesForGenQ.join('; ') + ')');
-          continue;
-        }
-        qForGenQ = fixedForGenQ;
+      if (issuesForGenQ.length === 0) return { question: qForGenQ };
+      var fixedForGenQ = await fixQuestionForServiceWorker(qForGenQ, issuesForGenQ, apiKeyForGenQ, modelForGenQ, requestRecordForGenQ ? requestRecordForGenQ.signal : null);
+      if (!fixedForGenQ) {
+        return { error: idxLabelForGenQ + ': fix attempt returned no result (original issues: ' + issuesForGenQ.join('; ') + ')' };
       }
-      validatedForGenQ.push(qForGenQ);
+      var retryIssuesForGenQ = validateQuestionForServiceWorker(fixedForGenQ);
+      if (retryIssuesForGenQ.length > 0) {
+        return { error: idxLabelForGenQ + ': still invalid after fix attempt (' + retryIssuesForGenQ.join('; ') + ')' };
+      }
+      return { question: fixedForGenQ };
+    }));
+    if (requestRecordForGenQ && requestRecordForGenQ.signal.aborted) {
+      logGenQOnceForServiceWorker({ status: 'cancelled' });
+      sendResponseForGenQ({ ok: false, cancelled: true, error: 'Cancelled' });
+      return;
     }
+
+    var validatedForGenQ = [];
+    var validationErrorsForGenQ = [];
+    outcomesForGenQ.forEach(function (outcomeForGenQ) {
+      if (outcomeForGenQ.question) validatedForGenQ.push(outcomeForGenQ.question);
+      else validationErrorsForGenQ.push(outcomeForGenQ.error);
+    });
 
     if (validatedForGenQ.length === 0) {
       sendResponseForGenQ({ ok: false, error: 'All generated questions failed validation: ' + validationErrorsForGenQ.join('; ') });

@@ -6003,6 +6003,7 @@
       if (dropdown) {
         dropdown.querySelectorAll('.mp-item').forEach(function (item) {
           item.classList.toggle('active', item.dataset.modelId === currentModelId);
+          item.setAttribute('aria-selected', item.dataset.modelId === currentModelId ? 'true' : 'false');
         });
       }
     }
@@ -6046,6 +6047,7 @@
       const listForDropdown = root.getElementById('model-picker-list');
       if (!listForDropdown) return;
       listForDropdown.innerHTML = '';
+      let optionCountForDropdown = 0;
       providerKeys.forEach(function (providerKey) {
         const models = pickedByProvider[providerKey];
         if (!models || models.length === 0) return;
@@ -6054,10 +6056,18 @@
         const groupLabel = document.createElement('div');
         groupLabel.className = 'mp-group-label';
         groupLabel.textContent = getProviderLabel(providerKey, models);
+        groupLabel.setAttribute('aria-hidden', 'true');
+        group.setAttribute('role', 'group');
+        group.setAttribute('aria-label', groupLabel.textContent);
         group.appendChild(groupLabel);
         models.forEach(function (m) {
           const btn = document.createElement('button');
           btn.className = 'mp-item';
+          // Rows are reached with the arrow keys from the search box, not with Tab.
+          btn.id = 'mp-option-' + (optionCountForDropdown++);
+          btn.tabIndex = -1;
+          btn.setAttribute('role', 'option');
+          btn.setAttribute('aria-selected', m.id === effectiveSelected ? 'true' : 'false');
           if (m.id === effectiveSelected) btn.classList.add('active');
           btn.dataset.action = 'select-model';
           btn.dataset.modelId = m.id;
@@ -6143,7 +6153,169 @@
         countForFilter.classList.toggle('hidden', !narrowedForFilter);
       }
       syncSearchWrapValueStateForPanelRuntime('model-picker-search');
+      resetModelPickerPositionForPanelRuntime(
+        listForFilter,
+        Boolean(queryForFilter) || reasoningOnlyForFilter || visionStateForFilter !== 'all' || priceCapActiveForFilter
+      );
     }
+
+    // Rows a filter has not hidden. A group is hidden only when every row in it is, so checking
+    // the rows is enough. Works on the whole list or on one group.
+    function getVisibleModelPickerRowsForPanelRuntime(containerForRows) {
+      if (!containerForRows) return [];
+      return Array.prototype.filter.call(containerForRows.querySelectorAll('.mp-item'), function (rowForVisible) {
+        return rowForVisible.style.display !== 'none';
+      });
+    }
+
+    // One row at a time carries .highlighted, and it is the row Enter picks. The search box keeps
+    // focus, so aria-activedescendant is what tells a screen reader which row that is.
+    function setModelPickerHighlightForPanelRuntime(rowForHighlight) {
+      const listForHighlight = root.getElementById('model-picker-list');
+      if (!listForHighlight) return;
+      listForHighlight.querySelectorAll('.mp-item.highlighted').forEach(function (rowForClear) {
+        if (rowForClear !== rowForHighlight) rowForClear.classList.remove('highlighted');
+      });
+      if (rowForHighlight) rowForHighlight.classList.add('highlighted');
+      const searchForHighlight = root.getElementById('model-picker-search');
+      if (!searchForHighlight) return;
+      if (rowForHighlight && rowForHighlight.id) searchForHighlight.setAttribute('aria-activedescendant', rowForHighlight.id);
+      else searchForHighlight.removeAttribute('aria-activedescendant');
+    }
+
+    // Runs after every filter pass. A filtered list starts at the top with its first row
+    // highlighted, so the best match shows first and Enter picks it. The unfiltered list, on open
+    // or once the search and filters are cleared, is centred on the current model, which can sit
+    // far below the first rows, and that row is highlighted. Scrolling sets scrollTop on the list
+    // instead of calling scrollIntoView, which can also scroll the page the panel sits on.
+    function resetModelPickerPositionForPanelRuntime(listForReset, filteredForReset) {
+      if (!listForReset) return;
+      const rowsForReset = getVisibleModelPickerRowsForPanelRuntime(listForReset);
+      let currentRowForReset = null;
+      if (!filteredForReset) {
+        const chatSelectForReset = root.getElementById('chat-model-select');
+        const currentIdForReset = chatSelectForReset ? chatSelectForReset.value : '';
+        if (currentIdForReset) {
+          currentRowForReset = rowsForReset.find(function (rowForFind) {
+            return rowForFind.dataset.modelId === currentIdForReset;
+          }) || null;
+        }
+      }
+      setModelPickerHighlightForPanelRuntime(currentRowForReset || rowsForReset[0] || null);
+      if (listForReset.clientHeight === 0) return;
+      if (!currentRowForReset) {
+        listForReset.scrollTop = 0;
+        return;
+      }
+      const listRectForReset = listForReset.getBoundingClientRect();
+      const rowRectForReset = currentRowForReset.getBoundingClientRect();
+      const rowTopForReset = rowRectForReset.top - listRectForReset.top - listForReset.clientTop + listForReset.scrollTop;
+      listForReset.scrollTop = Math.max(0, rowTopForReset - (listForReset.clientHeight - rowRectForReset.height) / 2);
+    }
+
+    // Scrolls the list the least distance that shows the row. A row that is the first in its group
+    // brings the group's provider label into view with it.
+    function revealModelPickerRowForPanelRuntime(listForReveal, rowForReveal) {
+      if (!listForReveal || !rowForReveal || listForReveal.clientHeight === 0) return;
+      const listRectForReveal = listForReveal.getBoundingClientRect();
+      const viewTopForReveal = listRectForReveal.top + listForReveal.clientTop;
+      const viewBottomForReveal = viewTopForReveal + listForReveal.clientHeight;
+      const rowRectForReveal = rowForReveal.getBoundingClientRect();
+      const groupForReveal = rowForReveal.closest('.mp-group');
+      const firstInGroupForReveal = groupForReveal
+        && getVisibleModelPickerRowsForPanelRuntime(groupForReveal)[0] === rowForReveal;
+      const topForReveal = firstInGroupForReveal ? groupForReveal.getBoundingClientRect().top : rowRectForReveal.top;
+      if (topForReveal < viewTopForReveal) {
+        listForReveal.scrollTop -= viewTopForReveal - topForReveal;
+      } else if (rowRectForReveal.bottom > viewBottomForReveal) {
+        listForReveal.scrollTop += rowRectForReveal.bottom - viewBottomForReveal;
+      }
+    }
+
+    // The arrow keys step one row and wrap at the ends. The page keys step a listful and stop there.
+    function moveModelPickerHighlightForPanelRuntime(stepForMove, wrapForMove) {
+      const listForMove = root.getElementById('model-picker-list');
+      const rowsForMove = getVisibleModelPickerRowsForPanelRuntime(listForMove);
+      if (!rowsForMove.length) return;
+      const fromForMove = rowsForMove.indexOf(listForMove.querySelector('.mp-item.highlighted'));
+      let toForMove;
+      if (fromForMove === -1) {
+        toForMove = stepForMove > 0 ? 0 : rowsForMove.length - 1;
+      } else if (wrapForMove) {
+        toForMove = (((fromForMove + stepForMove) % rowsForMove.length) + rowsForMove.length) % rowsForMove.length;
+      } else {
+        toForMove = Math.min(rowsForMove.length - 1, Math.max(0, fromForMove + stepForMove));
+      }
+      setModelPickerHighlightForPanelRuntime(rowsForMove[toForMove]);
+      revealModelPickerRowForPanelRuntime(listForMove, rowsForMove[toForMove]);
+    }
+
+    // Enter picks the highlighted row and moves focus to the message box, where the next key press
+    // most likely belongs. The picker's own button takes focus when the message box is disabled.
+    function chooseHighlightedModelForPanelRuntime() {
+      const listForChoose = root.getElementById('model-picker-list');
+      const rowForChoose = listForChoose ? listForChoose.querySelector('.mp-item.highlighted') : null;
+      if (!rowForChoose || rowForChoose.style.display === 'none') return;
+      selectModelForPanelRuntime(rowForChoose.dataset.modelId);
+      const composerForChoose = root.querySelector('.chat-textarea');
+      const buttonForChoose = root.getElementById('model-picker-btn');
+      if (composerForChoose && !composerForChoose.disabled) composerForChoose.focus();
+      else if (buttonForChoose) buttonForChoose.focus();
+    }
+
+    // The search box keeps focus while the picker is open. The arrow and page keys move the
+    // highlighted row, Enter picks it, and Esc closes the picker and returns focus to its button.
+    // Bound on the dropdown, below the mount, so this runs before the mount's shortcut handler,
+    // which skips an event that is already prevented. Esc is taken from anywhere in the dropdown;
+    // the other keys only from the search box, so the price fields keep their own arrow keys.
+    (function bindModelPickerKeysForPanelRuntime() {
+      const dropdownForKeys = root.getElementById('model-picker-dropdown');
+      const listForKeys = root.getElementById('model-picker-list');
+      if (!dropdownForKeys || !listForKeys) return;
+      dropdownForKeys.addEventListener('keydown', function (evtForPickerKey) {
+        if (evtForPickerKey.defaultPrevented) return;
+        // An IME uses Esc and Enter to cancel or commit a candidate.
+        if (evtForPickerKey.isComposing || evtForPickerKey.keyCode === 229) return;
+        if (evtForPickerKey.metaKey || evtForPickerKey.ctrlKey || evtForPickerKey.altKey || evtForPickerKey.shiftKey) return;
+        const keyForPicker = evtForPickerKey.key;
+        if (keyForPicker === 'Escape') {
+          evtForPickerKey.preventDefault();
+          closeAllDropdownsForPanelRuntime();
+          const buttonForEscape = root.getElementById('model-picker-btn');
+          if (buttonForEscape) buttonForEscape.focus();
+          return;
+        }
+        if (evtForPickerKey.target !== root.getElementById('model-picker-search')) return;
+        if (keyForPicker === 'ArrowDown' || keyForPicker === 'ArrowUp') {
+          evtForPickerKey.preventDefault();
+          moveModelPickerHighlightForPanelRuntime(keyForPicker === 'ArrowDown' ? 1 : -1, true);
+        } else if (keyForPicker === 'PageDown' || keyForPicker === 'PageUp') {
+          evtForPickerKey.preventDefault();
+          const rowForPage = getVisibleModelPickerRowsForPanelRuntime(listForKeys)[0];
+          const rowsPerPageForPicker = rowForPage && rowForPage.offsetHeight > 0
+            ? Math.max(1, Math.floor(listForKeys.clientHeight / rowForPage.offsetHeight) - 1)
+            : 1;
+          moveModelPickerHighlightForPanelRuntime(keyForPicker === 'PageDown' ? rowsPerPageForPicker : -rowsPerPageForPicker, false);
+        } else if (keyForPicker === 'Enter') {
+          evtForPickerKey.preventDefault();
+          chooseHighlightedModelForPanelRuntime();
+        }
+      });
+      // The pointer moves the same highlight, so a hovered row and a keyboard row never show at
+      // once. A move that leaves the pointer where it was is ignored, so scrolling the list under
+      // a still pointer cannot take the highlight from a row reached by keyboard.
+      let lastPointerXForPicker = null;
+      let lastPointerYForPicker = null;
+      listForKeys.addEventListener('mousemove', function (evtForPickerHover) {
+        if (evtForPickerHover.clientX === lastPointerXForPicker && evtForPickerHover.clientY === lastPointerYForPicker) return;
+        lastPointerXForPicker = evtForPickerHover.clientX;
+        lastPointerYForPicker = evtForPickerHover.clientY;
+        const rowForHover = evtForPickerHover.target && typeof evtForPickerHover.target.closest === 'function'
+          ? evtForPickerHover.target.closest('.mp-item')
+          : null;
+        if (rowForHover && !rowForHover.classList.contains('highlighted')) setModelPickerHighlightForPanelRuntime(rowForHover);
+      });
+    })();
 
     function toggleReasoningFilterForPanelRuntime() {
       reasoningFilterActiveForPanelRuntime = !reasoningFilterActiveForPanelRuntime;
@@ -6320,6 +6492,7 @@
         dropdown.classList.remove('open');
         dropdown.querySelectorAll('.mp-item').forEach(function (item) {
           item.classList.toggle('active', item.dataset.modelId === modelId);
+          item.setAttribute('aria-selected', item.dataset.modelId === modelId ? 'true' : 'false');
         });
       }
       if (btn) btn.classList.remove('open');
@@ -13839,33 +14012,22 @@
 
     const SELECTED_IMAGE_MODEL_KEY_FOR_PANEL_RUNTIME = 'abchat_selected_image_model';
 
-    const FALLBACK_IMAGE_MODELS_FOR_PANEL_RUNTIME = [
-      { id: 'google/gemini-3.1-flash-lite',  name: 'Gemini 3.1 Flash Lite',  created: 0 },
-      { id: 'openai/gpt-image-1',                    name: 'GPT Image 1',                    created: 0 },
-      { id: 'google/imagen-4.0-generate-001',        name: 'Imagen 4',                       created: 0 },
-      { id: 'google/imagen-4.0-ultra-generate-001',  name: 'Imagen 4 Ultra',                 created: 0 },
-    ];
-
     const IMAGE_MODEL_PROVIDER_ORDER_FOR_PANEL_RUNTIME = ['openai', 'google', 'stability', 'fal-ai', 'black-forest-labs'];
     // Display order for the chat model picker's provider groups, not an allowlist: a provider absent
     // from this list is still shown, appended after the listed ones in alphabetical key order, so a
     // vendor OpenRouter onboards later needs no code change to appear.
     const CHAT_MODEL_PROVIDER_ORDER_FOR_PANEL_RUNTIME = ['google', 'openai', 'openrouter', 'meta-llama', 'meta', 'anthropic', 'qwen', 'xai', 'x-ai', 'z-ai', 'deepseek', 'mistralai', 'moonshotai', 'minimax', 'microsoft', 'amazon', 'nvidia', 'perplexity', 'cohere', 'poolside'];
 
-    const FALLBACK_MODELS_FOR_PANEL_RUNTIME = {
-      google: [
-        { id: 'google/gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite' },
-      ],
-      openai: [
-        // { id: 'openai/gpt-4.1-nano', name: 'GPT-4.1 Nano' },
-        { id: 'openai/gpt-4.1-mini', name: 'GPT-4.1 Mini' },
-      ],
-      anthropic: [
-        { id: 'anthropic/claude-haiku-4.5', name: 'Claude Haiku 4.5' },
-        { id: 'anthropic/claude-sonnet-4.6', name: 'Claude Sonnet 4.6' },
-      ],
-    };
+    // The chat model used when none has been saved. There is no image model default: generate_image
+    // refuses to run until the user picks one.
     const DEFAULT_MODEL_FOR_PANEL_RUNTIME = 'google/gemini-3.1-flash-lite';
+    // There is no hard-coded model list to fall back on. When OpenRouter's list cannot be shown,
+    // the model selects say why instead. Hard-coded ids go stale, and one once put a chat model in
+    // the image list.
+    const MODEL_LIST_UNAVAILABLE_TEXT_FOR_PANEL_RUNTIME = {
+      'no-key': 'Add your OpenRouter API key to load models',
+      'load-failed': 'Could not load the model list. Open Settings to try again.'
+    };
     var loadedGlobalDefaultModelForPanelRuntime = '';
     var loadedImageModelsForPanelRuntime = [];
     var loadedChatModelsForPanelRuntime = [];
@@ -14097,31 +14259,29 @@
       });
     }
 
+    // Returns { chatModels, imageModels, unavailableReason }. When both lists are empty,
+    // unavailableReason is 'no-key' or 'load-failed', a key into
+    // MODEL_LIST_UNAVAILABLE_TEXT_FOR_PANEL_RUNTIME.
     async function getAllModelsForPanelRuntime(apiKey) {
       const cached = await getCachedModelsForPanelRuntime();
       if (cached) return cached;
-      if (apiKey) {
-        try {
-          const agentNsForModels = globalThis.ABChatAgent || {};
-          const clientForModels = agentNsForModels.client || {};
-          if (typeof clientForModels.fetchRawModels === 'function') {
-            const rawModels = await clientForModels.fetchRawModels(apiKey);
-            if (Array.isArray(rawModels) && rawModels.length > 0) {
-              const chatModels = filterChatModelsForPanelRuntime(rawModels);
-              const imageModels = filterImageModelsForPanelRuntime(rawModels);
-              await saveCachedModelsForPanelRuntime(chatModels, imageModels);
-              return { chatModels, imageModels };
-            }
+      if (!apiKey) return { chatModels: [], imageModels: [], unavailableReason: 'no-key' };
+      try {
+        const agentNsForModels = globalThis.ABChatAgent || {};
+        const clientForModels = agentNsForModels.client || {};
+        if (typeof clientForModels.fetchRawModels === 'function') {
+          const rawModels = await clientForModels.fetchRawModels(apiKey);
+          if (Array.isArray(rawModels) && rawModels.length > 0) {
+            const chatModels = filterChatModelsForPanelRuntime(rawModels);
+            const imageModels = filterImageModelsForPanelRuntime(rawModels);
+            await saveCachedModelsForPanelRuntime(chatModels, imageModels);
+            return { chatModels, imageModels };
           }
-        } catch (e) {
-          const stale = await getStaleCachedModelsForPanelRuntime();
-          if (stale) return stale;
         }
-      }
-      return {
-        chatModels: Object.values(FALLBACK_MODELS_FOR_PANEL_RUNTIME).flat(),
-        imageModels: FALLBACK_IMAGE_MODELS_FOR_PANEL_RUNTIME
-      };
+      } catch (e) {}
+      const stale = await getStaleCachedModelsForPanelRuntime();
+      if (stale) return stale;
+      return { chatModels: [], imageModels: [], unavailableReason: 'load-failed' };
     }
 
     function getModelProviderKeyForPanelRuntime(model) {
@@ -14235,7 +14395,7 @@
       return rawModelNameForDisplay;
     }
 
-    function populateModelSelectsForPanelRuntime(models, selectedId) {
+    function populateModelSelectsForPanelRuntime(models, selectedId, unavailableReason) {
       const chatSelect = root.getElementById('chat-model-select');
       const settingsSelect = root.getElementById('settings-default-model-select');
       const normalizedModels = Array.isArray(models) ? models : [];
@@ -14263,12 +14423,30 @@
         picked.forEach(function (m) { allPickedIds.add(m.id); });
       });
 
-      const resolvedSelectedId = allPickedIds.has(selectedId) ? selectedId : DEFAULT_MODEL_FOR_PANEL_RUNTIME;
+      // With no list to check against, the saved model is kept so a send still uses it. Each select
+      // then holds a disabled line saying why there is no list, and the saved model.
+      const listEmptyForSelects = normalizedModels.length === 0;
+      const unavailableTextForSelects = listEmptyForSelects
+        ? (MODEL_LIST_UNAVAILABLE_TEXT_FOR_PANEL_RUNTIME[unavailableReason] || MODEL_LIST_UNAVAILABLE_TEXT_FOR_PANEL_RUNTIME['load-failed'])
+        : '';
+      const resolvedSelectedId = (allPickedIds.has(selectedId) || (listEmptyForSelects && selectedId)) ? selectedId : DEFAULT_MODEL_FOR_PANEL_RUNTIME;
       const effectiveSelected = resolvedSelectedId || DEFAULT_MODEL_FOR_PANEL_RUNTIME;
 
       [chatSelect, settingsSelect].forEach(function (sel) {
         if (!sel) return;
         sel.innerHTML = '';
+        if (listEmptyForSelects) {
+          const unavailableOptForSelect = document.createElement('option');
+          unavailableOptForSelect.disabled = true;
+          unavailableOptForSelect.textContent = unavailableTextForSelects;
+          sel.appendChild(unavailableOptForSelect);
+          const savedOptForSelect = document.createElement('option');
+          savedOptForSelect.value = effectiveSelected;
+          savedOptForSelect.textContent = effectiveSelected;
+          savedOptForSelect.selected = true;
+          sel.appendChild(savedOptForSelect);
+          return;
+        }
         providerKeys.forEach(function (providerKeyForGroup) {
           const pickedForGroup = pickedByProvider[providerKeyForGroup];
           if (!pickedForGroup || pickedForGroup.length === 0) return;
@@ -14288,6 +14466,9 @@
           sel.appendChild(optgroupForModels);
         });
       });
+
+      const emptyNoteForPicker = root.getElementById('model-picker-empty');
+      if (emptyNoteForPicker) emptyNoteForPicker.textContent = unavailableTextForSelects || 'No matching models';
 
       buildModelPickerDropdownForPanelRuntime(
         pickedByProvider,
@@ -14324,7 +14505,10 @@
       });
     }
 
-    function populateImageModelSelectForPanelRuntime(models, selectedId) {
+    // The saved model is always shown, even when the loaded list does not include it, because
+    // generate_image uses the saved model regardless. Showing "Choose a model" instead would hide
+    // the model that actually runs.
+    function populateImageModelSelectForPanelRuntime(models, selectedId, unavailableReason) {
       const sel = root.getElementById('settings-image-model-select');
       if (!sel) return;
       const normalizedForImage = Array.isArray(models) ? models : [];
@@ -14338,13 +14522,37 @@
       const otherKeys = Object.keys(byProviderForImage).filter(function (k) { return !IMAGE_MODEL_PROVIDER_ORDER_FOR_PANEL_RUNTIME.includes(k); }).sort();
       const orderedKeys = knownKeys.concat(otherKeys);
       const allIds = normalizedForImage.map(function (m) { return m.id; });
-      const effectiveSelected = (selectedId && allIds.includes(selectedId)) ? selectedId : '';
+      const savedIdForImage = typeof selectedId === 'string' ? selectedId : '';
       sel.innerHTML = '';
+      if (normalizedForImage.length === 0) {
+        const unavailableOptForImage = document.createElement('option');
+        unavailableOptForImage.disabled = true;
+        unavailableOptForImage.textContent = MODEL_LIST_UNAVAILABLE_TEXT_FOR_PANEL_RUNTIME[unavailableReason]
+          || MODEL_LIST_UNAVAILABLE_TEXT_FOR_PANEL_RUNTIME['load-failed'];
+        if (!savedIdForImage) unavailableOptForImage.selected = true;
+        sel.appendChild(unavailableOptForImage);
+        if (savedIdForImage) {
+          const savedOptForImage = document.createElement('option');
+          savedOptForImage.value = savedIdForImage;
+          savedOptForImage.textContent = savedIdForImage;
+          savedOptForImage.selected = true;
+          sel.appendChild(savedOptForImage);
+        }
+        return;
+      }
       const placeholderOptForImage = document.createElement('option');
       placeholderOptForImage.value = '';
       placeholderOptForImage.textContent = '-- Choose a model --';
-      if (!effectiveSelected) placeholderOptForImage.selected = true;
+      if (!savedIdForImage) placeholderOptForImage.selected = true;
       sel.appendChild(placeholderOptForImage);
+      if (savedIdForImage && !allIds.includes(savedIdForImage)) {
+        const unlistedOptForImage = document.createElement('option');
+        unlistedOptForImage.value = savedIdForImage;
+        unlistedOptForImage.textContent = savedIdForImage + ' (not in the current list)';
+        unlistedOptForImage.selected = true;
+        sel.appendChild(unlistedOptForImage);
+      }
+      const effectiveSelected = savedIdForImage;
       orderedKeys.forEach(function (providerKey) {
         const group = byProviderForImage[providerKey];
         group.sort(function (a, b) { return Number(b.created || 0) - Number(a.created || 0); });
@@ -14361,33 +14569,6 @@
         });
         sel.appendChild(optgroupForImage);
       });
-    }
-
-    function getDefaultImageModelIdForPanelRuntime(models) {
-      if (!Array.isArray(models) || models.length === 0) return '';
-      const cheapGemini = models.filter(function (m) {
-        if (!m.id.startsWith('google/') || m.id.indexOf('gemini') === -1) return false;
-        const cost = Number(m.completionCostPerMillion);
-        return Number.isFinite(cost) && cost > 0 && cost < 5;
-      });
-      if (cheapGemini.length > 0) {
-        cheapGemini.sort(function (a, b) { return Number(b.completionCostPerMillion) - Number(a.completionCostPerMillion); });
-        return cheapGemini[0].id;
-      }
-      const standard = models.filter(function (m) {
-        const cost = Number(m.completionCostPerMillion);
-        return Number.isFinite(cost) && cost >= 5 && cost <= 10;
-      });
-      if (standard.length > 0) {
-        standard.sort(function (a, b) { return Number(a.completionCostPerMillion) - Number(b.completionCostPerMillion); });
-        return standard[0].id;
-      }
-      const withImageCost = models.filter(function (m) { return Number.isFinite(m.imageCost) && m.imageCost !== null; });
-      if (withImageCost.length > 0) {
-        withImageCost.sort(function (a, b) { return a.imageCost - b.imageCost; });
-        return withImageCost[0].id;
-      }
-      return models[0].id;
     }
 
     // TTS (speech-output) models are excluded from the default /models catalog and only surface
@@ -14677,20 +14858,16 @@
 
     async function initModelSelectsForPanelRuntime() {
       const apiKey = await getApiKeyForPanelRuntime();
-      const { chatModels, imageModels } = await getAllModelsForPanelRuntime(apiKey);
+      const { chatModels, imageModels, unavailableReason } = await getAllModelsForPanelRuntime(apiKey);
       const selectedModel = await getDefaultModelForPanelRuntime();
-      populateModelSelectsForPanelRuntime(chatModels, selectedModel);
+      populateModelSelectsForPanelRuntime(chatModels, selectedModel, unavailableReason);
       loadedChatModelsForPanelRuntime = Array.isArray(chatModels) ? chatModels : [];
       const chatSelectAfterInit = root.getElementById('chat-model-select');
       if (chatSelectAfterInit) loadedGlobalDefaultModelForPanelRuntime = chatSelectAfterInit.value;
       reapplyActiveChatModelToPickerForPanelRuntime();
       loadedImageModelsForPanelRuntime = imageModels;
-      let imageModel = await getImageModelForPanelRuntime();
-      if (!imageModel && imageModels.length > 0) {
-        imageModel = getDefaultImageModelIdForPanelRuntime(imageModels);
-        if (imageModel) await saveImageModelForPanelRuntime(imageModel);
-      }
-      populateImageModelSelectForPanelRuntime(imageModels, imageModel);
+      const imageModel = await getImageModelForPanelRuntime();
+      populateImageModelSelectForPanelRuntime(imageModels, imageModel, unavailableReason);
       populateTtsModelSelectForPanelRuntime();
     }
 
@@ -16127,6 +16304,8 @@
           return 'Updating memory';
         case 'skill':
           if (args.operation === 'create') return args.title ? 'Saving skill "' + trunc(args.title, 20) + '"' : 'Saving skill';
+          var builtinGuidesForLabel = (globalThis.ABChatAgent || {}).builtinGuides;
+          if (args.operation === 'read' && builtinGuidesForLabel && builtinGuidesForLabel.isReservedSlug(args.slug)) return 'Reading built-in guide';
           if (args.operation === 'read')   return args.slug ? 'Using skill /' + trunc(args.slug, 24) : 'Using skill';
           if (args.operation === 'update') return args.slug ? 'Updating skill /' + trunc(args.slug, 24) : 'Updating skill';
           if (args.operation === 'delete') return args.slug ? 'Deleting skill /' + trunc(args.slug, 24) : 'Deleting skill';
@@ -16793,13 +16972,20 @@
         const webSearchCountForLog = log.usage.server_tool_use && log.usage.server_tool_use.web_search_requests
           ? log.usage.server_tool_use.web_search_requests
           : 0;
+        // A call a hook refused never ran (the image cap, or a call made before its built-in guide
+        // was read), so it is not an image generation.
+        const imageGenCountForLog = Array.isArray(log.toolCalls)
+          ? log.toolCalls.filter(function (tcForImageCount) {
+            return tcForImageCount && tcForImageCount.name === 'generate_image' && !tcForImageCount.blocked;
+          }).length
+          : 0;
         html += `<div class="log-detail-section-title">Token Usage</div>` +
           `<div class="log-detail-meta">` +
           `<div class="log-detail-row"><span class="log-detail-label">Prompt</span><span>${log.usage.prompt_tokens || 0}</span></div>` +
           `<div class="log-detail-row"><span class="log-detail-label">Completion</span><span>${log.usage.completion_tokens || 0}</span></div>` +
           `<div class="log-detail-row"><span class="log-detail-label">Total</span><span>${log.usage.total_tokens || 0}</span></div>` +
           (webSearchCountForLog ? `<div class="log-detail-row"><span class="log-detail-label">Web Searches</span><span>${webSearchCountForLog}</span></div>` : '') +
-          (log.toolCalls && log.toolCalls.filter(function(tc) { return tc.name === 'generate_image'; }).length > 0 ? `<div class="log-detail-row"><span class="log-detail-label">Image Gens</span><span>${log.toolCalls.filter(function(tc) { return tc.name === 'generate_image'; }).length}</span></div>` : '') +
+          (imageGenCountForLog > 0 ? `<div class="log-detail-row"><span class="log-detail-label">Image Gens</span><span>${imageGenCountForLog}</span></div>` : '') +
           `</div>`;
       }
 
@@ -17721,6 +17907,11 @@
       var bodyForSave = String(bodyElForSave.value || '');
       if (!slugForSave) { showSkillErr('Command is required.'); return; }
       if (!/^[a-z0-9-]+$/.test(slugForSave)) { showSkillErr('Command may contain only lowercase letters, numbers and hyphens.'); return; }
+      var builtinGuidesForSave = (globalThis.ABChatAgent || {}).builtinGuides;
+      if (builtinGuidesForSave && builtinGuidesForSave.isReservedSlug(slugForSave)) {
+        showSkillErr('Commands starting with ' + builtinGuidesForSave.SLUG_PREFIX + ' are reserved for built-in guides.');
+        return;
+      }
       if (slugForSave.length > skillSlugMaxLenForPanelRuntime) { showSkillErr('Command must be ' + skillSlugMaxLenForPanelRuntime + ' characters or fewer.'); return; }
       if (!titleForSave) { showSkillErr('Title is required.'); return; }
       if (titleForSave.length > skillTitleMaxLenForPanelRuntime) { showSkillErr('Title must be ' + skillTitleMaxLenForPanelRuntime + ' characters or fewer.'); return; }
