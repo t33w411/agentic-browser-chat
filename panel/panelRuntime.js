@@ -1324,7 +1324,7 @@
     // mutation failed, must not claim action was taken. memory always writes; skill mutates only
     // for specific operations.
     const MUTATING_TOOL_NAMES_FOR_PANEL_RUNTIME = {
-      write: true, edit: true, create_document: true, generate_image: true,
+      write: true, edit: true, create_document: true, edit_document: true, generate_image: true,
       generate_questions: true, page_act: true, memory: true, page_spreadsheet: true
     };
     function isMutatingToolCallForPanelRuntime(nameForMutCheck, parsedArgsForMutCheck) {
@@ -18964,13 +18964,28 @@
       if (ttsEngineSelectForBehaviour) ttsEngineSelectForBehaviour.value = ttsEngineForPanelRuntime;
       updateTtsModelRowVisibilityForPanelRuntime();
       try {
-        chrome.storage.local.get('abchatAutomationEnabled', function (itemsForAutomationToggle) {
+        chrome.storage.local.get(['abchatAutomationEnabled', 'abchatPdfPrintMode'], function (itemsForAutomationToggle) {
           const automationToggleForBehaviour = root.getElementById('settings-automation-toggle');
           if (automationToggleForBehaviour) {
             automationToggleForBehaviour.checked = !!(itemsForAutomationToggle && itemsForAutomationToggle.abchatAutomationEnabled);
           }
+          const pdfPrintToggleForBehaviour = root.getElementById('settings-pdf-print-toggle');
+          if (pdfPrintToggleForBehaviour) {
+            pdfPrintToggleForBehaviour.checked = !!(itemsForAutomationToggle && itemsForAutomationToggle.abchatPdfPrintMode === 'chrome');
+          }
         });
       } catch (eAutomationLoadForBehaviour) {}
+    }
+
+    // Unlike Advanced automation, no consent window: the setting's own text explains the banner,
+    // and turning it on here is the user's answer. Unset (never chosen) shows as off, and the
+    // first PDF then asks once.
+    function savePdfPrintModeForPanelRuntime(useChromeForSave) {
+      try {
+        chrome.storage.local.set({ abchatPdfPrintMode: useChromeForSave ? 'chrome' : 'basic', abchatPdfPrintModeTs: Date.now() }, function () {
+          void chrome.runtime.lastError;
+        });
+      } catch (ePdfPrintSave) {}
     }
 
     function updateTtsModelRowVisibilityForPanelRuntime() {
@@ -19045,6 +19060,10 @@
           if (changes.abchatAutomationEnabled) {
             const elForAutomationSync = root.getElementById('settings-automation-toggle');
             if (elForAutomationSync) elForAutomationSync.checked = !!changes.abchatAutomationEnabled.newValue;
+          }
+          if (changes.abchatPdfPrintMode) {
+            const elForPdfPrintSync = root.getElementById('settings-pdf-print-toggle');
+            if (elForPdfPrintSync) elForPdfPrintSync.checked = changes.abchatPdfPrintMode.newValue === 'chrome';
           }
         };
         chrome.storage.onChanged.addListener(automationStorageSyncListenerForPanelRuntime);
@@ -22374,6 +22393,7 @@
             case 'save-alert-sound':               saveAlertSoundForPanelRuntime(tgtForRuntime.checked); break;
             case 'toggle-page-context':            savePageContextEnabledForPanelRuntime(tgtForRuntime.checked); break;
             case 'toggle-automation':              handleAutomationToggleForPanelRuntime(tgtForRuntime.checked); break;
+            case 'toggle-pdf-print':               savePdfPrintModeForPanelRuntime(tgtForRuntime.checked); break;
             case 'save-reminder-lead-time':        saveReminderLeadTimeForPanelRuntime(tgtForRuntime.value); break;
             case 'tep-due-change': {
               if (!tgtForRuntime.value) break;

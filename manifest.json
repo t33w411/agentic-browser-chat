@@ -88,6 +88,7 @@
         "agent/pageActionLogger.js",
         "agent/tools.js",
         "agent/builtinGuides.js",
+        "agent/documentThemes.js",
         "agent/documentGeneration.js",
         "agent/cdpClient.js",
         "agent/embeddedRegions.js",

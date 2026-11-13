@@ -1,13 +1,14 @@
 # Privacy Policy
 
-_Last updated: 2026-05-21_
+_Last updated: 2026-11-13_
 
 Agentic Browser Chat ("the extension") is a Chrome extension that lets you chat with an AI model about web pages, manage notes and tasks, and attach files for context. This policy describes what data the extension handles, where it goes, and what it does not do.
 
 ## Summary
 
 - **All your data stays on your device.** Chat history, notes, tasks, attachments, settings, and your API key are stored locally in your browser (IndexedDB and `chrome.storage`).
-- **The only external network destination is OpenRouter.** When you send a message, the extension calls the [OpenRouter](https://openrouter.ai) API using the API key you provided. OpenRouter then routes the request to the underlying model provider (OpenAI, Anthropic, Google, Meta, etc.) you selected.
+- **Your conversations go only to OpenRouter.** When you send a message, the extension calls the [OpenRouter](https://openrouter.ai) API using the API key you provided. OpenRouter then routes the request to the underlying model provider (OpenAI, Anthropic, Google, Meta, etc.) you selected.
+- **PDF fonts come from jsDelivr.** When Chrome prints a PDF for you, the page it prints downloads font files from `cdn.jsdelivr.net`. The document's text is never sent.
 - **There is no telemetry, analytics, tracking, or remote server operated by the developer.** The developer has no servers and receives no data from the extension.
 
 ## What the extension stores locally
@@ -41,6 +42,10 @@ When you send a message, the extension makes an HTTPS request directly from your
 
 OpenRouter then forwards the request to the underlying model provider (OpenAI, Anthropic, Google, Meta, etc.) that hosts the model you selected. OpenRouter's and the underlying provider's privacy policies and terms govern how they handle that data. See [openrouter.ai/privacy](https://openrouter.ai/privacy) and the policy of the model provider you choose. The developer of this extension does not see, intercept, or store any of that traffic.
 
+### Fonts for printed PDFs
+
+If you allow Chrome to print the PDFs the assistant makes (asked once, and changeable in Settings under Documents), the page being printed downloads the font files it uses from `cdn.jsdelivr.net`, which serves the open-source [Fontsource](https://fontsource.org) font library. Each request names one font file, such as the Latin bold file of Inter. Because a script's font is fetched only when the document contains that script, the requests can show which writing systems a document uses (for example, that it contains Arabic). They never contain the document's text, and jsDelivr sees your IP address as any website you visit does. If you choose the built-in PDF writer instead, no fonts are downloaded.
+
 The extension may also fetch publicly-available resources required for features you use (for example, retrieving a page's own assets when you attach page content). It does not contact any analytics, advertising, or developer-controlled server.
 
 ## Permissions and why they are requested
@@ -56,6 +61,7 @@ The extension may also fetch publicly-available resources required for features 
 | `alarms` | Schedule task reminders. |
 | `notifications` | Show reminder notifications when a task is due. |
 | `offscreen` | Run background utilities (clipboard, parsing) that require a DOM in Manifest V3. |
+| `debugger` | Print PDFs with Chrome's print engine, only on the extension's own blank print page and only after you allow it. Advanced automation also uses it to act on pages, only when you turn that on. Chrome shows a "started debugging this browser" banner while it is attached. |
 
 ## Data you should be careful with
 

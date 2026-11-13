@@ -1,5 +1,8 @@
 <!DOCTYPE html>
 <html>
+<head>
+  <meta charset="utf-8">
+</head>
 <body>
   <audio id="reminder-audio" src="../sounds/reminder.wav"></audio>
   <script src="offscreen.js"></script>
@@ -21,7 +24,6 @@
   <script src="../shared/storage.js"></script>
   <script src="../shared/panelDataRepo.js"></script>
   <script src="../lib/jszip.min.js"></script>
-  <script src="../lib/xlsx.min.js"></script>
   <script src="../agent/apiLogger.js"></script>
   <script src="../agent/apiLogTurns.js"></script>
 
@@ -34,7 +36,10 @@
 
   <script src="../agent/tools.js"></script>
   <script src="../agent/builtinGuides.js"></script>
+  <script src="../agent/documentThemes.js"></script>
+  <script src="../agent/xlsxFormulas.js"></script>
   <script src="../agent/documentGeneration.js"></script>
+  <script src="../agent/documentPrint.js"></script>
   <script src="../agent/cdpClient.js"></script>
   <script src="../agent/toolExec.js"></script>
   <script src="../agent/contextBuilder.js"></script>

@@ -8,6 +8,7 @@ importScripts(
   "../agent/docxFormat.js",
   "../agent/docxTextFromHtml.js",
   "../agent/pdfLinks.js",
+  "../agent/docxEdit.js",
   "../agent/fileParsing.js",
   "../shared/toolRegistry.js",
   "../shared/domainConfig.js",
@@ -18,6 +19,7 @@ importScripts(
   "./dbHandler.js",
   "./crossFrameAx.js",
   "./cdpAutomation.js",
+  "./documentPrinter.js",
   "./fetchBody.js"
 );
 
@@ -4955,6 +4957,9 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
             ok: true,
             html: structureResultForServiceWorker && structureResultForServiceWorker.html ? structureResultForServiceWorker.html : "",
             truncated: Boolean(structureResultForServiceWorker && structureResultForServiceWorker.truncated),
+            headersFooters: structureResultForServiceWorker && Array.isArray(structureResultForServiceWorker.headersFooters)
+              ? structureResultForServiceWorker.headersFooters
+              : [],
             name: nameForStructure
           });
         });
@@ -4965,6 +4970,97 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
           error: errorForStructure && errorForStructure.message
             ? errorForStructure.message
             : "DOCX structure parsing failed."
+        });
+      });
+    return true;
+  }
+
+  // edit_document runs here because the attachment's bytes are here: the source file is read
+  // from storage, edited in place by agent/docxEdit.js, and only the new file goes back.
+  if (messageForServiceWorker.action === (actionsForServiceWorker.printDocumentPdf || "printDocumentPdf")) {
+    var printerForServiceWorker = backgroundNamespaceForServiceWorker.documentPrinter;
+    // Only the agent loop (an extension page) prints. A content script has no reason to.
+    if (senderForServiceWorker && senderForServiceWorker.tab) {
+      sendResponseForServiceWorker({ ok: false, code: "failed", error: "Only the extension's own pages can print documents." });
+      return false;
+    }
+    if (!printerForServiceWorker || typeof printerForServiceWorker.printPdf !== "function") {
+      sendResponseForServiceWorker({ ok: false, code: "failed", error: "The PDF printer is unavailable." });
+      return false;
+    }
+    acquireServiceWorkerKeepAliveForServiceWorker();
+    printerForServiceWorker.printPdf({
+      html: messageForServiceWorker.html,
+      title: messageForServiceWorker.title,
+      fonts: messageForServiceWorker.fonts,
+      templates: messageForServiceWorker.templates
+    }).then(function (printedForServiceWorker) {
+      releaseServiceWorkerKeepAliveForServiceWorker();
+      sendResponseForServiceWorker(printedForServiceWorker);
+    }, function (errorForPrint) {
+      releaseServiceWorkerKeepAliveForServiceWorker();
+      sendResponseForServiceWorker({ ok: false, code: "failed", error: errorForPrint && errorForPrint.message ? errorForPrint.message : "Printing failed." });
+    });
+    return true;
+  }
+
+  if (messageForServiceWorker.action === (actionsForServiceWorker.editDocx || "editDocx")) {
+    var refIdForEdit = Number(messageForServiceWorker.refId);
+    if (!Number.isFinite(refIdForEdit) || refIdForEdit <= 0) {
+      sendResponseForServiceWorker({ ok: false, error: "Invalid attachment id." });
+      return false;
+    }
+    var repoForEdit = globalThis.ABChatShared && globalThis.ABChatShared.panelDataRepo;
+    var docxEditForServiceWorker = (globalThis.ABChatAgent || {}).docxEdit;
+    if (!repoForEdit || typeof repoForEdit.getAttachmentBlob !== "function") {
+      sendResponseForServiceWorker({ ok: false, error: "Attachment storage is unavailable." });
+      return false;
+    }
+    if (!docxEditForServiceWorker || typeof docxEditForServiceWorker.applyEditsToDocx !== "function") {
+      sendResponseForServiceWorker({ ok: false, error: "The DOCX editor is unavailable." });
+      return false;
+    }
+    Promise.resolve(repoForEdit.getAttachmentBlob(refIdForEdit))
+      .then(function (blobForEdit) {
+        if (!blobForEdit) {
+          throw new Error("Attachment " + refIdForEdit + " was not found.");
+        }
+        var mimeForEdit = String(blobForEdit.mimeType || "").toLowerCase();
+        var nameForEdit = String(blobForEdit.name || "");
+        if (mimeForEdit !== docxEditForServiceWorker.MIME_TYPE && !/\.docx$/i.test(nameForEdit)) {
+          throw new Error("edit_document only works on DOCX files.");
+        }
+        var dataUrlForEdit = String(blobForEdit.dataUrl || "");
+        if (dataUrlForEdit.indexOf("data:") !== 0) {
+          throw new Error("This document was attached before editing was available. Ask the user to re-attach the file.");
+        }
+        if (!globalThis.JSZip) importScripts(chrome.runtime.getURL("lib/jszip.min.js"));
+        var bytesForEdit = dataUrlToUint8ForServiceWorker(dataUrlForEdit);
+        return docxEditForServiceWorker.applyEditsToDocx(bytesForEdit.buffer, messageForServiceWorker.edits, {
+          trackChanges: Boolean(messageForServiceWorker.trackChanges),
+          author: messageForServiceWorker.author
+        }).then(function (outcomeForEdit) {
+          if (!outcomeForEdit || !outcomeForEdit.ok) {
+            sendResponseForServiceWorker({
+              ok: false,
+              error: (outcomeForEdit && outcomeForEdit.error) || "The edits could not be applied."
+            });
+            return;
+          }
+          sendResponseForServiceWorker({
+            ok: true,
+            name: nameForEdit,
+            mimeType: outcomeForEdit.mimeType,
+            dataUrl: "data:" + outcomeForEdit.mimeType + ";base64," + outcomeForEdit.base64,
+            size: outcomeForEdit.size,
+            summary: outcomeForEdit.summary
+          });
+        });
+      })
+      .catch(function (errorForEdit) {
+        sendResponseForServiceWorker({
+          ok: false,
+          error: errorForEdit && errorForEdit.message ? errorForEdit.message : "Editing the document failed."
         });
       });
     return true;

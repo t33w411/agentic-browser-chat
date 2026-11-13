@@ -424,26 +424,64 @@
             title: { type: 'string', description: 'Optional. Used as the filename when filename is omitted; never rendered as a heading in DOCX or PDF.' },
             content: { type: 'string', description: 'Plain text, for a simple document. The guide describes how each format reads it.' },
             html: { type: 'string', description: 'DOCX and PDF only: an HTML document to render, in the subset the guide describes.' },
+            theme: { type: 'string', enum: ['professional', 'modern', 'classic', 'minimal', 'academic', 'vibrant'], description: 'DOCX, PDF, XLSX, and PPTX: the look of a new document.' },
+            style: {
+              type: 'object',
+              description: 'DOCX, PDF, XLSX, and PPTX: theme overrides, only on request.',
+              properties: {
+                primary_color: { type: 'string', description: 'Hex colour.' },
+                accent_color: { type: 'string', description: 'Hex colour.' },
+                heading_font: { type: 'string' },
+                body_font: { type: 'string' }
+              }
+            },
+            page: {
+              type: 'object',
+              description: 'DOCX, PDF, and XLSX (for printing): paper size and orientation.',
+              properties: {
+                size: { type: 'string', enum: ['letter', 'a4', 'legal'] },
+                orientation: { type: 'string', enum: ['portrait', 'landscape'] }
+              }
+            },
+            page_numbers: { type: 'boolean', description: 'DOCX and PDF: footer page numbers. PPTX: slide numbers, on unless false.' },
+            header: { type: 'string', description: 'DOCX and PDF: text at the top of every page.' },
             blocks: {
               type: 'array',
               description: 'DOCX and PDF only: structured content blocks.',
               items: {
                 type: 'object',
                 properties: {
-                  type: { type: 'string', enum: ['heading', 'paragraph', 'bullet', 'table'], description: 'Block type.' },
+                  type: {
+                    type: 'string',
+                    enum: ['title', 'heading', 'paragraph', 'bullet', 'numbered', 'table', 'key_value', 'callout', 'quote', 'divider', 'page_break'],
+                    description: 'Block type.'
+                  },
                   level: { type: 'integer', description: 'Heading level from 1 to 6.' },
-                  text: { type: 'string', description: 'Plain text for a heading, paragraph, or single bullet.' },
-                  items: { type: 'array', items: { type: 'string' }, description: 'Bullet items.' },
+                  text: { type: 'string', description: 'Plain text.' },
+                  subtitle: { type: 'string', description: 'Title only.' },
+                  align: {
+                    description: 'A text alignment, or for a table an array of one per column.'
+                  },
+                  items: {
+                    type: 'array',
+                    description: 'List items: strings, or { text, items } to nest.',
+                    items: { description: 'A string or { text, items }.' }
+                  },
                   rows: {
                     type: 'array',
-                    description: 'Table rows.',
+                    description: 'Table rows, or key_value pairs as [label, value].',
                     items: {
                       type: 'array',
                       items: { description: 'A string, number, boolean, or null.' }
                     }
                   },
-                  header: { type: 'boolean', description: 'Table only: bold the first row.' },
-                  bordered: { type: 'boolean', description: 'Table only: false for a borderless layout table.' }
+                  header: { type: 'boolean', description: 'Table: the first row is a header.' },
+                  bordered: { type: 'boolean', description: 'Table: false for a layout table.' },
+                  columns: { type: 'array', items: { type: 'number' }, description: 'Table: relative column widths.' },
+                  caption: { type: 'string', description: 'Table only.' },
+                  tone: { type: 'string', enum: ['info', 'success', 'warning', 'danger', 'note'], description: 'Callout only.' },
+                  title: { type: 'string', description: 'Callout only.' },
+                  cite: { type: 'string', description: 'Quote only.' }
                 }
               }
             },
@@ -456,11 +494,22 @@
                   name: { type: 'string', description: 'Sheet name.' },
                   rows: {
                     type: 'array',
-                    description: 'Rows of cell values.',
+                    description: 'Rows of cells.',
                     items: {
                       type: 'array',
-                      items: { description: 'A string, number, boolean, or null.' }
+                      items: { description: 'A string, number, boolean, null, or a cell object { v, f, format, bold, italic, color, fill, align, wrap }.' }
                     }
+                  },
+                  columns: {
+                    type: 'array',
+                    description: 'XLSX: per column, a format string or { format, width, align }.',
+                    items: {}
+                  },
+                  header: { type: 'boolean', description: 'XLSX: whether row 1 is a header.' },
+                  freeze: {
+                    type: 'object',
+                    description: 'XLSX: rows and columns kept in view.',
+                    properties: { rows: { type: 'integer' }, columns: { type: 'integer' } }
                   }
                 },
                 required: ['rows']
@@ -480,10 +529,18 @@
               items: {
                 type: 'object',
                 properties: {
+                  layout: { type: 'string', enum: ['title', 'section', 'bullets', 'two_column', 'big_number', 'table', 'image'], description: 'Optional; chosen from the content when omitted.' },
                   title: { type: 'string', description: 'Slide title.' },
-                  bullets: { type: 'array', items: { type: 'string' }, description: 'Bullet points for the slide body.' },
-                  items: { type: 'array', items: { type: 'string' }, description: 'Alias for bullets.' },
-                  content: { type: 'string', description: 'Slide body text; each line becomes a bullet when bullets are omitted.' }
+                  subtitle: { type: 'string', description: 'Title and section slides.' },
+                  bullets: { type: 'array', description: 'Bullet points.', items: { description: 'A string, or { text, level } with level 1 for a sub-bullet.' } },
+                  content: { type: 'string', description: 'Body text, one bullet per line, when bullets are omitted.' },
+                  left: { type: 'object', description: 'two_column: { heading, bullets }.' },
+                  right: { type: 'object', description: 'two_column: { heading, bullets }.' },
+                  stats: { type: 'array', description: 'big_number: one to four { value, label }.', items: { type: 'object' } },
+                  table: { type: 'object', description: 'Table slide: { rows, header }.' },
+                  image: { type: 'object', description: 'image slide: { blob_id, fit, side, alt }.' },
+                  background: { type: 'object', description: '{ image: blob_id }, { pattern }, or { color }.' },
+                  notes: { type: 'string', description: 'Speaker notes.' }
                 }
               }
             }
@@ -497,13 +554,60 @@
       type: 'function',
       function: {
         name: 'read_document_structure',
-        description: 'Read an attached DOCX as structured HTML so you can edit it and hand it back with its layout intact (headings, lists, tables, fonts, images), by passing the edited HTML to create_document. Not for questions about the file\'s contents: its extracted text is already in context. DOCX only. Covered by the builtin-documents guide, which must be in the conversation first. Returns { ok, html, name, truncated }.',
+        description: 'Read an attached DOCX as structured HTML in which each paragraph carries a data-id, so you can change it with edit_document (or rebuild it in a new layout with create_document). Not for questions about the file\'s contents: its extracted text is already in context. DOCX only. Covered by the builtin-documents guide, which must be in the conversation first. Returns { ok, html, name, truncated, headers_footers? }.',
         parameters: {
           type: 'object',
           properties: {
             ref_id: { type: 'integer', description: 'The DOCX attachment\'s blob id: the blob_id attribute of its <file name="name.docx" blob_id="N"> element, or a "name.docx (blob id: N)" entry in a note\'s attachment list.' }
           },
           required: ['ref_id']
+        }
+      }
+    },
+
+    {
+      type: 'function',
+      function: {
+        name: 'edit_document',
+        description: 'Change an attached DOCX in place, optionally as tracked changes, and give the user the edited copy. Everything you do not edit stays exactly as it was. Ids come from read_document_structure. Covered by the builtin-documents guide, which must be in the conversation first. Returns metadata only; the file is shown to the user automatically.',
+        parameters: {
+          type: 'object',
+          properties: {
+            ref_id: { type: 'integer', description: 'Blob id of the DOCX to edit, the same ref_id read_document_structure took.' },
+            edits: {
+              type: 'array',
+              description: 'Applied in order. Ids refer to the document as you read it.',
+              items: {
+                type: 'object',
+                properties: {
+                  op: { type: 'string', enum: ['replace_text', 'set_text', 'insert_after', 'insert_before', 'delete', 'insert_row_after', 'insert_row_before', 'delete_row', 'delete_table', 'format'] },
+                  id: { type: 'string', description: 'A data-id such as "p12".' },
+                  to: { type: 'string' },
+                  find: { type: 'string' },
+                  replace: { type: 'string' },
+                  occurrence: { type: 'string', enum: ['all', 'first'] },
+                  text: { type: 'string' },
+                  paragraphs: { type: 'array', items: { type: 'string' } },
+                  like: { type: 'string' },
+                  cells: { type: 'array', items: { description: 'A string or number.' } },
+                  bold: { type: 'boolean' },
+                  italic: { type: 'boolean' },
+                  underline: { type: 'boolean' },
+                  strike: { type: 'boolean' },
+                  color: { type: 'string' },
+                  highlight: { description: 'true, false, a Word highlight colour name, or a hex colour.' },
+                  font: { type: 'string' },
+                  size: { type: 'number' },
+                  align: { type: 'string', enum: ['left', 'center', 'right', 'justify'] }
+                },
+                required: ['op']
+              }
+            },
+            track_changes: { type: 'boolean', description: 'Record the edits as tracked changes the user can accept or reject in Word.' },
+            author: { type: 'string', description: 'Name shown on tracked changes. Defaults to ABChat.' },
+            filename: { type: 'string', description: 'Optional. Defaults to the source name with " (edited)".' }
+          },
+          required: ['ref_id', 'edits']
         }
       }
     },

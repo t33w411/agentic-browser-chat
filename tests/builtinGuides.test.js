@@ -60,6 +60,9 @@ test('covered calls are refused until the guide is in the window', function () {
   assert.ok(gateForTest && /^Not run: create_document/.test(gateForTest.reason));
   assert.ok(gateForTest.guide.startsWith('[built-in guide: builtin-documents]'));
   assert.ok(guidesForTest.gateToolCall('read_document_structure', { ref_id: 3 }, windowForTest));
+  // Fails when edit_document is left out of the documents guide's coversToolCall (checked against that copy).
+  const editGateForTest = guidesForTest.gateToolCall('edit_document', { ref_id: 3, edits: [{ op: 'set_text', id: 'p1', text: 'x' }] }, windowForTest);
+  assert.ok(editGateForTest && /builtin-documents/.test(editGateForTest.reason));
   assert.ok(guidesForTest.gateToolCall('eval', { code: 'return { __document__: { format: "csv", rows: [[1]] } };' }, windowForTest));
 
   // eval that builds no file, and tools no guide covers, always run.

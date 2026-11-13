@@ -78,7 +78,7 @@
   // mutation failed, must not claim action was taken. memory always writes; skill and page_layout
   // mutate only for specific operations.
   var MUTATING_TOOL_NAMES_FOR_AGENT_RUN = {
-    write: true, edit: true, create_document: true, generate_image: true,
+    write: true, edit: true, create_document: true, edit_document: true, generate_image: true,
     generate_questions: true, page_act: true, memory: true, page_spreadsheet: true
   };
   function isMutatingToolCallForAgentRun(nameForMutCheck, parsedArgsForMutCheck) {
@@ -92,6 +92,29 @@
       return String(argsForMutCheck.operation || '') !== 'scan';
     }
     return false;
+  }
+
+  // What the model sees after a document is made, by create_document, edit_document, or eval
+  // returning __document__. The file itself (dataUrl) is saved and shown to the user, never sent back. The
+  // generator's own note (images it could not re-embed), the theme it used and its warnings
+  // (characters a PDF could not show, rows it left out) are passed on, so the model can tell the
+  // user and reuse the theme for the next file.
+  function documentResultForModelForRun(documentForModel) {
+    var safeDocumentForModel = documentForModel || {};
+    var resultForModel = {
+      ok: true,
+      format: safeDocumentForModel.format || '',
+      filename: safeDocumentForModel.filename || '',
+      mimeType: safeDocumentForModel.mimeType || '',
+      size: Number(safeDocumentForModel.size) || 0,
+      note: 'The generated document has been saved and displayed to the user.'
+        + (safeDocumentForModel.note ? ' ' + String(safeDocumentForModel.note) : '')
+    };
+    if (safeDocumentForModel.theme) resultForModel.theme = String(safeDocumentForModel.theme);
+    if (Array.isArray(safeDocumentForModel.warnings) && safeDocumentForModel.warnings.length) {
+      resultForModel.warnings = safeDocumentForModel.warnings.map(String);
+    }
+    return resultForModel;
   }
 
   // Appended when the assembled request would otherwise end on an assistant message. Google AI
@@ -1136,10 +1159,10 @@
                 + imagesShownToUserCountForRun + ' image' + (imagesShownToUserCountForRun === 1 ? '' : 's')
                 + ' earlier in this turn. Generating this one did NOT replace them: every image stays visible in the chat and each one was billed. Your reply must state that you regenerated the image, why, and which of the images shown is the final one.';
             }
-          } else if (tcNameForResult === 'create_document' && toolResult && toolResult.ok && typeof toolResult.dataUrl === 'string') {
-            toolResultForModel = { ok: true, format: toolResult.format || '', filename: toolResult.filename || '', mimeType: toolResult.mimeType || '', size: Number(toolResult.size) || 0, note: 'The generated document has been saved and displayed to the user.' };
+          } else if ((tcNameForResult === 'create_document' || tcNameForResult === 'edit_document') && toolResult && toolResult.ok && typeof toolResult.dataUrl === 'string') {
+            toolResultForModel = documentResultForModelForRun(toolResult);
           } else if (tcNameForResult === 'eval' && toolResult && toolResult.ok && toolResult._generatedDocument && typeof toolResult._generatedDocument.dataUrl === 'string') {
-            toolResultForModel = { ok: true, result: toolResult.result, document: { format: toolResult._generatedDocument.format || '', filename: toolResult._generatedDocument.filename || '', mimeType: toolResult._generatedDocument.mimeType || '', size: Number(toolResult._generatedDocument.size) || 0, note: 'The generated document has been saved and displayed to the user.' } };
+            toolResultForModel = { ok: true, result: toolResult.result, document: documentResultForModelForRun(toolResult._generatedDocument) };
           }
           // Side-call cost from any secondary LLM usage on the tool result (usage.cost only).
           // Read from toolResult (not toolResultForModel): generators replace the model-facing
@@ -1270,7 +1293,9 @@
           var tcNameForDoc = toolCallsForLoop[gdi].function && toolCallsForLoop[gdi].function.name;
           var toolResultForDoc = toolResultsForRun[gdi];
           if (!toolResultForDoc || !toolResultForDoc.ok) continue;
-          var docPayloadForRun = tcNameForDoc === 'create_document' ? toolResultForDoc : (tcNameForDoc === 'eval' ? toolResultForDoc._generatedDocument : null);
+          var docPayloadForRun = (tcNameForDoc === 'create_document' || tcNameForDoc === 'edit_document')
+            ? toolResultForDoc
+            : (tcNameForDoc === 'eval' ? toolResultForDoc._generatedDocument : null);
           if (!docPayloadForRun || typeof docPayloadForRun.dataUrl !== 'string' || docPayloadForRun.dataUrl.indexOf('data:') !== 0) continue;
           if (typeof repoForRun.createAttachmentBlob !== 'function') continue;
           try {

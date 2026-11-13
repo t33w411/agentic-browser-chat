@@ -291,6 +291,34 @@
     return (globalScopeForFileParsing.ABChatAgent || {}).docxFormat || null;
   }
 
+  function getDocxEditForFileParsing() {
+    return (globalScopeForFileParsing.ABChatAgent || {}).docxEdit || null;
+  }
+
+  // mammoth reads a copy of the DOCX with an id marker at the start of each paragraph, which
+  // becomes a data-id in its HTML; edit_document counts paragraphs the same way, so those ids
+  // address the paragraphs the model read. A failure here only loses the ids.
+  function prepareDocxForStructureReadForFileParsing(arrayBufferForFileParsing) {
+    var docxEditForFileParsing = getDocxEditForFileParsing();
+    if (!docxEditForFileParsing) return Promise.resolve(null);
+    try {
+      loadLibraryForFileParsing('lib/jszip.min.js', 'jszip');
+    } catch (loadErrForFileParsing) {
+      return Promise.resolve(null);
+    }
+    return docxEditForFileParsing.prepareForRead(arrayBufferForFileParsing).catch(function () {
+      return null;
+    });
+  }
+
+  function isIdMarkerRunForFileParsing(nodeForFileParsing) {
+    var docxEditForFileParsing = getDocxEditForFileParsing();
+    var childrenForFileParsing = nodeForFileParsing.children;
+    return !!docxEditForFileParsing && Array.isArray(childrenForFileParsing) && childrenForFileParsing.length === 1
+      && childrenForFileParsing[0] && childrenForFileParsing[0].type === 'text'
+      && docxEditForFileParsing.isMarkerText(childrenForFileParsing[0].value);
+  }
+
   // Read the source document's own formatting straight from the OOXML parts. mammoth is a
   // semantic converter: it drops table borders entirely and reports a run's size only when
   // that size is direct formatting, so the style cascade that most real documents rely on is
@@ -345,7 +373,10 @@
       if (nodeForFileParsing.type === 'paragraph') {
         nextParagraphStyleIdForFileParsing = nodeForFileParsing.styleId || '';
       }
-      if (nodeForFileParsing.type === 'run' && !nodeForFileParsing.styleId && !nodeForFileParsing.styleName) {
+      // An id marker run is left unstyled so mammoth writes the marker as bare text right after
+      // the block's opening tag, where attachParagraphIds looks for it.
+      if (nodeForFileParsing.type === 'run' && !nodeForFileParsing.styleId && !nodeForFileParsing.styleName
+        && !isIdMarkerRunForFileParsing(nodeForFileParsing)) {
         var paragraphFormatForFileParsing = nextParagraphStyleIdForFileParsing
           ? styleFormatsForFileParsing[nextParagraphStyleIdForFileParsing]
           : null;
@@ -406,11 +437,12 @@
       });
     }
 
+    // The defaults div is always written, even with no defaults to report, because create_document
+    // reads its presence as "this is an existing document": a document handed back this way keeps
+    // its own formatting and is never given a theme.
     var defaultsCssForFileParsing = docxFormatForFileParsing.buildDocumentDefaultsCss(profileForFileParsing);
-    if (defaultsCssForFileParsing) {
-      annotatedForFileParsing = '<div data-doc-defaults="' + escapeHtmlAttributeForFileParsing(defaultsCssForFileParsing) + '"></div>'
-        + annotatedForFileParsing;
-    }
+    annotatedForFileParsing = '<div data-abchat-source="docx" data-doc-defaults="' + escapeHtmlAttributeForFileParsing(defaultsCssForFileParsing || '') + '"></div>'
+      + annotatedForFileParsing;
     return annotatedForFileParsing;
   }
 
@@ -435,7 +467,12 @@
         return { src: srcForFileParsing };
       });
     }
-    return readDocxFormatProfileForFileParsing(arrayBufferForFileParsing).then(function (profileForFileParsing) {
+    return Promise.all([
+      readDocxFormatProfileForFileParsing(arrayBufferForFileParsing),
+      prepareDocxForStructureReadForFileParsing(arrayBufferForFileParsing)
+    ]).then(function (readsForFileParsing) {
+      var profileForFileParsing = readsForFileParsing[0];
+      var preparedForFileParsing = readsForFileParsing[1];
       var docxFormatForFileParsing = getDocxFormatForFileParsing();
       var planForFileParsing = (profileForFileParsing && docxFormatForFileParsing)
         ? docxFormatForFileParsing.buildFormatClassPlan(profileForFileParsing)
@@ -451,8 +488,9 @@
           return documentForDocxStructure;
         };
       }
+      var mammothInputForFileParsing = preparedForFileParsing ? preparedForFileParsing.buffer : arrayBufferForFileParsing;
       return globalScopeForFileParsing.mammoth
-        .convertToHtml({ arrayBuffer: arrayBufferForFileParsing }, optionsForDocxStructure)
+        .convertToHtml({ arrayBuffer: mammothInputForFileParsing }, optionsForDocxStructure)
         .then(function (resultForFileParsing) {
           var htmlForFileParsing = String((resultForFileParsing && resultForFileParsing.value) || '')
             .replace(/<img\b(?![^>]*\babchat-img:)[^>]*>/gi, '');
@@ -463,6 +501,9 @@
               // Keep the unannotated HTML rather than failing the whole structural read.
             }
           }
+          if (preparedForFileParsing) {
+            htmlForFileParsing = getDocxEditForFileParsing().attachParagraphIds(htmlForFileParsing);
+          }
           var truncatedForFileParsing = false;
           // read_document_structure hands this HTML straight to the model, so it is bounded by the
           // inline budget rather than the (much larger) storage one.
@@ -470,7 +511,11 @@
             htmlForFileParsing = htmlForFileParsing.slice(0, MAX_INLINE_TEXT_CHARS_FOR_FILE_PARSING);
             truncatedForFileParsing = true;
           }
-          return { html: htmlForFileParsing, truncated: truncatedForFileParsing };
+          return {
+            html: htmlForFileParsing,
+            truncated: truncatedForFileParsing,
+            headersFooters: preparedForFileParsing ? preparedForFileParsing.headersFooters : []
+          };
         });
     });
   }

@@ -171,8 +171,9 @@ The page surface is **ref-based**: the model never writes CSS selectors or finge
 - `close_tab` — close a tab. Only a tab created earlier in this chat via `create_tab` can be closed; tabs the user opened cannot. If the closed tab was the active target, the target reverts to the tab the chat started on.
 
 **Generation**
-- `create_document` — generate a downloadable DOCX, XLSX, PDF, PPTX, or CSV file with structured content (headings, bullets, tables, sheets, slides). Files are stored as blobs and displayed inline.
-- `read_document_structure` — re-read an attached DOCX as structured HTML so the model can edit it while preserving headings, lists, tables, inline bold/italic, and hyperlinks. The intended round-trip is `read_document_structure` → edit the HTML → `create_document` with the edited `html`. Only DOCX is supported.
+- `create_document` — generate a downloadable DOCX, XLSX, PDF, PPTX, or CSV file with structured content (headings, lists, tables, callouts, sheets, slides). New DOCX, PDF, and PPTX files use one of six themes (professional, modern, classic, minimal, academic, vibrant) that the model picks, with optional brand colours, fonts, page size, page numbers and a running header. XLSX files take the theme's font and header colours, and have number formats, formulas with their results saved, a frozen header row with filter buttons, a styled total row, and print setup. PPTX decks are 16:9 on a real slide master, with title, section, bullet, two-column, big-number, table, and picture slides, speaker notes, slide numbers, and text sized to fit each slide. A slide can sit on a photo from the chat, a plain colour, or a subtle pattern, and text on a photo gets an overlay just dark or light enough to read. PDFs are printed by Chrome, with the fonts embedded and a matching Noto font for any script in the text, once you allow it; otherwise a built-in writer makes them with Helvetica, Times, and Courier and Western European characters only. Files are stored as blobs and displayed inline.
+- `read_document_structure` re-reads an attached DOCX as structured HTML (headings, lists, tables, inline bold/italic, hyperlinks), with an id on every paragraph. Only DOCX is supported.
+- `edit_document` changes an attached DOCX in place by paragraph id. It can replace or rewrite text, add or remove paragraphs and table rows, and change formatting, optionally as tracked changes. Everything the edits do not touch stays exactly as it was. To give a document a new layout instead, the model rebuilds it from the `read_document_structure` HTML with `create_document`.
 - `generate_image` — image generation through the configured image model. Generated images are displayed inline and can be iterated on by passing the prior image's blob id as `source_blob_id`, which also accepts an attached image to edit.
 - `generate_questions` — produces quiz items (MCQ or fill-in-the-blank) from source material and saves them directly to the Quiz tab.
 
@@ -288,6 +289,7 @@ All configuration lives in the panel's **Settings** tab. There is no separate op
 | **Manage Memory** | Create, edit, and delete memory entries (facts the agent keeps across chats). The button shows the current entry count. |
 | **Alert sound** | Toggles a sound effect for task reminders and agent confirmation prompts. |
 | **Reminder lead time** | Default minutes before `dueAt` to fire a reminder (0 to 1440). |
+| **Print PDFs with Chrome** (Documents) | Lets the agent print the PDFs it makes with Chrome's print engine, which embeds real fonts and handles every language. The first PDF asks once. While a PDF prints, Chrome shows its "started debugging this browser" banner for a moment, and font files are downloaded from cdn.jsdelivr.net. Off means the built-in PDF writer. |
 | **Storage used** | Live estimate of how much browser storage the extension is consuming. |
 | **Delete chats older than** | Auto-prune chats above a threshold (30 / 60 / 90 / 180 / 365 days, or *Never*). Pinned chats are excluded. |
 | **Prune orphaned blobs** | Manually reclaim space used by attachment blobs no longer referenced by any chat or note. |
@@ -318,12 +320,13 @@ Manifest V3 requires upfront declaration of every permission. Here is the why fo
 | `alarms` | Schedule task reminders. |
 | `notifications` | Show reminder notifications when a task is due. |
 | `offscreen` | Run DOM-dependent utilities under MV3, which strips the service worker of a DOM. |
+| `debugger` | Print PDFs with Chrome's print engine, on the extension's own blank print page and only after you allow it. Advanced automation also uses it, when you turn that on. Chrome shows a "started debugging this browser" banner while it is attached. |
 
 If a future feature would require a new permission, it will be called out in the changelog and discussed in an issue first.
 
 ## Privacy
 
-**Short version:** all your data stays on your device. The only network destination is OpenRouter, which you authenticate with your own key.
+**Short version:** all your data stays on your device. Your conversations go only to OpenRouter, which you authenticate with your own key. When Chrome prints a PDF for you, its font files come from cdn.jsdelivr.net; the document's text is never sent.
 
 The extension does not:
 
@@ -365,6 +368,7 @@ agentic-browser-chat/
 │   ├── contextMenus.js        # Right-click menu setup
 │   ├── commands.js            # Keyboard command handlers
 │   ├── panelDataRepoImpl.js   # Repository functions backing the panel (notes, chats, tasks, blobs)
+│   ├── documentPrinter.js     # Prints document pages to PDF with Chrome (debugger, own tab)
 │   └── apiLoggerImpl.js       # Persistent log of LLM API calls
 ├── content/                   # Content-script bootstrap
 │   ├── pageEventShield.js     # Main-world patch hiding panel events from page listeners
@@ -385,8 +389,12 @@ agentic-browser-chat/
 │   ├── contextBuilder.js      # Builds the system prompt + message list per turn
 │   ├── tools.js               # Tool definitions (schemas)
 │   ├── toolExec.js            # Executes tool calls in the page/extension
+│   ├── documentThemes.js      # Document themes, curated fonts, page sizes
 │   ├── documentGeneration.js  # Generated-doc support
+│   ├── xlsxFormulas.js        # Checks XLSX formulas and works out their results
 │   ├── fileParsing.js         # PDF/DOCX/XLSX/etc. parsing pipeline
+│   ├── docxEdit.js            # In-place DOCX edits and the paragraph ids they use
+│   ├── documentPrint.js       # Lays out a PDF as a print page: HTML, CSS, and web fonts
 │   ├── compactor.js           # History compaction when context fills
 │   ├── apiLogger.js           # Client side of the API log
 │   └── apiLogTurns.js         # How a run's turns are stored in the API log
@@ -411,6 +419,7 @@ agentic-browser-chat/
 │   ├── dom.js
 │   └── clipboard.js
 ├── offscreen/                 # MV3 offscreen document (needed for DOM-only APIs)
+├── print/                     # Blank print page and the one-time PDF printing consent window
 ├── lib/                       # Vendored third-party libraries (see THIRD_PARTY_NOTICES.md)
 ├── sounds/                    # Notification sounds
 ├── styles.css                 # Page-side CSS (toast host etc.)

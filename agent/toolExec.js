@@ -8435,16 +8435,17 @@ self.onmessage = function (e) {
     }
     if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
     try {
-      var built = await documentGenerationForEval.createDocument(spec, {
-        fetchDocxImages: fetchDocxImagesForToolExec
-      });
+      var built = await documentGenerationForEval.createDocument(spec, documentDepsForToolExec());
       if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
       baseResult._generatedDocument = {
         dataUrl: built.dataUrl,
         filename: built.filename,
         mimeType: built.mimeType,
         format: built.format,
-        size: built.size
+        size: built.size,
+        theme: built.theme || '',
+        note: built.note || '',
+        warnings: Array.isArray(built.warnings) ? built.warnings : []
       };
       return baseResult;
     } catch (docErr) {
@@ -10235,6 +10236,50 @@ self.onmessage = function (e) {
     });
   }
 
+  // Chrome prints a PDF in the service worker (background/documentPrinter.js). Only the
+  // extension's own pages may ask, and the agent loop runs in one; elsewhere the built-in
+  // writer makes the PDF.
+  function printPdfForToolExec(jobForPrint) {
+    return new Promise(function (resolveForPrint) {
+      var actionsForPrint = (globalScopeForToolExec.ABChatShared || {}).actions || {};
+      try {
+        chrome.runtime.sendMessage({
+          action: actionsForPrint.printDocumentPdf || 'printDocumentPdf',
+          html: jobForPrint.html,
+          title: jobForPrint.title,
+          fonts: jobForPrint.fonts,
+          templates: jobForPrint.templates
+        }, function (responseForPrint) {
+          if (chrome.runtime.lastError) {
+            resolveForPrint({ ok: false, code: 'failed', error: chrome.runtime.lastError.message || 'the printer did not answer' });
+            return;
+          }
+          resolveForPrint(responseForPrint || { ok: false, code: 'failed', error: 'the printer did not answer' });
+        });
+      } catch (errForPrint) {
+        resolveForPrint({ ok: false, code: 'failed', error: (errForPrint && errForPrint.message) || 'the printer could not be reached' });
+      }
+    });
+  }
+
+  // A picture for a slide, by blob id: the attachment record when it holds an image, else null.
+  // The bytes go into the deck without passing through the model's context.
+  function loadDocumentImageForToolExec(blobIdForImage) {
+    var repoForDocumentImage = getPanelDataRepoForToolExec();
+    if (!repoForDocumentImage || typeof repoForDocumentImage.getAttachmentBlob !== 'function') return Promise.resolve(null);
+    return Promise.resolve(repoForDocumentImage.getAttachmentBlob(blobIdForImage)).then(function (recordForDocumentImage) {
+      if (!recordForDocumentImage || typeof recordForDocumentImage.dataUrl !== 'string') return recordForDocumentImage ? { dataUrl: '' } : null;
+      return { dataUrl: recordForDocumentImage.dataUrl, mimeType: recordForDocumentImage.mimeType || '', name: recordForDocumentImage.name || '' };
+    }, function () { return null; });
+  }
+
+  function documentDepsForToolExec() {
+    var depsForDocument = { fetchDocxImages: fetchDocxImagesForToolExec, loadImage: loadDocumentImageForToolExec };
+    var locationForDocument = globalScopeForToolExec.location;
+    if (locationForDocument && locationForDocument.protocol === 'chrome-extension:') depsForDocument.printPdf = printPdfForToolExec;
+    return depsForDocument;
+  }
+
   async function createDocumentToolForToolExec(args, context) {
     var signal = getAbortSignalForToolExec(context);
     if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
@@ -10284,9 +10329,7 @@ self.onmessage = function (e) {
     }
 
     try {
-      var documentResultForToolExec = await documentGenerationForToolExec.createDocument(args, {
-        fetchDocxImages: fetchDocxImagesForToolExec
-      });
+      var documentResultForToolExec = await documentGenerationForToolExec.createDocument(args, documentDepsForToolExec());
       if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
       return documentResultForToolExec;
     } catch (errForDocumentTool) {
@@ -10924,15 +10967,81 @@ self.onmessage = function (e) {
             settleForRead({ ok: false, error: (responseForRead && responseForRead.error) || 'Could not read document structure.' });
             return;
           }
-          settleForRead({
+          var resultForRead = {
             ok: true,
             html: String(responseForRead.html || ''),
             name: String(responseForRead.name || ''),
             truncated: Boolean(responseForRead.truncated)
-          });
+          };
+          // Header and footer text is not in the html; listing it tells the model what a
+          // document-wide replace_text in edit_document can reach.
+          if (Array.isArray(responseForRead.headersFooters) && responseForRead.headersFooters.length) {
+            resultForRead.headers_footers = responseForRead.headersFooters.map(String);
+          }
+          settleForRead(resultForRead);
         });
       } catch (errForRead) {
         settleForRead({ ok: false, error: errForRead && errForRead.message ? errForRead.message : 'Could not read document structure.' });
+      }
+    });
+  }
+
+  // The edited copy's filename: the one the model gave, or the source name with " (edited)".
+  function editedDocxFilenameForToolExec(requestedForName, sourceNameForName) {
+    var requestedTextForName = String(requestedForName == null ? '' : requestedForName).trim();
+    var baseForName = requestedTextForName
+      || (String(sourceNameForName || 'document').replace(/\.docx$/i, '') + ' (edited)');
+    baseForName = baseForName.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 150) || 'document (edited)';
+    return /\.docx$/i.test(baseForName) ? baseForName : baseForName + '.docx';
+  }
+
+  // edit_document: the edits run in the service worker, next to the stored file, and come back
+  // as a new DOCX that the agent loop saves and shows exactly like a create_document result.
+  function editDocumentToolForToolExec(args, context) {
+    var signalForEdit = getAbortSignalForToolExec(context);
+    if (isAbortedForToolExec(signalForEdit)) return Promise.resolve(cancelledResultForToolExec());
+    var refIdForEdit = Number(args.ref_id);
+    if (!Number.isFinite(refIdForEdit) || refIdForEdit <= 0) {
+      return Promise.resolve({ ok: false, error: 'ref_id is required and must be a positive integer (the blob id of the DOCX).' });
+    }
+    if (!Array.isArray(args.edits) || !args.edits.length) {
+      return Promise.resolve({ ok: false, error: 'edits must be a non-empty array of edit objects.' });
+    }
+    var actionsForEdit = (globalScopeForToolExec.ABChatShared || {}).actions || {};
+    var actionNameForEdit = actionsForEdit.editDocx || 'editDocx';
+    return new Promise(function (resolveForEdit) {
+      try {
+        chrome.runtime.sendMessage({
+          action: actionNameForEdit,
+          refId: refIdForEdit,
+          edits: args.edits,
+          trackChanges: args.track_changes === true,
+          author: typeof args.author === 'string' ? args.author : ''
+        }, function (responseForEdit) {
+          if (isAbortedForToolExec(signalForEdit)) {
+            resolveForEdit(cancelledResultForToolExec());
+            return;
+          }
+          if (chrome.runtime.lastError) {
+            resolveForEdit({ ok: false, error: chrome.runtime.lastError.message || 'Could not edit the document.' });
+            return;
+          }
+          if (!responseForEdit || !responseForEdit.ok) {
+            resolveForEdit({ ok: false, error: (responseForEdit && responseForEdit.error) || 'Could not edit the document.' });
+            return;
+          }
+          resolveForEdit({
+            ok: true,
+            format: 'docx',
+            filename: editedDocxFilenameForToolExec(args.filename, responseForEdit.name),
+            mimeType: String(responseForEdit.mimeType || ''),
+            dataUrl: String(responseForEdit.dataUrl || ''),
+            size: Number(responseForEdit.size) || 0,
+            note: String(responseForEdit.summary || '')
+          });
+        });
+      } catch (errForEdit) {
+        resolveForEdit({ ok: false, error: (errForEdit && errForEdit.message) || 'Could not edit the document.' });
       }
     });
   }
@@ -12693,6 +12802,7 @@ self.onmessage = function (e) {
       case 'close_tab':             return closeTabToolForToolExec(args, context);
       case 'create_document':       return createDocumentToolForToolExec(args, context);
       case 'read_document_structure': return readDocumentStructureToolForToolExec(args);
+      case 'edit_document':         return editDocumentToolForToolExec(args, context);
       case 'generate_image':        return generateImageToolForToolExec(args, context);
       case 'generate_questions':    return generateQuestionsToolForToolExec(args, context);
       case 'get_environment':       return getEnvironmentToolForToolExec();
