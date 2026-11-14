@@ -10,26 +10,18 @@
   const maxAttemptsForTabMessaging = 4;
   const retryDelaysMsForTabMessaging = [80, 160, 320];
   const actionResponseTimeoutMsForTabMessaging = 700;
-  const reInjectPerTabTimeoutMsForTabMessaging = 2500;
-  // Bounded concurrency for re-injection across all supported tabs after an
-  // extension reload. A fully sequential loop (which is the most conservative
-  // path) makes recovery scale linearly with the number of open tabs; a small
-  // pool gives an N/K speedup while staying well inside what
-  // chrome.scripting.executeScript handles comfortably.
-  // Per-tab failures still isolate via the same Promise.race timeout +
-  // try/catch as before, so a misbehaving tab cannot stall a worker for more
-  // than reInjectPerTabTimeoutMsForTabMessaging.
-  const reInjectConcurrencyForTabMessaging = 4;
   // Per-tab in-flight guard for ensureContentInjected. Activation of a tab can
-  // trigger several concurrent callers (onActivated enforce, onFocusChanged
-  // enforce, the post-reload recovery sweep, sendActionToTab retries); without
-  // this guard two racing calls could both decide to inject and tear down a
-  // live panel twice in a row.
+  // trigger several concurrent callers (onActivated and onFocusChanged, each
+  // through both the activation inject and the panel enforce, the post-reload
+  // recovery of the tab in view, sendActionToTab retries); without this guard
+  // two racing calls could both decide to inject and tear down a live panel
+  // twice in a row.
   const inflightEnsureInjectedForTabMessaging = new Map();
 
   const injectableJsFilesForTabMessaging = [
     "content/keyboardShield.js",
     "content/preInit.js",
+    "content/staleCopyRelease.js",
     "shared/messages.js",
     "shared/agentRunStop.js",
     "shared/toolRegistry.js",
@@ -57,6 +49,7 @@
     "panel/panelDraftSync.js",
     "panel/panelComposerCopy.js",
     "panel/panelSpeechChunk.js",
+    "panel/panelGeneratedFiles.js",
     "agent/apiLogger.js",
     "agent/apiLogTurns.js",
     "agent/pageActionLogger.js",
@@ -395,6 +388,32 @@
       return false;
     }
 
+    // From here a copy is really being loaded, so the tab's toolbar icon says
+    // so until it is in. The stop sits in a finally: a path that left without
+    // it would leave the icon turning until the indicator's own time limit.
+    setInjectionIndicatorForTabMessaging(tabIdForTabMessaging, true);
+    try {
+      return await injectBundleForTabMessaging(tabIdForTabMessaging);
+    } finally {
+      setInjectionIndicatorForTabMessaging(tabIdForTabMessaging, false);
+    }
+  }
+
+  // Read at call time: the indicator is a separate worker module, and it is
+  // decoration, so a missing or failing one must never stop an injection.
+  function setInjectionIndicatorForTabMessaging(tabIdForTabMessaging, isLoadingForTabMessaging) {
+    try {
+      const indicatorForTabMessaging = (globalScopeForTabMessaging.ABChatBackground || {}).injectionIndicator;
+      if (!indicatorForTabMessaging) return;
+      if (isLoadingForTabMessaging) {
+        indicatorForTabMessaging.start(tabIdForTabMessaging);
+      } else {
+        indicatorForTabMessaging.stop(tabIdForTabMessaging);
+      }
+    } catch (errorForTabMessaging) {}
+  }
+
+  async function injectBundleForTabMessaging(tabIdForTabMessaging) {
     // Best-effort: the main-world shield is protective, not functional, so a
     // failure here must not block the isolated-world injection below.
     await executeMainWorldScriptFilesForTabMessaging(
@@ -527,77 +546,14 @@
     };
   }
 
-  // Proactive re-injection after extension reload/update.
-  //
-  // When the extension reloads, Chrome invalidates the runtime context of every
-  // content script running in open tabs. Without this function the user would have
-  // to manually refresh every tab before the extension works again.
-  //
-  // Calling this from onInstalled in the service worker re-runs all content scripts
-  // immediately after the reload, so all open tabs are ready before the user returns
-  // to them. Content scripts detect re-injection via migration-safe page markers
-  // (abchatMainInitNonce + legacy fallback) and perform a clean reset (see content/main.js).
-  //
-  // Lessons learned:
-  // - A message-based injected check with a timeout produces false "not
-  //   injected" verdicts on slow tabs; the executeScript nonce probe in
-  //   ensureContentInjected is deterministic and replaced it.
-  // - Per-tab timeouts are necessary so one hung tab cannot block all recovery.
-  // - Bounded-concurrency (small worker pool) is faster than fully sequential
-  //   while remaining safely under chrome.scripting.executeScript limits.
-  //
-  // Bounded worker pool over a shared cursor. Per-tab try/catch so a single
-  // failing tab does not abort the rest, and a Promise.race timeout so one
-  // hung tab cannot stall its worker past reInjectPerTabTimeoutMsForTabMessaging.
-  async function reInjectIntoAllSupportedTabsForTabMessaging() {
-    const allTabsForTabMessaging = await new Promise((resolveForTabMessaging) => {
-      chrome.tabs.query({}, (tabsForTabMessaging) => {
-        resolveForTabMessaging(Array.isArray(tabsForTabMessaging) ? tabsForTabMessaging : []);
-      });
-    });
-
-    const supportedTabsForTabMessaging = allTabsForTabMessaging.filter((tabForTabMessaging) => {
-      return isSupportedUrlForTabMessaging(tabForTabMessaging.url);
-    });
-
-    if (supportedTabsForTabMessaging.length === 0) {
-      return;
-    }
-
-    let nextIndexForTabMessaging = 0;
-    const workerCountForTabMessaging = Math.min(
-      reInjectConcurrencyForTabMessaging,
-      supportedTabsForTabMessaging.length
-    );
-
-    async function reInjectWorkerForTabMessaging() {
-      while (true) {
-        const idxForTabMessaging = nextIndexForTabMessaging++;
-        if (idxForTabMessaging >= supportedTabsForTabMessaging.length) {
-          return;
-        }
-        const tabForTabMessaging = supportedTabsForTabMessaging[idxForTabMessaging];
-        try {
-          await Promise.race([
-            ensureContentInjectedForTabMessaging(tabForTabMessaging.id),
-            new Promise((resolveForTabMessaging) => {
-              setTimeout(() => {
-                resolveForTabMessaging(false);
-              }, reInjectPerTabTimeoutMsForTabMessaging);
-            })
-          ]);
-        } catch (errForTabMessaging) {
-          // Skip tabs that fail injection silently
-        }
-      }
-    }
-
-    const workersForTabMessaging = [];
-    for (let workerIndexForTabMessaging = 0; workerIndexForTabMessaging < workerCountForTabMessaging; workerIndexForTabMessaging++) {
-      workersForTabMessaging.push(reInjectWorkerForTabMessaging());
-    }
-    await Promise.all(workersForTabMessaging);
-  }
+  // There is deliberately no "inject into every open tab" helper here. One
+  // existed, run after each extension reload so that every tab was ready before
+  // the user reached it. A reload does not unload the copy a tab already holds
+  // (the new one runs in a fresh isolated world beside it), so that pass added a
+  // full copy of the bundle to every open tab on every reload, all at once. A
+  // tab now gets its copy when the user reaches it: the service worker injects
+  // the tab in view after a reload and each other tab on activation, both
+  // through ensureContentInjected.
 
   globalScopeForTabMessaging.ABChatBackground = {
     ...existingBackgroundNamespaceForTabMessaging,
@@ -607,8 +563,7 @@
       queryActiveTab: queryActiveTabForTabMessaging,
       sendActionToTab: sendActionToTabForTabMessaging,
       ensureContentInjected: ensureContentInjectedForTabMessaging,
-      checkContentReady: checkContentReadyForTabMessaging,
-      reInjectIntoAllSupportedTabs: reInjectIntoAllSupportedTabsForTabMessaging
+      checkContentReady: checkContentReadyForTabMessaging
     }
   };
 })();

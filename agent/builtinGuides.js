@@ -34,22 +34,37 @@ If the user names a format, use it.
 ## 3. Rules for every format
 - Never use markdown in any field: no **bold**, _italic_, backtick code, [text](url) links, code fences, > quotes, --- rules, or | pipe | tables. These formats do not render markdown, so the characters appear literally in the file. Use the format's own structure instead.
 - Do not fake structure with characters. No runs of spaces or tabs to line things up, no typed "•" or "1." at the start of list items, no lines of dashes or underscores, and no empty paragraphs for spacing. The theme spaces everything; use the block types for lists, rules, and alignment.
-- title is used as the filename when filename is omitted. A new DOCX, PDF, or PPTX also stores it as the file's title property. It is never rendered in a DOCX or PDF, so add a title block if the document should open with one. In PPTX it becomes a slide only when you pass no slides and no content.
+- title is used as the filename when filename is omitted. A new DOCX, PDF, or PPTX also stores it as the file's title property. In a DOCX or PDF it is shown only on a cover that has no title of its own (section 7), so add a title block if the document should open with one and has no cover. In PPTX it becomes a slide only when you pass no slides and no content.
 - filename is optional, and the right extension is added.
-- The result is metadata only. The file is saved and shown to the user automatically, so do not repeat its contents in your reply.
+- The result is metadata only. The file is saved and shown to the user automatically, so do not repeat its contents in your reply. To point to the file in your reply, copy the link from the result's displayed_to_user field, such as [report.docx](#abchat-docblob-12); the file is then shown there instead of above your reply. A bare #abchat-docblob-12 is plain text, not a link.
+- Make each file once. Call again only to fix a problem the result reports or to make a change the user asked for. While you answer one message, a new file with the same name as an earlier one replaces it in the chat, so give each file its own filename when the user wants to keep several.
 
-## 4. Themes (DOCX, PDF, XLSX, and PPTX)
+## 4. Design and themes
+A new document must look designed, never like text poured into a default template. Unless it is one of the restrained kinds below, aim for the most striking result that suits its subject and reader:
+- Choose the theme for the subject and the reader.
+- Give it a colour of its own with style.primary_color, picked for the subject or the user's brand: a deep green for a sustainability report, terracotta for a restaurant menu, the company's colour for a pitch. Use a deep, saturated colour that reads as text on white, never a pastel or neon. Leave it out when the theme's own colour already suits the subject.
+- Use the whole range of blocks and layouts (sections 6, 7, and 9), so pages and slides are not runs of paragraphs or bullets.
+- Give a deck generated pictures (section 9).
+- Give a report, proposal, plan, brief, guide, or manual of three pages or more a cover with a generated photo (section 7). A shorter document opens with a title block instead.
+- Add a picture inside a document where it carries the point: a product, a place, a screenshot being explained, a photo for each story in a newsletter.
+
+Restrained documents follow conventions set outside the conversation, so keep them plain unless the user asks otherwise:
+- A résumé or CV for a job application: modern or classic, one column, no pictures or layout tables, so applicant tracking systems can read it.
+- A paper, thesis, or coursework for submission: academic, or the format the institution sets.
+- A contract, policy, or other legal document, and a formal letter: classic.
+Give these no style colours, no pictures, and no cover unless the user asks for a title page. Treat a document the same way when the user asks for it "simple", "plain", "black and white", or "for printing".
+
 A theme sets the fonts, colours, heading sizes, spacing, table style, and page margins of a new DOCX or PDF, the font and header row of an XLSX, and the fonts, colours, title slides, and table style of a PPTX. Pick one with theme. Without it the document uses professional.
-- professional: business reports, proposals, memos, invoices, procedures, and anything without a clearer fit. Navy headings, filled table headers, striped rows.
-- modern: one-pagers, product and project briefs, résumés, startup and tech documents. Dark headings, teal accents, open tables with rules.
+- professional: business reports, proposals, memos, invoices, and procedures. Navy headings, filled table headers, striped rows.
+- modern: one-pagers, product and project briefs, pitch decks, startup and tech documents, and résumés. Dark headings, teal accents, open tables with rules.
 - classic: formal letters, legal documents, policies, contracts, and traditional correspondence. Serif type, centred title, boxed tables.
-- minimal: technical documentation, notes, meeting minutes, checklists, and plain internal documents. Greyscale, compact.
+- minimal: technical documentation, notes, meeting minutes, checklists, and documents the user wants plain. Greyscale, compact.
 - academic: essays, research papers, theses, and coursework. Times New Roman 12 pt, 1.5 line spacing, black headings, tables ruled above and below only.
-- vibrant: flyers, newsletters, event programmes, and marketing pieces meant to catch the eye. Purple headings, orange accents.
+- vibrant: flyers, newsletters, event programmes, marketing pieces, and anything for a general audience that should feel lively. Purple headings, orange accents.
 
-Use one theme for every file in a conversation, so a report and its matching handout look alike. The result's theme field says which theme a file used. If the user describes a look ("elegant", "bold", "plain"), pick the closest theme and say which you used.
+Use one theme and one style for every file in a conversation, so a report and its matching handout look alike. The result's theme field says which theme a file used. If the user describes a look ("elegant", "bold", "plain"), pick the closest theme and say which you used.
 
-Change colours or fonts only when the user asks, through style:
+style sets colours and fonts over the theme. Keep the theme's fonts unless the user asks for others:
 - primary_color: a hex colour such as "#E4002B" for headings, table headers, and accents. Accents follow it unless you also set accent_color. Use this for "use our brand colour". A colour too light to read as text, such as a bright yellow, still fills table headers and draws rules and callout bars, but headings stay dark and links, bullets, and callout titles use a darker shade of it.
 - accent_color: a hex colour for bullets, rules, and callouts.
 - heading_font and body_font: a font from this list, or a font the user names.
@@ -68,7 +83,7 @@ Change colours or fonts only when the user asks, through style:
 ## 6. Writing a document that reads well
 These apply to every format, and they are what make a document look finished rather than generated.
 - Follow the user's specification exactly: section names, headings, column names, sheet names, and order. A neater structure that changes what they asked for is wrong.
-- Open with what the reader needs. A report or brief starts with a title block (title, and a subtitle with the date, audience, or author), then a short summary or the key finding. A letter starts with the sender and recipient details in a layout table, then the date, then the greeting.
+- Open with what the reader needs. A report or brief starts with a cover or a title block (section 4 says which), with the date, audience, or author, then a short summary or the key finding. A letter starts with the sender and recipient details in a layout table, then the date, then the greeting.
 - Use headings for sections a reader would scan for: level 1 for main sections, level 2 inside them. Do not skip levels or put a heading above a single short paragraph. Keep headings short and in one capitalisation style.
 - Keep paragraphs to two to four sentences. Put one idea in each.
 - Pick the block that matches the content:
@@ -100,6 +115,7 @@ blocks is an array of:
 - { "type": "key_value", "rows": [["Label", "Value"], ...] }: labels on the left, values on the right, no borders.
 - { "type": "callout", "tone": "info", "title": "...", "text": "..." }. tone is "info" (the theme's accent), "success", "warning", "danger", or "note". title is optional, and text may hold several lines separated by \n.
 - { "type": "quote", "text": "...", "cite": "..." }. cite is optional.
+- { "type": "image", "blob_id": 42, "caption": "...", "alt": "...", "size": "full" }: a picture, centred, with its caption under it. size is "full" (the text width, the default), "medium", or "small", and a tall picture is kept to 60% of the page's height. alt describes the picture for screen readers. A picture is an image in this conversation, named by its blob id as in section 9, or a new one from generate_image.
 - { "type": "divider" } and { "type": "page_break" }.
 Block text is plain, so blocks cannot carry inline bold, italic, colour, or links. Use html when you need those.
 
@@ -109,9 +125,18 @@ html is an HTML document. Use it for inline formatting, and always when reproduc
 - Headings get real heading styles, ul and ol become real lists (nesting supported), and a href becomes a clickable link. Table cells keep inline bold, italic, colour, and links, colspan and rowspan merges are kept, and th cells make a header row.
 - A style attribute is honoured for: color and background-color (on text, and background-color on a cell as its fill); font-size, font-family, font-weight, and font-style; text-align on a block or cell; width on a col or a first-row cell (proportions only); page-break-before: always; and table borders. On a table, the border shorthand (for example style="border:1pt solid #000000") sets the frame and the inner gridlines together, border-top, border-right, border-bottom, and border-left override single frame edges, and --border-inside-h and --border-inside-v override the inner lines. A table with a border style keeps exactly those borders instead of the theme's.
 - Inline styles win over the theme, so use them only where the user asked for something specific.
-- Not kept: paragraph spacing and margins set in style, and images other than the abchat-img placeholders from read_document_structure (section 10). A URL or data URI image is dropped.
+- <img src="abchat-blob:42" alt="..." data-caption="..." data-size="medium"> is a picture, as the image block. data-caption and data-size are optional.
+- Not kept: paragraph spacing and margins set in style, and images other than abchat-blob pictures and the abchat-img placeholders from read_document_structure (section 10). A URL or data URI image is dropped.
 
 content is plain text. A line starting with "# ", "## ", or "### " is a heading of level 1 to 3, a line starting with "- " or "* " is a bullet, and every other line is a paragraph. It suits a short plain document; use blocks or html for anything with structure.
+
+cover adds a cover page before any of the three: { "title": "...", "subtitle": "...", "details": ["October 2026", "Prepared by Revenue Operations"], "image": 42 }.
+- title defaults to the document's title. details are up to six short lines at the foot of the page, such as the date, the author, and who it is for. image is a photo, by blob id.
+- With image, the photo fills the top half of the page and the title sits under it. Without it, the cover is the theme's own: the main colour across the top with the title in white (professional, modern, vibrant), or a white page with a rule above the title (classic, minimal, academic).
+- The cover is page 1, but it shows no page number or header.
+- Do not also open the content with a title block. One that repeats the cover's title is left out.
+- A document rebuilt from read_document_structure keeps its own first page and gets no cover.
+- For the photo, read the builtin-images guide and call generate_image with aspect_ratio "4:3" ("16:9" on a landscape page), a prompt giving the subject, mood, and colours to suit the theme, and no text, lettering, or logos in the image. Generate it in the same response as the document's other pictures, then make the document with their ids. If generate_image fails or is not available, make the document with the theme's cover and tell the user why it has no photo.
 
 A PDF printed by Chrome keeps all of the above. The built-in PDF writer does not: its table cells are plain text (no inline bold, italic, or links inside cells, though a cell's colour, fill, and alignment are kept), colspan merges are kept but a rowspan shows as empty cells below the first, and a table keeps its first 500 rows. If its warnings say rows were left out, use DOCX or XLSX for the full table.
 
@@ -143,7 +168,7 @@ Spreadsheet rules:
 CSV: "rows": [[...], ...]. If you pass sheets instead, only the first sheet is used. A CSV holds values only: a formula gives its result, and formats and styles are dropped. Text that a spreadsheet would run as a formula (starting with =, @, or + or - followed by a name) gets a leading apostrophe.
 - content also works for XLSX and CSV: each line is a row, split on tabs when the line has any and on commas otherwise. There is no quoting, so a value containing a comma breaks into two cells. Prefer rows.
 
-PPTX: "slides": [{ "layout": "...", "title": "...", ... }]. The deck is 16:9 in the theme's fonts and colours, on real slide layouts, so the user can add slides and change the design in PowerPoint. professional, modern, and vibrant fill the title and section slides with the main colour (primary_color when set); classic, minimal, and academic keep them white. Each slide has one layout. Leave layout out and it is chosen from what the slide has.
+PPTX: "slides": [{ "layout": "...", "title": "...", ... }]. The deck is 16:9 in the theme's fonts and colours, on real slide layouts, so the user can add slides and change the design in PowerPoint. professional, modern, and vibrant fill the title and section slides with the main colour (primary_color when set) and draw a faint pattern on it (grid, dots, and waves); classic, minimal, and academic keep them white. Each slide has one layout. Leave layout out and it is chosen from what the slide has.
 - title: { "title": "...", "subtitle": "..." }. The opening slide. A first slide with only a title and subtitle gets it.
 - section: { "layout": "section", "title": "...", "subtitle": "..." }. Opens a part of a longer deck. A later slide with only a title and subtitle gets it.
 - bullets: { "title": "...", "bullets": ["...", { "text": "...", "level": 1 }] }. A bullet is a string, or { text, level } with level 1 for a sub-bullet.
@@ -151,16 +176,17 @@ PPTX: "slides": [{ "layout": "...", "title": "...", ... }]. The deck is 16:9 in 
 - big_number: { "title": "...", "stats": [{ "value": "$4.97M", "label": "Q3 revenue, up 9% on plan" }] }. One to four figures, each with a short label. Keep value to a number and its unit.
 - table: { "title": "...", "table": { "rows": [[...], ...], "header": true } }. Up to about 12 short rows. More rows make the text smaller, rows that still do not fit are cut with a warning, and a larger table belongs in an XLSX.
 - image: { "title": "...", "bullets": [...], "image": { "blob_id": 42, "fit": "cover", "side": "right", "alt": "..." } }. With bullets, the picture fills one half of the slide and the text sits on the other (at most 8 bullets; three or four read best). With a title and no bullets, the picture fills the space under the title. With neither, it fills the slide. fit "cover" fills the space and crops the picture's edges, for photos; "contain" shows all of it, for charts, screenshots, diagrams, and logos. Left out, a picture under a title is contained and the others cover. side is "right" or "left". alt describes the picture for screen readers.
-- background, on any slide: { "image": 42 } puts a picture behind the slide, with an overlay just dark or light enough for the text on it to read; { "pattern": "dots" } a faint pattern in the theme's colours ("dots", "grid", "diagonal", or "waves"); { "color": "#0B1F3A" } a plain colour, with the text white or dark to suit it. A picture with no bullets on the first slide, or on a slide with a subtitle, goes behind the title as a cover or section photo, and so does image on a title or section slide.
-- A picture is an image in this conversation, named by its blob id: the blob_id on an <image> or <screenshot> placeholder, the "(blob id: N)" in a note's attachment list, or the N in "__blob:N__" from generate_image. Never make one up. For a new background or slide picture, call generate_image first (aspect_ratio "16:9" for a background, and ask for no text in the image), then use its id.
+- background, on any slide: { "image": 42 } puts a picture behind the slide, with an overlay just dark or light enough for the text on it to read; { "pattern": "dots" } a faint pattern in the theme's colours ("dots", "grid", "diagonal", or "waves"); { "color": "#0B1F3A" } a plain colour, with the text white or dark to suit it; "none" keeps a filled title or section slide's flat colour without the pattern. A picture with no bullets on the first slide, or on a slide with a subtitle, goes behind the title as a cover or section photo, and so does image on a title or section slide.
+- A picture is an image in this conversation, named by its blob id: the blob_id on an <image> or <screenshot> placeholder, the "(blob id: N)" in a note's attachment list, or the N in "__blob:N__" from generate_image. Never make one up; a new picture comes from generate_image, as described under Writing slides.
 - notes, on any slide: speaker notes, which the presenter sees and the audience does not.
 - A title or section slide shows only its title and subtitle. Anything else on it is left out with a warning.
 
 Writing slides:
 - One idea per slide, with a title that states its point ("Revenue beat plan by 9%" rather than "Revenue").
 - Three to six bullets of about one line each. Text is sized to fit, getting smaller as there is more of it, and a slide that does not fit even at the smallest size is named in the warnings. Split it across two slides.
-- Use the layouts: a key figure on a big_number slide, a comparison in two_column, figures in a table. A deck of nothing but bullets is hard to follow. Detail and talking points go in notes.
-- Use pictures where they carry meaning: a photo on the title slide, a product beside its features, a screenshot being explained. Keep text over a photo short.
+- Vary the layouts, with never more than two bullet slides in a row: a key figure on a big_number slide, a comparison in two_column, figures in a table, a picture beside its point. Detail and talking points go in notes.
+- Pictures: unless the deck is restrained (section 4) or the user asked for none, generate a photo for the title slide and one for each section slide, five at most. Read the builtin-images guide, then make them all in one response, where the calls run at the same time: aspect_ratio "16:9", a prompt giving the subject, mood, and colours to suit the theme, and no text, lettering, or logos in the image. Then make the deck with their ids. Add a picture to another slide only where it carries the point: a product beside its features, a screenshot being explained. If generate_image fails or is not available, make the deck without photos rather than stopping, and tell the user why it has none.
+- Keep text over a photo short.
 - No typed bullet characters; the slide draws its own.
 - Slides are numbered unless page_numbers is false. Title and section slides never show a number.
 - content also works: sections separated by a blank line become slides, and each section's first line is its title.
@@ -215,20 +241,20 @@ return { totals: totals, __document__: { format: "xlsx", filename: "revenue-by-r
 You get back { totals } and a note that the document was shown; the user gets the file.
 
 ## 12. The result
-The result has format, filename, size, and a note. A themed DOCX, PDF, XLSX, or PPTX also has theme. For edit_document the note says what was changed. For a PDF the note also says when the built-in writer made it, and why. It may have warnings: characters the built-in PDF writer could not show, blocks, table rows, or columns left out, XLSX formulas that give an error or were kept as text, a renamed sheet, slide content that was cut or does not fit, a picture that could not be used or will look soft, a DOCX font that is not in the list, a PDF font that could not be found or downloaded, a theme or page value that was not recognised, or a theme ignored for an edited document. Read them. When content was left out or changed, tell the user what and why, and offer the fix (another format, or splitting the document).
+The result has format, filename, size, and a note. A themed DOCX, PDF, XLSX, or PPTX also has theme. For edit_document the note says what was changed. For a PDF the note also says when the built-in writer made it, and why. It may have warnings: characters the built-in PDF writer could not show, blocks, table rows, or columns left out, XLSX formulas that give an error or were kept as text, a renamed sheet, slide content that was cut or does not fit, a picture that could not be used or will look soft, a cover that was left out, a DOCX font that is not in the list, a PDF font that could not be found or downloaded, a theme or page value that was not recognised, or a theme ignored for an edited document. Read them. When content was left out or changed, tell the user what and why, and offer the fix (another format, or splitting the document).
 
 ## 13. Size limits
 Content past these limits is dropped, and the result's warnings say what was left out (the note counts images past 50). Plan a bigger document as parts.
 - DOCX and PDF: 500 blocks, and html of 200,000 characters. html is converted to blocks first, and each heading, paragraph, list, or table is one block.
 - PDF from the built-in writer: 500 rows per table and 400 pages.
 - Tables: 5,000 rows and 100 columns. XLSX sheets and CSV files: 10,000 rows, 100 columns, and 10,000 characters per cell.
-- Images: 50 per document.
+- Images: 50 different pictures per DOCX or PDF, and 6 lines of details on a cover.
 - XLSX: 20 sheets.
 - PPTX: 100 slides and 50 different pictures. Per slide: 12 bullets, 8 in each two_column column, 8 beside a picture, 4 stats, 8 table columns, and 10,000 characters of notes.
 - edit_document: 200 edits per call, 20,000 characters per text, and 2,000 characters per find.
 
 ## 14. Examples
-A report: { "format": "docx", "title": "Q3 sales review", "theme": "professional", "page_numbers": true, "blocks": [{ "type": "title", "text": "Q3 Sales Review", "subtitle": "October 2026 · Prepared for the leadership team" }, { "type": "key_value", "rows": [["Period", "July to September 2026"], ["Owner", "Revenue Operations"]] }, { "type": "heading", "level": 1, "text": "Summary" }, { "type": "paragraph", "text": "Revenue grew 14% to €4.2M, led by the enterprise segment." }, { "type": "callout", "tone": "warning", "title": "Risk", "text": "Two large renewals fall due in Q4." }, { "type": "heading", "level": 1, "text": "Revenue by region" }, { "type": "table", "header": true, "caption": "Table 1. Revenue by region (€k)", "rows": [["Region", "Q2", "Q3", "Change"], ["North", "1,480", "1,655", "11.8%"], ["South", "1,210", "1,402", "15.9%"], ["Total", "2,690", "3,057", "13.6%"]] }, { "type": "heading", "level": 1, "text": "Next steps" }, { "type": "numbered", "items": ["Confirm the renewal owners", "Review pricing for the South region"] }] }
+A report, with 57 a photo from generate_image: { "format": "docx", "title": "Q3 sales review", "theme": "professional", "page_numbers": true, "cover": { "title": "Q3 Sales Review", "subtitle": "Prepared for the leadership team", "details": ["October 2026", "Revenue Operations"], "image": 57 }, "blocks": [{ "type": "key_value", "rows": [["Period", "July to September 2026"], ["Owner", "Revenue Operations"]] }, { "type": "heading", "level": 1, "text": "Summary" }, { "type": "paragraph", "text": "Revenue grew 14% to €4.2M, led by the enterprise segment." }, { "type": "callout", "tone": "warning", "title": "Risk", "text": "Two large renewals fall due in Q4." }, { "type": "heading", "level": 1, "text": "Revenue by region" }, { "type": "table", "header": true, "caption": "Table 1. Revenue by region (€k)", "rows": [["Region", "Q2", "Q3", "Change"], ["North", "1,480", "1,655", "11.8%"], ["South", "1,210", "1,402", "15.9%"], ["Total", "2,690", "3,057", "13.6%"]] }, { "type": "heading", "level": 1, "text": "Next steps" }, { "type": "numbered", "items": ["Confirm the renewal owners", "Review pricing for the South region"] }] }
 A letter: { "format": "docx", "filename": "offer-letter", "theme": "classic", "html": "<table border=\"0\"><tr><td><strong>Ada Lovelace</strong><br>12 Market Street<br>London</td><td style=\"text-align:right\">18 October 2026</td></tr></table><p>Dear Linus,</p><p>We are pleased to offer you the role of Senior Engineer, starting on 1 November.</p><ul><li>Salary: £50,000 a year</li><li>Location: London office</li></ul><p>Yours sincerely,</p><p>Ada Lovelace</p>" }
 A one-pager with a brand colour: { "format": "pdf", "theme": "modern", "style": { "primary_color": "#E4002B" }, "html": "<h1 class=\"title\">Atlas</h1><p class=\"subtitle\">Invoice matching for finance teams</p><div class=\"callout\" data-tone=\"success\"><p>Cuts reconciliation time by half.</p></div><h2>How it works</h2><ol><li>Connect your accounting system</li><li>Review the flagged exceptions</li></ol>" }
 XLSX: { "format": "xlsx", "filename": "q3-revenue", "theme": "professional", "sheets": [{ "name": "Revenue", "columns": ["", "currency:EUR:0", "currency:EUR:0", "percent:1"], "rows": [["Region", "Q2", "Q3", "Change"], ["North", 1480000, 1655000, { "f": "C2/B2-1" }], ["South", 1210000, 1402000, { "f": "C3/B3-1" }], ["Total", { "f": "SUM(B2:B3)" }, { "f": "SUM(C2:C3)" }, { "f": "C4/B4-1" }]] }, { "name": "Orders", "columns": ["", "date", "", "currency:EUR"], "rows": [["Order", "Date", "Customer", "Amount"], ["SO-1001", "2026-07-02", "Contoso", 1250], ["SO-1002", "2026-07-09", "Fabrikam", 980]] }] }
@@ -312,7 +338,8 @@ This guide covers generate_image. Once it is in the conversation you do not need
 
 ## 1. Before you call
 - The image is shown in the chat as soon as a call succeeds. Every call is billed and adds a new image. Nothing replaces or removes an earlier one.
-- At most 2 generate_image calls run per user message, and a call that fails still counts. A third is refused. If the user asks for more images than that in one message, make 2 and tell them they can ask for the rest.
+- At most 6 generate_image calls run per user message, and a call that fails still counts. A seventh is refused. If the user asks for more images than that in one message, make 6 and tell them they can ask for the rest.
+- Several calls in one response run at the same time. When you need a set of images, such as the pictures for a deck, make them all in one response.
 
 ## 2. aspect_ratio
 - Required, and the only thing that sets the image's shape: "1:1" square, "16:9" landscape, "9:16" tall portrait (a phone screen), "4:3" landscape, "3:4" portrait. "4:3" is landscape and "3:4" is portrait, so check which one you mean.
@@ -338,7 +365,7 @@ Describe what the image should show. When changing an existing image, describe o
 
 ## 6. The result
 - ok: true means the image is already on screen. The result also gives prompt, aspect_ratio, and, when they could be measured, width and height in pixels. Check them against what the user asked for before you say the image is done.
-- When you already showed an image earlier while answering the same message, the result carries a note. Your reply must then say that you made another image, why, and which one is final.
+- When you already showed an image earlier while answering the same message, the result carries a note. If the new image replaces an earlier one, your reply must say so, why, and which one is final.
 - Do not regenerate to polish an image that succeeded. Regenerate only when it is wrong, such as the wrong shape or plainly not what was asked.
 - Errors about the setup (no API key, no image model selected, image generation on the free model) are for the user to fix. Tell them what to change and do not call again.
 

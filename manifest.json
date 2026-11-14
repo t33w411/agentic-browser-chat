@@ -56,6 +56,7 @@
       ],
       "js": [
         "content/preInit.js",
+        "content/staleCopyRelease.js",
         "shared/messages.js",
         "shared/agentRunStop.js",
         "shared/toolRegistry.js",
@@ -83,6 +84,7 @@
         "panel/panelDraftSync.js",
         "panel/panelComposerCopy.js",
         "panel/panelSpeechChunk.js",
+        "panel/panelGeneratedFiles.js",
         "agent/apiLogger.js",
         "agent/apiLogTurns.js",
         "agent/pageActionLogger.js",

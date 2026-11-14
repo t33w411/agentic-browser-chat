@@ -427,7 +427,7 @@
             theme: { type: 'string', enum: ['professional', 'modern', 'classic', 'minimal', 'academic', 'vibrant'], description: 'DOCX, PDF, XLSX, and PPTX: the look of a new document.' },
             style: {
               type: 'object',
-              description: 'DOCX, PDF, XLSX, and PPTX: theme overrides, only on request.',
+              description: 'DOCX, PDF, XLSX, and PPTX: colours and fonts over the theme.',
               properties: {
                 primary_color: { type: 'string', description: 'Hex colour.' },
                 accent_color: { type: 'string', description: 'Hex colour.' },
@@ -445,6 +445,16 @@
             },
             page_numbers: { type: 'boolean', description: 'DOCX and PDF: footer page numbers. PPTX: slide numbers, on unless false.' },
             header: { type: 'string', description: 'DOCX and PDF: text at the top of every page.' },
+            cover: {
+              type: 'object',
+              description: 'DOCX and PDF: a cover page.',
+              properties: {
+                title: { type: 'string' },
+                subtitle: { type: 'string' },
+                image: { type: 'integer', description: 'Blob id of a photo.' },
+                details: { type: 'array', items: { type: 'string' }, description: 'Short lines, such as the date and author.' }
+              }
+            },
             blocks: {
               type: 'array',
               description: 'DOCX and PDF only: structured content blocks.',
@@ -453,7 +463,7 @@
                 properties: {
                   type: {
                     type: 'string',
-                    enum: ['title', 'heading', 'paragraph', 'bullet', 'numbered', 'table', 'key_value', 'callout', 'quote', 'divider', 'page_break'],
+                    enum: ['title', 'heading', 'paragraph', 'bullet', 'numbered', 'table', 'key_value', 'callout', 'quote', 'image', 'divider', 'page_break'],
                     description: 'Block type.'
                   },
                   level: { type: 'integer', description: 'Heading level from 1 to 6.' },
@@ -478,7 +488,10 @@
                   header: { type: 'boolean', description: 'Table: the first row is a header.' },
                   bordered: { type: 'boolean', description: 'Table: false for a layout table.' },
                   columns: { type: 'array', items: { type: 'number' }, description: 'Table: relative column widths.' },
-                  caption: { type: 'string', description: 'Table only.' },
+                  caption: { type: 'string', description: 'Table or image.' },
+                  blob_id: { type: 'integer', description: 'Image only: the picture.' },
+                  alt: { type: 'string', description: 'Image only.' },
+                  size: { type: 'string', enum: ['full', 'medium', 'small'], description: 'Image only.' },
                   tone: { type: 'string', enum: ['info', 'success', 'warning', 'danger', 'note'], description: 'Callout only.' },
                   title: { type: 'string', description: 'Callout only.' },
                   cite: { type: 'string', description: 'Quote only.' }

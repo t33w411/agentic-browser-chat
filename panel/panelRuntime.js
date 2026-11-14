@@ -3056,11 +3056,27 @@
       return Promise.all(imageLoadsForPanelRuntime.concat(docLoadsForPanelRuntime)).then(function () {});
     }
 
+    // Indexes of automatic file links to leave out: one the reply already links, or an older file
+    // remade under the same name in the same reply. Read per call so a re-injection picks up the
+    // new copy; with the module missing every link is drawn, as before.
+    function getHiddenGeneratedFileIndexesForPanelRuntime(messagesForHiddenFiles) {
+      const generatedFileLinksForPanelRuntime = (globalThis.ABChatContent || {}).generatedFileLinks;
+      if (!generatedFileLinksForPanelRuntime || typeof generatedFileLinksForPanelRuntime.hiddenDisplayIndexes !== 'function') {
+        return new Set();
+      }
+      try {
+        return generatedFileLinksForPanelRuntime.hiddenDisplayIndexes(messagesForHiddenFiles);
+      } catch (errForHiddenFiles) {
+        return new Set();
+      }
+    }
+
     function renderChatMessages() {
       const container = root.getElementById('chat-messages-content');
       if (!container) return;
 
       const messages = getActiveChatMessagesForPanelRuntime();
+      const hiddenGeneratedFileIndexesForRender = getHiddenGeneratedFileIndexesForPanelRuntime(messages);
       const activeChatRecordForRender = S.activeChatId ? CHAT_STORE_FOR_PANEL_RUNTIME[S.activeChatId] : null;
       const compactedThroughIdForRender = activeChatRecordForRender ? activeChatRecordForRender.compactedThroughMessageId : null;
       let compactionMarkerInsertedForRender = false;
@@ -3237,6 +3253,11 @@
 
         // Assistant messages with text are buffered and merged into one bubble.
         if (!isUser) {
+          // Skipped without flushing, so the reply around it stays one bubble.
+          if (hiddenGeneratedFileIndexesForRender.has(i)) {
+            i++;
+            continue;
+          }
           const mdText = String(msg.md || msg.content || '').trim();
           if (msg.systemNotice && mdText) {
             flushAsstBuffer();

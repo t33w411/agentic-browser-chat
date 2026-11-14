@@ -58,11 +58,13 @@
   // Deck covers (PPTX title and section slides):
   //   fill         the primary colour fills the slide, with an accent band along the bottom
   //   plain        white, with the accent rule under the title or a bar beside a section title
+  // A filled cover also gets a faint pattern in the primary colour (deck.pattern) unless the slide
+  // has its own background or asks for none.
   const THEMES_FOR_DOCUMENT_THEMES = [
     {
       name: 'professional',
       label: 'Professional',
-      useFor: 'business reports, proposals, memos, invoices, procedures, and anything without a clearer fit',
+      useFor: 'business reports, proposals, memos, invoices, and procedures',
       fonts: { heading: 'Calibri', body: 'Calibri', mono: 'Consolas' },
       webFonts: { heading: 'Source Sans 3', body: 'Source Sans 3', mono: 'Source Code Pro' },
       colors: { text: '1F2328', muted: '5B6470', heading: '1F3864', primary: '1F3864', accent: '2E75B6' },
@@ -71,14 +73,14 @@
       title: { align: 'left', rule: true },
       headingRule: false,
       table: { style: 'header-fill', zebra: true },
-      deck: { cover: 'fill' },
+      deck: { cover: 'fill', pattern: 'grid' },
       footer: 'page-x-of-y',
       marginPt: 72
     },
     {
       name: 'modern',
       label: 'Modern',
-      useFor: 'one-pagers, product and project briefs, résumés, startup and tech documents',
+      useFor: 'one-pagers, product and project briefs, pitch decks, startup and tech documents, and résumés',
       fonts: { heading: 'Arial', body: 'Arial', mono: 'Consolas' },
       webFonts: { heading: 'Montserrat', body: 'Inter', mono: 'JetBrains Mono' },
       colors: { text: '1F2937', muted: '6B7280', heading: '111827', primary: '0F766E', accent: '0F766E' },
@@ -87,7 +89,7 @@
       title: { align: 'left', rule: false },
       headingRule: false,
       table: { style: 'lines', zebra: false },
-      deck: { cover: 'fill' },
+      deck: { cover: 'fill', pattern: 'dots' },
       footer: 'page-x-of-y',
       marginPt: 66
     },
@@ -151,7 +153,7 @@
       title: { align: 'left', rule: true },
       headingRule: false,
       table: { style: 'header-fill', zebra: true },
-      deck: { cover: 'fill' },
+      deck: { cover: 'fill', pattern: 'waves' },
       footer: 'page-x-of-y',
       marginPt: 66
     }

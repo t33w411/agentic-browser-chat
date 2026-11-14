@@ -236,3 +236,42 @@ test('a printed list nests each list element under its item with its own tag', f
   assert.ok(rendered.html.includes('<div class="list"><ol class="l0"><li>One<ul class="l1"><li>Sub one</li></ul></li>'
     + '<li>Two<ol class="l1"><li>Sub again</li></ol><ol class="l1"><li>Sibling sub</li></ol></li><li>Three</li></ol></div>'), rendered.html.slice(rendered.html.indexOf('<div class="list">'), rendered.html.indexOf('<div class="list">') + 400));
 });
+
+// A PNG header is all the picture loader reads, and the printed page carries the bytes as they are.
+function pngHeaderForTest(width, height) {
+  const bytes = Buffer.alloc(33);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]).copy(bytes, 0);
+  bytes.writeUInt32BE(width, 16);
+  bytes.writeUInt32BE(height, 20);
+  bytes[24] = 8;
+  bytes[25] = 2;
+  return { dataUrl: 'data:image/png;base64,' + bytes.toString('base64') };
+}
+
+// Replayed against the renderer before covers and pictures, the page had neither. With the
+// title's font stack written into its style attribute, as in the first version, the stack's
+// quotes closed the attribute early and Chrome printed the title in the default font; the
+// style-attribute check fails on that copy (checked).
+test('a printed cover is its own named page with no margins, passes the printer check, and keeps font stacks out of style attributes', async function () {
+  const generation = generatorForTest.ABChatAgent.documentGeneration;
+  const records = { 7: pngHeaderForTest(1600, 1200) };
+  let seenJob = null;
+  await generation.createDocument({
+    format: 'pdf', title: 'Harbour Lights', theme: 'modern', page_numbers: true, header: 'Draft',
+    cover: { subtitle: 'Festival plan', details: ['October 2026'], image: 7 },
+    blocks: [{ type: 'paragraph', text: 'Body.' }, { type: 'image', blob_id: 7, size: 'small', caption: 'Figure 1. The quay', alt: 'Boats' }]
+  }, {
+    loadImage: (blobId) => Promise.resolve(records[blobId] || null),
+    printPdf: (job) => { seenJob = job; return Promise.resolve({ ok: true, base64: Buffer.from('%PDF-1.7 printed').toString('base64') }); }
+  });
+  const html = seenJob.html;
+  assert.match(html, /@page cover \{ margin: 0; @top-right \{ content: none; \} @bottom-right \{ content: none; \} @bottom-center \{ content: none; \} \}/);
+  assert.match(html, /\.cover \{ page: cover;[^}]*break-after: page;/);
+  assert.match(html, /<section class="cover"[^>]*><img class="cover-art" alt="" src="data:image\/png;base64,/);
+  assert.match(html, /<p class="cover-title"[^>]*>Harbour Lights<\/p>/);
+  assert.match(html, /\.cover-title \{ font-family: [^}]+\}/);
+  assert.doesNotMatch(html, /style="[^"]*font-family/);
+  assert.match(html, /<div class="picture"><img alt="Boats" src="data:image\/png;base64,[^"]+" style="width: 168pt; height: 126pt">/);
+  assert.match(html, /<p class="picture-caption">Figure 1\. The quay<\/p>/);
+  assert.strictEqual(loadPrinterForTest().checkHtml(html), '');
+});

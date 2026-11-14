@@ -6,7 +6,9 @@
     return;
   }
 
-  const MAX_IMAGE_GENERATIONS_PER_SEND_FOR_IMAGE_GENERATION_CAP = 2;
+  // Enough for a deck's cover and section photos with one to spare, and few enough that a model
+  // polishing its own images cannot run up a large bill on one message.
+  const MAX_IMAGE_GENERATIONS_PER_SEND_FOR_IMAGE_GENERATION_CAP = 6;
 
   nsForImageGenerationCap.hooks.register('PreToolUse', {
     name: 'image-generation-cap',

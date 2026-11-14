@@ -171,10 +171,10 @@ The page surface is **ref-based**: the model never writes CSS selectors or finge
 - `close_tab` — close a tab. Only a tab created earlier in this chat via `create_tab` can be closed; tabs the user opened cannot. If the closed tab was the active target, the target reverts to the tab the chat started on.
 
 **Generation**
-- `create_document` — generate a downloadable DOCX, XLSX, PDF, PPTX, or CSV file with structured content (headings, lists, tables, callouts, sheets, slides). New DOCX, PDF, and PPTX files use one of six themes (professional, modern, classic, minimal, academic, vibrant) that the model picks, with optional brand colours, fonts, page size, page numbers and a running header. XLSX files take the theme's font and header colours, and have number formats, formulas with their results saved, a frozen header row with filter buttons, a styled total row, and print setup. PPTX decks are 16:9 on a real slide master, with title, section, bullet, two-column, big-number, table, and picture slides, speaker notes, slide numbers, and text sized to fit each slide. A slide can sit on a photo from the chat, a plain colour, or a subtle pattern, and text on a photo gets an overlay just dark or light enough to read. PDFs are printed by Chrome, with the fonts embedded and a matching Noto font for any script in the text, once you allow it; otherwise a built-in writer makes them with Helvetica, Times, and Courier and Western European characters only. Files are stored as blobs and displayed inline.
+- `create_document` — generate a downloadable DOCX, XLSX, PDF, PPTX, or CSV file with structured content (headings, lists, tables, callouts, sheets, slides). New DOCX, PDF, and PPTX files use one of six themes (professional, modern, classic, minimal, academic, vibrant) that the model picks, with a colour chosen for the subject or the brand, fonts, page size, page numbers and a running header. New documents aim for a designed look by default; résumés for applications, papers for submission, legal documents, and formal letters stay conventional unless you ask otherwise. XLSX files take the theme's font and header colours, and have number formats, formulas with their results saved, a frozen header row with filter buttons, a styled total row, and print setup. PPTX decks are 16:9 on a real slide master, with title, section, bullet, two-column, big-number, table, and picture slides, speaker notes, slide numbers, and text sized to fit each slide. A slide can sit on a photo from the chat, a plain colour, or a subtle pattern, and text on a photo gets an overlay just dark or light enough to read. Unless you ask for a plain deck, the model generates a cover photo and section photos for it, and filled title and section slides that have no photo get a pattern in the theme's colours. A report, proposal, or guide of three pages or more gets a cover page with a generated photo, or the theme's own cover, and DOCX and PDF files can hold pictures from the chat with captions. PDFs are printed by Chrome, with the fonts embedded and a matching Noto font for any script in the text, once you allow it; otherwise a built-in writer makes them with Helvetica, Times, and Courier and Western European characters only. Files are stored as blobs and displayed inline.
 - `read_document_structure` re-reads an attached DOCX as structured HTML (headings, lists, tables, inline bold/italic, hyperlinks), with an id on every paragraph. Only DOCX is supported.
 - `edit_document` changes an attached DOCX in place by paragraph id. It can replace or rewrite text, add or remove paragraphs and table rows, and change formatting, optionally as tracked changes. Everything the edits do not touch stays exactly as it was. To give a document a new layout instead, the model rebuilds it from the `read_document_structure` HTML with `create_document`.
-- `generate_image` — image generation through the configured image model. Generated images are displayed inline and can be iterated on by passing the prior image's blob id as `source_blob_id`, which also accepts an attached image to edit.
+- `generate_image` — image generation through the configured image model, at most six images per message. Generated images are displayed inline and can be iterated on by passing the prior image's blob id as `source_blob_id`, which also accepts an attached image to edit.
 - `generate_questions` — produces quiz items (MCQ or fill-in-the-blank) from source material and saves them directly to the Quiz tab.
 
 **Context awareness**
@@ -365,6 +365,7 @@ agentic-browser-chat/
 │   ├── service-worker.js      # Entry point: wires up everything below
 │   ├── dbHandler.js           # IndexedDB proxy for content scripts
 │   ├── tabMessaging.js        # Cross-tab/content messaging + script re-injection
+│   ├── injectionIndicator.js  # Animates a tab's toolbar icon while the scripts load into it
 │   ├── contextMenus.js        # Right-click menu setup
 │   ├── commands.js            # Keyboard command handlers
 │   ├── panelDataRepoImpl.js   # Repository functions backing the panel (notes, chats, tasks, blobs)
@@ -373,6 +374,7 @@ agentic-browser-chat/
 ├── content/                   # Content-script bootstrap
 │   ├── pageEventShield.js     # Main-world patch hiding panel events from page listeners
 │   ├── preInit.js             # First in the load order; bumps the listener-generation counter
+│   ├── staleCopyRelease.js    # Frees a copy of the content scripts left behind by an extension reload
 │   ├── keyboardShield.js      # Shields panel keyboard and pointer events from page listeners
 │   └── main.js                # Last in the load order; runs re-init recovery
 ├── panel/                     # The injected overlay panel (shadow-DOM UI)

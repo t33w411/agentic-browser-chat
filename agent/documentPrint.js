@@ -184,7 +184,7 @@
       return accForCollect;
     }
     if (typeof valueForCollect === 'object') {
-      ['text', 'subtitle', 'title', 'cite', 'caption', 'label', 'value', 'runs', 'items', 'rows', 'paragraphs'].forEach(function (keyForCollect) {
+      ['text', 'subtitle', 'title', 'cite', 'caption', 'label', 'value', 'runs', 'items', 'rows', 'paragraphs', 'details'].forEach(function (keyForCollect) {
         if (valueForCollect[keyForCollect] != null) collectTextForDocumentPrint(valueForCollect[keyForCollect], accForCollect);
       });
     }
@@ -611,6 +611,13 @@
     var bytesForImage = resolvedForImage.bytes;
     var typeForImage = String(resolvedForImage.contentType || '').toLowerCase();
     if (!bytesForImage || !bytesForImage.length || !/^image\/(png|jpeg|gif|webp|bmp|svg\+xml)$/.test(typeForImage)) return '';
+    // A picture from the chat has the size it is shown at, and is centred over its caption.
+    if (blockForImage.shown) {
+      var captionForPicture = typeof blockForImage.caption === 'string' ? blockForImage.caption.trim() : '';
+      return '<div class="picture"><img alt="' + escapeHtmlForDocumentPrint(blockForImage.alt || '') + '" src="data:' + typeForImage + ';base64,' + bytesToBase64ForDocumentPrint(bytesForImage)
+        + '" style="width: ' + ptForDocumentPrint(blockForImage.shown.widthPt) + '; height: ' + ptForDocumentPrint(blockForImage.shown.heightPt) + '">'
+        + (captionForPicture ? '<p class="picture-caption">' + escapeHtmlForDocumentPrint(captionForPicture) + '</p>' : '') + '</div>';
+    }
     var widthPtForImage = Math.max(1, (Number(resolvedForImage.wPx) || 1) * PX_TO_PT_FOR_DOCUMENT_PRINT);
     var heightPtForImage = Math.max(1, (Number(resolvedForImage.hPx) || 1) * PX_TO_PT_FOR_DOCUMENT_PRINT);
     var scaleForImage = Math.min(1, stateForImage.contentWidthPt / widthPtForImage, stateForImage.contentHeightPt / heightPtForImage);
@@ -682,6 +689,74 @@
     return '<p' + alignAttrForDocumentPrint(blockForBlock.align) + '>' + stateForBlock.content(contentForBlock) + '</p>';
   }
 
+  // ---- Cover ----
+
+  // The cover is the first page, on a named page with no margins so it can run to the edges.
+  // Everything on it is placed where the layout from documentGeneration says, the same place the
+  // DOCX and the built-in PDF put it. The page counts as page 1 but shows no number or header.
+  // Font stacks hold quotes, so they go in the stylesheet (coverCss), never in a style attribute.
+  function coverHtmlForDocumentPrint(layoutForCover) {
+    var ptCover = ptForDocumentPrint;
+    var colorsForCover = layoutForCover.colors;
+    var boxStyle = function (box) {
+      return 'left: ' + ptCover(box.x) + '; top: ' + ptCover(box.y) + '; width: ' + ptCover(box.w) + '; height: ' + ptCover(box.h) + ';';
+    };
+    var partsForCover = [];
+    if (layoutForCover.photo) {
+      partsForCover.push('<img class="cover-art" alt="' + escapeHtmlForDocumentPrint(layoutForCover.photo.alt || '') + '" src="data:image/' + layoutForCover.photo.ext + ';base64,'
+        + bytesToBase64ForDocumentPrint(layoutForCover.photo.bytes) + '" style="' + boxStyle(layoutForCover.art) + '">');
+    }
+    if (layoutForCover.variant === 'band') {
+      partsForCover.push('<div class="cover-fill" style="' + boxStyle(layoutForCover.art) + ' background-color: ' + hexForDocumentPrint(colorsForCover.band) + ';"></div>');
+      if (layoutForCover.bandArt) {
+        partsForCover.push('<img class="cover-art" alt="" src="data:image/png;base64,' + bytesToBase64ForDocumentPrint(layoutForCover.bandArt.png) + '" style="' + boxStyle(layoutForCover.art) + '">');
+      }
+      partsForCover.push('<div class="cover-fill" style="' + boxStyle(layoutForCover.strip) + ' background-color: ' + hexForDocumentPrint(colorsForCover.strip) + ';"></div>');
+    }
+    var alignForCover = layoutForCover.align === 'center' ? 'center' : 'left';
+    var textForCover = '';
+    if (layoutForCover.rule) {
+      textForCover += '<div class="cover-rule" style="width: ' + ptCover(layoutForCover.rule.w) + '; height: ' + ptCover(layoutForCover.rule.h)
+        + '; background-color: ' + hexForDocumentPrint(colorsForCover.rule) + ';' + (alignForCover === 'center' ? ' margin-left: auto; margin-right: auto;' : '') + '"></div>';
+    }
+    textForCover += '<p class="cover-title" style="font-size: ' + ptCover(layoutForCover.titleSize)
+      + '; font-weight: ' + (layoutForCover.titleBold ? 700 : 400) + '; color: ' + hexForDocumentPrint(colorsForCover.title) + ';">' + escapeHtmlForDocumentPrint(layoutForCover.title) + '</p>';
+    if (layoutForCover.subtitle) {
+      textForCover += '<p class="cover-subtitle" style="font-size: ' + ptCover(layoutForCover.subtitleSize) + '; color: ' + hexForDocumentPrint(colorsForCover.subtitle) + ';">'
+        + escapeHtmlForDocumentPrint(layoutForCover.subtitle) + '</p>';
+    }
+    var textPlace = layoutForCover.variant === 'band'
+      ? 'bottom: ' + ptCover(layoutForCover.height - layoutForCover.textBottom) + ';'
+      : 'top: ' + ptCover(layoutForCover.textTop) + ';';
+    partsForCover.push('<div class="cover-text" style="left: ' + ptCover(layoutForCover.margin) + '; width: ' + ptCover(layoutForCover.textWidth) + '; ' + textPlace
+      + ' text-align: ' + alignForCover + ';">' + textForCover + '</div>');
+    if (layoutForCover.details.length) {
+      var detailsPlace = layoutForCover.variant === 'band'
+        ? 'top: ' + ptCover(layoutForCover.detailsTop) + ';'
+        : 'bottom: ' + ptCover(layoutForCover.height - layoutForCover.detailsBottom) + ';';
+      partsForCover.push('<div class="cover-details" style="left: ' + ptCover(layoutForCover.margin) + '; width: ' + ptCover(layoutForCover.textWidth) + '; ' + detailsPlace
+        + ' text-align: ' + alignForCover + '; font-size: ' + ptCover(layoutForCover.detailSize) + '; color: ' + hexForDocumentPrint(colorsForCover.details) + ';">'
+        + layoutForCover.details.map(function (lineForCover) { return '<p>' + escapeHtmlForDocumentPrint(lineForCover) + '</p>'; }).join('') + '</div>');
+    }
+    // A point short of the page, so rounding cannot push the section onto a second, blank page.
+    return '<section class="cover" style="width: ' + ptCover(layoutForCover.width) + '; height: ' + ptCover(layoutForCover.height - 1) + ';">' + partsForCover.join('') + '</section>';
+  }
+
+  function coverCssForDocumentPrint(stacksForCoverCss) {
+    return [
+      '.cover-title { font-family: ' + stacksForCoverCss.heading + '; }',
+      '@page cover { margin: 0; @top-right { content: none; } @bottom-right { content: none; } @bottom-center { content: none; } }',
+      '.cover { page: cover; position: relative; overflow: hidden; break-after: page; margin: 0; }',
+      '.cover-art, .cover-fill, .cover-text, .cover-details { position: absolute; }',
+      '.cover-art { display: block; object-fit: cover; }',
+      '.cover-rule { margin-bottom: 22pt; }',
+      '.cover-title { line-height: 1.08; margin: 0 0 10pt; }',
+      '.cover-subtitle { line-height: 1.25; margin: 0; }',
+      '.cover-details { line-height: 1.4; }',
+      '.cover-details p { margin: 0 0 2pt; }'
+    ].join('\n');
+  }
+
   // ---- Page and styles ----
 
   function pageCssForDocumentPrint(lookForPage, stacksForPage) {
@@ -747,7 +822,10 @@
       'hr { border: 0; border-top: 0.75pt solid ' + (hexForDocumentPrint(colorsForCss.rule) || '#808080') + '; margin: 0 0 ' + ptForDocumentPrint(Math.max(12, spacingForCss.after * 2)) + '; }',
       '.page-break { break-after: page; height: 0; }',
       '.figure { margin: 0 0 ' + afterForCss + '; break-inside: avoid; }',
-      '.figure img { display: block; max-width: 100%; }'
+      '.figure img { display: block; max-width: 100%; }',
+      '.picture { margin: 4pt 0 ' + ptForDocumentPrint(spacingForCss.after + 6) + '; text-align: center; break-inside: avoid; }',
+      '.picture img { display: block; margin: 0 auto; }',
+      '.picture-caption { font-weight: 700; color: ' + mutedForCss + '; font-size: ' + ptForDocumentPrint(sizesForCss.small) + '; margin: 4pt 0 0; }'
     ];
     for (var levelForCss = 1; levelForCss <= 6; levelForCss++) {
       rulesForCss.push('h' + levelForCss + ' { font-family: ' + stacksForCss.heading + '; font-size: ' + ptForDocumentPrint(sizesForCss.headings[levelForCss - 1])
@@ -803,7 +881,8 @@
     var blocksForRender = layoutForRender.tidyBlocks(layoutForRender.normalizeBlocks(inputForRender, 'PDF creation requires blocks, html, or content.'));
     var lookForRender = buildLookForDocumentPrint(contextForRender, inputForRender.docDefaults || null);
     var langForRender = String(safeOptionsForRender.lang || '').replace(/[^A-Za-z0-9-]/g, '').slice(0, 35) || 'en';
-    var textForRender = collectTextForDocumentPrint(blocksForRender, { parts: [], chars: 0 }).parts.join('\n');
+    var coverForRender = lookForRender.themed && inputForRender.coverLayout ? inputForRender.coverLayout : null;
+    var textForRender = collectTextForDocumentPrint([coverForRender, blocksForRender], { parts: [], chars: 0 }).parts.join('\n');
     var scriptFontsForRender = detectScriptFontsForDocumentPrint(textForRender, langForRender);
     var registryForRender = makeFontRegistryForDocumentPrint(scriptFontsForRender);
     var stacksForRender = {
@@ -823,10 +902,12 @@
       if (!blockForRender || typeof blockForRender !== 'object') return '';
       return blockHtmlForDocumentPrint(blockForRender, stateForRender);
     }).join('\n');
+    if (coverForRender) bodyForRender = coverHtmlForDocumentPrint(coverForRender) + '\n' + bodyForRender;
     var facesForRender = registryForRender.faces();
     var htmlForRender = '<!DOCTYPE html>\n<html lang="' + langForRender + '"><head><meta charset="utf-8">'
       + '<title>' + escapeHtmlForDocumentPrint(String(safeOptionsForRender.title || 'Document').slice(0, 200)) + '</title>'
-      + '<style>\n' + fontFaceCssForDocumentPrint(facesForRender) + '\n' + documentCssForDocumentPrint(lookForRender, stacksForRender) + '\n</style>'
+      + '<style>\n' + fontFaceCssForDocumentPrint(facesForRender) + '\n' + documentCssForDocumentPrint(lookForRender, stacksForRender)
+      + (coverForRender ? '\n' + coverCssForDocumentPrint(stacksForRender) : '') + '\n</style>'
       + '</head><body>\n' + bodyForRender + '\n</body></html>';
     return {
       html: htmlForRender,

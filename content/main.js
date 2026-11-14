@@ -51,10 +51,17 @@
   // script already running in open tabs. Without intervention the user would need
   // to manually refresh every tab before the extension works again.
   //
-  // The service worker prevents this by calling reInjectIntoAllSupportedTabs() from
-  // its onInstalled listener, which re-runs all content scripts into those tabs
-  // immediately after the reload. This IIFE is therefore executed a second time in
-  // the same page context, so it must clean up after the previous run.
+  // The service worker prevents this by re-running all content scripts into a tab:
+  // straight after the reload for the tab in view, and when the user reaches it for
+  // every other tab. This IIFE is therefore executed a second time in the same page,
+  // so it must clean up after the previous run.
+  //
+  // After a genuine reload that second run is in a NEW isolated world. The DOM is
+  // shared with the previous copy; globalThis is not. So the DOM steps below (the
+  // highlight classes, removing the old panel host) do the work, while the steps that
+  // go through globalThis.ABChatContent find nothing there and only apply when a
+  // second injection lands in the same world. The previous copy cleans up its own
+  // world by itself (content/staleCopyRelease.js).
   //
   // Four things happen in the re-init block below:
   //

@@ -27,11 +27,14 @@ require('../agent/tools.js');
 
 const REPO_ROOT = path.join(__dirname, '..');
 
-function loadGeneratorForTest(language) {
+// The offscreen document has CompressionStream, which the PPTX writer uses for pattern PNGs;
+// withoutCompression leaves it out, as an older browser would.
+function loadGeneratorForTest(language, withoutCompression) {
   const ctx = {
     console, Promise, Uint8Array, ArrayBuffer, TextEncoder, TextDecoder, setTimeout, clearTimeout, btoa, atob,
     navigator: { language: language || 'en-US' }
   };
+  if (!withoutCompression) ctx.CompressionStream = CompressionStream;
   ctx.globalThis = ctx;
   ctx.self = ctx;
   vm.createContext(ctx);
@@ -908,7 +911,8 @@ test('an image slide puts its picture beside the bullets, under the title, or ac
   assert.match(parts['[Content_Types].xml'], /<Default Extension="jpeg" ContentType="image\/jpeg"\/>/);
   assert.match(parts['[Content_Types].xml'], /<Default Extension="png" ContentType="image\/png"\/>/);
   const targets = [2, 4, 5].map(function (n) { return parts['ppt/slides/_rels/slide' + n + '.xml.rels'].match(/Target="\.\.\/media\/([^"]+)"/)[1]; });
-  assert.deepStrictEqual(targets, ['image1.jpeg', 'image1.jpeg', 'image1.jpeg']);
+  assert.strictEqual(new Set(targets).size, 1);
+  assert.match(targets[0], /^image\d+\.jpeg$/);
   // The layout's picture placeholder has no fill to show through a transparent picture.
   assert.doesNotMatch(parts['ppt/slideLayouts/slideLayout7.xml'].match(/<p:ph type="pic" idx="1"\/>[\s\S]*?<\/p:spPr>/)[0], /solidFill/);
 });
@@ -1040,6 +1044,93 @@ test('a pattern is a PNG in the theme\'s colours, stored once for every slide th
   assert.strictEqual(parts['ppt/slides/_rels/slide2.xml.rels'].match(/media\/image\d\.png/)[0], parts['ppt/slides/_rels/slide3.xml.rels'].match(/media\/image\d\.png/)[0]);
 });
 
+// Checked against the writer before the default: the first assertion fails there, since a
+// professional cover had no background part. The pixels of the tiled, natively compressed
+// pattern were compared in a scratch script with the earlier per-pixel drawing and were the same
+// byte for byte for every pattern on white and on a filled cover (with the dots' row gap set to
+// 17.5 in both).
+test('a filled cover or section slide gets the theme\'s pattern unless it has a background or "none"', async function () {
+  const spec = { format: 'pptx', theme: 'professional', slides: [
+    { title: 'Deck', subtitle: 'October' },
+    { title: 'Body', bullets: ['a'] },
+    { layout: 'section', title: 'Part two' },
+    { layout: 'section', title: 'Flat', background: 'none' },
+    { layout: 'section', title: 'Coloured', background: { color: '#0B1F3A' } },
+    { layout: 'section', title: 'Lost photo', background: { image: 999 } },
+    { layout: 'section', title: 'Photo', image: 101, background: 'none' }
+  ] };
+  const { result, parts, binary } = await pptxWithPicturesForTest(spec, PHOTO_RECORDS_FOR_TEST);
+  const target = function (n) {
+    const match = (parts['ppt/slides/_rels/slide' + n + '.xml.rels'] || '').match(/Target="\.\.\/media\/([^"]+)"/);
+    return match ? match[1] : '';
+  };
+  assert.match(parts['ppt/slides/slide1.xml'], /<p:bg><p:bgPr><a:blipFill/);
+  assert.match(target(1), /\.png$/);
+  assert.strictEqual(target(3), target(1));
+  assert.strictEqual(target(6), target(1), 'a picture that could not be used leaves the pattern');
+  assert.doesNotMatch(parts['ppt/slides/slide2.xml'], /<p:bg>/);
+  assert.doesNotMatch(parts['ppt/slides/slide4.xml'], /<p:bg>/);
+  assert.match(parts['ppt/slides/slide5.xml'], /<p:bg><p:bgPr><a:solidFill><a:srgbClr val="0B1F3A"\/>/);
+  assert.match(target(7), /\.jpeg$/, '"none" does not stop a cover photo');
+  const warnings = result.warnings.join('\n');
+  assert.match(warnings, /slide 6 background \(blob 999 was not found\)/);
+  assert.doesNotMatch(warnings, /has a background that is not/);
+  assert.strictEqual(Object.keys(binary).filter(function (name) { return /\.png$/.test(name); }).length, 1);
+
+  // The pattern is a grid on the theme's main colour, and the PNG made without CompressionStream
+  // has the same pixels.
+  const pixels = function (png) {
+    let at = 8;
+    const idat = [];
+    while (at < png.length) {
+      const length = png.readUInt32BE(at);
+      if (png.toString('latin1', at + 4, at + 8) === 'IDAT') idat.push(png.subarray(at + 8, at + 8 + length));
+      at += 12 + length;
+    }
+    return zlib.inflateSync(Buffer.concat(idat));
+  };
+  const cover = pixels(binary['ppt/media/' + target(1)]);
+  const primary = themes.resolveTheme('professional').theme.colors.primary;
+  const pixelHex = function (x, y) { const at = y * 5761 + 1 + x * 3; return cover.subarray(at, at + 3).toString('hex').toUpperCase(); };
+  assert.strictEqual(pixelHex(20, 20), primary, 'between the lines');
+  assert.notStrictEqual(pixelHex(0, 20), primary, 'on a line');
+  const plain = loadGeneratorForTest('en-US', true);
+  const plainResult = await plain.ABChatAgent.documentGeneration.createDocument({ format: 'pptx', theme: 'professional', slides: [{ title: 'Deck' }] }, {});
+  const plainZip = await plain.JSZip.loadAsync(Buffer.from(plainResult.dataUrl.split(',')[1], 'base64'));
+  const plainPng = Object.keys(plainZip.files).filter(function (name) { return /\.png$/.test(name); });
+  assert.strictEqual(plainPng.length, 1);
+  assert.ok(pixels(Buffer.from(await plainZip.file(plainPng[0]).async('uint8array'))).equals(cover));
+
+  // Plain covers stay white.
+  const minimal = await pptxWithPicturesForTest({ format: 'pptx', theme: 'minimal', slides: [{ title: 'Deck' }, { layout: 'section', title: 'Part' }] }, {});
+  assert.deepStrictEqual(Object.keys(minimal.binary), []);
+  assert.doesNotMatch(minimal.parts['ppt/slides/slide1.xml'], /<p:bg>/);
+});
+
+// Checked by giving the grid a repeat of 60 pixels instead of 64: the test fails on the grid, at
+// a pixel the drawing puts on a line and the copy leaves plain.
+test('a pattern copied from one repeat has the pixels of the pattern drawn point by point', function () {
+  const pictures = generatorForTest.ABChatAgent.documentGeneration.slidePictures;
+  const base = [0x1F, 0x38, 0x64];
+  const ink = [0x35, 0x4B, 0x73];
+  let seed = 7;
+  const next = function (limit) { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % limit; };
+  ['dots', 'grid', 'diagonal', 'waves'].forEach(function (name) {
+    const rows = pictures.patternRows(name, '1F3864', '354B73');
+    assert.strictEqual(rows.length, 1080 * 5761);
+    for (let i = 0; i < 4000; i++) {
+      const x = next(1920);
+      const y = next(1080);
+      const coverage = pictures.patternCoverage(name, (x + 0.5) / 2, (y + 0.5) / 2, 2);
+      const at = y * 5761 + 1 + x * 3;
+      for (let c = 0; c < 3; c++) {
+        const expected = Math.floor(base[c] + (ink[c] - base[c]) * coverage + 0.5);
+        assert.ok(Math.abs(rows[at + c] - expected) <= 1, name + ' at ' + x + ',' + y + ': ' + rows[at + c] + ' against ' + expected);
+      }
+    }
+  });
+});
+
 test('pictures that cannot be used are reported, and their slides are made without them', async function () {
   const records = Object.assign({
     201: { dataUrl: 'data:text/plain;base64,aGk=' },
@@ -1118,4 +1209,200 @@ test('a PDF from the built-in writer reports blocks past 500 and its own 500-row
   assert.ok(warnings.includes('Table 2 (starting "Col 0") has more than 100 columns, and the PDF keeps the first 100. Split it into narrower tables.'), warnings.join('\n'));
   // The 5,000-row limit does not apply when this writer keeps 500, so it is not reported.
   assert.ok(!warnings.some(function (warning) { return /first 5,000/.test(warning); }), warnings.join('\n'));
+});
+
+// ---- Covers and pictures in a new DOCX or PDF ----
+//
+// Checked against the code before covers and pictures, which ignored both: all five tests below
+// fail. Each fix made while building them was also undone on its own in a copy, and the test that
+// guards it failed: with the cover's padding back on the cells (Word adds it to an exact row
+// height, which pushed the details onto a second page) and with the text's indent taken off the
+// paragraphs (LibreOffice ignores a cell's side margins, so the text sat against the page edge),
+// the cover test fails; with the built-in PDF writer measuring the cover's text down from the top,
+// the PDF test fails; and with every picture stored as a new part, the picture test fails.
+
+async function docxWithPicturesForTest(spec, records) {
+  const deps = { loadImage: function (blobId) { return Promise.resolve(records[blobId] || null); } };
+  const result = await generatorForTest.ABChatAgent.documentGeneration.createDocument(spec, deps);
+  const zip = await generatorForTest.JSZip.loadAsync(Buffer.from(result.dataUrl.split(',')[1], 'base64'));
+  const parts = {};
+  const binary = {};
+  for (const name of Object.keys(zip.files)) {
+    if (zip.files[name].dir) continue;
+    if (/^word\/media\//.test(name)) binary[name] = Buffer.from(await zip.file(name).async('uint8array'));
+    else parts[name] = await zip.file(name).async('string');
+  }
+  return { result, parts, binary, doc: parts['word/document.xml'] };
+}
+
+async function pdfWithPicturesForTest(spec, records) {
+  const deps = { loadImage: function (blobId) { return Promise.resolve(records[blobId] || null); } };
+  const result = await generatorForTest.ABChatAgent.documentGeneration.createDocument(spec, deps);
+  return { result, text: Buffer.from(result.dataUrl.split(',')[1], 'base64').toString('latin1') };
+}
+
+// The content stream of each page, in page order.
+function pdfPageStreamsForTest(text) {
+  return Array.from(text.matchAll(/stream\r?\n([\s\S]*?)\r?\nendstream/g)).map(function (match) { return match[1]; }).filter(function (body) { return /\bBT\b/.test(body); });
+}
+
+const A4_FOR_TEST = themes.resolvePage({ size: 'a4' }, 'en-US');
+const PROFESSIONAL_FOR_TEST = themes.resolveTheme('professional').theme;
+const TEXT_WIDTH_FOR_TEST = A4_FOR_TEST.widthPt - 2 * PROFESSIONAL_FOR_TEST.marginPt;
+const COVER_RECORDS_FOR_TEST = {
+  7: imageRecordForTest('image/png', pngForTest(1600, 1200, [40, 90, 140])),
+  8: imageRecordForTest('image/png', pngForTest(200, 150, [200, 60, 40])),
+  9: imageRecordForTest('image/jpeg', jpegForTest(1600, 1200, 1)),
+  10: imageRecordForTest('image/png', pngForTest(300, 1200, [20, 20, 20]))
+};
+
+test('a DOCX cover is its own section with no margins, its photo behind the text, and rows that stop short of the page', async function () {
+  const built = await docxWithPicturesForTest({
+    format: 'docx', theme: 'professional', page: { size: 'a4' }, page_numbers: true,
+    cover: { title: 'Harbour Lights', subtitle: 'Festival plan', details: ['October 2026', 'Events team'], image: 7 },
+    blocks: [{ type: 'title', text: 'Harbour Lights' }, { type: 'heading', level: 1, text: 'Summary' }, { type: 'paragraph', text: 'Body.' }]
+  }, COVER_RECORDS_FOR_TEST);
+  const doc = built.doc;
+  assert.strictEqual(built.result.warnings, undefined);
+
+  const sections = doc.match(/<w:sectPr>[\s\S]*?<\/w:sectPr>/g);
+  assert.strictEqual(sections.length, 2);
+  assert.match(sections[0], /<w:pgMar w:top="0" w:right="0" w:bottom="0" w:left="0" w:header="0" w:footer="0"/);
+  // The cover's section has no footer of its own, so it shows no page number.
+  assert.doesNotMatch(sections[0], /footerReference/);
+  assert.match(sections[1], /footerReference/);
+
+  assert.match(doc, /<wp:anchor [^>]*behindDoc="1"/);
+  assert.match(doc, /<wp:positionH relativeFrom="page">/);
+  assert.match(doc, /<wp:positionV relativeFrom="page">/);
+  // A 4:3 photo in a wider space is cropped at the sides, not stretched.
+  assert.match(doc, /<a:srcRect l="\d+" r="\d+"\/>/);
+  assert.ok(built.binary['word/media/image1.png'].equals(Buffer.from(COVER_RECORDS_FOR_TEST[7].dataUrl.split(',')[1], 'base64')));
+
+  // Word adds a cell's padding to an exact row height, so the rows hold no padding, and they
+  // stop short of the page: a cover one point too tall leaves a blank page behind it.
+  const rowHeights = Array.from(doc.matchAll(/<w:trHeight w:val="(\d+)" w:hRule="exact"\/>/g)).map(function (match) { return Number(match[1]); });
+  assert.strictEqual(rowHeights.length, 3);
+  assert.ok(rowHeights.reduce(function (sum, value) { return sum + value; }, 0) <= Math.round(A4_FOR_TEST.heightPt * 20) - 80, rowHeights.join(' + '));
+  assert.match(doc, /<w:tblCellMar><w:top w:w="0" w:type="dxa"\/><w:left w:w="0" w:type="dxa"\/><w:bottom w:w="0" w:type="dxa"\/><w:right w:w="0" w:type="dxa"\/><\/w:tblCellMar>/);
+  assert.doesNotMatch(doc, /<w:tcMar>/);
+  // LibreOffice ignores a cell's own side margins, so the text is indented on the paragraph.
+  assert.match(doc, new RegExp('<w:ind w:left="' + PROFESSIONAL_FOR_TEST.marginPt * 20 + '" w:right="' + PROFESSIONAL_FOR_TEST.marginPt * 20 + '"/>[\\s\\S]*?October 2026'));
+
+  // A title block that repeats the cover's title is left out; one with other text is kept.
+  assert.strictEqual(doc.split('>Harbour Lights<').length, 2);
+  assert.doesNotMatch(doc, /w:val="Title"/);
+  const other = await docxWithPicturesForTest({
+    format: 'docx', theme: 'professional', cover: { title: 'Harbour Lights', image: 7 },
+    blocks: [{ type: 'title', text: 'Programme' }, { type: 'paragraph', text: 'Body.' }]
+  }, COVER_RECORDS_FOR_TEST);
+  assert.match(other.doc, /w:val="Title"/);
+});
+
+test('without a photo the cover takes the theme\'s look: a patterned band, or a plain page with a rule', async function () {
+  const band = await docxWithPicturesForTest({ format: 'docx', theme: 'professional', page: { size: 'a4' }, title: 'Harbour Lights', cover: { details: ['October 2026'] }, blocks: [{ type: 'paragraph', text: 'Body.' }] }, {});
+  // The title comes from the document's title when the cover has none.
+  assert.match(band.doc, /<w:color w:val="FFFFFF"\/>[^]*?>Harbour Lights</);
+  assert.match(band.doc, new RegExp('<w:shd w:val="clear" w:color="auto" w:fill="' + PROFESSIONAL_FOR_TEST.colors.accent + '"/>'));
+  const art = band.binary['word/media/image1.png'];
+  assert.ok(art, 'the band is a picture of the theme\'s pattern');
+  assert.deepStrictEqual([art.readUInt32BE(16), art.readUInt32BE(20)], [Math.round(A4_FOR_TEST.widthPt * 2), Math.round(A4_FOR_TEST.heightPt * 0.6) * 2]);
+
+  // A brand colour too light for white text gets the theme's text colour.
+  const light = await docxWithPicturesForTest({ format: 'docx', theme: 'professional', style: { primary_color: '#F5C400' }, cover: { title: 'Harbour Lights' }, blocks: [{ type: 'paragraph', text: 'Body.' }] }, {});
+  assert.match(light.doc, new RegExp('<w:color w:val="' + PROFESSIONAL_FOR_TEST.colors.text + '"/>[^]*?>Harbour Lights<'));
+
+  const plain = await docxWithPicturesForTest({ format: 'docx', theme: 'classic', cover: { title: 'Terms of supply' }, blocks: [{ type: 'paragraph', text: 'Body.' }] }, {});
+  assert.doesNotMatch(plain.doc, /<w:drawing>/);
+  assert.deepStrictEqual(Object.keys(plain.binary), []);
+  assert.match(plain.doc, /<w:pBdr><w:bottom w:val="single" w:sz="24" w:space="0" w:color="6B1F2A"\/><\/w:pBdr>/);
+  assert.match(plain.doc, /<w:jc w:val="center"\/>[^]*?>Terms of supply</);
+
+  // A cover with no title of its own and none on the document is left out.
+  const noTitle = await docxWithPicturesForTest({ format: 'docx', cover: { subtitle: 'No title anywhere' }, blocks: [{ type: 'paragraph', text: 'Body.' }] }, {});
+  assert.deepStrictEqual(Array.from(noTitle.result.warnings), ['The cover was left out because it has no title. Give cover a title, or give the document one.']);
+  assert.strictEqual(noTitle.doc.match(/<w:sectPr>/g).length, 1);
+});
+
+test('picture blocks are centred at their size with alt text and a caption, and unusable or soft pictures are reported', async function () {
+  const built = await docxWithPicturesForTest({
+    format: 'docx', theme: 'professional', page: { size: 'a4' },
+    cover: { title: 'Harbour Lights', image: 7 },
+    blocks: [
+      { type: 'paragraph', text: 'Body.' },
+      { type: 'image', blob_id: 7, size: 'medium', caption: 'Figure 1. The quay', alt: 'Boats at the quay' },
+      { type: 'image', blob_id: 99 },
+      { type: 'image', blob_id: 8 },
+      { type: 'image', blob_id: 'abc' },
+      { type: 'image', blob_id: 10, size: 'full' }
+    ]
+  }, COVER_RECORDS_FOR_TEST);
+  assert.deepStrictEqual(Array.from(built.result.warnings), [
+    'These pictures could not be used and were left out: picture 2 (blob 99 was not found); picture 4 (blob id "abc" is not a blob id).',
+    'These pictures have fewer pixels than the space they fill, so they will look soft: picture 3 (200 x 150 pixels). A larger picture would print sharper.'
+  ]);
+  const extents = Array.from(built.doc.matchAll(/<wp:inline [^>]*><wp:extent cx="(\d+)" cy="(\d+)"\/>/g)).map(function (match) { return [Number(match[1]), Number(match[2])]; });
+  assert.strictEqual(extents.length, 3);
+  // medium is 60% of the text width, kept to the picture's shape.
+  assert.ok(Math.abs(extents[0][0] / 12700 - TEXT_WIDTH_FOR_TEST * 0.6) < 0.01, String(extents[0][0] / 12700));
+  assert.ok(Math.abs(extents[0][1] / extents[0][0] - 0.75) < 0.001);
+  assert.ok(Math.abs(extents[1][0] / 12700 - TEXT_WIDTH_FOR_TEST) < 0.01);
+  // A tall picture is held to 60% of the text area's height, and narrowed to keep its shape.
+  const maxHeight = (A4_FOR_TEST.heightPt - 2 * PROFESSIONAL_FOR_TEST.marginPt) * 0.6;
+  assert.ok(Math.abs(extents[2][1] / 12700 - maxHeight) < 0.01, String(extents[2][1] / 12700));
+  assert.ok(Math.abs(extents[2][0] / extents[2][1] - 0.25) < 0.001);
+
+  assert.match(built.doc, /<w:keepNext\/><w:jc w:val="center"\/>[^]*?<wp:docPr id="\d+" name="Picture \d+" descr="Boats at the quay"\/>/);
+  assert.match(built.doc, /<w:pStyle w:val="Caption"\/>[^]*?>Figure 1\. The quay</);
+
+  // The photo on the cover and in the text is stored once, and every drawing has its own id.
+  assert.deepStrictEqual(Object.keys(built.binary).sort(), ['word/media/image1.png', 'word/media/image2.png', 'word/media/image3.png']);
+  const drawingIds = Array.from(built.doc.matchAll(/<wp:docPr id="(\d+)"/g)).map(function (match) { return match[1]; });
+  assert.strictEqual(drawingIds.length, 4);
+  assert.strictEqual(new Set(drawingIds).size, 4);
+});
+
+test('the built-in PDF writer draws the cover on page 1 with no number or header, and numbers the pages after it', async function () {
+  const spec = {
+    format: 'pdf', theme: 'professional', page: { size: 'a4' }, page_numbers: true, header: 'Confidential',
+    cover: { title: 'Harbour Lights', details: ['October 2026'], image: 9 },
+    blocks: [{ type: 'heading', level: 1, text: 'Summary' }, { type: 'paragraph', text: 'Body.' }, { type: 'page_break' }, { type: 'paragraph', text: 'Two.' }]
+  };
+  const photo = await pdfWithPicturesForTest(spec, COVER_RECORDS_FOR_TEST);
+  assert.strictEqual(photo.result.warnings, undefined);
+  assert.match(photo.text, /\/Subtype \/Image \/Width 1600 \/Height 1200 [^>]*\/Filter \/DCTDecode/);
+  const pages = pdfPageStreamsForTest(photo.text);
+  assert.strictEqual(pages.length, 3);
+  assert.match(pages[0], /\/Im1 Do/);
+  assert.match(pages[0], /\(Harbour Lights\) Tj/);
+  assert.match(pages[0], /\(October 2026\) Tj/);
+  // PDF measures up from the foot of the page: the photo is at the top, the title under it, and
+  // the details at the foot.
+  const photoBottom = Number(pages[0].match(/q [\d.]+ ([\d.]+) [\d.]+ [\d.]+ re W n/)[1]);
+  const titleY = Number(pages[0].match(/([\d.]+) Td \(Harbour Lights\)/)[1]);
+  const detailsY = Number(pages[0].match(/([\d.]+) Td \(October 2026\)/)[1]);
+  assert.ok(photoBottom > A4_FOR_TEST.heightPt * 0.4 && titleY < photoBottom && detailsY < titleY && detailsY > 0, [photoBottom, titleY, detailsY].join(' '));
+  assert.doesNotMatch(pages[0], /Confidential| \/ 3\)/);
+  assert.match(pages[1], /\(2 \/ 3\) Tj/);
+  assert.match(pages[1], /\(Confidential\) Tj/);
+
+  // The band's pattern is embedded as its compressed PNG rows, which PDF reads with the PNG predictor.
+  const band = await pdfWithPicturesForTest(Object.assign({}, spec, { cover: { title: 'Harbour Lights' } }), {});
+  assert.match(band.text, /\/Filter \/FlateDecode \/DecodeParms << \/Predictor 15 \/Colors 3 \/BitsPerComponent 8 \/Columns 1191 >>/);
+
+  const plain = await pdfWithPicturesForTest(Object.assign({}, spec, { theme: 'classic', cover: { title: 'Terms of supply' } }), {});
+  assert.doesNotMatch(plain.text, /\/Subtype \/Image/);
+  assert.match(pdfPageStreamsForTest(plain.text)[0], /\(Terms of supply\) Tj/);
+});
+
+test('the documents guide and the create_document schema describe the same cover and picture fields', function () {
+  const props = createDocumentPropsForTest();
+  Object.keys(props.cover.properties).forEach(function (key) {
+    assert.ok(DOCUMENTS_GUIDE_FOR_TEST.includes('"cover"') && DOCUMENTS_GUIDE_FOR_TEST.includes('"' + key + '": '), 'cover.' + key);
+  });
+  ['blob_id', 'alt', 'size'].forEach(function (key) {
+    assert.ok(props.blocks.items.properties[key], 'schema block field ' + key);
+    assert.ok(DOCUMENTS_GUIDE_FOR_TEST.includes('"' + key + '": '), 'guide block field ' + key);
+  });
+  assert.deepStrictEqual(props.blocks.items.properties.size.enum, ['full', 'medium', 'small']);
 });

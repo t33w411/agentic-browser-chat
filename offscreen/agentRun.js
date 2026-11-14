@@ -1157,7 +1157,7 @@
             if (imagesShownToUserCountForRun > 0) {
               toolResultForModel.note = 'You had already generated and shown the user '
                 + imagesShownToUserCountForRun + ' image' + (imagesShownToUserCountForRun === 1 ? '' : 's')
-                + ' earlier in this turn. Generating this one did NOT replace them: every image stays visible in the chat and each one was billed. Your reply must state that you regenerated the image, why, and which of the images shown is the final one.';
+                + ' earlier in this turn. This one did NOT replace them: every image stays visible in the chat and each one was billed. If you made this one to replace an earlier image, your reply must say so, why, and which of the images shown is the final one.';
             }
           } else if ((tcNameForResult === 'create_document' || tcNameForResult === 'edit_document') && toolResult && toolResult.ok && typeof toolResult.dataUrl === 'string') {
             toolResultForModel = documentResultForModelForRun(toolResult);

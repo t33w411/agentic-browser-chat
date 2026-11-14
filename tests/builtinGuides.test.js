@@ -10,7 +10,7 @@
 // guide removed, both generate_image tests and the index test fail, and with the spreadsheets guide
 // removed, the page_spreadsheet test and the index test fail. With the gate back at priority 0,
 // the image slot test fails: image-generation-cap loads first, so it counted a slot for each refused
-// call and blocked the second real generation.
+// call and blocked the last real generation.
 
 const test = require('node:test');
 const assert = require('node:assert');
@@ -155,9 +155,9 @@ test('a generate_image call refused for its guide does not use up an image slot'
   }, contextForTest);
   assert.strictEqual(refusedForTest.block && refusedForTest.block.code, 'builtin-guide-required');
 
-  // Both slots are still free after the refusal, and the cap still stops the third generation.
+  // All six slots are still free after the refusal, and the cap still stops the seventh generation.
   const windowForTest = [toolMessageForTest('g', Object.assign({}, refusedForTest.block.result, { ok: false, error: refusedForTest.block.reason }))];
-  for (let iForTest = 0; iForTest < 2; iForTest++) {
+  for (let iForTest = 0; iForTest < 6; iForTest++) {
     const allowedForTest = await agentNsForTest.hooks.dispatch('PreToolUse', {
       toolName: 'generate_image', args: argsForTest, messages: windowForTest
     }, contextForTest);

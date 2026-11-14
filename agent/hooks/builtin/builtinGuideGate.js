@@ -10,7 +10,7 @@
   // so the detailed instructions moved out of the tool descriptions are always in front of the model
   // when it uses the tool. The refusal carries the guide, which puts it in the window for the retry.
   // It runs ahead of the other PreToolUse hooks because a block stops the ones after it: a refused
-  // call must not use up a counted slot, such as one of image-generation-cap's two per send.
+  // call must not use up a counted slot, such as one of image-generation-cap's slots per send.
   nsForBuiltinGuideGate.hooks.register('PreToolUse', {
     name: 'builtin-guide-gate',
     priority: 10,

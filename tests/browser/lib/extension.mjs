@@ -32,19 +32,26 @@ export async function startWithExtension(extPath, { windowSize } = {}) {
     })()`);
   }
 
-  // The content-script world of this extension in the page, for reading ABChatContent directly.
-  function isolatedContextId(pageSession) {
+  // Every content-script world of this extension still alive in the page, oldest first. An
+  // extension reload adds one and leaves the earlier ones in place until the page reloads.
+  function isolatedContextIds(pageSession) {
     const destroyed = new Set(chrome.events
       .filter((e) => e.sessionId === pageSession && e.method === 'Runtime.executionContextDestroyed')
       .map((e) => e.params.executionContextId));
-    const contexts = chrome.events
+    return chrome.events
       .filter((e) => e.sessionId === pageSession && e.method === 'Runtime.executionContextCreated')
       .map((e) => e.params.context)
-      .filter((c) => c.origin && c.origin.indexOf(extId) !== -1 && !destroyed.has(c.id));
-    return contexts.length ? contexts[contexts.length - 1].id : null;
+      .filter((c) => c.origin && c.origin.indexOf(extId) !== -1 && !destroyed.has(c.id))
+      .map((c) => c.id);
   }
 
-  return { chrome, extId, serviceWorker, callTool, isolatedContextId };
+  // The newest of them, for reading ABChatContent directly.
+  function isolatedContextId(pageSession) {
+    const ids = isolatedContextIds(pageSession);
+    return ids.length ? ids[ids.length - 1] : null;
+  }
+
+  return { chrome, extId, serviceWorker, callTool, isolatedContextId, isolatedContextIds };
 }
 
 export function checkList() {

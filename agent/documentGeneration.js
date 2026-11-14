@@ -1580,8 +1580,10 @@
 
   // Turn a resolved PDF image (original bytes) into embeddable JPEG bytes plus the pixel size to
   // declare in the XObject. Source JPEGs pass through losslessly (DCTDecode embeds them as-is);
-  // PNG/GIF are drawn onto an opaque white OffscreenCanvas and re-encoded to JPEG, which also
-  // flattens transparency. Oversized rasters are scaled down to MAX_PDF_IMAGE_RASTER_DIM.
+  // other images are drawn onto an opaque white canvas and re-encoded to JPEG, which also
+  // flattens transparency. Oversized rasters are scaled down to MAX_PDF_IMAGE_RASTER_DIM. The
+  // canvas is encoded with toDataURL, as a deck's pictures are: convertToBlob waits for idle time,
+  // which the hidden offscreen document rarely has.
   function rasterizePdfImageToJpegForDocumentGeneration(bytesForRaster, contentTypeForRaster, wPxForRaster, hPxForRaster) {
     if (contentTypeForRaster === 'image/jpeg') {
       return Promise.resolve({
@@ -1590,15 +1592,12 @@
         hPx: Math.max(1, Math.round(Number(hPxForRaster) || 1))
       });
     }
-    if (typeof createImageBitmap !== 'function' || typeof OffscreenCanvas !== 'function') {
-      return Promise.reject(new Error('no raster support'));
-    }
-    var blobForRaster = new Blob([bytesForRaster], { type: contentTypeForRaster });
-    return createImageBitmap(blobForRaster).then(function (bitmapForRaster) {
-      var naturalWForRaster = bitmapForRaster.width || Number(wPxForRaster) || 0;
-      var naturalHForRaster = bitmapForRaster.height || Number(hPxForRaster) || 0;
+    if (!pptxCanDrawForDocumentGeneration()) return Promise.reject(new Error('no raster support'));
+    return pptxDecodeForDocumentGeneration(bytesForRaster, contentTypeForRaster).then(function (decodedForRaster) {
+      var naturalWForRaster = decodedForRaster.width || Number(wPxForRaster) || 0;
+      var naturalHForRaster = decodedForRaster.height || Number(hPxForRaster) || 0;
       if (naturalWForRaster <= 0 || naturalHForRaster <= 0) {
-        try { if (bitmapForRaster.close) bitmapForRaster.close(); } catch (closeErrForRaster) {}
+        decodedForRaster.done();
         return Promise.reject(new Error('zero-size raster'));
       }
       var scaleForRaster = Math.min(
@@ -1608,23 +1607,23 @@
       );
       var targetWForRaster = Math.max(1, Math.round(naturalWForRaster * scaleForRaster));
       var targetHForRaster = Math.max(1, Math.round(naturalHForRaster * scaleForRaster));
-      var canvasForRaster = new OffscreenCanvas(targetWForRaster, targetHForRaster);
+      var canvasForRaster = pptxCanvasForDocumentGeneration(targetWForRaster, targetHForRaster);
       var ctxForRaster = canvasForRaster.getContext('2d');
       ctxForRaster.fillStyle = '#ffffff';
       ctxForRaster.fillRect(0, 0, targetWForRaster, targetHForRaster);
-      ctxForRaster.drawImage(bitmapForRaster, 0, 0, targetWForRaster, targetHForRaster);
-      try { if (bitmapForRaster.close) bitmapForRaster.close(); } catch (closeErr2ForRaster) {}
-      return canvasForRaster.convertToBlob({ type: 'image/jpeg', quality: PDF_IMAGE_JPEG_QUALITY_FOR_DOCUMENT_GENERATION })
-        .then(function (jpegBlobForRaster) { return jpegBlobForRaster.arrayBuffer(); })
-        .then(function (bufferForRaster) {
-          return { jpegBytes: new Uint8Array(bufferForRaster), wPx: targetWForRaster, hPx: targetHForRaster };
-        });
+      ctxForRaster.drawImage(decodedForRaster.source, 0, 0, targetWForRaster, targetHForRaster);
+      decodedForRaster.done();
+      return pptxEncodeCanvasForDocumentGeneration(canvasForRaster, 'image/jpeg', PDF_IMAGE_JPEG_QUALITY_FOR_DOCUMENT_GENERATION).then(function (jpegBytesForRaster) {
+        if (!jpegBytesForRaster || !jpegBytesForRaster.length) throw new Error('not encoded');
+        return { jpegBytes: jpegBytesForRaster, wPx: targetWForRaster, hPx: targetHForRaster };
+      });
     });
   }
 
   // Replace each { type:'image', resolved:{ bytes, contentType, wPx, hPx } } block with one
-  // carrying ready-to-embed JPEG bytes, dropping (and noting) any that cannot be rasterized.
-  // Runs sequentially to bound canvas/memory pressure across many images.
+  // carrying ready-to-embed JPEG bytes, dropping (and noting) any that cannot be rasterized. A
+  // picture from the chat keeps its shown size and caption. Runs sequentially to bound
+  // canvas/memory pressure across many images.
   function rasterizePdfImageBlocksForDocumentGeneration(blocksForRaster, dropTrackerForRaster) {
     var chainForRaster = Promise.resolve();
     var outBlocksForRaster = [];
@@ -1641,7 +1640,7 @@
               if (dropTrackerForRaster) dropTrackerForRaster.add('could not be decoded');
               return;
             }
-            outBlocksForRaster.push({ type: 'image', resolved: { jpegBytes: jpegForRaster.jpegBytes, wPx: jpegForRaster.wPx, hPx: jpegForRaster.hPx } });
+            outBlocksForRaster.push(Object.assign({}, blockForRaster, { resolved: { jpegBytes: jpegForRaster.jpegBytes, wPx: jpegForRaster.wPx, hPx: jpegForRaster.hPx } }));
           })
           .catch(function () {
             if (dropTrackerForRaster) dropTrackerForRaster.add('could not be decoded');
@@ -1649,6 +1648,32 @@
       });
     });
     return chainForRaster.then(function () { return outBlocksForRaster; });
+  }
+
+  // The built-in writer embeds only JPEG, so a cover photo in another format is converted first.
+  // One that cannot be falls back to the theme's own cover, which the drop tracker notes.
+  function rasterizePdfCoverForDocumentGeneration(inputForCover, contextForCover, dropTrackerForCover) {
+    var layoutForCover = inputForCover.coverLayout;
+    if (!layoutForCover || !layoutForCover.photo) return Promise.resolve(inputForCover);
+    var photoForCover = layoutForCover.photo;
+    return rasterizePdfImageToJpegForDocumentGeneration(photoForCover.bytes, 'image/' + photoForCover.ext, photoForCover.width, photoForCover.height)
+      .then(function (jpegForCover) {
+        var updatedLayout = Object.assign({}, layoutForCover, {
+          photo: Object.assign({}, photoForCover, { jpegBytes: jpegForCover.jpegBytes, wPx: jpegForCover.wPx, hPx: jpegForCover.hPx })
+        });
+        return Object.assign({}, inputForCover, { coverLayout: updatedLayout });
+      })
+      .catch(function () {
+        if (dropTrackerForCover) dropTrackerForCover.add('could not be decoded');
+        var themeForCover = contextForCover.theme;
+        var variantForCover = themeForCover.deck && themeForCover.deck.cover === 'plain' ? 'plain' : 'band';
+        var fallbackLayout = docCoverLayoutForDocumentGeneration(layoutForCover, variantForCover, themeForCover, contextForCover.page);
+        var artForCover = variantForCover === 'band' ? docCoverBandArtForDocumentGeneration(fallbackLayout, themeForCover) : Promise.resolve(null);
+        return artForCover.then(function (bandArtForCover) {
+          fallbackLayout.bandArt = bandArtForCover;
+          return Object.assign({}, inputForCover, { coverLayout: fallbackLayout });
+        });
+      });
   }
 
   function bytesToBinaryStringForDocumentGeneration(bytesForBinary) {
@@ -1736,11 +1761,27 @@
     var embeddedImageCountForDocumentGeneration = 0;
 
     function processSentinelImgForDocumentGeneration(imgElForDocumentGeneration) {
-      // No resolver means the PDF path or an API caller with no image support: drop img as
-      // before. Only our own minted sentinel src is honored; a model-supplied http/data src
-      // is never fetched or embedded.
+      // No resolver means an API caller with no image support: drop img as before. Only our own
+      // minted sentinel src and a picture's abchat-blob:N are honored; a model-supplied http or
+      // data src is never fetched or embedded.
       if (!imageResolverForDocumentGeneration) return;
       var srcForImg = String((imgElForDocumentGeneration.getAttribute && imgElForDocumentGeneration.getAttribute('src')) || '');
+      // A picture from the chat, loaded with the cover and picture blocks once the html is blocks.
+      var blobMatchForImg = srcForImg.trim().match(DOC_IMAGE_SRC_RE_FOR_DOCUMENT_GENERATION);
+      if (blobMatchForImg) {
+        if (blocksForDocumentGeneration.length >= MAX_DOCX_BLOCKS_FOR_DOCUMENT_GENERATION) {
+          cutForDocumentGeneration.blocks = true;
+          return;
+        }
+        blocksForDocumentGeneration.push({
+          type: 'image',
+          blob_id: Number(blobMatchForImg[1]),
+          alt: imgElForDocumentGeneration.getAttribute('alt') || '',
+          caption: imgElForDocumentGeneration.getAttribute('data-caption') || '',
+          size: imgElForDocumentGeneration.getAttribute('data-size') || ''
+        });
+        return;
+      }
       var sentinelMatchForImg = srcForImg.match(IMAGE_SENTINEL_RE_FOR_DOCUMENT_GENERATION);
       if (!sentinelMatchForImg) return;
       if (blocksForDocumentGeneration.length >= MAX_DOCX_BLOCKS_FOR_DOCUMENT_GENERATION) {
@@ -1986,6 +2027,7 @@
     var hyperlinksForDocumentGeneration = [];
     var numberingForDocumentGeneration = [];
     var imagesForDocumentGeneration = [];
+    var drawingCountForDocumentGeneration = 0;
     return {
       hyperlinks: hyperlinksForDocumentGeneration,
       numbering: numberingForDocumentGeneration,
@@ -2005,19 +2047,168 @@
         });
         return String(numIdForDocumentGeneration);
       },
+      // A picture shown twice, such as a photo on the cover and again in the text, is stored
+      // once: the loader hands back the same bytes for the same blob. ordinal is the drawing's
+      // id, which Word needs to be different for every drawing, so it counts drawings, not parts.
       addImage: function (bytesForDocumentGeneration, extForDocumentGeneration) {
-        var ordinalForDocumentGeneration = imagesForDocumentGeneration.length + 1;
-        var relIdForDocumentGeneration = 'rIdImg' + ordinalForDocumentGeneration;
-        var partNameForDocumentGeneration = 'media/image' + ordinalForDocumentGeneration + '.' + extForDocumentGeneration;
+        drawingCountForDocumentGeneration++;
+        for (var iForImage = 0; iForImage < imagesForDocumentGeneration.length; iForImage++) {
+          if (imagesForDocumentGeneration[iForImage].bytes === bytesForDocumentGeneration) {
+            return { relId: imagesForDocumentGeneration[iForImage].relId, ordinal: drawingCountForDocumentGeneration };
+          }
+        }
+        var partNumberForDocumentGeneration = imagesForDocumentGeneration.length + 1;
+        var relIdForDocumentGeneration = 'rIdImg' + partNumberForDocumentGeneration;
+        var partNameForDocumentGeneration = 'media/image' + partNumberForDocumentGeneration + '.' + extForDocumentGeneration;
         imagesForDocumentGeneration.push({
           relId: relIdForDocumentGeneration,
           partName: partNameForDocumentGeneration,
           ext: extForDocumentGeneration,
           bytes: bytesForDocumentGeneration
         });
-        return { relId: relIdForDocumentGeneration, ordinal: ordinalForDocumentGeneration };
+        return { relId: relIdForDocumentGeneration, ordinal: drawingCountForDocumentGeneration };
       }
     };
+  }
+
+  // A picture in its own paragraph. options: alt (the picture's description), align, keepNext
+  // (to keep it on the page with its caption).
+  function docxPictureParagraphXmlForDocumentGeneration(relIdForPicture, drawingIdForPicture, cxForPicture, cyForPicture, optionsForPicture) {
+    var safeOptionsForPicture = optionsForPicture || {};
+    var nameForPicture = 'Picture ' + drawingIdForPicture;
+    var descrForPicture = safeOptionsForPicture.alt ? ' descr="' + xlsxEscapeForDocumentGeneration(safeOptionsForPicture.alt) + '"' : '';
+    var propsForPicture = (safeOptionsForPicture.keepNext ? '<w:keepNext/>' : '')
+      + (safeOptionsForPicture.align === 'center' ? '<w:jc w:val="center"/>' : '');
+    return '<w:p>' + (propsForPicture ? '<w:pPr>' + propsForPicture + '</w:pPr>' : '') + '<w:r><w:drawing>'
+      + '<wp:inline distT="0" distB="0" distL="0" distR="0">'
+      + '<wp:extent cx="' + cxForPicture + '" cy="' + cyForPicture + '"/>'
+      + '<wp:effectExtent l="0" t="0" r="0" b="0"/>'
+      + '<wp:docPr id="' + drawingIdForPicture + '" name="' + nameForPicture + '"' + descrForPicture + '/>'
+      + '<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>'
+      + docxPictureGraphicXmlForDocumentGeneration(relIdForPicture, drawingIdForPicture, nameForPicture, cxForPicture, cyForPicture, '')
+      + '</wp:inline></w:drawing></w:r></w:p>';
+  }
+
+  function docxPictureGraphicXmlForDocumentGeneration(relIdForGraphic, idForGraphic, nameForGraphic, cxForGraphic, cyForGraphic, srcRectForGraphic) {
+    return '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic>'
+      + '<pic:nvPicPr><pic:cNvPr id="' + idForGraphic + '" name="' + nameForGraphic + '"/><pic:cNvPicPr/></pic:nvPicPr>'
+      + '<pic:blipFill><a:blip r:embed="' + relIdForGraphic + '"/>' + (srcRectForGraphic || '') + '<a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
+      + '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="' + cxForGraphic + '" cy="' + cyForGraphic + '"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>'
+      + '</pic:pic></a:graphicData></a:graphic>';
+  }
+
+  // A run of cover text with its formatting written out, since the cover uses none of the
+  // document's paragraph styles.
+  function docxCoverParagraphXmlForDocumentGeneration(textForCover, styleForCover) {
+    var fontForCover = xlsxEscapeForDocumentGeneration(styleForCover.font);
+    var halfPointsForCover = Math.round(styleForCover.size * 2);
+    var runPropsForCover = '<w:rPr><w:rFonts w:ascii="' + fontForCover + '" w:hAnsi="' + fontForCover + '" w:cs="' + fontForCover + '"/>'
+      + (styleForCover.bold ? '<w:b/><w:bCs/>' : '')
+      + '<w:color w:val="' + styleForCover.color + '"/><w:sz w:val="' + halfPointsForCover + '"/><w:szCs w:val="' + halfPointsForCover + '"/></w:rPr>';
+    return '<w:p><w:pPr><w:spacing w:before="' + Math.round((styleForCover.before || 0) * 20) + '" w:after="' + Math.round((styleForCover.after || 0) * 20) + '" w:line="' + Math.round((styleForCover.line || 1) * 240) + '" w:lineRule="auto"/>'
+      + '<w:ind w:left="' + Math.round((styleForCover.indent || 0) * 20) + '" w:right="' + Math.round((styleForCover.indent || 0) * 20) + '"/>'
+      + (styleForCover.align === 'center' ? '<w:jc w:val="center"/>' : '') + '</w:pPr>'
+      + '<w:r>' + runPropsForCover + '<w:t xml:space="preserve">' + xlsxEscapeForDocumentGeneration(textForCover) + '</w:t></w:r></w:p>';
+  }
+
+  var DOCX_TINY_PARAGRAPH_PROPS_FOR_DOCUMENT_GENERATION = '<w:spacing w:before="0" w:after="0" w:line="20" w:lineRule="exact"/>';
+
+  // The cover as a section of its own with no margins, so it can run to the page's edges. A
+  // picture behind the text (the photo, or the band's pattern) is anchored to the page's top left
+  // from a one-point paragraph, and the text sits in a borderless table the width of the page
+  // whose rows have the exact heights docCoverLayout gives, so the title stays at the foot of the
+  // band and the details at the foot of the page however long they are. The section ends in
+  // another one-point paragraph, which holds its properties.
+  // The space around a row's text is paragraph spacing and indents, not cell padding: Word adds a
+  // cell's top and bottom padding to an exact row height, which pushed the details row onto a
+  // second page, and LibreOffice ignores its left and right padding, which put the title against
+  // the page's edge.
+  function docxCoverXmlForDocumentGeneration(layoutForCover, themeForCover, relCollectorForCover) {
+    var twips = function (points) { return Math.round(points * 20); };
+    var widthTwips = twips(layoutForCover.width);
+    var headingFont = themeForCover.fonts.heading.office;
+    var bodyFont = themeForCover.fonts.body.office;
+    var colors = layoutForCover.colors;
+    var art = '';
+    var artBytes = null;
+    if (layoutForCover.photo) artBytes = { bytes: layoutForCover.photo.bytes, ext: layoutForCover.photo.ext };
+    else if (layoutForCover.bandArt) artBytes = { bytes: layoutForCover.bandArt.png, ext: 'png' };
+    if (artBytes) {
+      var added = relCollectorForCover.addImage(artBytes.bytes, artBytes.ext);
+      var cx = Math.round(layoutForCover.art.w * 12700);
+      var cy = Math.round(layoutForCover.art.h * 12700);
+      var crop = layoutForCover.photo
+        ? pptxSrcRectXmlForDocumentGeneration(pptxCoverCropForDocumentGeneration(layoutForCover.photo.width, layoutForCover.photo.height, layoutForCover.art.w, layoutForCover.art.h))
+        : '';
+      var alt = layoutForCover.photo && layoutForCover.photo.alt ? ' descr="' + xlsxEscapeForDocumentGeneration(layoutForCover.photo.alt) + '"' : '';
+      art = '<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="251658240" behindDoc="1" locked="1" layoutInCell="1" allowOverlap="1">'
+        + '<wp:simplePos x="0" y="0"/>'
+        + '<wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>'
+        + '<wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV>'
+        + '<wp:extent cx="' + cx + '" cy="' + cy + '"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/>'
+        + '<wp:docPr id="' + added.ordinal + '" name="Cover picture"' + alt + '/>'
+        + '<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>'
+        + docxPictureGraphicXmlForDocumentGeneration(added.relId, added.ordinal, 'Cover picture', cx, cy, crop)
+        + '</wp:anchor></w:drawing></w:r>';
+    }
+    var empty = '<w:p><w:pPr>' + DOCX_TINY_PARAGRAPH_PROPS_FOR_DOCUMENT_GENERATION + '</w:pPr></w:p>';
+    var side = layoutForCover.margin;
+    var titleXml = function (padBottom) {
+      var xml = '';
+      if (layoutForCover.rule) {
+        var ruleLeft = layoutForCover.align === 'center' ? (layoutForCover.textWidth - layoutForCover.rule.w) / 2 : 0;
+        var ruleRight = layoutForCover.textWidth - layoutForCover.rule.w - ruleLeft;
+        xml += '<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="' + Math.round(layoutForCover.rule.h * 8) + '" w:space="0" w:color="' + colors.rule + '"/></w:pBdr>'
+          + '<w:spacing w:before="0" w:after="' + twips(22) + '" w:line="20" w:lineRule="exact"/><w:ind w:left="' + twips(side + ruleLeft) + '" w:right="' + twips(side + ruleRight) + '"/></w:pPr></w:p>';
+      }
+      xml += docxCoverParagraphXmlForDocumentGeneration(layoutForCover.title, {
+        font: headingFont, size: layoutForCover.titleSize, bold: layoutForCover.titleBold, color: colors.title,
+        align: layoutForCover.align, line: 1.0, after: layoutForCover.subtitle ? 10 : padBottom, indent: side
+      });
+      if (layoutForCover.subtitle) {
+        xml += docxCoverParagraphXmlForDocumentGeneration(layoutForCover.subtitle, {
+          font: bodyFont, size: layoutForCover.subtitleSize, color: colors.subtitle, align: layoutForCover.align, line: 1.1, after: padBottom, indent: side
+        });
+      }
+      return xml;
+    };
+    var detailsXml = function (padTop, padBottom) {
+      if (!layoutForCover.details.length) return empty;
+      return layoutForCover.details.map(function (line, index) {
+        return docxCoverParagraphXmlForDocumentGeneration(line, {
+          font: bodyFont, size: layoutForCover.detailSize, color: colors.details, align: layoutForCover.align, line: 1.15, indent: side,
+          before: index === 0 ? padTop : 0,
+          after: index === layoutForCover.details.length - 1 ? padBottom : 2
+        });
+      }).join('');
+    };
+    var rowsXml = layoutForCover.rows.map(function (row) {
+      var content = empty;
+      var fill = '';
+      if (row.part === 'title') {
+        content = titleXml(row.padBottom || 0);
+        if (layoutForCover.variant === 'band' && !layoutForCover.bandArt) fill = colors.band;
+      } else if (row.part === 'details') {
+        content = detailsXml(row.padTop || 0, row.padBottom || 0);
+      } else if (row.part === 'strip') {
+        fill = colors.strip;
+      }
+      return '<w:tr><w:trPr><w:cantSplit/><w:trHeight w:val="' + twips(row.height) + '" w:hRule="exact"/></w:trPr>'
+        + '<w:tc><w:tcPr><w:tcW w:w="' + widthTwips + '" w:type="dxa"/>'
+        + (fill ? '<w:shd w:val="clear" w:color="auto" w:fill="' + fill + '"/>' : '')
+        + '<w:vAlign w:val="' + (row.valign === 'bottom' ? 'bottom' : 'top') + '"/></w:tcPr>' + content + '</w:tc></w:tr>';
+    }).join('');
+    var noBorders = ['top', 'left', 'bottom', 'right', 'insideH', 'insideV'].map(function (edge) { return '<w:' + edge + ' w:val="nil"/>'; }).join('');
+    var tableXml = '<w:tbl><w:tblPr><w:tblW w:w="' + widthTwips + '" w:type="dxa"/><w:tblInd w:w="0" w:type="dxa"/>'
+      + '<w:tblBorders>' + noBorders + '</w:tblBorders><w:tblLayout w:type="fixed"/>'
+      + '<w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="0" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar>'
+      + '<w:tblLook w:val="0000"/></w:tblPr><w:tblGrid><w:gridCol w:w="' + widthTwips + '"/></w:tblGrid>' + rowsXml + '</w:tbl>';
+    var landscape = layoutForCover.width > layoutForCover.height ? ' w:orient="landscape"' : '';
+    var sectionXml = '<w:sectPr><w:pgSz w:w="' + widthTwips + '" w:h="' + twips(layoutForCover.height) + '"' + landscape + '/>'
+      + '<w:pgMar w:top="0" w:right="0" w:bottom="0" w:left="0" w:header="0" w:footer="0" w:gutter="0"/></w:sectPr>';
+    return '<w:p><w:pPr>' + DOCX_TINY_PARAGRAPH_PROPS_FOR_DOCUMENT_GENERATION + '</w:pPr>' + art + '</w:p>'
+      + tableXml
+      + '<w:p><w:pPr>' + DOCX_TINY_PARAGRAPH_PROPS_FOR_DOCUMENT_GENERATION + sectionXml + '</w:pPr></w:p>';
   }
 
   function docxImageDrawingXmlForDocumentGeneration(relIdForImage, drawingIdForImage, cxForImage, cyForImage) {
@@ -2998,6 +3189,8 @@
       });
     }
 
+    // The cover comes first, so its picture is the document's first.
+    var coverXmlForBody = contextForThemed.cover ? docxCoverXmlForDocumentGeneration(contextForThemed.cover, themeForBody, relCollectorForBody) : '';
     var bodyXmlForThemed = tidyBlocksForThemedDocumentGeneration(blocksForThemed).map(function (blockForBody) {
       var typeForBody = blockForBody.type;
       var alignForBody = typeof blockForBody.align === 'string' ? blockForBody.align.toLowerCase() : '';
@@ -3005,7 +3198,13 @@
         var resolvedForBody = blockForBody.resolved;
         if (!resolvedForBody || !resolvedForBody.bytes) return '';
         var addedForBody = relCollectorForBody.addImage(resolvedForBody.bytes, resolvedForBody.ext);
-        return docxImageDrawingXmlForDocumentGeneration(addedForBody.relId, addedForBody.ordinal, resolvedForBody.cx, resolvedForBody.cy);
+        // A picture from the chat is centred, with its caption under it; one from an edited
+        // document keeps the plain paragraph it always had.
+        if (!blockForBody.shown) return docxImageDrawingXmlForDocumentGeneration(addedForBody.relId, addedForBody.ordinal, resolvedForBody.cx, resolvedForBody.cy);
+        var captionForBody = blockForBody.caption || '';
+        return docxPictureParagraphXmlForDocumentGeneration(addedForBody.relId, addedForBody.ordinal, resolvedForBody.cx, resolvedForBody.cy, {
+          alt: blockForBody.alt, align: 'center', keepNext: !!captionForBody
+        }) + (captionForBody ? paragraphForBody(captionForBody, { styleId: 'Caption', align: 'center', spacing: { before: 80, after: afterTwipsForBody + 120 } }) : '');
       }
       if (typeForBody === 'title') {
         var subtitleForBody = typeof blockForBody.subtitle === 'string' ? blockForBody.subtitle.trim() : '';
@@ -3099,7 +3298,7 @@
     }).join('');
 
     return {
-      body: bodyXmlForThemed,
+      body: coverXmlForBody + bodyXmlForThemed,
       hyperlinks: relCollectorForBody.hyperlinks,
       numbering: relCollectorForBody.numbering,
       images: relCollectorForBody.images,
@@ -3165,6 +3364,15 @@
         var resolvedForImageBlock = blockForDocumentGeneration.resolved;
         if (!resolvedForImageBlock || !resolvedForImageBlock.bytes) return '';
         var addedForImageBlock = relCollectorForDocumentGeneration.addImage(resolvedForImageBlock.bytes, resolvedForImageBlock.ext);
+        // A picture from the chat added to a rebuilt document is centred over its caption, as
+        // both PDF writers show it. The caption is bold rather than a Caption style, which the
+        // source document may not have.
+        if (blockForDocumentGeneration.shown) {
+          var captionForImageBlock = blockForDocumentGeneration.caption || '';
+          return docxPictureParagraphXmlForDocumentGeneration(addedForImageBlock.relId, addedForImageBlock.ordinal, resolvedForImageBlock.cx, resolvedForImageBlock.cy, {
+            alt: blockForDocumentGeneration.alt, align: 'center', keepNext: !!captionForImageBlock
+          }) + (captionForImageBlock ? docxParagraphForDocumentGeneration(captionForImageBlock, { align: 'center', bold: true, spacing: { after: 200 } }, relCollectorForDocumentGeneration) : '');
+        }
         return docxImageDrawingXmlForDocumentGeneration(
           addedForImageBlock.relId,
           addedForImageBlock.ordinal,
@@ -3268,7 +3476,7 @@
       };
       builtBodyForDocumentGeneration = buildThemedDocxBodyForDocumentGeneration(
         normalizeBlocksForDocumentGeneration(inputForDocumentGeneration, 'DOCX creation requires blocks, html, or content.'),
-        { theme: themeForDocx, contentWidthTwips: Math.round((pageForDocx.widthPt - 2 * marginForDocx) * 20) }
+        { theme: themeForDocx, contentWidthTwips: Math.round((pageForDocx.widthPt - 2 * marginForDocx) * 20), cover: inputForDocumentGeneration.coverLayout || null }
       );
       headerTextForDocx = renderContextForDocx.headerText || '';
       wantsFooterForDocx = !!renderContextForDocx.pageNumbers;
@@ -3856,23 +4064,120 @@
       return firstForParagraph;
     }
 
-    function imageForPdf(jpegBytesForImg, wPxForImg, hPxForImg) {
+    // shownForImg, for a picture from the chat, is the size it is shown at; it is centred, with
+    // its caption kept on the page under it.
+    function imageForPdf(jpegBytesForImg, wPxForImg, hPxForImg, shownForImg, captionForImg) {
       var naturalWPtForImg = Math.max(1, (Number(wPxForImg) || 1) * PDF_PX_TO_PT_FOR_DOCUMENT_GENERATION);
       var naturalHPtForImg = Math.max(1, (Number(hPxForImg) || 1) * PDF_PX_TO_PT_FOR_DOCUMENT_GENERATION);
       var scaleForImg = Math.min(1, contentWidthForPdf / naturalWPtForImg, (topYForPdf - bottomYForPdf) / naturalHPtForImg);
-      var displayWidthForImg = naturalWPtForImg * scaleForImg;
-      var displayHeightForImg = naturalHPtForImg * scaleForImg;
-      ensureSpaceForPdf(displayHeightForImg);
+      var displayWidthForImg = shownForImg ? Math.min(contentWidthForPdf, shownForImg.widthPt) : naturalWPtForImg * scaleForImg;
+      var displayHeightForImg = shownForImg ? displayWidthForImg * shownForImg.heightPt / shownForImg.widthPt : naturalHPtForImg * scaleForImg;
+      var captionLinesForImg = captionForImg ? layoutRunsForPdf(captionForImg, {
+        size: sizesForPdf.small, family: lookForPdf.families.body, bold: true, color: colorsForPdf.muted, width: contentWidthForPdf
+      }) : [];
+      var captionHeightForImg = captionLinesForImg.length ? 4 + linesHeightForPdf(captionLinesForImg) : 0;
+      if (shownForImg) yForPdf -= pageIsEmptyForPdf() ? 0 : 4;
+      ensureSpaceForPdf(displayHeightForImg + captionHeightForImg);
       if (stoppedForPdf) return;
+      var xForImg = shownForImg ? leftForPdf + (contentWidthForPdf - displayWidthForImg) / 2 : leftForPdf;
       var nameForImg = 'Im' + (imageObjectsForPdf.length + 1);
       imageObjectsForPdf.push({ jpegBytes: jpegBytesForImg, wPx: Math.max(1, Math.round(Number(wPxForImg) || 1)), hPx: Math.max(1, Math.round(Number(hPxForImg) || 1)), name: nameForImg });
       pageForPdf.images.push(nameForImg);
       var yBottomForImg = yForPdf - displayHeightForImg;
       pushOpForPdf({
         kind: 'path',
-        command: 'q ' + displayWidthForImg.toFixed(2) + ' 0 0 ' + displayHeightForImg.toFixed(2) + ' ' + leftForPdf.toFixed(2) + ' ' + yBottomForImg.toFixed(2) + ' cm /' + nameForImg + ' Do Q'
+        command: 'q ' + displayWidthForImg.toFixed(2) + ' 0 0 ' + displayHeightForImg.toFixed(2) + ' ' + xForImg.toFixed(2) + ' ' + yBottomForImg.toFixed(2) + ' cm /' + nameForImg + ' Do Q'
       });
-      yForPdf = yBottomForImg - 8;
+      yForPdf = yBottomForImg - (captionLinesForImg.length ? 4 : 8);
+      if (captionLinesForImg.length) {
+        drawLinesForPdf(captionLinesForImg, { x: leftForPdf, width: contentWidthForPdf, align: 'center' });
+        yForPdf -= lookForPdf.spacing.after + 6;
+      } else if (shownForImg) {
+        yForPdf -= lookForPdf.spacing.after;
+      }
+    }
+
+    // The cover fills the first page. Pictures are placed from the top left in points, as the
+    // layout gives them, and text from its layout too; PDF measures up from the foot of the page.
+    var coverForPdf = lookForPdf.themed && inputForDocumentGeneration.coverLayout ? inputForDocumentGeneration.coverLayout : null;
+    function coverForPdfDraw(layoutForCoverPdf) {
+      var heightForCoverPdf = layoutForCoverPdf.height;
+      var colorsForCoverPdf = layoutForCoverPdf.colors;
+      var placeImage = function (imageForCoverPdf, boxForCoverPdf) {
+        var nameForCoverPdf = 'Im' + (imageObjectsForPdf.length + 1);
+        imageObjectsForPdf.push(Object.assign({ name: nameForCoverPdf }, imageForCoverPdf));
+        pageForPdf.images.push(nameForCoverPdf);
+        // Scaled to cover the box and clipped to it, so a photo of another shape is cropped about
+        // its centre.
+        var scaleForCoverPdf = Math.max(boxForCoverPdf.w / imageForCoverPdf.wPx, boxForCoverPdf.h / imageForCoverPdf.hPx);
+        var drawWidth = imageForCoverPdf.wPx * scaleForCoverPdf;
+        var drawHeight = imageForCoverPdf.hPx * scaleForCoverPdf;
+        var boxBottom = heightForCoverPdf - boxForCoverPdf.y - boxForCoverPdf.h;
+        pushOpForPdf({
+          kind: 'path',
+          command: 'q ' + boxForCoverPdf.x.toFixed(2) + ' ' + boxBottom.toFixed(2) + ' ' + boxForCoverPdf.w.toFixed(2) + ' ' + boxForCoverPdf.h.toFixed(2) + ' re W n '
+            + drawWidth.toFixed(2) + ' 0 0 ' + drawHeight.toFixed(2) + ' ' + (boxForCoverPdf.x + (boxForCoverPdf.w - drawWidth) / 2).toFixed(2) + ' '
+            + (boxBottom + (boxForCoverPdf.h - drawHeight) / 2).toFixed(2) + ' cm /' + nameForCoverPdf + ' Do Q'
+        });
+      };
+      var fillBox = function (boxForFill, colorForFill) {
+        fillRectForPdf(boxForFill.x, heightForCoverPdf - boxForFill.y - boxForFill.h, boxForFill.w, boxForFill.h, colorForFill);
+      };
+      if (layoutForCoverPdf.photo && layoutForCoverPdf.photo.jpegBytes) {
+        placeImage({ jpegBytes: layoutForCoverPdf.photo.jpegBytes, wPx: layoutForCoverPdf.photo.wPx, hPx: layoutForCoverPdf.photo.hPx }, layoutForCoverPdf.art);
+      }
+      if (layoutForCoverPdf.variant === 'band') {
+        fillBox(layoutForCoverPdf.art, colorsForCoverPdf.band);
+        if (layoutForCoverPdf.bandArt) {
+          placeImage({ zlib: layoutForCoverPdf.bandArt.zlib, wPx: layoutForCoverPdf.bandArt.widthPx, hPx: layoutForCoverPdf.bandArt.heightPx }, layoutForCoverPdf.art);
+        }
+        fillBox(layoutForCoverPdf.strip, colorsForCoverPdf.strip);
+      }
+      var alignForCoverPdf = layoutForCoverPdf.align === 'center' ? 'center' : 'left';
+      var lay = function (textForLay, sizeForLay, familyForLay, boldForLay, colorForLay) {
+        return layoutRunsForPdf(textForLay, { size: sizeForLay, family: familyForLay, bold: boldForLay, color: colorForLay, width: layoutForCoverPdf.textWidth });
+      };
+      // Draws lines from yTopForAt, in points down from the top of the page, each taking its size
+      // times the factor, and returns where the next line would start.
+      var drawAt = function (linesForAt, yTopForAt, factorForAt) {
+        var yForAt = yTopForAt;
+        linesForAt.forEach(function (lineForAt) {
+          var baselineForAt = yForAt + lineForAt.maxSize * 0.82;
+          var slackForAt = Math.max(0, layoutForCoverPdf.textWidth - lineForAt.width);
+          var startForAt = layoutForCoverPdf.margin + (alignForCoverPdf === 'center' ? slackForAt / 2 : 0);
+          lineForAt.segs.forEach(function (segForAt) {
+            textOpForPdf(segForAt.encoded, segForAt.size, startForAt + segForAt.offset, heightForCoverPdf - baselineForAt, segForAt.fontKey, segForAt.color);
+          });
+          yForAt += lineForAt.maxSize * factorForAt;
+        });
+        return yForAt;
+      };
+      var heightOf = function (linesForHeight, factorForHeight) {
+        return linesForHeight.reduce(function (sum, line) { return sum + line.maxSize * factorForHeight; }, 0);
+      };
+      var titleLines = lay(layoutForCoverPdf.title, layoutForCoverPdf.titleSize, lookForPdf.families.heading, layoutForCoverPdf.titleBold, colorsForCoverPdf.title);
+      var subtitleLines = layoutForCoverPdf.subtitle ? lay(layoutForCoverPdf.subtitle, layoutForCoverPdf.subtitleSize, lookForPdf.families.body, false, colorsForCoverPdf.subtitle) : [];
+      var textHeight = heightOf(titleLines, 1.08) + (subtitleLines.length ? 10 + heightOf(subtitleLines, 1.25) : 0);
+      var yText;
+      if (layoutForCoverPdf.variant === 'band') {
+        yText = layoutForCoverPdf.textBottom - textHeight;
+      } else {
+        var ruleForCoverPdf = layoutForCoverPdf.rule;
+        fillBox(ruleForCoverPdf, colorsForCoverPdf.rule);
+        yText = ruleForCoverPdf.y + ruleForCoverPdf.h + 22;
+      }
+      var afterTitle = drawAt(titleLines, yText, 1.08);
+      if (subtitleLines.length) drawAt(subtitleLines, afterTitle + 10, 1.25);
+      if (layoutForCoverPdf.details.length) {
+        var detailLines = [];
+        layoutForCoverPdf.details.forEach(function (lineForDetails) {
+          Array.prototype.push.apply(detailLines, lay(lineForDetails, layoutForCoverPdf.detailSize, lookForPdf.families.body, false, colorsForCoverPdf.details));
+        });
+        var detailsTop = layoutForCoverPdf.variant === 'band'
+          ? layoutForCoverPdf.detailsTop
+          : layoutForCoverPdf.detailsBottom - heightOf(detailLines, 1.4);
+        drawAt(detailLines, detailsTop, 1.4);
+      }
     }
 
     function tableForPdf(blockForTable) {
@@ -4127,6 +4432,11 @@
       yForPdf -= Math.max(10, lookForPdf.spacing.after + 2);
     }
 
+    if (coverForPdf) {
+      coverForPdfDraw(coverForPdf);
+      newPageForPdf();
+    }
+
     blocksForPdf.forEach(function (blockForPdf) {
       if (stoppedForPdf) return;
       var typeForPdf = blockForPdf.type;
@@ -4134,7 +4444,7 @@
       if (typeForPdf === 'image') {
         var resolvedImageForPdf = blockForPdf.resolved || {};
         if (resolvedImageForPdf.jpegBytes && resolvedImageForPdf.jpegBytes.length) {
-          imageForPdf(resolvedImageForPdf.jpegBytes, resolvedImageForPdf.wPx, resolvedImageForPdf.hPx);
+          imageForPdf(resolvedImageForPdf.jpegBytes, resolvedImageForPdf.wPx, resolvedImageForPdf.hPx, blockForPdf.shown || null, blockForPdf.shown ? blockForPdf.caption : '');
         }
         return;
       }
@@ -4229,6 +4539,8 @@
     var pageCountForPdf = pagesForPdf.length;
     var smallKeyForPdf = pdfFontKeyForDocumentGeneration(lookForPdf.families.body, false, false);
     pagesForPdf.forEach(function (pageForChrome, pageIndexForChrome) {
+      // The cover counts as page 1 but carries no number or header.
+      if (coverForPdf && pageIndexForChrome === 0) return;
       if (lookForPdf.themed && contextForPdf.pageNumbers) {
         var withTotalForChrome = lookForPdf.theme.footer === 'page-x-of-y';
         var numberTextForChrome = withTotalForChrome ? (pageIndexForChrome + 1) + ' / ' + pageCountForPdf : String(pageIndexForChrome + 1);
@@ -4282,8 +4594,16 @@
 
     // Each embedded image is one Image XObject (DCTDecode/JPEG, DeviceRGB). The binary stream is
     // spliced in as a latin1 string, so the whole document is byte-encoded as latin1 at the end.
+    // A cover band's pattern is the zlib data of its PNG rows, which FlateDecode reads with the PNG
+    // predictor, so it goes in without being decoded.
     var imageNameToObjIdForPdf = {};
     imageObjectsForPdf.forEach(function (imgObjForPdf) {
+      if (imgObjForPdf.zlib) {
+        imageNameToObjIdForPdf[imgObjForPdf.name] = addObjectForPdf('<< /Type /XObject /Subtype /Image /Width ' + imgObjForPdf.wPx + ' /Height ' + imgObjForPdf.hPx
+          + ' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 3 /BitsPerComponent 8 /Columns ' + imgObjForPdf.wPx
+          + ' >> /Length ' + imgObjForPdf.zlib.length + ' >>\nstream\n' + bytesToBinaryStringForDocumentGeneration(imgObjForPdf.zlib) + '\nendstream');
+        return;
+      }
       var binaryForImgObj = bytesToBinaryStringForDocumentGeneration(imgObjForPdf.jpegBytes);
       var imgObjIdForPdf = addObjectForPdf('<< /Type /XObject /Subtype /Image /Width ' + imgObjForPdf.wPx + ' /Height ' + imgObjForPdf.hPx + ' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ' + imgObjForPdf.jpegBytes.length + ' >>\nstream\n' + binaryForImgObj + '\nendstream');
       imageNameToObjIdForPdf[imgObjForPdf.name] = imgObjIdForPdf;
@@ -4427,7 +4747,7 @@
     },
     title: { align: 'left', rule: true },
     table: { style: 'header-fill', zebra: true },
-    deck: { cover: 'fill' }
+    deck: { cover: 'fill', pattern: 'grid' }
   };
 
   function pptxEmuForDocumentGeneration(points) {
@@ -4642,12 +4962,15 @@
       alt: source.alt == null ? '' : String(source.alt).trim().slice(0, 500)
     };
   }
-  // A background: { image }, { pattern }, or { color }, or the bare value of one of them.
+  // A background: { image }, { pattern }, or { color }, or the bare value of one of them. "none"
+  // (or false) keeps a filled cover's plain colour, without the theme's pattern.
   function pptxBackgroundForDocumentGeneration(raw) {
     if (raw == null || raw === '') return null;
+    if (raw === false) return { none: true };
     if (typeof raw === 'number') return { image: pptxImageRefForDocumentGeneration(raw) };
     if (typeof raw === 'string') {
       var text = raw.trim().toLowerCase();
+      if (text === 'none') return { none: true };
       if (PPTX_PATTERNS_FOR_DOCUMENT_GENERATION.indexOf(text) !== -1) return { pattern: text };
       if (/^\d+$/.test(text)) return { image: pptxImageRefForDocumentGeneration(Number(text)) };
       if (pptxHexForInputForDocumentGeneration(text)) return { color: pptxHexForInputForDocumentGeneration(text) };
@@ -4747,7 +5070,7 @@
     }
     // A picture on a title or section slide is its background. Anywhere else but an image slide
     // it has no place, and is left out with a warning.
-    if (image && (layout === 'title' || layout === 'section') && !background) {
+    if (image && (layout === 'title' || layout === 'section') && (!background || background.none)) {
       background = { image: image };
       image = null;
     }
@@ -4907,12 +5230,13 @@
   // The canvas as JPEG or PNG bytes. toDataURL encodes at once. toBlob and convertToBlob wait for
   // idle time, which the hidden offscreen document rarely has, so each picture took about a
   // second through them; they are kept only for a context with no page.
-  function pptxEncodeCanvasForDocumentGeneration(canvas, type) {
+  function pptxEncodeCanvasForDocumentGeneration(canvas, type, quality) {
+    var qualityForEncode = quality || 0.9;
     if (typeof canvas.toDataURL === 'function') {
-      var decoded = pptxBytesFromDataUrlForDocumentGeneration(canvas.toDataURL(type, 0.9));
+      var decoded = pptxBytesFromDataUrlForDocumentGeneration(canvas.toDataURL(type, qualityForEncode));
       return Promise.resolve(decoded ? decoded.bytes : null);
     }
-    return canvas.convertToBlob({ type: type, quality: 0.9 }).then(function (blob) {
+    return canvas.convertToBlob({ type: type, quality: qualityForEncode }).then(function (blob) {
       return blob.arrayBuffer();
     }).then(function (buffer) { return new Uint8Array(buffer); });
   }
@@ -5253,7 +5577,8 @@
     var distance;
     var halfWidth;
     if (name === 'dots') {
-      var rowGap = 17.32;
+      // Close to a triangular grid (17.32), rounded so two rows repeat in a whole 70 pixels.
+      var rowGap = 17.5;
       var columnGap = 20;
       var row = Math.round(y / rowGap);
       var offset = (Math.abs(row) % 2) * columnGap / 2;
@@ -5302,33 +5627,21 @@
     return (crc ^ 0xFFFFFFFF) >>> 0;
   }
 
-  // An RGB PNG from rows that each start with their filter byte. The image data is stored, not
-  // compressed: the deck's zip compresses the part, and stored blocks need no deflate code.
-  function pptxPngFromRowsForDocumentGeneration(width, height, rows) {
+  // The zlib data of a PNG's rows as stored, uncompressed deflate blocks, for where the browser's
+  // own compression is missing. The deck's zip then compresses the part.
+  function pptxStoredZlibForDocumentGeneration(rows) {
     var blockCount = Math.max(1, Math.ceil(rows.length / 65535));
-    var idatLength = 2 + rows.length + blockCount * 5 + 4;
-    var png = new Uint8Array(8 + 25 + 12 + idatLength + 12);
-    var pos = 0;
-    var put = function (list) { png.set(list, pos); pos += list.length; };
-    var put32 = function (value) { put([value >>> 24 & 255, value >>> 16 & 255, value >>> 8 & 255, value & 255]); };
-    put([137, 80, 78, 71, 13, 10, 26, 10]);
-    put32(13);
-    var chunk = pos;
-    put([73, 72, 68, 82]);
-    put32(width);
-    put32(height);
-    put([8, 2, 0, 0, 0]);
-    put32(pptxCrcForDocumentGeneration(png, chunk, pos));
-    put32(idatLength);
-    chunk = pos;
-    put([73, 68, 65, 84, 0x78, 0x01]);
+    var data = new Uint8Array(2 + rows.length + blockCount * 5 + 4);
+    data[0] = 0x78;
+    data[1] = 0x01;
+    var pos = 2;
     for (var block = 0; block < blockCount; block++) {
       var start = block * 65535;
       var end = Math.min(rows.length, start + 65535);
       var length = end - start;
-      put([block === blockCount - 1 ? 1 : 0, length & 255, length >>> 8 & 255, ~length & 255, ~length >>> 8 & 255]);
-      png.set(rows.subarray(start, end), pos);
-      pos += length;
+      data.set([block === blockCount - 1 ? 1 : 0, length & 255, length >>> 8 & 255, ~length & 255, ~length >>> 8 & 255], pos);
+      data.set(rows.subarray(start, end), pos + 5);
+      pos += 5 + length;
     }
     var a = 1;
     var b = 0;
@@ -5341,7 +5654,63 @@
       a %= 65521;
       b %= 65521;
     }
-    put32(((b << 16) | a) >>> 0);
+    var adler = ((b << 16) | a) >>> 0;
+    data.set([adler >>> 24 & 255, adler >>> 16 & 255, adler >>> 8 & 255, adler & 255], pos);
+    return data;
+  }
+
+  // The rows compressed with the browser's CompressionStream, or null where it is missing or
+  // fails. The 6 MB of a pattern's pixels take about 50 ms there, against about 600 ms in the
+  // zip's own deflate.
+  function pptxDeflateForDocumentGeneration(rows) {
+    var CompressionStreamForDeflate = globalScopeForDocumentGeneration.CompressionStream;
+    if (typeof CompressionStreamForDeflate !== 'function') return Promise.resolve(null);
+    try {
+      var stream = new CompressionStreamForDeflate('deflate');
+      var writer = stream.writable.getWriter();
+      writer.write(rows).catch(function () {});
+      writer.close().catch(function () {});
+      var reader = stream.readable.getReader();
+      var chunks = [];
+      var total = 0;
+      var pump = function () {
+        return reader.read().then(function (step) {
+          if (step.done) {
+            var out = new Uint8Array(total);
+            var at = 0;
+            chunks.forEach(function (chunk) { out.set(chunk, at); at += chunk.length; });
+            return out;
+          }
+          chunks.push(step.value);
+          total += step.value.length;
+          return pump();
+        });
+      };
+      return pump().catch(function () { return null; });
+    } catch (deflateError) {
+      return Promise.resolve(null);
+    }
+  }
+
+  // An RGB PNG around zlib data of rows that each start with their filter byte.
+  function pptxPngForDocumentGeneration(width, height, zlibData) {
+    var png = new Uint8Array(8 + 25 + 12 + zlibData.length + 12);
+    var pos = 0;
+    var put = function (list) { png.set(list, pos); pos += list.length; };
+    var put32 = function (value) { put([value >>> 24 & 255, value >>> 16 & 255, value >>> 8 & 255, value & 255]); };
+    put([137, 80, 78, 71, 13, 10, 26, 10]);
+    put32(13);
+    var chunk = pos;
+    put([73, 72, 68, 82]);
+    put32(width);
+    put32(height);
+    put([8, 2, 0, 0, 0]);
+    put32(pptxCrcForDocumentGeneration(png, chunk, pos));
+    put32(zlibData.length);
+    chunk = pos;
+    put([73, 68, 65, 84]);
+    png.set(zlibData, pos);
+    pos += zlibData.length;
     put32(pptxCrcForDocumentGeneration(png, chunk, pos));
     put32(0);
     chunk = pos;
@@ -5350,26 +5719,375 @@
     return png;
   }
 
-  function pptxPatternPngForDocumentGeneration(name, baseHex, inkHex) {
-    var width = 1920;
-    var height = 1080;
-    var pixelsPerPoint = width / 960;
+  var PPTX_PATTERN_WIDTH_FOR_DOCUMENT_GENERATION = 1920;
+  var PPTX_PATTERN_HEIGHT_FOR_DOCUMENT_GENERATION = 1080;
+  // How many pixels each pattern takes to repeat, across and down. One repeat is worked out and
+  // copied over the slide, which takes milliseconds; working out all two million pixels took over
+  // a second. The diagonal has no whole-pixel repeat, but each of its rows is the row above moved
+  // one pixel left. A change to a pattern's spacing must change its repeat here too, or the copies
+  // leave a seam at every repeat.
+  var PPTX_PATTERN_REPEAT_FOR_DOCUMENT_GENERATION = { dots: [40, 70], grid: [64, 64], waves: [208, 52] };
+
+  // A slide's pattern by default; a DOCX or PDF cover band passes its own size, at the same two
+  // pixels per point.
+  function pptxPatternRowsForDocumentGeneration(name, baseHex, inkHex, widthPx, heightPx) {
+    var width = widthPx || PPTX_PATTERN_WIDTH_FOR_DOCUMENT_GENERATION;
+    var height = heightPx || PPTX_PATTERN_HEIGHT_FOR_DOCUMENT_GENERATION;
+    var pixelsPerPoint = 2;
     var base = pptxRgbFromHexForDocumentGeneration(baseHex).map(function (channel) { return channel * 255; });
     var ink = pptxRgbFromHexForDocumentGeneration(inkHex).map(function (channel) { return channel * 255; });
+    var paint = function (target, at, coverage) {
+      target[at] = base[0] + (ink[0] - base[0]) * coverage + 0.5;
+      target[at + 1] = base[1] + (ink[1] - base[1]) * coverage + 0.5;
+      target[at + 2] = base[2] + (ink[2] - base[2]) * coverage + 0.5;
+    };
     var rowLength = width * 3 + 1;
     var rows = new Uint8Array(rowLength * height);
-    for (var py = 0; py < height; py++) {
-      var y = (py + 0.5) / pixelsPerPoint;
-      var rowStart = py * rowLength;
-      for (var px = 0; px < width; px++) {
-        var coverage = pptxPatternCoverageForDocumentGeneration(name, (px + 0.5) / pixelsPerPoint, y, pixelsPerPoint);
-        var at = rowStart + 1 + px * 3;
-        rows[at] = base[0] + (ink[0] - base[0]) * coverage + 0.5;
-        rows[at + 1] = base[1] + (ink[1] - base[1]) * coverage + 0.5;
-        rows[at + 2] = base[2] + (ink[2] - base[2]) * coverage + 0.5;
+    if (name === 'diagonal') {
+      var line = new Uint8Array((width + height) * 3);
+      for (var along = 0; along < width + height; along++) {
+        paint(line, along * 3, pptxPatternCoverageForDocumentGeneration(name, (along + 1) / pixelsPerPoint, 0, pixelsPerPoint));
       }
+      for (var lineRow = 0; lineRow < height; lineRow++) rows.set(line.subarray(lineRow * 3, (lineRow + width) * 3), lineRow * rowLength + 1);
+      return rows;
     }
-    return pptxPngFromRowsForDocumentGeneration(width, height, rows);
+    var repeat = PPTX_PATTERN_REPEAT_FOR_DOCUMENT_GENERATION[name];
+    var rowBytes = width * 3;
+    for (var py = 0; py < Math.min(repeat[1], height); py++) {
+      var start = py * rowLength + 1;
+      var y = (py + 0.5) / pixelsPerPoint;
+      for (var px = 0; px < repeat[0]; px++) {
+        paint(rows, start + px * 3, pptxPatternCoverageForDocumentGeneration(name, (px + 0.5) / pixelsPerPoint, y, pixelsPerPoint));
+      }
+      for (var filled = repeat[0] * 3; filled < rowBytes; filled *= 2) rows.copyWithin(start + filled, start, start + Math.min(filled, rowBytes - filled));
+    }
+    for (var done = repeat[1]; done < height; done *= 2) rows.copyWithin(done * rowLength, 0, Math.min(done, height - done) * rowLength);
+    return rows;
+  }
+
+  // The deck's pattern PNGs, made before the slides are written so they can be compressed
+  // outside the zip. Each is keyed by name, base, and line colour, and stored once.
+  function pptxPatternPngsForDocumentGeneration(slides, theme, look) {
+    var wanted = {};
+    slides.forEach(function (slide) {
+      var colours = pptxPatternColoursForDocumentGeneration(slide, theme, look);
+      if (colours) wanted[colours.key] = colours;
+    });
+    var made = {};
+    return Promise.all(Object.keys(wanted).map(function (key) {
+      var rows = pptxPatternRowsForDocumentGeneration(wanted[key].name, wanted[key].base, wanted[key].ink);
+      return pptxDeflateForDocumentGeneration(rows).then(function (compressed) {
+        made[key] = {
+          bytes: pptxPngForDocumentGeneration(PPTX_PATTERN_WIDTH_FOR_DOCUMENT_GENERATION, PPTX_PATTERN_HEIGHT_FOR_DOCUMENT_GENERATION, compressed || pptxStoredZlibForDocumentGeneration(rows)),
+          compressed: !!compressed
+        };
+      });
+    })).then(function () { return made; });
+  }
+
+  // A slide's pattern and its colours: on a filled cover the theme's main colour, elsewhere white.
+  function pptxPatternColoursForDocumentGeneration(slide, theme, look) {
+    if (!slide.background || !slide.background.pattern) return null;
+    var filledCover = look.cover === 'fill' && (slide.layout === 'title' || slide.layout === 'section');
+    var base = filledCover ? String(theme.colors.primary).toUpperCase() : 'FFFFFF';
+    var ink = pptxPatternInkForDocumentGeneration(base, theme);
+    return { name: slide.background.pattern, base: base, ink: ink, key: 'pattern:' + slide.background.pattern + ':' + base + ':' + ink };
+  }
+
+  // ---- Pictures and covers in a new DOCX or PDF ----
+
+  // A picture block's width as a share of the text width, and the most of the text area's height
+  // a picture may take, so a portrait photo leaves room for its caption and some text.
+  var DOC_PICTURE_SIZES_FOR_DOCUMENT_GENERATION = { full: 1, medium: 0.6, small: 0.35 };
+  var DOC_PICTURE_MAX_HEIGHT_SHARE_FOR_DOCUMENT_GENERATION = 0.6;
+  var DOC_COVER_MAX_DETAILS_FOR_DOCUMENT_GENERATION = 6;
+  // A picture in html: <img src="abchat-blob:42">. Only this form is honoured; a URL or data
+  // URI is never fetched or embedded.
+  var DOC_IMAGE_SRC_RE_FOR_DOCUMENT_GENERATION = /^abchat-blob:(\d+)$/;
+
+  function docPlainTextForDocumentGeneration(value, limit) {
+    return String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, limit || 300);
+  }
+
+  function docIsPendingPictureForDocumentGeneration(block) {
+    return !!block && typeof block === 'object' && block.type === 'image' && !block.resolved;
+  }
+
+  // The cover from the spec, { title, subtitle, details, image }, or null when there is none.
+  function docCoverSpecForDocumentGeneration(input) {
+    var raw = input.cover;
+    if (raw == null || raw === false) return null;
+    var source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    var detailsSource = Array.isArray(source.details) ? source.details
+      : (typeof source.details === 'string' ? source.details.split(/\r?\n/) : []);
+    var details = detailsSource.map(function (line) {
+      return docPlainTextForDocumentGeneration(Array.isArray(line) ? line.join(' ') : line, 200);
+    }).filter(Boolean);
+    var image = source.image != null ? source.image : (source.blob_id != null ? source.blob_id : source.photo);
+    return {
+      title: docPlainTextForDocumentGeneration(source.title) || docPlainTextForDocumentGeneration(input.title),
+      subtitle: docPlainTextForDocumentGeneration(source.subtitle),
+      details: details.slice(0, DOC_COVER_MAX_DETAILS_FOR_DOCUMENT_GENERATION),
+      detailsCut: Math.max(0, details.length - DOC_COVER_MAX_DETAILS_FOR_DOCUMENT_GENERATION),
+      image: pptxImageRefForDocumentGeneration(image)
+    };
+  }
+
+  // Where everything on a cover sits, in points from the page's top left. The DOCX writer, the
+  // page Chrome prints, and the built-in PDF writer all place the cover from this, so the three
+  // match.
+  //   photo  the picture across the top 55% of the page, then a short accent rule, the title and
+  //          the subtitle on white, and the details at the foot of the page
+  //   band   the theme's main colour across the top 60%, with the theme's pattern, the title and
+  //          subtitle in white at the foot of it, an accent strip under it, then the details
+  //   plain  white: an accent rule, the title and the subtitle a third of the way down, and the
+  //          details at the foot of the page
+  // The DOCX cover is a table of rows with exact heights, so every row is sized here too, and
+  // together they stop 6 points short of the page: a cover that ran over would leave a blank page.
+  function docCoverLayoutForDocumentGeneration(cover, variant, theme, page) {
+    var width = page.widthPt;
+    var height = page.heightPt;
+    var margin = theme.marginPt;
+    var colors = theme.colors;
+    var titleLength = cover.title.length;
+    var titleSize = titleLength <= 24 ? 44 : (titleLength <= 40 ? 38 : (titleLength <= 64 ? 32 : (titleLength <= 100 ? 28 : 24)));
+    var layout = {
+      variant: variant,
+      width: width,
+      height: height,
+      margin: margin,
+      textWidth: width - 2 * margin,
+      align: variant === 'plain' && theme.title && theme.title.align === 'center' ? 'center' : 'left',
+      title: cover.title,
+      subtitle: cover.subtitle,
+      details: cover.details,
+      // A landscape page is shorter, so its title is too.
+      titleSize: Math.min(titleSize, Math.round(height * 0.055)),
+      titleBold: theme.fonts.heading.kind === 'sans',
+      subtitleSize: 16,
+      detailSize: 11,
+      colors: { title: colors.heading, subtitle: colors.muted, details: colors.muted, rule: colors.accent }
+    };
+    var detailsHeight = margin + 8 + 16 * Math.max(1, cover.details.length);
+    if (variant === 'band') {
+      var base = String(colors.primary).toUpperCase();
+      var light = pptxHexLuminanceForDocumentGeneration(base) > 0.3;
+      var titleColor = light ? colors.text : 'FFFFFF';
+      layout.colors = {
+        band: base,
+        title: titleColor,
+        subtitle: pptxMixForDocumentGeneration(titleColor, base, 0.22),
+        details: colors.muted,
+        // The accent, or a tint of the main colour when the two are the same (a shade on a light
+        // main colour, where a tint would vanish), as on a deck's cover.
+        strip: String(colors.accent).toUpperCase() !== base ? colors.accent
+          : (light ? pptxMixForDocumentGeneration(base, '000000', 0.25) : pptxMixForDocumentGeneration(base, 'FFFFFF', 0.4))
+      };
+      layout.art = { x: 0, y: 0, w: width, h: Math.round(height * 0.6) };
+      layout.strip = { x: 0, y: layout.art.h, w: width, h: 6 };
+      layout.textBottom = layout.art.h - 40;
+      layout.detailsTop = layout.strip.y + layout.strip.h + 30;
+      layout.rows = [
+        { height: layout.art.h, part: 'title', valign: 'bottom', padBottom: 40 },
+        { height: layout.strip.h, part: 'strip' },
+        { height: height - layout.art.h - layout.strip.h - 6, part: 'details', valign: 'top', padTop: 30 }
+      ];
+    } else {
+      var ruleTop = variant === 'photo' ? Math.round(height * 0.55) + 44 : Math.round(height * 0.34);
+      if (variant === 'photo') layout.art = { x: 0, y: 0, w: width, h: Math.round(height * 0.55) };
+      layout.rule = { x: layout.align === 'center' ? (width - 56) / 2 : margin, y: ruleTop, w: 56, h: variant === 'photo' ? 4 : 3 };
+      layout.textTop = ruleTop;
+      layout.detailsBottom = height - margin;
+      layout.rows = [
+        { height: ruleTop, part: 'empty' },
+        { height: height - ruleTop - detailsHeight - 6, part: 'title', valign: 'top' },
+        { height: detailsHeight, part: 'details', valign: 'bottom', padBottom: margin }
+      ];
+    }
+    return layout;
+  }
+
+  // The size a picture block is shown at, in points: its share of the text width, kept to its
+  // shape, and no taller than the share of the text area's height above.
+  function docPictureShownForDocumentGeneration(entry, size, area) {
+    var widthPt = area.width * DOC_PICTURE_SIZES_FOR_DOCUMENT_GENERATION[size];
+    var heightPt = widthPt * entry.height / entry.width;
+    var maxHeight = area.height * DOC_PICTURE_MAX_HEIGHT_SHARE_FOR_DOCUMENT_GENERATION;
+    if (heightPt > maxHeight) {
+      widthPt *= maxHeight / heightPt;
+      heightPt = maxHeight;
+    }
+    return { widthPt: Math.round(widthPt * 100) / 100, heightPt: Math.round(heightPt * 100) / 100 };
+  }
+
+  // The image block a writer embeds: original bytes and the shown size, in the form each writer
+  // already takes for an image from an edited document.
+  function docResolvedPictureForDocumentGeneration(entry, format, shown) {
+    if (format === 'docx') {
+      return { bytes: entry.bytes, ext: entry.ext, cx: Math.round(shown.widthPt * 12700), cy: Math.round(shown.heightPt * 12700) };
+    }
+    return { bytes: entry.bytes, contentType: 'image/' + entry.ext, wPx: entry.width, hPx: entry.height };
+  }
+
+  // The band's pattern, drawn at the band's size and compressed as a deck's pattern is: a PNG for
+  // the DOCX and for Chrome, and its zlib rows for the built-in PDF writer, which takes them as
+  // they are with the PNG predictor.
+  function docCoverBandArtForDocumentGeneration(layout, theme) {
+    var name = theme.deck && theme.deck.pattern;
+    if (PPTX_PATTERNS_FOR_DOCUMENT_GENERATION.indexOf(name) === -1) return Promise.resolve(null);
+    var widthPx = Math.round(layout.art.w * 2);
+    var heightPx = Math.round(layout.art.h * 2);
+    var base = layout.colors.band;
+    var rows = pptxPatternRowsForDocumentGeneration(name, base, pptxPatternInkForDocumentGeneration(base, theme), widthPx, heightPx);
+    return pptxDeflateForDocumentGeneration(rows).then(function (compressed) {
+      var zlib = compressed || pptxStoredZlibForDocumentGeneration(rows);
+      return { widthPx: widthPx, heightPx: heightPx, zlib: zlib, png: pptxPngForDocumentGeneration(widthPx, heightPx, zlib), compressed: !!compressed };
+    });
+  }
+
+  // Loads the pictures of a new DOCX or PDF through deps.loadImage, as a deck does, and settles
+  // its cover. Each picture block becomes an image block holding the bytes the writers embed and
+  // the size it is shown at, and the cover becomes input.coverLayout. A picture that cannot be
+  // used is left out with a warning, and a cover whose photo cannot be used falls back to the
+  // theme's own cover.
+  function docPicturesForDocumentGeneration(input, format, context, deps) {
+    var warnings = context.warnings;
+    var cover = docCoverSpecForDocumentGeneration(input);
+    var blocks = Array.isArray(input.blocks) ? input.blocks : null;
+    var hasPictures = !!blocks && blocks.some(docIsPendingPictureForDocumentGeneration);
+    if (!cover && !hasPictures) return Promise.resolve(input);
+    var theme = context.theme;
+    if (cover && !theme) {
+      warnings.push('The cover was left out: this html came from read_document_structure, and an existing document keeps its own first page.');
+      cover = null;
+    }
+    if (cover && !cover.title) {
+      warnings.push('The cover was left out because it has no title. Give cover a title, or give the document one.');
+      cover = null;
+    }
+    if (cover && cover.detailsCut) {
+      warnings.push('The cover shows ' + DOC_COVER_MAX_DETAILS_FOR_DOCUMENT_GENERATION + ' lines of details; ' + cover.detailsCut + ' more were left out.');
+    }
+    var defaults = input.docDefaults || {};
+    var marginsSource = defaults.margins || {};
+    var area = theme
+      ? { width: context.page.widthPt - 2 * theme.marginPt, height: context.page.heightPt - 2 * theme.marginPt }
+      : {
+        width: (defaults.pageWidthPt || DEFAULT_PAGE_WIDTH_PT_FOR_DOCUMENT_GENERATION) - (marginsSource.left || 72) - (marginsSource.right || 72),
+        height: (defaults.pageHeightPt || DEFAULT_PAGE_HEIGHT_PT_FOR_DOCUMENT_GENERATION) - (marginsSource.top || 72) - (marginsSource.bottom || 72)
+      };
+
+    var ids = [];
+    var addId = function (ref) {
+      if (ref && ref.blobId && ids.indexOf(ref.blobId) === -1) ids.push(ref.blobId);
+    };
+    if (cover) addId(cover.image);
+    var pictureRefs = [];
+    if (blocks) {
+      blocks.forEach(function (block) {
+        if (!docIsPendingPictureForDocumentGeneration(block)) return;
+        var ref = pptxImageRefForDocumentGeneration(block.blob_id != null ? block.blob_id : (block.image != null ? block.image : block.id));
+        pictureRefs.push(ref);
+        addId(ref);
+      });
+    }
+    var cutCount = 0;
+    if (ids.length > MAX_DOCX_IMAGES_FOR_DOCUMENT_GENERATION) {
+      cutCount = ids.length - MAX_DOCX_IMAGES_FOR_DOCUMENT_GENERATION;
+      ids = ids.slice(0, MAX_DOCX_IMAGES_FOR_DOCUMENT_GENERATION);
+    }
+    var images = {};
+    var loader = deps && typeof deps.loadImage === 'function' ? deps.loadImage : null;
+    var chain = Promise.resolve();
+    ids.forEach(function (blobId) {
+      chain = chain.then(function () {
+        if (!loader) return { error: 'could not be loaded here' };
+        return Promise.resolve().then(function () { return loader(blobId); }).then(function (record) {
+          return pptxPrepareImageForDocumentGeneration(record, false);
+        }, function () { return { error: 'was not found' }; });
+      }).then(function (entry) { images[blobId] = entry; });
+    });
+    var describe = function (ref) {
+      if (!ref || !ref.blobId) return 'blob id "' + (ref ? ref.rawId : '') + '" is not a blob id';
+      var entry = images[ref.blobId];
+      if (!entry) return 'blob ' + ref.blobId + ' is past the picture limit';
+      return 'blob ' + ref.blobId + ' ' + entry.error;
+    };
+    var usable = function (ref) {
+      var entry = ref && ref.blobId ? images[ref.blobId] : null;
+      return entry && !entry.error && entry.width && entry.height ? entry : null;
+    };
+
+    return chain.then(function () {
+      var bad = [];
+      var soft = [];
+      var output = blocks;
+      if (blocks) {
+        var pictureNumber = 0;
+        output = [];
+        blocks.forEach(function (block) {
+          if (!docIsPendingPictureForDocumentGeneration(block)) {
+            output.push(block);
+            return;
+          }
+          var ref = pictureRefs[pictureNumber];
+          pictureNumber++;
+          var entry = usable(ref);
+          if (!entry) {
+            bad.push('picture ' + pictureNumber + ' (' + describe(ref) + ')');
+            return;
+          }
+          var size = DOC_PICTURE_SIZES_FOR_DOCUMENT_GENERATION[String(block.size || '').trim().toLowerCase()] ? String(block.size).trim().toLowerCase() : 'full';
+          var shown = docPictureShownForDocumentGeneration(entry, size, area);
+          if (entry.width < shown.widthPt * 0.98) soft.push('picture ' + pictureNumber + ' (' + entry.width + ' x ' + entry.height + ' pixels)');
+          output.push({
+            type: 'image',
+            resolved: docResolvedPictureForDocumentGeneration(entry, format, shown),
+            shown: shown,
+            size: size,
+            caption: docPlainTextForDocumentGeneration(block.caption, 500),
+            alt: docPlainTextForDocumentGeneration(block.alt != null ? block.alt : ref.alt, 500)
+          });
+        });
+      }
+      var coverLayout = null;
+      if (cover) {
+        var photo = cover.image ? usable(cover.image) : null;
+        if (cover.image && !photo) bad.push('the cover (' + describe(cover.image) + ')');
+        var variant = photo ? 'photo' : (theme.deck && theme.deck.cover === 'plain' ? 'plain' : 'band');
+        coverLayout = docCoverLayoutForDocumentGeneration(cover, variant, theme, context.page);
+        if (photo) {
+          coverLayout.photo = { bytes: photo.bytes, ext: photo.ext, width: photo.width, height: photo.height, alt: cover.image.alt };
+          if (photo.width < coverLayout.art.w * 0.98) soft.push('the cover (' + photo.width + ' x ' + photo.height + ' pixels)');
+        }
+        // A title block that repeats the cover's title would print it twice.
+        if (output) {
+          var firstIndex = -1;
+          for (var i = 0; i < output.length; i++) {
+            if (output[i] && typeof output[i] === 'object') { firstIndex = i; break; }
+          }
+          var first = firstIndex === -1 ? null : output[firstIndex];
+          if (first && first.type === 'title') {
+            var content = blockContentForDocumentGeneration(first);
+            var text = Array.isArray(content) ? content.map(function (run) { return run && run.text ? run.text : ''; }).join('') : content;
+            if (docPlainTextForDocumentGeneration(text).toLowerCase() === cover.title.toLowerCase()) {
+              output = output.slice(0, firstIndex).concat(output.slice(firstIndex + 1));
+            }
+          }
+        }
+      }
+      if (bad.length) warnings.push('These pictures could not be used and were left out: ' + bad.join('; ') + '.');
+      if (cutCount) warnings.push('A document holds at most ' + MAX_DOCX_IMAGES_FOR_DOCUMENT_GENERATION + ' different pictures; ' + cutCount + ' more were left out.');
+      if (soft.length) warnings.push('These pictures have fewer pixels than the space they fill, so they will look soft: ' + soft.join('; ') + '. A larger picture would print sharper.');
+      var art = coverLayout && coverLayout.variant === 'band' ? docCoverBandArtForDocumentGeneration(coverLayout, theme) : Promise.resolve(null);
+      return art.then(function (bandArt) {
+        if (coverLayout) coverLayout.bandArt = bandArt;
+        var updated = Object.assign({}, input);
+        if (output) updated.blocks = output;
+        if (coverLayout) updated.coverLayout = coverLayout;
+        return updated;
+      });
+    });
   }
 
   // ---- Look ----
@@ -5380,6 +6098,8 @@
     var primaryLuminance = themes && themes.luminance ? themes.luminance(colors.primary) : 0;
     return {
       cover: theme.deck && theme.deck.cover === 'plain' ? 'plain' : 'fill',
+      // The pattern a filled title or section slide gets when it has no background of its own.
+      coverPattern: theme.deck && theme.deck.cover !== 'plain' && PPTX_PATTERNS_FOR_DOCUMENT_GENERATION.indexOf(theme.deck.pattern) !== -1 ? theme.deck.pattern : '',
       // White on the primary colour, or the text colour when a brand primary is too light for
       // white text (under 3:1 contrast, the large-text minimum).
       coverText: primaryLuminance > 0.3 ? 'tx1' : 'bg1',
@@ -5782,14 +6502,14 @@
 
   // Each slide's pictures, as relationships to parts in ppt/media shared by the whole deck. A
   // picture used on several slides, or a pattern with the same colours, is stored once.
-  function pptxSlideRelsForDocumentGeneration(deckMedia, images) {
+  function pptxSlideRelsForDocumentGeneration(deckMedia, images, patterns) {
     var rels = { list: [], byPart: {}, images: images };
     var relFor = function (key, make) {
       if (!deckMedia.byKey[key]) {
         var made = make();
         var partName = 'image' + (deckMedia.parts.length + 1) + '.' + made.ext;
         deckMedia.byKey[key] = partName;
-        deckMedia.parts.push({ name: partName, ext: made.ext, bytes: made.bytes });
+        deckMedia.parts.push({ name: partName, ext: made.ext, bytes: made.bytes, compressed: !!made.compressed });
       }
       var part = deckMedia.byKey[key];
       if (!rels.byPart[part]) {
@@ -5801,8 +6521,8 @@
     rels.image = function (blobId) {
       return relFor('blob:' + blobId, function () { return { ext: images[blobId].ext, bytes: images[blobId].bytes }; });
     };
-    rels.pattern = function (name, base, ink) {
-      return relFor('pattern:' + name + ':' + base + ':' + ink, function () { return { ext: 'png', bytes: pptxPatternPngForDocumentGeneration(name, base, ink) }; });
+    rels.pattern = function (colours) {
+      return relFor(colours.key, function () { return { ext: 'png', bytes: patterns[colours.key].bytes, compressed: patterns[colours.key].compressed }; });
     };
     return rels;
   }
@@ -5831,10 +6551,8 @@
       backgroundXml = '<p:bg><p:bgPr><a:solidFill><a:srgbClr val="' + background.color + '"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>';
       hideLayoutShapes = true;
     } else if (background && background.pattern) {
-      var filledCover = look.cover === 'fill' && (slide.layout === 'title' || slide.layout === 'section');
-      var base = filledCover ? String(theme.colors.primary).toUpperCase() : 'FFFFFF';
       backgroundXml = '<p:bg><p:bgPr><a:blipFill dpi="0" rotWithShape="1"><a:blip r:embed="'
-        + rels.pattern(background.pattern, base, pptxPatternInkForDocumentGeneration(base, theme)) + '"/>'
+        + rels.pattern(pptxPatternColoursForDocumentGeneration(slide, theme, look)) + '"/>'
         + '<a:stretch><a:fillRect/></a:stretch></a:blipFill><a:effectLst/></p:bgPr></p:bg>';
     }
     issues.overflowHere = false;
@@ -6058,10 +6776,21 @@
     var showNumbers = safeContext.pageNumbers !== false;
     var issues = pptxIssuesForDocumentGeneration();
     var slides = normalizeDeckForDocumentGeneration(inputForDocumentGeneration, issues);
-    return pptxLoadImagesForDocumentGeneration(slides, depsForPptx, issues).then(function (images) {
+    var images = null;
+    return pptxLoadImagesForDocumentGeneration(slides, depsForPptx, issues).then(function (loaded) {
+      images = loaded;
       pptxSettleImagesForDocumentGeneration(slides, images, issues);
+      // A cover or section slide with nothing behind it gets the theme's pattern, including one
+      // whose picture could not be used.
+      if (look.cover === 'fill' && look.coverPattern) {
+        slides.forEach(function (slide) {
+          if (!slide.background && (slide.layout === 'title' || slide.layout === 'section')) slide.background = { pattern: look.coverPattern };
+        });
+      }
+      return pptxPatternPngsForDocumentGeneration(slides, theme, look);
+    }).then(function (patterns) {
       var deckMedia = { parts: [], byKey: {} };
-      var slideRels = slides.map(function () { return pptxSlideRelsForDocumentGeneration(deckMedia, images); });
+      var slideRels = slides.map(function () { return pptxSlideRelsForDocumentGeneration(deckMedia, images, patterns); });
       var slideXml = slides.map(function (slide, index) { return pptxSlideXmlForDocumentGeneration(slide, theme, look, showNumbers, issues, slideRels[index]); });
       pptxWarningsForDocumentGeneration(issues).forEach(function (warning) { warnings.push(warning); });
       return pptxWriteDeckForDocumentGeneration(inputForDocumentGeneration, slides, slideXml, slideRels, deckMedia, theme, look);
@@ -6157,7 +6886,8 @@
       zip.file('ppt/slides/slide' + slide.number + '.xml', slideXml[index]);
       zip.file('ppt/slides/_rels/slide' + slide.number + '.xml.rels', relsXml(slideRels.concat(slideRelsList[index].list)));
     });
-    deckMedia.parts.forEach(function (part) { zip.file('ppt/media/' + part.name, part.bytes); });
+    // A pattern already compressed is stored as it is; deflating it again only costs time.
+    deckMedia.parts.forEach(function (part) { zip.file('ppt/media/' + part.name, part.bytes, part.compressed ? { compression: 'STORE' } : {}); });
 
     return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE', mimeType: PPTX_MIME_FOR_DOCUMENT_GENERATION }).then(function (bytes) {
       return {
@@ -6288,11 +7018,13 @@
       var hasImageBytesForBuiltIn = !!blocksForBuiltIn && blocksForBuiltIn.some(function (blockForBytes) {
         return blockForBytes && blockForBytes.type === 'image' && blockForBytes.resolved && blockForBytes.resolved.bytes;
       });
-      var readyForBuiltIn = hasImageBytesForBuiltIn
+      var readyForBuiltIn = (hasImageBytesForBuiltIn
         ? rasterizePdfImageBlocksForDocumentGeneration(blocksForBuiltIn, dropTrackerForRoute).then(function (rasterizedForBuiltIn) {
           return Object.assign({}, inputForRoute, { blocks: rasterizedForBuiltIn });
         })
-        : Promise.resolve(inputForRoute);
+        : Promise.resolve(inputForRoute)).then(function (inputWithImages) {
+        return rasterizePdfCoverForDocumentGeneration(inputWithImages, contextForRoute, dropTrackerForRoute);
+      });
       return readyForBuiltIn.then(function (inputForBuiltIn) {
         var builtForBuiltIn = buildPdfForDocumentGeneration(inputForBuiltIn, contextForRoute);
         var notesForBuiltIn = [dropTrackerForRoute.note()];
@@ -6430,6 +7162,13 @@
     );
     var renderContextForDocumentGeneration = buildRenderContextForDocumentGeneration(safeInputForDocumentGeneration, formatForDocumentGeneration);
     return prepareInputWithBlocksForDocumentGeneration(safeInputForDocumentGeneration, formatForDocumentGeneration, depsForDocumentGeneration)
+      .then(function (preparedForPictures) {
+        if (formatForDocumentGeneration !== 'docx' && formatForDocumentGeneration !== 'pdf') return preparedForPictures;
+        return docPicturesForDocumentGeneration(preparedForPictures.input, formatForDocumentGeneration, renderContextForDocumentGeneration, depsForDocumentGeneration)
+          .then(function (inputWithPictures) {
+            return Object.assign({}, preparedForPictures, { input: inputWithPictures });
+          });
+      })
       .then(function (preparedForDocumentGeneration) {
         var preparedInputForDocumentGeneration = preparedForDocumentGeneration.input;
         var noteForDocumentGeneration = preparedForDocumentGeneration.note;
@@ -6504,9 +7243,13 @@
     },
     // The slide overlay rule and the picture header reader, for tests: Node has no canvas, so a
     // photo cannot be sampled there and these are tested on pixels and bytes made in the test.
+    // The pattern's pixels and its coverage at a point, so the copied repeat can be checked
+    // against the drawing.
     slidePictures: {
       overlay: pptxOverlayForDocumentGeneration,
-      imageInfo: pptxImageInfoForDocumentGeneration
+      imageInfo: pptxImageInfoForDocumentGeneration,
+      patternRows: pptxPatternRowsForDocumentGeneration,
+      patternCoverage: pptxPatternCoverageForDocumentGeneration
     }
   };
 

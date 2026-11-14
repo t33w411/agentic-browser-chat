@@ -13,6 +13,7 @@ importScripts(
   "../shared/toolRegistry.js",
   "../shared/domainConfig.js",
   "../shared/storage.js",
+  "./injectionIndicator.js",
   "./tabMessaging.js",
   "./contextMenus.js",
   "./commands.js",
@@ -128,6 +129,8 @@ function setActiveTabFromWindowForServiceWorker(windowIdForActiveTab) {
       var tabForActiveTab = tabsForActiveTab[0];
       if (!tabForActiveTab || typeof tabForActiveTab.id !== "number") return;
       setCurrentActiveTabForServiceWorker(tabForActiveTab.id);
+      // A window coming to the front shows a tab that tabs.onActivated never reported.
+      ensureInjectedOnActivationForServiceWorker(tabForActiveTab.id);
     });
   } catch (errorForActiveTab) {}
 }
@@ -1780,7 +1783,11 @@ async function setSessionValueForServiceWorker(keyForServiceWorker, valueForServ
 }
 
 // Recovery design notes:
-// - Re-inject the active tab first (fast UX path), then every other supported tab.
+// - Re-inject the tab in view and no other. Every other tab gets its copy when the user reaches
+//   it (ensureInjectedOnActivationForServiceWorker). A reload does not unload the copy a tab
+//   already holds, so injecting into every open tab here added a full copy of the bundle to each
+//   of them on every reload, all at once: a CPU burst across the whole browser and memory that
+//   only a tab reload gave back.
 // - Keep this idempotent and bounded with timeouts to avoid stuck worker runs.
 // - Never write window.abchatListenerGeneration from here; content/preInit.js owns it. After a
 //   reload the new content scripts run in a fresh isolated world, so a bump from here cannot reach
@@ -1788,54 +1795,53 @@ async function setSessionValueForServiceWorker(keyForServiceWorker, valueForServ
 //   it can do is land in a world where this build's scripts have already run, such as a tab that
 //   loaded during install or a restored tab at browser startup. Every listener there then fails its
 //   stale check, and the tab answers no message until it is reloaded.
-async function runReloadRecoveryPassForServiceWorker(isFirstPassForServiceWorker) {
-  if (isFirstPassForServiceWorker) {
-    try {
-      var activeTabForServiceWorker = await tabMessagingForServiceWorker.queryActiveTab();
-      if (
-        activeTabForServiceWorker &&
-        typeof activeTabForServiceWorker.id === "number" &&
-        tabMessagingForServiceWorker.isSupportedUrl(activeTabForServiceWorker.url || "")
-      ) {
-        var didInjectActiveTabForServiceWorker = await Promise.race([
-          tabMessagingForServiceWorker.ensureContentInjected(activeTabForServiceWorker.id),
-          new Promise((resolveForServiceWorker) => {
-            setTimeout(() => {
-              resolveForServiceWorker(false);
-            }, 3500);
-          })
-        ]);
-
-        if (didInjectActiveTabForServiceWorker) {
-          await tabMessagingForServiceWorker.checkContentReady(
-            activeTabForServiceWorker.id,
-            5
-          );
-        }
-      }
-    } catch (errorForServiceWorker) {
-      // Continue with broader recovery even when active-tab fast path fails.
-    }
-  }
-
+async function runReloadRecoveryPassForServiceWorker() {
   try {
-    await Promise.race([
-      tabMessagingForServiceWorker.reInjectIntoAllSupportedTabs(),
-      new Promise((resolveForServiceWorker) => {
-        setTimeout(() => {
-          resolveForServiceWorker(false);
-        }, 7000);
-      })
-    ]);
+    var activeTabForServiceWorker = await tabMessagingForServiceWorker.queryActiveTab();
+    if (
+      activeTabForServiceWorker &&
+      typeof activeTabForServiceWorker.id === "number" &&
+      tabMessagingForServiceWorker.isSupportedUrl(activeTabForServiceWorker.url || "")
+    ) {
+      var didInjectActiveTabForServiceWorker = await Promise.race([
+        tabMessagingForServiceWorker.ensureContentInjected(activeTabForServiceWorker.id),
+        new Promise((resolveForServiceWorker) => {
+          setTimeout(() => {
+            resolveForServiceWorker(false);
+          }, 3500);
+        })
+      ]);
+
+      if (didInjectActiveTabForServiceWorker) {
+        await tabMessagingForServiceWorker.checkContentReady(
+          activeTabForServiceWorker.id,
+          5
+        );
+      }
+    }
   } catch (errorForServiceWorker) {
-    // Ignore re-injection failures during lifecycle recovery and continue.
+    // Ignore re-injection failures during lifecycle recovery; a later pass or the
+    // tab's next activation covers it.
   }
 }
 
+// Gives the tab the user just reached a live copy of the content scripts when it has none, which
+// after an extension reload is every tab except the one that was in view. The panel-open path
+// (openPanelInActiveTabForServiceWorker) injects too, but only while the panel is set to open,
+// and the selection and context tools need the scripts either way. For a tab that already has
+// them this is one nonce probe; ensureContentInjected folds concurrent callers into one run.
+function ensureInjectedOnActivationForServiceWorker(tabIdForActivation) {
+  if (typeof tabIdForActivation !== "number") return;
+  if (!tabMessagingForServiceWorker || typeof tabMessagingForServiceWorker.ensureContentInjected !== "function") return;
+  try {
+    tabMessagingForServiceWorker.ensureContentInjected(tabIdForActivation).catch(function () {});
+  } catch (errorForActivation) {}
+}
+
 // Lessons learned:
-// - Recovery must prioritize the visible tab first to avoid stale UI perception.
-// - Re-injection can stall on some tabs; bounded timeouts prevent
-//   the overall recovery sequence from hanging.
+// - Re-injection can stall; a bounded timeout prevents the recovery sequence from hanging.
+// - The tab in view can be missing or mid-navigation on the first pass, so the pass repeats.
+//   For a tab that is already injected a repeat is one nonce probe.
 // - Do not run overlapping recovery sequences; a simple in-flight guard avoids races.
 // - Recovery retries must be non-destructive once the user starts interacting with modes.
 async function runReloadRecoveryWithRetriesForServiceWorker() {
@@ -1854,7 +1860,7 @@ async function runReloadRecoveryWithRetriesForServiceWorker() {
           setTimeout(resolveForServiceWorker, delayMsForServiceWorker);
         });
       }
-      await runReloadRecoveryPassForServiceWorker(retryIndexForServiceWorker === 0);
+      await runReloadRecoveryPassForServiceWorker();
     }
   } finally {
     isReloadRecoveryRunningForServiceWorker = false;
@@ -3726,6 +3732,7 @@ chrome.tabs.onActivated.addListener((activeInfoForServiceWorker) => {
   enforceStoredPanelVisibilityForServiceWorker();
   if (activeInfoForServiceWorker && typeof activeInfoForServiceWorker.tabId === "number") {
     setCurrentActiveTabForServiceWorker(activeInfoForServiceWorker.tabId);
+    ensureInjectedOnActivationForServiceWorker(activeInfoForServiceWorker.tabId);
   }
 });
 
