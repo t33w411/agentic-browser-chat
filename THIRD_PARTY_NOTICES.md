@@ -15,9 +15,12 @@ This extension bundles the following third-party libraries under `lib/`. Each re
 | PapaParse | `papaparse.min.js` | MIT | https://www.papaparse.com |
 | PDF.js | `pdf.min.js`, `pdf.worker.min.js` | Apache-2.0 | https://mozilla.github.io/pdf.js/ |
 | DOMPurify | `purify.min.js` | Apache-2.0 or MPL-2.0 (dual) | https://github.com/cure53/DOMPurify |
+| docx-preview 0.4.1 | `docx-preview.js` (modified) | Apache-2.0 | https://github.com/VolodymyrBaydalka/docxjs |
 | SheetJS (xlsx) | `xlsx.min.js` | Apache-2.0 (Community Edition) | https://sheetjs.com |
 
 `lib/mermaid-guard.js` is original code in this repository, not third-party. It only wraps Mermaid's `customElements.define` call.
+
+`lib/docx-preview.js` is modified. The header comment at the top of the file lists the changes, and each one is marked "abchat patch" in the code.
 
 ## Data copied into source files
 
@@ -30,7 +33,7 @@ These are not bundled libraries. Data from them was copied into the extension's 
 
 ## Fonts downloaded at runtime
 
-No font files are bundled. When the user allows Chrome to print PDFs, the print page downloads the fonts a document uses from the Fontsource library on jsDelivr (`https://cdn.jsdelivr.net/fontsource/fonts/`), and Chrome embeds a subset of each in the PDF. The curated families, the Noto families used for non-Latin scripts, and the metric-compatible Arimo, Tinos, Cousine, Carlito, and Caladea are released under the SIL Open Font License 1.1 or the Apache License 2.0, both of which allow embedding in documents. A font the user names is fetched the same way, under whatever license it carries.
+No font files are bundled. When the user allows Chrome to print PDFs, the print page (and, when a Word file is converted, the frame it is laid out in) downloads the fonts a document uses from the Fontsource library on jsDelivr (`https://cdn.jsdelivr.net/fontsource/fonts/`), and Chrome embeds a subset of each in the PDF. The curated families, the Noto families used for non-Latin scripts, and the metric-compatible Arimo, Tinos, Cousine, Carlito, and Caladea are released under the SIL Open Font License 1.1 or the Apache License 2.0, both of which allow embedding in documents. A font the user names is fetched the same way, under whatever license it carries.
 
 If you redistribute a built/packaged version of this extension, you must include the license texts of the libraries above. The simplest path is to copy the `LICENSE` file from each upstream project alongside the distribution.
 

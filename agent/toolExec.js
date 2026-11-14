@@ -957,7 +957,7 @@
     return null;
   }
 
-  async function skillToolForToolExec(args) {
+  async function skillToolForToolExec(args, context) {
     var operation = args.operation;
     var slug = typeof args.slug === 'string' ? args.slug.trim() : '';
     var title = typeof args.title === 'string' ? args.title.trim() : '';
@@ -969,11 +969,12 @@
     }
 
     // Built-in guides ship with the extension and are never stored, so they are served before the
-    // database is consulted and can be neither created nor changed.
+    // database is consulted and can be neither created nor changed. The read is given the window the
+    // model is answering from, so a guide it already holds is not sent again.
     var builtinGuidesForSkill = (globalScopeForToolExec.ABChatAgent || {}).builtinGuides;
     if (builtinGuidesForSkill && slug) {
       if (operation === 'read') {
-        var guideReadForSkill = builtinGuidesForSkill.readResult(slug);
+        var guideReadForSkill = builtinGuidesForSkill.readResult(slug, context && context.messages);
         if (guideReadForSkill) return guideReadForSkill;
       } else if (operation === 'create' ? builtinGuidesForSkill.isReservedSlug(slug) : !!builtinGuidesForSkill.get(slug)) {
         return { ok: false, error: 'Slugs starting with "' + builtinGuidesForSkill.SLUG_PREFIX + '" belong to built-in guides, which are read-only. Use a different slug.' };
@@ -8447,6 +8448,10 @@ self.onmessage = function (e) {
         note: built.note || '',
         warnings: Array.isArray(built.warnings) ? built.warnings : []
       };
+      if (Array.isArray(built.pictureBlobIds)) baseResult._generatedDocument.pictureBlobIds = built.pictureBlobIds;
+      // __document__ with also_pdf: the PDF rides along and is saved beside the first file.
+      if (built.companion) baseResult._generatedDocument.companion = built.companion;
+      if (built.companionError) baseResult._generatedDocument.companionError = built.companionError;
       return baseResult;
     } catch (docErr) {
       baseResult.document_error = 'Document generation failed: ' + ((docErr && docErr.message) || String(docErr));
@@ -10297,8 +10302,14 @@ self.onmessage = function (e) {
       var hasDocxContentForDocumentTool = typeof args.content === 'string' && args.content.trim();
       var hasDocxBlocksForDocumentTool = Array.isArray(args.blocks) && args.blocks.length > 0;
       var hasDocxHtmlForDocumentTool = typeof args.html === 'string' && args.html.trim();
-      if (!hasDocxContentForDocumentTool && !hasDocxBlocksForDocumentTool && !hasDocxHtmlForDocumentTool) {
-        return { ok: false, error: formatForDocumentTool.toUpperCase() + ' creation requires html, content, or blocks' };
+      var hasPdfSlidesForDocumentTool = formatForDocumentTool === 'pdf' && Array.isArray(args.slides) && args.slides.length > 0;
+      if (!hasDocxContentForDocumentTool && !hasDocxBlocksForDocumentTool && !hasDocxHtmlForDocumentTool && !hasPdfSlidesForDocumentTool) {
+        return {
+          ok: false,
+          error: formatForDocumentTool === 'pdf'
+            ? 'PDF creation requires html, content, blocks, or slides'
+            : 'DOCX creation requires html, content, or blocks'
+        };
       }
     }
 
@@ -11044,6 +11055,123 @@ self.onmessage = function (e) {
         resolveForEdit({ ok: false, error: (errForEdit && errForEdit.message) || 'Could not edit the document.' });
       }
     });
+  }
+
+  var DOCX_MIME_FOR_TOOL_EXEC = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+  function bytesFromDataUrlForToolExec(dataUrlForBytes) {
+    var textForBytes = String(dataUrlForBytes || '');
+    var commaForBytes = textForBytes.indexOf(',');
+    if (commaForBytes === -1 || textForBytes.slice(0, commaForBytes).indexOf(';base64') === -1) return null;
+    try {
+      var binaryForBytes = atob(textForBytes.slice(commaForBytes + 1));
+      var bytesForBytes = new Uint8Array(binaryForBytes.length);
+      for (var indexForBytes = 0; indexForBytes < binaryForBytes.length; indexForBytes++) bytesForBytes[indexForBytes] = binaryForBytes.charCodeAt(indexForBytes);
+      return bytesForBytes;
+    } catch (errForBytes) {
+      return null;
+    }
+  }
+
+  function convertedPdfFilenameForToolExec(requestedForName, sourceNameForName) {
+    var baseForName = String(requestedForName == null ? '' : requestedForName).trim()
+      || String(sourceNameForName || 'document').replace(/\.docx$/i, '');
+    baseForName = baseForName.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 150) || 'document';
+    return /\.pdf$/i.test(baseForName) ? baseForName : baseForName + '.pdf';
+  }
+
+  // Why Chrome did not print a converted document. There is no built-in fallback: the built-in PDF
+  // writer lays out flowing text from blocks and cannot draw a Word layout.
+  function convertPrintFailureForToolExec(printedForFailure) {
+    var codeForFailure = printedForFailure && printedForFailure.code;
+    if (codeForFailure === 'declined') {
+      return 'Converting a Word file needs Print PDFs with Chrome, and the user chose the built-in PDF writer, which cannot draw a Word layout. Nothing was converted. Tell the user they can turn on Print PDFs with Chrome in Settings, or use Save as PDF in Word.';
+    }
+    if (codeForFailure === 'no-consent') {
+      return 'Converting a Word file needs Print PDFs with Chrome, and the user has not yet said whether Chrome may print PDFs. Nothing was converted. Ask the user to answer the print prompt, then try again.';
+    }
+    if (codeForFailure === 'cancelled') {
+      return 'The print was cancelled before it finished, so nothing was converted. Try again if the user wants the PDF.';
+    }
+    return 'Chrome could not print the document (' + ((printedForFailure && printedForFailure.error) || 'no answer from the printer') + '), so nothing was converted.';
+  }
+
+  // convert_document: a DOCX laid out page by page in the offscreen document (agent/docxToPdf.js)
+  // and printed by Chrome. The result is saved and shown like a create_document result.
+  async function convertDocumentToolForToolExec(args, context) {
+    var signalForConvert = getAbortSignalForToolExec(context);
+    if (isAbortedForToolExec(signalForConvert)) return cancelledResultForToolExec();
+    var refIdForConvert = Number(args.ref_id);
+    if (!Number.isFinite(refIdForConvert) || refIdForConvert <= 0) {
+      return { ok: false, error: 'ref_id is required and must be a positive integer (the blob id of the DOCX).' };
+    }
+    if (args.to != null && String(args.to).trim().toLowerCase() !== 'pdf') {
+      return { ok: false, error: 'to must be "pdf"; a DOCX converts only to PDF.' };
+    }
+    var converterForConvert = (globalScopeForToolExec.ABChatAgent || {}).docxToPdf;
+    var locationForConvert = globalScopeForToolExec.location;
+    if (!converterForConvert || typeof converterForConvert.convert !== 'function'
+      || !locationForConvert || locationForConvert.protocol !== 'chrome-extension:') {
+      return { ok: false, error: 'The Word converter is not available here.' };
+    }
+    var repoForConvert = getPanelDataRepoForToolExec();
+    if (!repoForConvert || typeof repoForConvert.getAttachmentBlob !== 'function') {
+      return { ok: false, error: 'Attachments are not available.' };
+    }
+    var recordForConvert = null;
+    try {
+      recordForConvert = await repoForConvert.getAttachmentBlob(refIdForConvert);
+    } catch (errForRecord) {
+      recordForConvert = null;
+    }
+    if (!recordForConvert || typeof recordForConvert.dataUrl !== 'string' || !recordForConvert.dataUrl) {
+      return { ok: false, error: 'No file with blob id ' + refIdForConvert + ' was found.' };
+    }
+    var sourceNameForConvert = String(recordForConvert.name || '');
+    var mimeForConvert = String(recordForConvert.mimeType || '').toLowerCase();
+    if (!/\.docx$/i.test(sourceNameForConvert) && mimeForConvert !== DOCX_MIME_FOR_TOOL_EXEC) {
+      return { ok: false, error: 'convert_document takes a DOCX, and blob ' + refIdForConvert + ' is ' + (sourceNameForConvert || mimeForConvert || 'another kind of file') + '.' };
+    }
+    var bytesForConvert = bytesFromDataUrlForToolExec(recordForConvert.dataUrl);
+    if (!bytesForConvert) return { ok: false, error: 'The file\'s contents could not be read.' };
+    var filenameForConvert = convertedPdfFilenameForToolExec(args.filename, sourceNameForConvert);
+    var navigatorForConvert = globalScopeForToolExec.navigator;
+    var convertedForTool = await converterForConvert.convert(bytesForConvert, {
+      title: filenameForConvert.replace(/\.pdf$/i, ''),
+      lang: navigatorForConvert && navigatorForConvert.language
+    });
+    if (isAbortedForToolExec(signalForConvert)) return cancelledResultForToolExec();
+    if (!convertedForTool || !convertedForTool.ok) {
+      return { ok: false, error: (convertedForTool && convertedForTool.error) || 'The document could not be converted.' };
+    }
+    var printedForConvert = await printPdfForToolExec({
+      html: convertedForTool.html,
+      title: filenameForConvert.replace(/\.pdf$/i, ''),
+      fonts: convertedForTool.fonts,
+      templates: convertedForTool.templates
+    });
+    if (isAbortedForToolExec(signalForConvert)) return cancelledResultForToolExec();
+    if (!printedForConvert || !printedForConvert.ok || !printedForConvert.base64) {
+      return { ok: false, error: convertPrintFailureForToolExec(printedForConvert) };
+    }
+    var base64ForConvert = String(printedForConvert.base64);
+    var paddingForConvert = /==$/.test(base64ForConvert) ? 2 : (/=$/.test(base64ForConvert) ? 1 : 0);
+    var pagesForConvert = Number(convertedForTool.pageCount) || 0;
+    var warningsForConvert = (convertedForTool.warnings || []).concat(Array.isArray(printedForConvert.warnings) ? printedForConvert.warnings : [])
+      .filter(function (warningForFilter, indexForFilter, listForFilter) { return warningForFilter && listForFilter.indexOf(warningForFilter) === indexForFilter; })
+      .map(String);
+    var resultForConvert = {
+      ok: true,
+      format: 'pdf',
+      filename: filenameForConvert,
+      mimeType: 'application/pdf',
+      dataUrl: 'data:application/pdf;base64,' + base64ForConvert,
+      size: Math.floor(base64ForConvert.length * 3 / 4) - paddingForConvert,
+      note: 'Converted ' + (sourceNameForConvert || 'the DOCX') + ' to ' + pagesForConvert + ' page' + (pagesForConvert === 1 ? '' : 's')
+        + '. Lines and page breaks follow Word closely, but a page can end a few lines earlier or later than in Word.'
+    };
+    if (warningsForConvert.length) resultForConvert.warnings = warningsForConvert;
+    return resultForConvert;
   }
 
   // ---- Trusted-input automation ----
@@ -12777,7 +12905,7 @@ self.onmessage = function (e) {
       case 'write':                 return writeToolForToolExec(args);
       case 'edit':                  return editToolForToolExec(args);
       case 'memory':                return memoryToolForToolExec(args);
-      case 'skill':                 return skillToolForToolExec(args);
+      case 'skill':                 return skillToolForToolExec(args, context);
       case 'grep':                  return grepToolForToolExec(args);
       case 'ls':                    return lsToolForToolExec(args);
       case 'page_observe':          return pageObserveToolForToolExec(args);
@@ -12803,6 +12931,7 @@ self.onmessage = function (e) {
       case 'create_document':       return createDocumentToolForToolExec(args, context);
       case 'read_document_structure': return readDocumentStructureToolForToolExec(args);
       case 'edit_document':         return editDocumentToolForToolExec(args, context);
+      case 'convert_document':      return convertDocumentToolForToolExec(args, context);
       case 'generate_image':        return generateImageToolForToolExec(args, context);
       case 'generate_questions':    return generateQuestionsToolForToolExec(args, context);
       case 'get_environment':       return getEnvironmentToolForToolExec();

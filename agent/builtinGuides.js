@@ -7,34 +7,38 @@
   // builtin-guide-gate PreToolUse hook refuses a covered tool call until the guide's text is in the
   // live message window. The gate finds the guide by its marker line, so every copy the model can
   // see (a skill read, or a refusal that carries the guide) must be built by guideTextForBuiltinGuides.
+  // The documents guide is split by task, so a chat carries only the part it uses: builtin-documents
+  // holds the rules for every file and comes with whichever part is read first.
 
   // Reserved for built-in guides. User skills may not take a slug with this prefix, from either the
   // skill tool or the Manage Skills editor, so a guide can never shadow a skill.
   const SLUG_PREFIX_FOR_BUILTIN_GUIDES = 'builtin-';
 
-  const DOCUMENTS_GUIDE_BODY_FOR_BUILTIN_GUIDES = String.raw`# Creating and editing documents
+  const DOCUMENTS_GUIDE_BODY_FOR_BUILTIN_GUIDES = String.raw`# Documents: rules for every file
 
-This guide covers create_document, edit_document, eval code that returns __document__, and read_document_structure. Once it is in the conversation you do not need to read it again.
+This guide holds the rules for every file you make or change with create_document, eval code that returns __document__, read_document_structure, or edit_document. It comes with the guide for the task, which has the fields and layouts: builtin-docx-pdf, builtin-xlsx-csv, builtin-pptx, or builtin-docx-edit. Once a guide is in the conversation you do not need to read it again.
 
 ## 1. Which tool
 - create_document: a document whose content you write out by hand.
-- eval returning { __document__: spec }: a large or computed document, such as hundreds of rows or anything derived by filtering, sorting, or aggregating data. The code builds the rows in a loop, so you do not enumerate every row in the tool arguments, which costs tokens and risks truncation. The spec is the same object create_document takes.
-- edit_document: changes to a DOCX the user gave you, handed back with everything else exactly as it was (section 10).
-- read_document_structure: reads an attached DOCX with an id on each paragraph, before edit_document or before rebuilding it in a new layout (section 10). For questions about a file's contents, its extracted text is already in context.
+- eval returning { __document__: spec }: a large or computed document, such as hundreds of rows or anything derived by filtering, sorting, or aggregating data. The code builds the rows in a loop, so you do not enumerate every row in the tool arguments, which costs tokens and risks truncation. The spec is the same object create_document takes (section 6).
+- edit_document: changes to a DOCX the user gave you, handed back with everything else exactly as it was (builtin-docx-edit).
+- read_document_structure: reads an attached DOCX with an id on each paragraph, before edit_document or before rebuilding it in a new layout (builtin-docx-edit). For questions about a file's contents, its extracted text is already in context.
+- convert_document: a DOCX the user gave you, or one made in this chat, as a PDF laid out the way Word lays it out. Use it when the user wants their own Word file as a PDF; do not rebuild the file with create_document for that.
 
 ## 2. Which format
 - DOCX: reports, letters, proposals, résumés, and anything the user may edit afterwards.
 - PDF: a finished document to share or print as it is. Chrome prints it with the theme's fonts embedded, and adds a Noto font for each script in the text (Greek, Cyrillic, Vietnamese, Arabic, Hebrew, the Indian scripts, Thai, Chinese, Japanese, Korean, and others), so any language prints as written. The first PDF asks the user to allow this.
-  When the user chose not to, or Chrome could not print, the result's note says so and a simpler built-in writer made the file. It has only Helvetica, Times, and Courier, and covers English and Western European text: other characters are simplified or shown as "?", and the warnings list them. If the text needs those characters, make a DOCX instead and tell the user why, and mention that Print PDFs with Chrome can be turned on in Settings.
 - XLSX: spreadsheets, including several sheets in one workbook.
 - CSV: one plain table to open in a spreadsheet app or import elsewhere.
-- PPTX: slide decks.
-If the user names a format, use it.
+- PPTX: slide decks. A deck can also be made as a PDF, one slide per page, for reading or sending rather than presenting (builtin-pptx).
+If the user names a format, use it. Before the first file in a format, read its guide with the skill tool: builtin-docx-pdf for DOCX and PDF, builtin-xlsx-csv for XLSX and CSV, and builtin-pptx for PPTX and a PDF of slides.
+
+When the user wants a DOCX or PPTX and a PDF of it, such as a CV in Word and PDF, make both in one call: set also_pdf to true on the DOCX or PPTX. The PDF is made from the same content and saved as a second file with the same name and .pdf. Do not make the PDF in a second call.
 
 ## 3. Rules for every format
 - Never use markdown in any field: no **bold**, _italic_, backtick code, [text](url) links, code fences, > quotes, --- rules, or | pipe | tables. These formats do not render markdown, so the characters appear literally in the file. Use the format's own structure instead.
 - Do not fake structure with characters. No runs of spaces or tabs to line things up, no typed "•" or "1." at the start of list items, no lines of dashes or underscores, and no empty paragraphs for spacing. The theme spaces everything; use the block types for lists, rules, and alignment.
-- title is used as the filename when filename is omitted. A new DOCX, PDF, or PPTX also stores it as the file's title property. In a DOCX or PDF it is shown only on a cover that has no title of its own (section 7), so add a title block if the document should open with one and has no cover. In PPTX it becomes a slide only when you pass no slides and no content.
+- title is used as the filename when filename is omitted. A new DOCX, PDF, or PPTX also stores it as the file's title property. In a DOCX or PDF it is shown only on a cover that has no title of its own, so add a title block if the document should open with one and has no cover. In PPTX it becomes a slide only when you pass no slides and no content.
 - filename is optional, and the right extension is added.
 - The result is metadata only. The file is saved and shown to the user automatically, so do not repeat its contents in your reply. To point to the file in your reply, copy the link from the result's displayed_to_user field, such as [report.docx](#abchat-docblob-12); the file is then shown there instead of above your reply. A bare #abchat-docblob-12 is plain text, not a link.
 - Make each file once. Call again only to fix a problem the result reports or to make a change the user asked for. While you answer one message, a new file with the same name as an earlier one replaces it in the chat, so give each file its own filename when the user wants to keep several.
@@ -43,9 +47,9 @@ If the user names a format, use it.
 A new document must look designed, never like text poured into a default template. Unless it is one of the restrained kinds below, aim for the most striking result that suits its subject and reader:
 - Choose the theme for the subject and the reader.
 - Give it a colour of its own with style.primary_color, picked for the subject or the user's brand: a deep green for a sustainability report, terracotta for a restaurant menu, the company's colour for a pitch. Use a deep, saturated colour that reads as text on white, never a pastel or neon. Leave it out when the theme's own colour already suits the subject.
-- Use the whole range of blocks and layouts (sections 6, 7, and 9), so pages and slides are not runs of paragraphs or bullets.
-- Give a deck generated pictures (section 9).
-- Give a report, proposal, plan, brief, guide, or manual of three pages or more a cover with a generated photo (section 7). A shorter document opens with a title block instead.
+- Use the whole range of blocks and layouts in the format's guide, so pages and slides are not runs of paragraphs or bullets.
+- Give a deck generated pictures (builtin-pptx).
+- Give a report, proposal, plan, brief, guide, or manual of three pages or more a cover with a generated photo (builtin-docx-pdf). A shorter document opens with a title block instead.
 - Add a picture inside a document where it carries the point: a product, a place, a screenshot being explained, a photo for each story in a newsletter.
 
 Restrained documents follow conventions set outside the conversation, so keep them plain unless the user asks otherwise:
@@ -73,17 +77,50 @@ style sets colours and fonts over the theme. Keep the theme's fonts unless the u
   A DOCX names its fonts rather than carrying them, so a web font is written as the closest installed font (Inter becomes Arial, Lora becomes Georgia). A font the user names is written as named; a reader who does not have it installed sees a substitute, and the result's warnings say so.
   A PDF printed by Chrome carries its fonts, so every reader sees them. A font the user names is fetched from the same open font library as the web fonts above, which has the Google Fonts families and many others, and otherwise taken from the fonts installed on this computer. If it is in neither, the PDF uses a substitute and the warnings say so. The built-in PDF writer sets every font in the nearest of Helvetica, Times, or Courier.
 
-## 5. Page setup (DOCX and PDF)
+## 5. Writing
+- Follow the user's specification exactly: section names, headings, column names, sheet names, and order. A neater structure that changes what they asked for is wrong.
+- Be consistent: one date format, one number format, one way of writing names and titles throughout the document.
+- Give a data table a header row, and put units in the header: "Revenue (€k)", "Duration (days)".
+
+## 6. Building a document in eval
+Return an object whose __document__ key holds the spec. The file is generated and shown to the user, and __document__ is removed from the result you get back; everything else you return is the normal result. One document per call. If the spec is invalid, the result carries document_error and keeps your computed result, so fix the spec and run it again.
+
+Example: total revenue per region from an attached CSV with blob id 42, delivered as an xlsx. Call eval with blob_ids: [42] and this code:
+const lines = blobs[0].text.trim().split("\n");
+lines.shift();
+const totals = {};
+lines.forEach(function (l) { const c = l.split(","); totals[c[0]] = (totals[c[0]] || 0) + (parseFloat(c[2]) || 0); });
+const rows = [["Region", "Revenue"]].concat(Object.keys(totals).sort().map(function (k) { return [k, totals[k]]; }));
+rows.push(["Total", { f: "SUM(B2:B" + rows.length + ")" }]);
+return { totals: totals, __document__: { format: "xlsx", filename: "revenue-by-region", sheets: [{ name: "Summary", columns: ["", "currency:USD"], rows: rows }] } };
+You get back { totals } and a note that the document was shown; the user gets the file.
+
+## 7. The result
+The result has format, filename, size, and a note. A themed DOCX, PDF, XLSX, or PPTX also has theme. For edit_document the note says what was changed. For a PDF the note also says when the built-in writer made it, and why. It may have warnings: characters the built-in PDF writer could not show, blocks, table rows, or columns left out, XLSX formulas that give an error or were kept as text, a renamed sheet, slide content that was cut or does not fit, a picture that could not be used or will look soft, a cover that was left out, a DOCX font that is not in the list, a PDF font that could not be found or downloaded, a theme or page value that was not recognised, or a theme ignored for an edited document. Read them. When content was left out or changed, tell the user what and why, and offer the fix (another format, or splitting the document).
+With also_pdf, the result also has pdf, holding the PDF's filename and size and any note or warnings the first file did not already give, or pdf_error saying why the PDF could not be made. The first file is made either way, so do not make it again; tell the user why there is no PDF.
+
+## 8. Size limits
+Content past a limit is dropped, and the result's warnings say what was left out (the note counts images past 50). Plan a bigger document as parts. The guide for each format gives its limits.`;
+
+  const DOCX_PDF_GUIDE_BODY_FOR_BUILTIN_GUIDES = String.raw`# Making a DOCX or PDF
+
+This guide covers create_document, and eval code that returns __document__, with format "docx", or "pdf" for a document of pages (a PDF of slides is in builtin-pptx). It goes with builtin-documents, the rules for every file. Once it is in the conversation you do not need to read it again.
+
+## 1. The PDF writers
+A PDF is printed by Chrome when the user allows it. When the user chose not to, or Chrome could not print, the result's note says so and a simpler built-in writer made the file. It has only Helvetica, Times, and Courier, and covers English and Western European text: other characters are simplified or shown as "?", and the warnings list them. If the text needs those characters, make a DOCX instead and tell the user why, and mention that Print PDFs with Chrome can be turned on in Settings.
+
+also_pdf: true on a DOCX makes a PDF of the same document in the same call, by the same route as a format "pdf" call. Use it when the user wants both, as for a CV, a letter, or a report to edit and to send. The two files lay out alike but are not identical: Word and the PDF break lines and pages a little differently.
+
+## 2. Page setup
 - page.size is "letter", "a4", or "legal". Leave it out and the size used in the user's locale is chosen. Set it when the user asks, or when the document is for a country that uses the other size.
 - page.orientation "landscape" suits a table with many columns or long text in several columns. Otherwise leave it portrait.
 - page_numbers: true for reports, manuals, and anything several pages long; false for letters, one-pagers, flyers, and résumés. Left out, numbers are on only for long documents.
 - header: a short line repeated at the top of every page, such as a company name or "Confidential". Leave it out unless it helps.
-- Themed documents always get the theme's margins. Edited source documents keep their own page setup (section 10).
+- Themed documents always get the theme's margins. Edited source documents keep their own page setup (builtin-docx-edit).
 
-## 6. Writing a document that reads well
-These apply to every format, and they are what make a document look finished rather than generated.
-- Follow the user's specification exactly: section names, headings, column names, sheet names, and order. A neater structure that changes what they asked for is wrong.
-- Open with what the reader needs. A report or brief starts with a cover or a title block (section 4 says which), with the date, audience, or author, then a short summary or the key finding. A letter starts with the sender and recipient details in a layout table, then the date, then the greeting.
+## 3. Writing a document that reads well
+These make a document look finished rather than generated.
+- Open with what the reader needs. A report or brief starts with a cover or a title block (section 4 of builtin-documents says which), with the date, audience, or author, then a short summary or the key finding. A letter starts with the sender and recipient details in a layout table, then the date, then the greeting.
 - Use headings for sections a reader would scan for: level 1 for main sections, level 2 inside them. Do not skip levels or put a heading above a single short paragraph. Keep headings short and in one capitalisation style.
 - Keep paragraphs to two to four sentences. Put one idea in each.
 - Pick the block that matches the content:
@@ -95,15 +132,13 @@ These apply to every format, and they are what make a document look finished rat
   - divider between parts of a document that change subject without a heading, such as before a signature or a closing note. Use it sparingly.
   - page_break before a part that should start on a new page, such as an appendix.
 - Tables:
-  - Always give a header row (header: true) and put units in the header: "Revenue (€k)", "Duration (days)".
-  - In DOCX and PDF, write figures as the reader should see them, with thousands separators and the same number of decimals down a column: "1,480", "14.1%", "€4,200". Columns of figures are right-aligned automatically.
+  - Write figures as the reader should see them, with thousands separators and the same number of decimals down a column: "1,480", "14.1%", "€4,200". Columns of figures are right-aligned automatically.
   - Put a total or subtotal in the last row, starting with "Total"; it is bolded and ruled automatically.
   - Give a table that holds long text in one column relative widths with columns, for example [4, 1, 1].
   - In a report with several tables, add a caption such as "Table 2. Revenue by region".
-- Be consistent: one date format, one number format, one way of writing names and titles throughout the document.
 - A template or form for someone to fill in should label every field clearly (key_value with empty values, or a table with an empty column) and say which parts to complete.
 
-## 7. DOCX and PDF content
+## 4. Content
 Pass one of blocks, html, or content. If you pass blocks, html is ignored.
 
 blocks is an array of:
@@ -111,11 +146,11 @@ blocks is an array of:
 - { "type": "heading", "level": 1-6, "text": "..." }
 - { "type": "paragraph", "text": "...", "align": "justify" }. align is optional: "left", "center", "right", or "justify".
 - { "type": "bullet", "items": [...] } and { "type": "numbered", "items": [...] }. An item is a string, or { "text": "...", "items": [...] } for a nested list, up to three levels.
-- { "type": "table", "rows": [[...], ...], "header": true, "columns": [3, 1, 1], "align": ["left", "right", "right"], "caption": "...", "bordered": false }. Only rows is required. bordered: false makes a borderless layout table (section 8).
+- { "type": "table", "rows": [[...], ...], "header": true, "columns": [3, 1, 1], "align": ["left", "right", "right"], "caption": "...", "bordered": false }. Only rows is required. bordered: false makes a borderless layout table (section 5).
 - { "type": "key_value", "rows": [["Label", "Value"], ...] }: labels on the left, values on the right, no borders.
 - { "type": "callout", "tone": "info", "title": "...", "text": "..." }. tone is "info" (the theme's accent), "success", "warning", "danger", or "note". title is optional, and text may hold several lines separated by \n.
 - { "type": "quote", "text": "...", "cite": "..." }. cite is optional.
-- { "type": "image", "blob_id": 42, "caption": "...", "alt": "...", "size": "full" }: a picture, centred, with its caption under it. size is "full" (the text width, the default), "medium", or "small", and a tall picture is kept to 60% of the page's height. alt describes the picture for screen readers. A picture is an image in this conversation, named by its blob id as in section 9, or a new one from generate_image.
+- { "type": "image", "blob_id": 42, "caption": "...", "alt": "...", "size": "full" }: a picture, centred, with its caption under it. size is "full" (the text width, the default), "medium", or "small", and a tall picture is kept to 60% of the page's height. alt describes the picture for screen readers. A picture is an image in this conversation, named by its blob id: the blob_id on an <image> or <screenshot> placeholder, the "(blob id: N)" in a note's attachment list, or the N in "__blob:N__" from generate_image. Never make one up; a new picture comes from generate_image.
 - { "type": "divider" } and { "type": "page_break" }.
 Block text is plain, so blocks cannot carry inline bold, italic, colour, or links. Use html when you need those.
 
@@ -126,7 +161,7 @@ html is an HTML document. Use it for inline formatting, and always when reproduc
 - A style attribute is honoured for: color and background-color (on text, and background-color on a cell as its fill); font-size, font-family, font-weight, and font-style; text-align on a block or cell; width on a col or a first-row cell (proportions only); page-break-before: always; and table borders. On a table, the border shorthand (for example style="border:1pt solid #000000") sets the frame and the inner gridlines together, border-top, border-right, border-bottom, and border-left override single frame edges, and --border-inside-h and --border-inside-v override the inner lines. A table with a border style keeps exactly those borders instead of the theme's.
 - Inline styles win over the theme, so use them only where the user asked for something specific.
 - <img src="abchat-blob:42" alt="..." data-caption="..." data-size="medium"> is a picture, as the image block. data-caption and data-size are optional.
-- Not kept: paragraph spacing and margins set in style, and images other than abchat-blob pictures and the abchat-img placeholders from read_document_structure (section 10). A URL or data URI image is dropped.
+- Not kept: paragraph spacing and margins set in style, and images other than abchat-blob pictures and the abchat-img placeholders from read_document_structure (builtin-docx-edit). A URL or data URI image is dropped.
 
 content is plain text. A line starting with "# ", "## ", or "### " is a heading of level 1 to 3, a line starting with "- " or "* " is a bullet, and every other line is a paragraph. It suits a short plain document; use blocks or html for anything with structure.
 
@@ -140,13 +175,28 @@ cover adds a cover page before any of the three: { "title": "...", "subtitle": "
 
 A PDF printed by Chrome keeps all of the above. The built-in PDF writer does not: its table cells are plain text (no inline bold, italic, or links inside cells, though a cell's colour, fill, and alignment are kept), colspan merges are kept but a rowspan shows as empty cells below the first, and a table keeps its first 500 rows. If its warnings say rows were left out, use DOCX or XLSX for the full table.
 
-## 8. Layout tables
+## 5. Layout tables
 To position content side by side (a letterhead with sender and date, label and value rows, signature lines, a two-column cover), use a borderless table: with blocks set "bordered": false, or use key_value; with html put border="0" or role="presentation" on the table. Runs of spaces, tabs, or blank lines do not align. Keep genuine data tables bordered. A data table cannot sit inside a layout-table cell, because nested tables are flattened to text, so place each data table at the top level, next to or between the layout tables.
 
-## 9. XLSX, CSV, and PPTX
-Themes apply to XLSX and PPTX, not to CSV.
+## 6. Size limits
+- 500 blocks, and html of 200,000 characters. html is converted to blocks first, and each heading, paragraph, list, or table is one block.
+- Tables: 5,000 rows and 100 columns.
+- The built-in PDF writer: 500 rows per table and 400 pages.
+- 50 different pictures per document, and 6 lines of details on a cover.
 
-XLSX: "sheets": [{ "name": "...", "rows": [[...], ...], "columns": [...], "header": true, "freeze": { "rows": 1, "columns": 0 } }]. Only rows is required. At most 20 sheets.
+## 7. Examples
+A report, with 57 a photo from generate_image: { "format": "docx", "title": "Q3 sales review", "theme": "professional", "page_numbers": true, "cover": { "title": "Q3 Sales Review", "subtitle": "Prepared for the leadership team", "details": ["October 2026", "Revenue Operations"], "image": 57 }, "blocks": [{ "type": "key_value", "rows": [["Period", "July to September 2026"], ["Owner", "Revenue Operations"]] }, { "type": "heading", "level": 1, "text": "Summary" }, { "type": "paragraph", "text": "Revenue grew 14% to €4.2M, led by the enterprise segment." }, { "type": "callout", "tone": "warning", "title": "Risk", "text": "Two large renewals fall due in Q4." }, { "type": "heading", "level": 1, "text": "Revenue by region" }, { "type": "table", "header": true, "caption": "Table 1. Revenue by region (€k)", "rows": [["Region", "Q2", "Q3", "Change"], ["North", "1,480", "1,655", "11.8%"], ["South", "1,210", "1,402", "15.9%"], ["Total", "2,690", "3,057", "13.6%"]] }, { "type": "heading", "level": 1, "text": "Next steps" }, { "type": "numbered", "items": ["Confirm the renewal owners", "Review pricing for the South region"] }] }
+A letter: { "format": "docx", "filename": "offer-letter", "theme": "classic", "html": "<table border=\"0\"><tr><td><strong>Ada Lovelace</strong><br>12 Market Street<br>London</td><td style=\"text-align:right\">18 October 2026</td></tr></table><p>Dear Linus,</p><p>We are pleased to offer you the role of Senior Engineer, starting on 1 November.</p><ul><li>Salary: £50,000 a year</li><li>Location: London office</li></ul><p>Yours sincerely,</p><p>Ada Lovelace</p>" }
+A one-pager with a brand colour: { "format": "pdf", "theme": "modern", "style": { "primary_color": "#E4002B" }, "html": "<h1 class=\"title\">Atlas</h1><p class=\"subtitle\">Invoice matching for finance teams</p><div class=\"callout\" data-tone=\"success\"><p>Cuts reconciliation time by half.</p></div><h2>How it works</h2><ol><li>Connect your accounting system</li><li>Review the flagged exceptions</li></ol>" }`;
+
+  const XLSX_CSV_GUIDE_BODY_FOR_BUILTIN_GUIDES = String.raw`# Making an XLSX or CSV
+
+This guide covers create_document, and eval code that returns __document__, with format "xlsx" or "csv". It goes with builtin-documents, the rules for every file. Once it is in the conversation you do not need to read it again.
+
+Themes apply to XLSX, not to CSV.
+
+## 1. XLSX
+Pass "sheets": [{ "name": "...", "rows": [[...], ...], "columns": [...], "header": true, "freeze": { "rows": 1, "columns": 0 } }]. Only rows is required. At most 20 sheets.
 - A sheet name is cut to 31 characters, : \ / ? * [ ] become spaces, and no two sheets may share a name. When a name changes, the warnings give the new one, and formulas must use it.
 - A cell is a string, number, boolean, null, or an object { "v": value, "f": "formula", "format": "...", "bold": true, "italic": true, "color": "#RRGGBB", "fill": "#RRGGBB", "align": "left|center|right", "wrap": true }.
 - Pass numbers as numbers, never as text such as "1,480" or "14%", so the sheet can calculate with them. A date is a "YYYY-MM-DD" or "YYYY-MM-DD HH:MM" string, and becomes a real date.
@@ -157,7 +207,7 @@ XLSX: "sheets": [{ "name": "...", "rows": [[...], ...], "columns": [...], "heade
 - Do not use FILTER, SORT, SORTBY, UNIQUE, SEQUENCE, LET, or LAMBDA. They return several values, which this file cannot spread into the cells below. Work those values out in eval and write them as cells. XLOOKUP needs Excel 2021 or Microsoft 365, and INDEX with MATCH works in every version.
 - The look is automatic: the theme's font, a bold header row in the theme's colours that stays in view and has filter buttons, column widths from the content, wrapped long text, and print setup. A last row whose first cell starts with "Total" (or "Subtotal", "Sum", "Net") is styled as a total and kept out of the filter. Set header: false for a sheet whose first row is not a header, such as label and value pairs or notes.
 
-Spreadsheet rules:
+## 2. Spreadsheet rules
 - One table per sheet, header in row 1, no blank rows or columns inside it, and no merged cells. Name sheets for what they hold.
 - Use formulas for totals, subtotals, differences, ratios, and anything else derived from other cells, so the sheet stays right when the user changes a number. Type only the inputs.
 - Put assumptions (prices, rates, growth) in their own labelled cells, often on an "Assumptions" sheet, and refer to them with absolute references such as Assumptions!$B$2. In a model, colour typed inputs blue ("color": "#0000FF") and leave formulas in the default colour.
@@ -165,10 +215,24 @@ Spreadsheet rules:
 - Years, IDs, phone numbers, postcodes, and anything with leading zeros are text ("2026", "00721").
 - In a template for others to fill in, label every input, include one example row, and explain what goes where in a short note above the table or on a "How to use" sheet.
 
-CSV: "rows": [[...], ...]. If you pass sheets instead, only the first sheet is used. A CSV holds values only: a formula gives its result, and formats and styles are dropped. Text that a spreadsheet would run as a formula (starting with =, @, or + or - followed by a name) gets a leading apostrophe.
+## 3. CSV
+Pass "rows": [[...], ...]. If you pass sheets instead, only the first sheet is used. A CSV holds values only: a formula gives its result, and formats and styles are dropped. Text that a spreadsheet would run as a formula (starting with =, @, or + or - followed by a name) gets a leading apostrophe.
 - content also works for XLSX and CSV: each line is a row, split on tabs when the line has any and on commas otherwise. There is no quoting, so a value containing a comma breaks into two cells. Prefer rows.
 
-PPTX: "slides": [{ "layout": "...", "title": "...", ... }]. The deck is 16:9 in the theme's fonts and colours, on real slide layouts, so the user can add slides and change the design in PowerPoint. professional, modern, and vibrant fill the title and section slides with the main colour (primary_color when set) and draw a faint pattern on it (grid, dots, and waves); classic, minimal, and academic keep them white. Each slide has one layout. Leave layout out and it is chosen from what the slide has.
+## 4. Size limits
+- XLSX: 20 sheets.
+- Each sheet, and a CSV file: 10,000 rows, 100 columns, and 10,000 characters per cell.
+
+## 5. Examples
+XLSX: { "format": "xlsx", "filename": "q3-revenue", "theme": "professional", "sheets": [{ "name": "Revenue", "columns": ["", "currency:EUR:0", "currency:EUR:0", "percent:1"], "rows": [["Region", "Q2", "Q3", "Change"], ["North", 1480000, 1655000, { "f": "C2/B2-1" }], ["South", 1210000, 1402000, { "f": "C3/B3-1" }], ["Total", { "f": "SUM(B2:B3)" }, { "f": "SUM(C2:C3)" }, { "f": "C4/B4-1" }]] }, { "name": "Orders", "columns": ["", "date", "", "currency:EUR"], "rows": [["Order", "Date", "Customer", "Amount"], ["SO-1001", "2026-07-02", "Contoso", 1250], ["SO-1002", "2026-07-09", "Fabrikam", 980]] }] }
+CSV: { "format": "csv", "filename": "contacts", "rows": [["Name", "Email"], ["Ada", "ada@example.com"], ["Linus", "linus@example.com"]] }`;
+
+  const PPTX_GUIDE_BODY_FOR_BUILTIN_GUIDES = String.raw`# Making a PPTX deck
+
+This guide covers create_document, and eval code that returns __document__, with format "pptx", or "pdf" with slides. It goes with builtin-documents, the rules for every file. Once it is in the conversation you do not need to read it again.
+
+## 1. Slides
+Pass "slides": [{ "layout": "...", "title": "...", ... }]. The deck is 16:9 in the theme's fonts and colours, on real slide layouts, so the user can add slides and change the design in PowerPoint. professional, modern, and vibrant fill the title and section slides with the main colour (primary_color when set) and draw a faint pattern on it (grid, dots, and waves); classic, minimal, and academic keep them white. A deck of one slide is its own cover: with no picture or background of its own, it is filled the same way. Each slide has one layout. Leave layout out and it is chosen from what the slide has.
 - title: { "title": "...", "subtitle": "..." }. The opening slide. A first slide with only a title and subtitle gets it.
 - section: { "layout": "section", "title": "...", "subtitle": "..." }. Opens a part of a longer deck. A later slide with only a title and subtitle gets it.
 - bullets: { "title": "...", "bullets": ["...", { "text": "...", "level": 1 }] }. A bullet is a string, or { text, level } with level 1 for a sub-bullet.
@@ -177,30 +241,47 @@ PPTX: "slides": [{ "layout": "...", "title": "...", ... }]. The deck is 16:9 in 
 - table: { "title": "...", "table": { "rows": [[...], ...], "header": true } }. Up to about 12 short rows. More rows make the text smaller, rows that still do not fit are cut with a warning, and a larger table belongs in an XLSX.
 - image: { "title": "...", "bullets": [...], "image": { "blob_id": 42, "fit": "cover", "side": "right", "alt": "..." } }. With bullets, the picture fills one half of the slide and the text sits on the other (at most 8 bullets; three or four read best). With a title and no bullets, the picture fills the space under the title. With neither, it fills the slide. fit "cover" fills the space and crops the picture's edges, for photos; "contain" shows all of it, for charts, screenshots, diagrams, and logos. Left out, a picture under a title is contained and the others cover. side is "right" or "left". alt describes the picture for screen readers.
 - background, on any slide: { "image": 42 } puts a picture behind the slide, with an overlay just dark or light enough for the text on it to read; { "pattern": "dots" } a faint pattern in the theme's colours ("dots", "grid", "diagonal", or "waves"); { "color": "#0B1F3A" } a plain colour, with the text white or dark to suit it; "none" keeps a filled title or section slide's flat colour without the pattern. A picture with no bullets on the first slide, or on a slide with a subtitle, goes behind the title as a cover or section photo, and so does image on a title or section slide.
-- A picture is an image in this conversation, named by its blob id: the blob_id on an <image> or <screenshot> placeholder, the "(blob id: N)" in a note's attachment list, or the N in "__blob:N__" from generate_image. Never make one up; a new picture comes from generate_image, as described under Writing slides.
-- notes, on any slide: speaker notes, which the presenter sees and the audience does not.
+- A picture is an image in this conversation, named by its blob id: the blob_id on an <image> or <screenshot> placeholder, the "(blob id: N)" in a note's attachment list, or the N in "__blob:N__" from generate_image. Never make one up; a new picture comes from generate_image, as section 2 describes.
+- notes, on any slide: speaker notes, which the presenter sees and the audience does not. Add them only when the user asks for speaker notes, talking points, or a script. Notes go wherever the PPTX goes, so the people a deck is sent to can read them; a PDF of the deck leaves them out. Detail that does not fit a slide is left out, not moved to notes.
 - A title or section slide shows only its title and subtitle. Anything else on it is left out with a warning.
 
-Writing slides:
+## 2. Writing slides
 - One idea per slide, with a title that states its point ("Revenue beat plan by 9%" rather than "Revenue").
 - Three to six bullets of about one line each. Text is sized to fit, getting smaller as there is more of it, and a slide that does not fit even at the smallest size is named in the warnings. Split it across two slides.
-- Vary the layouts, with never more than two bullet slides in a row: a key figure on a big_number slide, a comparison in two_column, figures in a table, a picture beside its point. Detail and talking points go in notes.
-- Pictures: unless the deck is restrained (section 4) or the user asked for none, generate a photo for the title slide and one for each section slide, five at most. Read the builtin-images guide, then make them all in one response, where the calls run at the same time: aspect_ratio "16:9", a prompt giving the subject, mood, and colours to suit the theme, and no text, lettering, or logos in the image. Then make the deck with their ids. Add a picture to another slide only where it carries the point: a product beside its features, a screenshot being explained. If generate_image fails or is not available, make the deck without photos rather than stopping, and tell the user why it has none.
+- Vary the layouts, with never more than two bullet slides in a row: a key figure on a big_number slide, a comparison in two_column, figures in a table, a picture beside its point.
+- Pictures: unless the deck is restrained (section 4 of builtin-documents) or the user asked for none, generate a photo for the title slide and one for each section slide, five at most. A deck with no title slide, such as the one or two slides the user asked for, still gets one photo: on an image slide beside three or four short points, or as the background of a slide with little text, such as big_number. Read the builtin-images guide, then make them all in one response, where the calls run at the same time: aspect_ratio "16:9", a prompt giving the subject, mood, and colours to suit the theme, and no text, lettering, or logos in the image. Then make the deck with their ids. Add a picture to another slide only where it carries the point: a product beside its features, a screenshot being explained. If generate_image fails or is not available, make the deck without photos rather than stopping, and tell the user why it has none.
 - Keep text over a photo short.
 - No typed bullet characters; the slide draws its own.
-- Slides are numbered unless page_numbers is false. Title and section slides never show a number.
+- Slides are numbered unless page_numbers is false. Title and section slides never show a number, and a deck of one slide is not numbered unless page_numbers is true.
 - content also works: sections separated by a blank line become slides, and each section's first line is its title.
 
-## 10. Changing an attached DOCX
+## 3. A PDF of the deck
+- also_pdf: true on a pptx call makes a PDF of the same slides in the same call, with the deck's name and .pdf. Use it when the user wants the deck and a PDF, or a PDF to send to people who may not have PowerPoint.
+- For a PDF alone, pass format "pdf" with slides and every other field as for a pptx. Each slide is one 16:9 page, laid out as in the PPTX.
+- Only Chrome can print slides. If the user has not allowed Print PDFs with Chrome, or chose the built-in writer, no PDF is made: a format "pdf" call fails, and with also_pdf the result has pdf_error while the PPTX still stands. Tell the user, and mention that Print PDFs with Chrome can be turned on in Settings.
+
+## 4. Size limits
+- 100 slides and 50 different pictures.
+- Per slide: 12 bullets, 8 in each two_column column, 8 beside a picture, 4 stats, 8 table columns, and 10,000 characters of notes.
+
+## 5. Example
+{ "format": "pptx", "title": "Q3 review", "theme": "professional", "slides": [{ "title": "Q3 business review", "subtitle": "Northwind Retail · October 2026" }, { "title": "Revenue beat plan by 9%", "stats": [{ "value": "$4.97M", "label": "Q3 revenue" }, { "value": "38.2%", "label": "Gross margin, up 1.4 points" }] }, { "title": "Every region grew, led by the South", "table": { "rows": [["Region", "Q2", "Q3"], ["North", "$1.48M", "$1.66M"], ["South", "$1.21M", "$1.40M"]] } }, { "title": "Decisions we need today", "bullets": ["Approve a 3% price rise on staple lines", "Release $180K for seasonal hiring"] }] }`;
+
+  const DOCX_EDIT_GUIDE_BODY_FOR_BUILTIN_GUIDES = String.raw`# Changing an attached DOCX
+
+This guide covers read_document_structure, edit_document, and rebuilding an attached DOCX with create_document. It goes with builtin-documents, the rules for every file. Once it is in the conversation you do not need to read it again.
+
 There are two ways, and the first is almost always right.
 - edit_document changes the user's own file in place. Everything you do not edit stays exactly as it was: styles, fonts, spacing, colours, headers and footers, footnotes, comments, images, page setup, and anything else in the file. Use it whenever the user wants their document back with changes: fixing, updating, filling in, adding or removing paragraphs, sections, or table rows, rewording, formatting a phrase, or redlining.
-- create_document with the html from read_document_structure rebuilds the document from scratch. Use it only when the user wants a new layout: "reformat this", "make it look like our other reports", or a PDF made from it. The rebuilt file loses headers, footers, text colour, cell shading, column widths, paragraph spacing, footnotes, comments, and tracked changes, so say so if the document relies on them.
+- create_document with the html from read_document_structure rebuilds the document from scratch. Use it only when the user wants a new layout: "reformat this", or "make it look like our other reports". For the same document as a PDF, use convert_document, which keeps the layout. The rebuilt file loses headers, footers, text colour, cell shading, column widths, paragraph spacing, footnotes, comments, and tracked changes, so say so if the document relies on them.
 
-Reading the document
+Only DOCX can be read and edited this way. PDF and other formats expose just their extracted text, so changing a PDF means making a new document from its text, and the original layout is not kept. Say so.
+
+## 1. Reading the document
 1. Call read_document_structure with ref_id set to the DOCX's blob id: the blob_id attribute of its <file> element, or the "(blob id: N)" entry in a note's attachment list. It works for a DOCX attached in this conversation, attached to a note, or made earlier in this conversation (see "Editing again" below). If it reports the bytes are unavailable, ask the user to attach the file again.
 2. It returns { ok, html, name, truncated, headers_footers }. Every heading, paragraph, list item, and table-cell paragraph in the html carries a data-id such as data-id="p12". headers_footers lists the text of the page headers and footers, which are not in the html. truncated: true means the html was cut at the size cap and its end is missing; ids in the part you have still work, and you can still reach the rest with replace_text.
 
-Editing with edit_document
+## 2. Editing with edit_document
 Call edit_document with ref_id (the same blob id) and edits, an array of operations applied in order. Ids always refer to the document as you read it, even after earlier edits in the same call inserted or deleted paragraphs. Put every change for one request in one call. If any edit fails, nothing is changed and the result lists each failed edit; fix those and send the whole list again.
 - { "op": "replace_text", "find": "1 March 2025", "replace": "1 April 2026" } replaces every occurrence in the document, including headers, footers, footnotes, and text boxes. Add "id": "p12" to limit it to one paragraph, and "occurrence": "first" to change only the first match. find must match the text exactly, including spaces, punctuation, and capital letters, and it can span bold or italic words. Only the words that differ are changed, so the surrounding words keep their own formatting. replace may be "" to delete the text.
 - { "op": "set_text", "id": "p12", "text": "..." } rewrites one paragraph. Words that stay the same keep their formatting, images in the paragraph stay, and new words take the paragraph's main formatting. In text, \n is a line break within the paragraph.
@@ -210,56 +291,23 @@ Call edit_document with ref_id (the same blob id) and edits, an array of operati
 - { "op": "delete_row", "id": "p30" } removes the row holding p30, and { "op": "delete_table", "id": "p30" } removes its whole table.
 - { "op": "format", "id": "p12", "bold": true } changes formatting. Properties: bold, italic, underline, strike (true or false), color (hex such as "#C00000"), highlight (true, false, a Word highlight colour such as "yellow", or a hex colour), font (a font name), size (points), align ("left", "center", "right", or "justify"). Add "find": "Total due" to format only that text; without find the whole paragraph changes.
 
-Tracked changes
+## 3. Tracked changes
 Set "track_changes": true when the user asks for tracked changes, a redline, or to see what changed, and when you edit a contract or someone else's document for review. Replacements and deletions then show as struck-through text and insertions as underlined text, and formatting changes are recorded too, for the user to accept or reject in Word. Changes are attributed to "author", which defaults to ABChat; set it to the user's name if they give it.
 
-Rules for editing
+## 4. Rules for editing
 - Change only what the user asked for. Do not tidy, reword, or reformat anything else.
 - Use the data-id values from your most recent read of this exact file. Never guess an id or reuse ids from a different file.
 - Prefer replace_text for small changes to words, numbers, dates, and names, and set_text when most of a paragraph changes.
 - Do not use edit_document to restyle a whole document; that is a rebuild with create_document.
 - Editing again: an edited file is a new file with its own blob id, the N in the #abchat-docblob-N link in the result's displayed_to_user field. Its ids differ from the old file's once paragraphs were added or removed, so read the new file with read_document_structure before editing it again. Edit the newest version unless the user asks otherwise.
 
-Rebuilding with create_document
+## 5. Rebuilding with create_document
 1. The html from read_document_structure starts with a <div data-abchat-source="docx" data-doc-defaults="..."> holding the base font, page size, and margins. Keep that div: it marks the html as an existing document, so no theme is applied and the file keeps its own look. theme, style, page, page_numbers, and header are ignored for it. Each element whose font size or family differs from the default carries a style attribute, and each table carries its real border width and colour, or border="0" when it has none. Pass all of it back unchanged, and edit a value only when you mean to change it. The data-id attributes are ignored here, so you may leave them in.
 2. Images appear as placeholders such as <img src="abchat-img:12:0">, with no image data. Keep each one where its image belongs, and never change a src or invent a new one. create_document re-embeds them in docx and in a PDF printed by Chrome (the original image), and in a PDF from the built-in writer (converted to JPEG, with transparency flattened to white); other formats drop them. An image that cannot be re-embedded, because the source file is no longer attached or the image is emf or wmf, is skipped, and the result's note says how many were dropped.
-3. Change what the user asked for, then call create_document with format "docx" (or "pdf") and the edited html.
+3. Change what the user asked for, then call create_document with format "docx" (or "pdf") and the edited html. Read builtin-docx-pdf before that call: it describes the html create_document accepts.
 
-Only DOCX can be read and edited this way. PDF and other formats expose just their extracted text, so changing a PDF means making a new document from its text, and the original layout is not kept. Say so.
-
-## 11. Building a document in eval
-Return an object whose __document__ key holds the spec. The file is generated and shown to the user, and __document__ is removed from the result you get back; everything else you return is the normal result. One document per call. If the spec is invalid, the result carries document_error and keeps your computed result, so fix the spec and run it again.
-
-Example: total revenue per region from an attached CSV with blob id 42, delivered as an xlsx. Call eval with blob_ids: [42] and this code:
-const lines = blobs[0].text.trim().split("\n");
-lines.shift();
-const totals = {};
-lines.forEach(function (l) { const c = l.split(","); totals[c[0]] = (totals[c[0]] || 0) + (parseFloat(c[2]) || 0); });
-const rows = [["Region", "Revenue"]].concat(Object.keys(totals).sort().map(function (k) { return [k, totals[k]]; }));
-rows.push(["Total", { f: "SUM(B2:B" + rows.length + ")" }]);
-return { totals: totals, __document__: { format: "xlsx", filename: "revenue-by-region", sheets: [{ name: "Summary", columns: ["", "currency:USD"], rows: rows }] } };
-You get back { totals } and a note that the document was shown; the user gets the file.
-
-## 12. The result
-The result has format, filename, size, and a note. A themed DOCX, PDF, XLSX, or PPTX also has theme. For edit_document the note says what was changed. For a PDF the note also says when the built-in writer made it, and why. It may have warnings: characters the built-in PDF writer could not show, blocks, table rows, or columns left out, XLSX formulas that give an error or were kept as text, a renamed sheet, slide content that was cut or does not fit, a picture that could not be used or will look soft, a cover that was left out, a DOCX font that is not in the list, a PDF font that could not be found or downloaded, a theme or page value that was not recognised, or a theme ignored for an edited document. Read them. When content was left out or changed, tell the user what and why, and offer the fix (another format, or splitting the document).
-
-## 13. Size limits
-Content past these limits is dropped, and the result's warnings say what was left out (the note counts images past 50). Plan a bigger document as parts.
-- DOCX and PDF: 500 blocks, and html of 200,000 characters. html is converted to blocks first, and each heading, paragraph, list, or table is one block.
-- PDF from the built-in writer: 500 rows per table and 400 pages.
-- Tables: 5,000 rows and 100 columns. XLSX sheets and CSV files: 10,000 rows, 100 columns, and 10,000 characters per cell.
-- Images: 50 different pictures per DOCX or PDF, and 6 lines of details on a cover.
-- XLSX: 20 sheets.
-- PPTX: 100 slides and 50 different pictures. Per slide: 12 bullets, 8 in each two_column column, 8 beside a picture, 4 stats, 8 table columns, and 10,000 characters of notes.
-- edit_document: 200 edits per call, 20,000 characters per text, and 2,000 characters per find.
-
-## 14. Examples
-A report, with 57 a photo from generate_image: { "format": "docx", "title": "Q3 sales review", "theme": "professional", "page_numbers": true, "cover": { "title": "Q3 Sales Review", "subtitle": "Prepared for the leadership team", "details": ["October 2026", "Revenue Operations"], "image": 57 }, "blocks": [{ "type": "key_value", "rows": [["Period", "July to September 2026"], ["Owner", "Revenue Operations"]] }, { "type": "heading", "level": 1, "text": "Summary" }, { "type": "paragraph", "text": "Revenue grew 14% to €4.2M, led by the enterprise segment." }, { "type": "callout", "tone": "warning", "title": "Risk", "text": "Two large renewals fall due in Q4." }, { "type": "heading", "level": 1, "text": "Revenue by region" }, { "type": "table", "header": true, "caption": "Table 1. Revenue by region (€k)", "rows": [["Region", "Q2", "Q3", "Change"], ["North", "1,480", "1,655", "11.8%"], ["South", "1,210", "1,402", "15.9%"], ["Total", "2,690", "3,057", "13.6%"]] }, { "type": "heading", "level": 1, "text": "Next steps" }, { "type": "numbered", "items": ["Confirm the renewal owners", "Review pricing for the South region"] }] }
-A letter: { "format": "docx", "filename": "offer-letter", "theme": "classic", "html": "<table border=\"0\"><tr><td><strong>Ada Lovelace</strong><br>12 Market Street<br>London</td><td style=\"text-align:right\">18 October 2026</td></tr></table><p>Dear Linus,</p><p>We are pleased to offer you the role of Senior Engineer, starting on 1 November.</p><ul><li>Salary: £50,000 a year</li><li>Location: London office</li></ul><p>Yours sincerely,</p><p>Ada Lovelace</p>" }
-A one-pager with a brand colour: { "format": "pdf", "theme": "modern", "style": { "primary_color": "#E4002B" }, "html": "<h1 class=\"title\">Atlas</h1><p class=\"subtitle\">Invoice matching for finance teams</p><div class=\"callout\" data-tone=\"success\"><p>Cuts reconciliation time by half.</p></div><h2>How it works</h2><ol><li>Connect your accounting system</li><li>Review the flagged exceptions</li></ol>" }
-XLSX: { "format": "xlsx", "filename": "q3-revenue", "theme": "professional", "sheets": [{ "name": "Revenue", "columns": ["", "currency:EUR:0", "currency:EUR:0", "percent:1"], "rows": [["Region", "Q2", "Q3", "Change"], ["North", 1480000, 1655000, { "f": "C2/B2-1" }], ["South", 1210000, 1402000, { "f": "C3/B3-1" }], ["Total", { "f": "SUM(B2:B3)" }, { "f": "SUM(C2:C3)" }, { "f": "C4/B4-1" }]] }, { "name": "Orders", "columns": ["", "date", "", "currency:EUR"], "rows": [["Order", "Date", "Customer", "Amount"], ["SO-1001", "2026-07-02", "Contoso", 1250], ["SO-1002", "2026-07-09", "Fabrikam", 980]] }] }
-CSV: { "format": "csv", "filename": "contacts", "rows": [["Name", "Email"], ["Ada", "ada@example.com"], ["Linus", "linus@example.com"]] }
-PPTX: { "format": "pptx", "title": "Q3 review", "theme": "professional", "slides": [{ "title": "Q3 business review", "subtitle": "Northwind Retail · October 2026" }, { "title": "Revenue beat plan by 9%", "stats": [{ "value": "$4.97M", "label": "Q3 revenue" }, { "value": "38.2%", "label": "Gross margin, up 1.4 points" }] }, { "title": "Every region grew, led by the South", "table": { "rows": [["Region", "Q2", "Q3"], ["North", "$1.48M", "$1.66M"], ["South", "$1.21M", "$1.40M"]] } }, { "title": "Decisions we need today", "bullets": ["Approve a 3% price rise on staple lines", "Release $180K for seasonal hiring"], "notes": "Ask for each decision separately." }] }`;
+## 6. Limits
+edit_document takes 200 edits per call, 20,000 characters per text, and 2,000 characters per find.`;
 
   const PAGE_LAYOUT_GUIDE_BODY_FOR_BUILTIN_GUIDES = String.raw`# Changing how the page looks
 
@@ -338,6 +386,7 @@ This guide covers generate_image. Once it is in the conversation you do not need
 
 ## 1. Before you call
 - The image is shown in the chat as soon as a call succeeds. Every call is billed and adds a new image. Nothing replaces or removes an earlier one.
+- An image that a document made while answering the same message uses is shown only in that document, not in the chat. Do not tell the user it is in the chat.
 - At most 6 generate_image calls run per user message, and a call that fails still counts. A seventh is refused. If the user asks for more images than that in one message, make 6 and tell them they can ask for the rest.
 - Several calls in one response run at the same time. When you need a set of images, such as the pictures for a deck, make them all in one response.
 
@@ -364,7 +413,7 @@ Describe what the image should show. When changing an existing image, describe o
 - Ids past the first 3, and ids that are missing or not images, are skipped without an error. If no image resolves, the image is made from the prompt alone and the result does not say so. Pass only ids you have seen on an image.
 
 ## 6. The result
-- ok: true means the image is already on screen. The result also gives prompt, aspect_ratio, and, when they could be measured, width and height in pixels. Check them against what the user asked for before you say the image is done.
+- ok: true means the image was made and, unless a document uses it (section 1), is on screen. The result also gives prompt, aspect_ratio, and, when they could be measured, width and height in pixels. Check them against what the user asked for before you say the image is done.
 - When you already showed an image earlier while answering the same message, the result carries a note. If the new image replaces an earlier one, your reply must say so, why, and which one is final.
 - Do not regenerate to polish an image that succeeded. Regenerate only when it is wrong, such as the wrong shape or plainly not what was asked.
 - Errors about the setup (no API key, no image model selected, image generation on the free model) are for the user to fix. Tell them what to change and do not call again.
@@ -424,20 +473,110 @@ A cell is an A1 reference such as "B2". A range is two cells joined by a colon, 
 - "Add a header row": { "intent": "set_range", "anchor": "A1", "values": [["Name", "Email", "Score"]] }.
 - "What is in A1 to C3?": { "intent": "read_range", "range": "A1:C3" }.`;
 
+  const DOCUMENT_FORMATS_FOR_BUILTIN_GUIDES = ['docx', 'pdf', 'xlsx', 'csv', 'pptx'];
+
+  // eval is covered only when its code builds a file; ordinary computation needs no guide.
+  function isDocumentEvalForBuiltinGuides(toolNameForEval, argsForEval) {
+    return toolNameForEval === 'eval'
+      && !!argsForEval
+      && typeof argsForEval.code === 'string'
+      && argsForEval.code.indexOf('__document__') !== -1;
+  }
+
+  // A PDF of slides is laid out as the deck it prints, so it needs the PPTX guide, not the DOCX and
+  // PDF one. Same rule as isSlidePdfInputForDocumentGeneration in agent/documentGeneration.js:
+  // slides, and neither blocks nor html.
+  function isSlidePdfCallForBuiltinGuides(argsForSlides) {
+    return !!argsForSlides
+      && Array.isArray(argsForSlides.slides) && argsForSlides.slides.length > 0
+      && !Array.isArray(argsForSlides.blocks)
+      && !(typeof argsForSlides.html === 'string' && argsForSlides.html.trim());
+  }
+
+  // The formats a call makes a file in, which decide the format guides it needs. eval code is read
+  // for format literals ("format": "pptx", format: 'xlsx', spec.format = "pdf"). Code that names
+  // none chooses the format at run time, so it counts as every format and waits for every format
+  // guide: letting it through on a guess would run it without the fields it needs. A create_document
+  // PDF with slides counts as pptx. eval code that names pdf and mentions slides counts as both,
+  // since the code may build either kind of PDF.
+  function documentFormatsForBuiltinGuides(toolNameForFormats, argsForFormats) {
+    if (toolNameForFormats === 'create_document') {
+      var formatForCreate = String((argsForFormats && argsForFormats.format) || '').trim().toLowerCase();
+      if (formatForCreate === 'pdf' && isSlidePdfCallForBuiltinGuides(argsForFormats)) return ['pptx'];
+      return DOCUMENT_FORMATS_FOR_BUILTIN_GUIDES.indexOf(formatForCreate) !== -1 ? [formatForCreate] : [];
+    }
+    if (!isDocumentEvalForBuiltinGuides(toolNameForFormats, argsForFormats)) return [];
+    var foundForFormats = [];
+    var patternForFormats = /\bformat["']?\s*[:=]\s*["'`]([a-z]+)["'`]/gi;
+    var matchForFormats;
+    while ((matchForFormats = patternForFormats.exec(argsForFormats.code)) !== null) {
+      var formatForEval = matchForFormats[1].toLowerCase();
+      if (DOCUMENT_FORMATS_FOR_BUILTIN_GUIDES.indexOf(formatForEval) !== -1 && foundForFormats.indexOf(formatForEval) === -1) {
+        foundForFormats.push(formatForEval);
+      }
+    }
+    if (foundForFormats.indexOf('pdf') !== -1 && foundForFormats.indexOf('pptx') === -1 && /\bslides\b/.test(argsForFormats.code)) {
+      foundForFormats.push('pptx');
+    }
+    return foundForFormats.length > 0 ? foundForFormats : DOCUMENT_FORMATS_FOR_BUILTIN_GUIDES.slice();
+  }
+
+  function coversFormatsForBuiltinGuides(formatsForCovers) {
+    return function (toolNameForCovers, argsForCovers) {
+      return documentFormatsForBuiltinGuides(toolNameForCovers, argsForCovers).some(function (formatForCovers) {
+        return formatsForCovers.indexOf(formatForCovers) !== -1;
+      });
+    };
+  }
+
+  // Order matters: a guide's requirements come before it, so a read or a refusal that carries both
+  // puts the shared rules first. A guide with listed: false is left out of the prompt's index; it is
+  // only ever delivered with a guide that requires it.
   const GUIDES_FOR_BUILTIN_GUIDES = [
     {
       slug: 'builtin-documents',
-      title: 'Creating and editing documents',
-      summary: 'creating DOCX, XLSX, PDF, PPTX, and CSV files (create_document, or eval code that returns __document__) and changing an attached DOCX in place (read_document_structure, edit_document)',
+      title: 'Documents: rules for every file',
+      summary: 'the rules for every file, which each document guide brings with it',
+      listed: false,
       body: DOCUMENTS_GUIDE_BODY_FOR_BUILTIN_GUIDES,
-      // eval is covered only when its code builds a file; ordinary computation needs no guide.
       coversToolCall: function (toolNameForCovers, argsForCovers) {
         if (toolNameForCovers === 'create_document' || toolNameForCovers === 'read_document_structure'
           || toolNameForCovers === 'edit_document') return true;
-        return toolNameForCovers === 'eval'
-          && !!argsForCovers
-          && typeof argsForCovers.code === 'string'
-          && argsForCovers.code.indexOf('__document__') !== -1;
+        return isDocumentEvalForBuiltinGuides(toolNameForCovers, argsForCovers);
+      }
+    },
+    {
+      slug: 'builtin-docx-pdf',
+      title: 'Making a DOCX or PDF',
+      summary: 'making a DOCX or PDF file',
+      requires: ['builtin-documents'],
+      body: DOCX_PDF_GUIDE_BODY_FOR_BUILTIN_GUIDES,
+      coversToolCall: coversFormatsForBuiltinGuides(['docx', 'pdf'])
+    },
+    {
+      slug: 'builtin-xlsx-csv',
+      title: 'Making an XLSX or CSV',
+      summary: 'making an XLSX or CSV file',
+      requires: ['builtin-documents'],
+      body: XLSX_CSV_GUIDE_BODY_FOR_BUILTIN_GUIDES,
+      coversToolCall: coversFormatsForBuiltinGuides(['xlsx', 'csv'])
+    },
+    {
+      slug: 'builtin-pptx',
+      title: 'Making a PPTX deck',
+      summary: 'making a PPTX slide deck',
+      requires: ['builtin-documents'],
+      body: PPTX_GUIDE_BODY_FOR_BUILTIN_GUIDES,
+      coversToolCall: coversFormatsForBuiltinGuides(['pptx'])
+    },
+    {
+      slug: 'builtin-docx-edit',
+      title: 'Changing an attached DOCX',
+      summary: 'changing an attached DOCX in place (read_document_structure, edit_document)',
+      requires: ['builtin-documents'],
+      body: DOCX_EDIT_GUIDE_BODY_FOR_BUILTIN_GUIDES,
+      coversToolCall: function (toolNameForCovers) {
+        return toolNameForCovers === 'read_document_structure' || toolNameForCovers === 'edit_document';
       }
     },
     {
@@ -505,18 +644,74 @@ A cell is an A1 reference such as "B2". A range is two cells joined by a colon, 
     });
   }
 
-  // The skill tool's read result for a built-in guide, or null when the slug names no guide.
-  function readResultForBuiltinGuides(slugForRead) {
+  // The guides a delivery of the given guides must hold: each one's requirements and the guide
+  // itself, each once, in the order of the guide list, which puts requirements first.
+  function withRequiredGuidesForBuiltinGuides(guidesForRequired) {
+    var slugsForRequired = {};
+    guidesForRequired.forEach(function (guideForRequired) {
+      (guideForRequired.requires || []).forEach(function (slugForRequires) { slugsForRequired[slugForRequires] = true; });
+      slugsForRequired[guideForRequired.slug] = true;
+    });
+    return GUIDES_FOR_BUILTIN_GUIDES.filter(function (guideForFilter) { return !!slugsForRequired[guideForFilter.slug]; });
+  }
+
+  function joinSlugsForBuiltinGuides(guidesForJoin) {
+    var slugsForJoin = guidesForJoin.map(function (guideForJoin) { return guideForJoin.slug; });
+    if (slugsForJoin.length <= 2) return slugsForJoin.join(' and ');
+    return slugsForJoin.slice(0, -1).join(', ') + ', and ' + slugsForJoin[slugsForJoin.length - 1];
+  }
+
+  // Guides already handed over while answering one model response, keyed by the message array the
+  // agent loop passes to every call of that iteration. Calls in one response run side by side and
+  // see the same window, so without this two reads in one response (builtin-pptx and
+  // builtin-docx-pdf) would each carry builtin-documents. It decides only which text is sent. The gate
+  // still refuses a call whose guide was not in the window the model saw when it wrote the call.
+  const deliveredInResponseForBuiltinGuides = new WeakMap();
+
+  function deliveredSetForBuiltinGuides(messagesForDelivered) {
+    if (!Array.isArray(messagesForDelivered)) return null;
+    var setForDelivered = deliveredInResponseForBuiltinGuides.get(messagesForDelivered);
+    if (!setForDelivered) {
+      setForDelivered = {};
+      deliveredInResponseForBuiltinGuides.set(messagesForDelivered, setForDelivered);
+    }
+    return setForDelivered;
+  }
+
+  // The skill tool's read result for a built-in guide, or null when the slug names no guide. It holds
+  // the guide and the guides it requires, leaving out any the model already has: one in the window
+  // it is answering from, or one another call of the same response just delivered. A guide the
+  // conversation already holds is named in note instead of being sent again. Without messages the
+  // read holds everything.
+  function readResultForBuiltinGuides(slugForRead, messagesForRead) {
     var guideForRead = getGuideForBuiltinGuides(slugForRead);
     if (!guideForRead) return null;
-    return {
+    var deliveredForRead = deliveredSetForBuiltinGuides(messagesForRead);
+    var heldForRead = [];
+    var sendForRead = [];
+    withRequiredGuidesForBuiltinGuides([guideForRead]).forEach(function (guideForNeed) {
+      var isHeldForNeed = !!deliveredForRead
+        && (!!deliveredForRead[guideForNeed.slug] || isGuideInMessagesForBuiltinGuides(guideForNeed.slug, messagesForRead));
+      (isHeldForNeed ? heldForRead : sendForRead).push(guideForNeed);
+    });
+    var resultForRead = {
       ok: true,
       operation: 'read',
       slug: guideForRead.slug,
       title: guideForRead.title,
-      builtin: true,
-      body: guideTextForBuiltinGuides(guideForRead)
+      builtin: true
     };
+    if (sendForRead.length > 0) {
+      sendForRead.forEach(function (guideForSend) { if (deliveredForRead) deliveredForRead[guideForSend.slug] = true; });
+      resultForRead.body = sendForRead.map(guideTextForBuiltinGuides).join('\n\n');
+    }
+    if (heldForRead.length > 0) {
+      resultForRead.note = joinSlugsForBuiltinGuides(heldForRead)
+        + (heldForRead.length === 1 ? ' is' : ' are')
+        + ' already in the conversation, in another tool result, so '
+        + (heldForRead.length === 1 ? 'it is' : 'they are') + ' not repeated here.';
+    }
+    return resultForRead;
   }
 
   function messageTextForBuiltinGuides(messageForText) {
@@ -543,28 +738,49 @@ A cell is an A1 reference such as "B2". A range is two cells joined by a colon, 
     return false;
   }
 
-  // Returns null when the call may run, or { reason, guide } when a guide covering it is missing from
-  // the window. Without a message array there is nothing to check against, so the call runs.
+  // Returns null when the call may run, or { reason, guide } when a guide covering it, or a guide one
+  // of those requires, is missing from the window. All the missing guides go in one refusal, so the
+  // model is refused once rather than once per guide. A guide another call of the same response
+  // already delivered is named but not sent again, and guide is left out when nothing is left to send.
+  // Without a message array there is nothing to check against, so the call runs.
   function gateToolCallForBuiltinGuides(toolNameForGate, argsForGate, messagesForGate) {
     if (!Array.isArray(messagesForGate)) return null;
-    for (var iForGate = 0; iForGate < GUIDES_FOR_BUILTIN_GUIDES.length; iForGate++) {
-      var guideForGate = GUIDES_FOR_BUILTIN_GUIDES[iForGate];
-      if (!guideForGate.coversToolCall(toolNameForGate, argsForGate || {})) continue;
-      if (isGuideInMessagesForBuiltinGuides(guideForGate.slug, messagesForGate)) continue;
-      var callLabelForGate = toolNameForGate === 'eval' ? 'eval code that returns __document__' : toolNameForGate;
-      return {
-        reason: 'Not run: ' + callLabelForGate + ' needs the ' + guideForGate.slug
-          + ' guide, which was not in the conversation yet. The guide is in this result\'s guide field; follow it, then make the call again.',
-        guide: guideTextForBuiltinGuides(guideForGate)
-      };
+    var coveringForGate = GUIDES_FOR_BUILTIN_GUIDES.filter(function (guideForCovers) {
+      return guideForCovers.coversToolCall(toolNameForGate, argsForGate || {});
+    });
+    var missingForGate = withRequiredGuidesForBuiltinGuides(coveringForGate).filter(function (guideForMissing) {
+      return !isGuideInMessagesForBuiltinGuides(guideForMissing.slug, messagesForGate);
+    });
+    if (missingForGate.length === 0) return null;
+    var deliveredForGate = deliveredSetForBuiltinGuides(messagesForGate);
+    var sendForGate = missingForGate.filter(function (guideForSend) { return !deliveredForGate[guideForSend.slug]; });
+    sendForGate.forEach(function (guideForSend) { deliveredForGate[guideForSend.slug] = true; });
+
+    var isOneForGate = missingForGate.length === 1;
+    var whereForGate;
+    if (sendForGate.length === missingForGate.length) {
+      whereForGate = isOneForGate ? 'The guide is in this result\'s guide field' : 'They are in this result\'s guide field';
+    } else if (sendForGate.length === 0) {
+      whereForGate = (isOneForGate ? 'It is' : 'They are') + ' in another result of this response';
+    } else {
+      whereForGate = 'They are in this result\'s guide field and another result of this response';
     }
-    return null;
+    var callLabelForGate = toolNameForGate === 'eval' ? 'eval code that returns __document__' : toolNameForGate;
+    var gateForGate = {
+      reason: 'Not run: ' + callLabelForGate + ' needs the ' + joinSlugsForBuiltinGuides(missingForGate)
+        + (isOneForGate ? ' guide, which was' : ' guides, which were') + ' not in the conversation yet. '
+        + whereForGate + '; follow ' + (isOneForGate ? 'it' : 'them') + ', then make the call again.'
+    };
+    if (sendForGate.length > 0) gateForGate.guide = sendForGate.map(guideTextForBuiltinGuides).join('\n\n');
+    return gateForGate;
   }
 
-  // The system prompt section that lists every guide. Only tool-bearing callers include it.
+  // The system prompt section that lists the guides to read. A guide that only comes with another
+  // (listed: false) is not listed. Only tool-bearing callers include it.
   function renderIndexForBuiltinGuides() {
-    if (GUIDES_FOR_BUILTIN_GUIDES.length === 0) return '';
-    var linesForIndex = GUIDES_FOR_BUILTIN_GUIDES.map(function (guideForIndex) {
+    var listedForIndex = GUIDES_FOR_BUILTIN_GUIDES.filter(function (guideForListed) { return guideForListed.listed !== false; });
+    if (listedForIndex.length === 0) return '';
+    var linesForIndex = listedForIndex.map(function (guideForIndex) {
       return '- ' + guideForIndex.slug + ': ' + guideForIndex.summary;
     });
     return 'Built-in guides hold the detailed instructions for some tools. Before your first call to a tool a guide covers, read that guide with the skill tool (operation \'read\', the slug shown). A covered call made before its guide is in the conversation is not run, and its result carries the guide instead.\n'

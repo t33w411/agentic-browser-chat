@@ -252,6 +252,20 @@
     return JSON.parse(jsonForPageChanges);
   }
 
+  // The blob ids of the pictures a generated document holds, kept on its display-only message so
+  // the chat can leave out a generated image the document already shows. A document holds at most
+  // 50 different pictures.
+  var MAX_PICTURE_BLOB_IDS_FOR_PANEL_DATA_REPO = 50;
+  function normalizePictureBlobIdsForPanelDataRepo(valueForPictureIds) {
+    if (!Array.isArray(valueForPictureIds)) return undefined;
+    var idsForPictures = [];
+    valueForPictureIds.forEach(function (rawIdForPicture) {
+      var idForPicture = Number(rawIdForPicture);
+      if (Number.isInteger(idForPicture) && idForPicture > 0 && idsForPictures.indexOf(idForPicture) === -1) idsForPictures.push(idForPicture);
+    });
+    return idsForPictures.length ? idsForPictures.slice(0, MAX_PICTURE_BLOB_IDS_FOR_PANEL_DATA_REPO) : undefined;
+  }
+
   function normalizeMessageRecordForPanelDataRepo(chatIdForPanelDataRepo, messageInputForPanelDataRepo, fallbackTimestampForPanelDataRepo) {
     var inputForPanelDataRepo = messageInputForPanelDataRepo || {};
     var normalizedRoleForPanelDataRepo = normalizeMessageRoleForPanelDataRepo(inputForPanelDataRepo.role);
@@ -270,6 +284,7 @@
       tool_calls: Array.isArray(inputForPanelDataRepo.tool_calls) ? inputForPanelDataRepo.tool_calls : undefined,
       tool_call_id: inputForPanelDataRepo.tool_call_id != null ? String(inputForPanelDataRepo.tool_call_id) : undefined,
       pageChanges: normalizePageChangesForPanelDataRepo(inputForPanelDataRepo.pageChanges),
+      pictureBlobIds: normalizePictureBlobIdsForPanelDataRepo(inputForPanelDataRepo.pictureBlobIds),
       isHidden: Boolean(inputForPanelDataRepo.isHidden),
       usagePromptTokens: Number.isFinite(Number(inputForPanelDataRepo.usagePromptTokens)) ? Number(inputForPanelDataRepo.usagePromptTokens) : 0,
       usageCompletionTokens: Number.isFinite(Number(inputForPanelDataRepo.usageCompletionTokens)) ? Number(inputForPanelDataRepo.usageCompletionTokens) : 0,

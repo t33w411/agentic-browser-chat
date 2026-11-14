@@ -919,11 +919,221 @@
     };
   }
 
+  // ---- Slides ----
+  // A deck as documentGeneration hands it over (pptxPrintDeckForDocumentGeneration): one page per
+  // slide, each shape placed in points exactly where the PPTX puts it, with sizes and colours
+  // already decided. Nothing here chooses a size or a position, so the PDF and the PPTX made from
+  // one spec cannot disagree about them. Pictures are inline <img> elements, cropped by the box
+  // that holds them, because the printer refuses any url() that is not a font.
+
+  var SLIDE_ALIGN_FOR_DOCUMENT_PRINT = { l: 'left', ctr: 'center', r: 'right' };
+  var SLIDE_ANCHOR_FOR_DOCUMENT_PRINT = { t: 'flex-start', ctr: 'center', b: 'flex-end' };
+  var SLIDE_IMAGE_TYPE_RE_FOR_DOCUMENT_PRINT = /^image\/(png|jpeg|gif|webp|bmp)$/;
+
+  function slideBoxStyleForDocumentPrint(boxForStyle) {
+    return 'left: ' + ptForDocumentPrint(boxForStyle.x) + '; top: ' + ptForDocumentPrint(boxForStyle.y)
+      + '; width: ' + ptForDocumentPrint(boxForStyle.w) + '; height: ' + ptForDocumentPrint(boxForStyle.h) + ';';
+  }
+
+  function slideRunsHtmlForDocumentPrint(runsForHtml) {
+    return (Array.isArray(runsForHtml) ? runsForHtml : []).map(function (runForHtml) {
+      var textForRun = String(runForHtml && runForHtml.text != null ? runForHtml.text : '').split(/\r?\n/).map(escapeHtmlForDocumentPrint).join('<br>');
+      return runForHtml && runForHtml.bold ? '<strong>' + textForRun + '</strong>' : textForRun;
+    }).join('');
+  }
+
+  // The whole picture is drawn at the size that puts its kept part exactly over the box, and the
+  // box clips the rest: the same crop as the PPTX's srcRect.
+  function slidePictureHtmlForDocumentPrint(boxForPicture, imageForPicture, cropForPicture, altForPicture) {
+    var typeForPicture = String((imageForPicture && imageForPicture.type) || '').toLowerCase();
+    if (!imageForPicture || !imageForPicture.bytes || !imageForPicture.bytes.length || !SLIDE_IMAGE_TYPE_RE_FOR_DOCUMENT_PRINT.test(typeForPicture)) return '';
+    var cropForDraw = cropForPicture || { l: 0, t: 0, r: 0, b: 0 };
+    var widthForDraw = boxForPicture.w / Math.max(0.01, 1 - cropForDraw.l - cropForDraw.r);
+    var heightForDraw = boxForPicture.h / Math.max(0.01, 1 - cropForDraw.t - cropForDraw.b);
+    return '<div class="pic" style="' + slideBoxStyleForDocumentPrint(boxForPicture) + '"><img alt="' + escapeHtmlForDocumentPrint(altForPicture || '')
+      + '" src="data:' + typeForPicture + ';base64,' + bytesToBase64ForDocumentPrint(imageForPicture.bytes)
+      + '" style="left: ' + ptForDocumentPrint(-cropForDraw.l * widthForDraw) + '; top: ' + ptForDocumentPrint(-cropForDraw.t * heightForDraw)
+      + '; width: ' + ptForDocumentPrint(widthForDraw) + '; height: ' + ptForDocumentPrint(heightForDraw) + ';"></div>';
+  }
+
+  // A text shape: its paragraphs stacked from the anchor, the way PowerPoint anchors a text box,
+  // and text that does not fit runs past the box rather than being cut.
+  function slideTextHtmlForDocumentPrint(shapeForText) {
+    var alignForText = SLIDE_ALIGN_FOR_DOCUMENT_PRINT[shapeForText.align] || 'left';
+    var paragraphsForText = (shapeForText.paragraphs || []).map(function (paragraphForText) {
+      var stylesForParagraph = [
+        'font-size: ' + ptForDocumentPrint(paragraphForText.size),
+        'line-height: ' + (Number(shapeForText.lineHeight) || 1.2),
+        'color: ' + (hexForDocumentPrint(paragraphForText.color) || '#000000'),
+        'text-align: ' + alignForText
+      ];
+      if (paragraphForText.bold) stylesForParagraph.push('font-weight: 700');
+      if (paragraphForText.spaceBefore > 0) stylesForParagraph.push('margin-top: ' + ptForDocumentPrint(paragraphForText.spaceBefore));
+      var bulletForParagraph = '';
+      if (paragraphForText.bullet) {
+        stylesForParagraph.push('padding-left: ' + ptForDocumentPrint(paragraphForText.bullet.left), 'text-indent: ' + ptForDocumentPrint(-paragraphForText.bullet.hang));
+        bulletForParagraph = '<span class="bullet" style="width: ' + ptForDocumentPrint(paragraphForText.bullet.hang) + '; color: '
+          + (hexForDocumentPrint(paragraphForText.bullet.color) || '#000000') + ';">' + escapeHtmlForDocumentPrint(paragraphForText.bullet.char) + '</span>';
+      }
+      return '<p style="' + stylesForParagraph.join('; ') + ';">' + bulletForParagraph + slideRunsHtmlForDocumentPrint(paragraphForText.runs) + '</p>';
+    }).join('');
+    return '<div class="text ' + (shapeForText.font === 'heading' ? 'f-head' : 'f-body') + '" style="' + slideBoxStyleForDocumentPrint(shapeForText.box)
+      + ' justify-content: ' + (SLIDE_ANCHOR_FOR_DOCUMENT_PRINT[shapeForText.anchor] || 'flex-start') + ';">' + paragraphsForText + '</div>';
+  }
+
+  function slideBorderCssForDocumentPrint(edgeForBorder) {
+    if (!Array.isArray(edgeForBorder) || !(Number(edgeForBorder[0]) > 0) || !hexForDocumentPrint(edgeForBorder[1])) return 'none';
+    return ptForDocumentPrint(edgeForBorder[0]) + ' solid ' + hexForDocumentPrint(edgeForBorder[1]);
+  }
+
+  function slideTableHtmlForDocumentPrint(shapeForTable) {
+    var columnsForTable = (shapeForTable.widths || []).map(function (widthForColumn) {
+      return '<col style="width: ' + ptForDocumentPrint(widthForColumn) + ';">';
+    }).join('');
+    var rowsForTable = (shapeForTable.rows || []).map(function (rowForTable) {
+      return '<tr style="height: ' + ptForDocumentPrint(rowForTable.height) + ';">' + rowForTable.cells.map(function (cellForTable) {
+        var bordersForCell = cellForTable.borders || {};
+        var stylesForCell = [
+          'padding: ' + ptForDocumentPrint(shapeForTable.padY) + ' ' + ptForDocumentPrint(shapeForTable.padX),
+          'font-size: ' + ptForDocumentPrint(shapeForTable.size),
+          'line-height: ' + (Number(shapeForTable.lineHeight) || 1.2),
+          'color: ' + (hexForDocumentPrint(cellForTable.color) || '#000000'),
+          'text-align: ' + (cellForTable.align === 'r' ? 'right' : 'left'),
+          'border-top: ' + slideBorderCssForDocumentPrint(bordersForCell.t),
+          'border-right: ' + slideBorderCssForDocumentPrint(bordersForCell.r),
+          'border-bottom: ' + slideBorderCssForDocumentPrint(bordersForCell.b),
+          'border-left: ' + slideBorderCssForDocumentPrint(bordersForCell.l)
+        ];
+        if (cellForTable.bold) stylesForCell.push('font-weight: 700');
+        if (hexForDocumentPrint(cellForTable.fill)) stylesForCell.push('background-color: ' + hexForDocumentPrint(cellForTable.fill));
+        return '<td style="' + stylesForCell.join('; ') + ';">' + slideRunsHtmlForDocumentPrint(cellForTable.runs) + '</td>';
+      }).join('') + '</tr>';
+    }).join('');
+    return '<div class="table f-body" style="left: ' + ptForDocumentPrint(shapeForTable.box.x) + '; top: ' + ptForDocumentPrint(shapeForTable.box.y)
+      + '; width: ' + ptForDocumentPrint(shapeForTable.box.w) + ';"><table><colgroup>' + columnsForTable + '</colgroup><tbody>' + rowsForTable + '</tbody></table></div>';
+  }
+
+  function slideHtmlForDocumentPrint(slideForHtml, deckForSlide) {
+    var partsForSlide = [];
+    var backgroundForSlide = slideForHtml.background || {};
+    if (backgroundForSlide.image) {
+      partsForSlide.push(slidePictureHtmlForDocumentPrint({ x: 0, y: 0, w: deckForSlide.widthPt, h: deckForSlide.heightPt }, backgroundForSlide.image, backgroundForSlide.crop, ''));
+    }
+    (slideForHtml.shapes || []).forEach(function (shapeForSlide) {
+      if (!shapeForSlide || !shapeForSlide.box) return;
+      if (shapeForSlide.kind === 'rect') {
+        var opacityForRect = Math.max(0, Math.min(1, Number(shapeForSlide.opacity)));
+        partsForSlide.push('<div class="rect" style="' + slideBoxStyleForDocumentPrint(shapeForSlide.box) + ' background-color: '
+          + (hexForDocumentPrint(shapeForSlide.color) || '#000000') + ';' + (opacityForRect < 1 ? ' opacity: ' + (Math.round(opacityForRect * 1000) / 1000) + ';' : '') + '"></div>');
+      } else if (shapeForSlide.kind === 'picture') {
+        partsForSlide.push(slidePictureHtmlForDocumentPrint(shapeForSlide.box, shapeForSlide.image, shapeForSlide.crop, shapeForSlide.alt));
+      } else if (shapeForSlide.kind === 'text') {
+        partsForSlide.push(slideTextHtmlForDocumentPrint(shapeForSlide));
+      } else if (shapeForSlide.kind === 'table') {
+        partsForSlide.push(slideTableHtmlForDocumentPrint(shapeForSlide));
+      }
+    });
+    return '<section class="slide" style="background-color: ' + (hexForDocumentPrint(backgroundForSlide.color) || '#FFFFFF') + ';">' + partsForSlide.join('') + '</section>';
+  }
+
+  // Every run of text on every slide, for script detection.
+  function slideTextForDocumentPrint(deckForText) {
+    var partsForText = [];
+    (deckForText.slides || []).forEach(function (slideForText) {
+      (slideForText.shapes || []).forEach(function (shapeForText) {
+        if (shapeForText.kind === 'text') {
+          shapeForText.paragraphs.forEach(function (paragraphForText) {
+            (paragraphForText.runs || []).forEach(function (runForText) { partsForText.push(String(runForText.text || '')); });
+          });
+        } else if (shapeForText.kind === 'table') {
+          shapeForText.rows.forEach(function (rowForText) {
+            rowForText.cells.forEach(function (cellForText) {
+              (cellForText.runs || []).forEach(function (runForText) { partsForText.push(String(runForText.text || '')); });
+            });
+          });
+        }
+      });
+    });
+    return partsForText.join('\n').slice(0, MAX_SCRIPT_SCAN_CHARS_FOR_DOCUMENT_PRINT);
+  }
+
+  // A slide prints in the font the PPTX names, so its lines break where PowerPoint's do: that
+  // font when this computer has it, else its metric-compatible clone (Carlito for Calibri, Arimo
+  // for Arial). The theme's web fonts are wider or narrower than the Office fonts the deck names,
+  // and the slide's text sizes were fitted for the deck. A font outside the curated list is one
+  // the user named, fetched by name from the font library.
+  function slideFontRoleForDocumentPrint(fontForRole) {
+    var officeForRole = cleanFamilyForDocumentPrint(fontForRole && fontForRole.office) || 'Calibri';
+    var cloneForRole = curatedCloneForDocumentPrint(officeForRole);
+    return {
+      web: cloneForRole || officeForRole,
+      local: officeForRole,
+      kind: (fontForRole && fontForRole.kind) || kindOfFamilyForDocumentPrint(officeForRole),
+      localFirst: true,
+      userNamed: !cloneForRole
+    };
+  }
+
+  // deck: { widthPt, heightPt, fonts: { heading, body } as { office, kind }, slides: [{ number,
+  // background, shapes }] }. options: { title, lang }. Returns { html, fonts, scripts, templates }
+  // like renderHtml.
+  function renderSlidesHtmlForDocumentPrint(deckForRender, optionsForRender) {
+    var safeOptionsForRender = optionsForRender || {};
+    var langForRender = String(safeOptionsForRender.lang || '').replace(/[^A-Za-z0-9-]/g, '').slice(0, 35) || 'en';
+    var scriptFontsForRender = detectScriptFontsForDocumentPrint(slideTextForDocumentPrint(deckForRender), langForRender);
+    var registryForRender = makeFontRegistryForDocumentPrint(scriptFontsForRender);
+    var fontsForRender = deckForRender.fonts || {};
+    var stacksForRender = {
+      heading: registryForRender.stack(slideFontRoleForDocumentPrint(fontsForRender.heading)),
+      body: registryForRender.stack(slideFontRoleForDocumentPrint(fontsForRender.body))
+    };
+    var widthForRender = ptForDocumentPrint(deckForRender.widthPt);
+    var heightForRender = ptForDocumentPrint(deckForRender.heightPt);
+    var cssForRender = [
+      '@page { size: ' + widthForRender + ' ' + heightForRender + '; margin: 0; }',
+      'html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }',
+      'body { margin: 0; font-kerning: normal; text-rendering: optimizeLegibility; }',
+      '.slide { position: relative; width: ' + widthForRender + '; height: ' + heightForRender + '; overflow: hidden; break-after: page; margin: 0; }',
+      '.slide:last-child { break-after: auto; }',
+      '.pic, .rect, .text, .table { position: absolute; }',
+      '.pic { overflow: hidden; }',
+      '.pic img { position: absolute; display: block; max-width: none; }',
+      '.text { display: flex; flex-direction: column; }',
+      '.text p { margin: 0; overflow-wrap: break-word; }',
+      // The master's bullets are drawn in Arial.
+      '.bullet { display: inline-block; text-indent: 0; font-family: Arial, Helvetica, sans-serif; }',
+      '.table table { border-collapse: collapse; table-layout: fixed; width: 100%; }',
+      '.table td { vertical-align: middle; overflow-wrap: anywhere; }',
+      'strong { font-weight: 700; }',
+      '.f-head { font-family: ' + stacksForRender.heading + '; }',
+      '.f-body { font-family: ' + stacksForRender.body + '; }'
+    ].join('\n');
+    var bodyForRender = (deckForRender.slides || []).map(function (slideForRender) {
+      return slideHtmlForDocumentPrint(slideForRender, deckForRender);
+    }).join('\n');
+    var facesForRender = registryForRender.faces();
+    var htmlForRender = '<!DOCTYPE html>\n<html lang="' + langForRender + '"><head><meta charset="utf-8">'
+      + '<title>' + escapeHtmlForDocumentPrint(String(safeOptionsForRender.title || 'Slides').slice(0, 200)) + '</title>'
+      + '<style>\n' + fontFaceCssForDocumentPrint(facesForRender) + '\n' + cssForRender + '\n</style>'
+      + '</head><body>\n' + bodyForRender + '\n</body></html>';
+    return {
+      html: htmlForRender,
+      fonts: facesForRender.map(function (faceForList) {
+        return { alias: faceForList.alias, family: faceForList.family, userNamed: !!faceForList.userNamed };
+      }),
+      scripts: scriptFontsForRender.map(function (scriptForList) { return scriptForList.key; }),
+      templates: { needed: false, header: '<div></div>', footer: '<div></div>' }
+    };
+  }
+
   agentNamespaceForDocumentPrint.documentPrint = {
     renderHtml: renderDocumentHtmlForDocumentPrint,
+    renderSlides: renderSlidesHtmlForDocumentPrint,
     detectScriptFonts: detectScriptFontsForDocumentPrint,
     fontFaceCss: fontFaceCssForDocumentPrint,
-    webFonts: WEB_FONTS_FOR_DOCUMENT_PRINT
+    webFonts: WEB_FONTS_FOR_DOCUMENT_PRINT,
+    // The web font with the metrics of an Office font, for agent/docxToPdf.js.
+    metricClone: curatedCloneForDocumentPrint
   };
 
   globalScopeForDocumentPrint.ABChatAgent = agentNamespaceForDocumentPrint;

@@ -1,4 +1,4 @@
-// Decides which automatic file links the chat leaves out.
+// Decides which automatic file links and generated pictures the chat leaves out.
 //
 // The agent loop saves every document it makes (create_document, edit_document, eval returning
 // __document__) as a display-only assistant message whose md is "[name](#abchat-docblob-N)". The
@@ -12,8 +12,16 @@
 //     reword it. Both links showed with the same label and nothing to tell them apart. Only the
 //     newest is kept. The older file is not deleted; its message still references the blob.
 //
-// Both rules look only within one reply: the messages between two user messages. A file made in
-// an earlier reply keeps its link even when a later reply mentions it or reuses its name.
+// Generated images are saved the same way, as "![Generated image](__blob:N__)". A picture the model
+// made for a document (a deck's photos, a report's cover) used to show above the reply as well,
+// full size with a download button, though the user never asked for it on its own. The document
+// message lists the blob ids of the pictures it holds (pictureBlobIds), and a generated image from
+// the same reply that a document holds is left out. A document left out as an older copy does
+// not count, because the user cannot open it from the chat.
+//
+// All three rules look only within one reply: the messages between two user messages. A file made
+// in an earlier reply keeps its link even when a later reply mentions it or reuses its name, and a
+// picture made in an earlier reply stays even when a later document uses it.
 //
 // Hiding is the only thing this decides, and a missed match leaves a link showing. So a reply's
 // link counts only when it renders as a link: text inside code is ignored, and so is image syntax.
@@ -29,6 +37,9 @@
   // Exactly the md the agent loop writes for a generated document. A generated image's marker
   // starts with "!" and never matches.
   const DISPLAY_MARKER_PATTERN_FOR_GENERATED_FILES = /^\[([^\]]*)\]\(#abchat-docblob-(\d+)\)$/;
+
+  // Exactly the md the agent loop writes for a generated image.
+  const PICTURE_MARKER_PATTERN_FOR_GENERATED_FILES = /^!\[[^\]]*\]\(__blob:(\d+)__\)$/;
 
   // A markdown link to a generated document, optionally wrapped in <> and with a title. The
   // lookbehind drops image syntax, which renders as a broken image rather than a link.
@@ -64,6 +75,7 @@
 
   function addHiddenForReplyForGeneratedFiles(messagesForReply, startForReply, endForReply, hiddenForReply) {
     const markersForReply = [];
+    const picturesForReply = [];
     const linkedIdsForReply = new Set();
     for (let indexForReply = startForReply; indexForReply < endForReply; indexForReply++) {
       const messageForReply = messagesForReply[indexForReply];
@@ -76,8 +88,13 @@
           markersForReply.push({
             index: indexForReply,
             blobId: Number(markerMatchForReply[2]),
-            nameKey: markerMatchForReply[1].trim().toLowerCase()
+            nameKey: markerMatchForReply[1].trim().toLowerCase(),
+            pictureBlobIds: Array.isArray(messageForReply.pictureBlobIds) ? messageForReply.pictureBlobIds : []
           });
+        }
+        const pictureMatchForReply = textForReply.match(PICTURE_MARKER_PATTERN_FOR_GENERATED_FILES);
+        if (pictureMatchForReply) {
+          picturesForReply.push({ index: indexForReply, blobId: Number(pictureMatchForReply[1]) });
         }
         continue;
       }
@@ -88,14 +105,23 @@
     markersForReply.forEach(function (markerForNewest) {
       newestIndexByNameForReply.set(markerForNewest.nameKey, markerForNewest.index);
     });
+    const heldPictureIdsForReply = new Set();
     markersForReply.forEach(function (markerForHide) {
       const isLinkedForHide = linkedIdsForReply.has(markerForHide.blobId);
       const isSupersededForHide = newestIndexByNameForReply.get(markerForHide.nameKey) !== markerForHide.index;
       if (isLinkedForHide || isSupersededForHide) hiddenForReply.add(markerForHide.index);
+      if (isSupersededForHide) return;
+      markerForHide.pictureBlobIds.forEach(function (pictureIdForHeld) {
+        heldPictureIdsForReply.add(Number(pictureIdForHeld));
+      });
+    });
+    picturesForReply.forEach(function (pictureForHide) {
+      if (heldPictureIdsForReply.has(pictureForHide.blobId)) hiddenForReply.add(pictureForHide.index);
     });
   }
 
-  // Returns a Set of indexes into messagesForHidden whose automatic file link should not be drawn.
+  // Returns a Set of indexes into messagesForHidden whose automatic file link or picture should not
+  // be drawn.
   function hiddenDisplayIndexesForGeneratedFiles(messagesForHidden) {
     const hiddenForMessages = new Set();
     if (!Array.isArray(messagesForHidden)) return hiddenForMessages;

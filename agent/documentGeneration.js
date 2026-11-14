@@ -4835,7 +4835,7 @@
       var paragraphSize = pptxSubSizeForDocumentGeneration(size, paragraph.level);
       var indent = paragraph.bullet ? pptxIndentForDocumentGeneration(size, paragraph.level).left : 0;
       var lines = pptxLineCountForDocumentGeneration(pptxPlainForDocumentGeneration(paragraph.text), paragraphSize, width - indent, kind, paragraph.bold);
-      height += lines * paragraphSize * 1.2 + (index ? paragraphSize * 0.5 : 0);
+      height += lines * paragraphSize * PPTX_BODY_LINE_FOR_DOCUMENT_GENERATION + (index ? paragraphSize * 0.5 : 0);
     });
     return height;
   }
@@ -5551,10 +5551,15 @@
     return { scrim: String(theme.colors.text).toUpperCase(), opacity: forWhiteText, ink: PPTX_LIGHT_TEXT_INK_FOR_DOCUMENT_GENERATION };
   }
 
-  // White text or the theme's text colours on a plain colour, whichever has more contrast.
+  // White text or the theme's text colours on a plain colour, whichever has more contrast. The
+  // accent is a shade of the main colour, so on a light colour near it (a yellow brand colour) it
+  // fades into the slide; below 3:1, the figures and bullets it draws take the heading colour.
   function pptxInkForColorForDocumentGeneration(hex, theme) {
     var background = pptxHexLuminanceForDocumentGeneration(hex);
     var darkInk = pptxDarkTextInkForDocumentGeneration(theme);
+    if (pptxContrastForDocumentGeneration(pptxHexLuminanceForDocumentGeneration(darkInk.accent), background) < 3) {
+      darkInk = Object.assign({}, darkInk, { accent: darkInk.title, bullet: darkInk.title });
+    }
     return pptxContrastForDocumentGeneration(1, background) >= pptxContrastForDocumentGeneration(pptxInkLuminanceForDocumentGeneration(darkInk), background)
       ? PPTX_LIGHT_TEXT_INK_FOR_DOCUMENT_GENERATION
       : darkInk;
@@ -5785,10 +5790,11 @@
     })).then(function () { return made; });
   }
 
-  // A slide's pattern and its colours: on a filled cover the theme's main colour, elsewhere white.
+  // A slide's pattern and its colours: on a filled cover (or a deck's only slide drawn as one)
+  // the theme's main colour, elsewhere white.
   function pptxPatternColoursForDocumentGeneration(slide, theme, look) {
     if (!slide.background || !slide.background.pattern) return null;
-    var filledCover = look.cover === 'fill' && (slide.layout === 'title' || slide.layout === 'section');
+    var filledCover = !!slide.background.filled || (look.cover === 'fill' && (slide.layout === 'title' || slide.layout === 'section'));
     var base = filledCover ? String(theme.colors.primary).toUpperCase() : 'FFFFFF';
     var ink = pptxPatternInkForDocumentGeneration(base, theme);
     return { name: slide.background.pattern, base: base, ink: ink, key: 'pattern:' + slide.background.pattern + ':' + base + ':' + ink };
@@ -5945,6 +5951,13 @@
     });
   }
 
+  // Records a picture the document holds, by blob id. The result lists them so the chat can leave
+  // out a generated image that is already shown in the document.
+  function notePictureForDocumentGeneration(context, blobId) {
+    if (!context || !Array.isArray(context.pictureBlobIds) || !blobId) return;
+    if (context.pictureBlobIds.indexOf(blobId) === -1) context.pictureBlobIds.push(blobId);
+  }
+
   // Loads the pictures of a new DOCX or PDF through deps.loadImage, as a deck does, and settles
   // its cover. Each picture block becomes an image block holding the bytes the writers embed and
   // the size it is shown at, and the cover becomes input.coverLayout. A picture that cannot be
@@ -6040,6 +6053,7 @@
           var size = DOC_PICTURE_SIZES_FOR_DOCUMENT_GENERATION[String(block.size || '').trim().toLowerCase()] ? String(block.size).trim().toLowerCase() : 'full';
           var shown = docPictureShownForDocumentGeneration(entry, size, area);
           if (entry.width < shown.widthPt * 0.98) soft.push('picture ' + pictureNumber + ' (' + entry.width + ' x ' + entry.height + ' pixels)');
+          notePictureForDocumentGeneration(context, ref.blobId);
           output.push({
             type: 'image',
             resolved: docResolvedPictureForDocumentGeneration(entry, format, shown),
@@ -6058,6 +6072,7 @@
         coverLayout = docCoverLayoutForDocumentGeneration(cover, variant, theme, context.page);
         if (photo) {
           coverLayout.photo = { bytes: photo.bytes, ext: photo.ext, width: photo.width, height: photo.height, alt: cover.image.alt };
+          notePictureForDocumentGeneration(context, cover.image.blobId);
           if (photo.width < coverLayout.art.w * 0.98) soft.push('the cover (' + photo.width + ' x ' + photo.height + ' pixels)');
         }
         // A title block that repeats the cover's title would print it twice.
@@ -6123,6 +6138,171 @@
     return ink ? '<a:srgbClr val="' + ink[role] + '"/>' : (otherwise || '');
   }
 
+  // ---- What a slide draws, for the slide PDF ----
+  // Every shape function records what it put on the slide (box, sizes, colours, bullets) beside
+  // the XML it writes, so the PDF made from a deck is drawn from the same decisions as the PPTX.
+  // A fill in a record is the colour element the XML uses, or the one the shape inherits from its
+  // layout or the master; pptxFillHexForDocumentGeneration resolves it against the theme.
+
+  // Line height as a multiple of the text size: titles at the master's 90% spacing, everything
+  // else at 100%. The fitting measures with the same numbers the PDF draws with.
+  var PPTX_TITLE_LINE_FOR_DOCUMENT_GENERATION = 1.1;
+  var PPTX_BODY_LINE_FOR_DOCUMENT_GENERATION = 1.2;
+  var PPTX_TITLE_FILL_FOR_DOCUMENT_GENERATION = '<a:schemeClr val="tx2"/>';
+  var PPTX_TEXT_FILL_FOR_DOCUMENT_GENERATION = '<a:schemeClr val="tx1"/>';
+  var PPTX_ACCENT_FILL_FOR_DOCUMENT_GENERATION = '<a:schemeClr val="accent2"/>';
+  // The bullet the master draws at each level.
+  var PPTX_BULLET_CHARS_FOR_DOCUMENT_GENERATION = ['•', '–', '–'];
+  var PPTX_NUMBER_SIZE_FOR_DOCUMENT_GENERATION = 11;
+  // How the slide colour map names the theme's colours.
+  var PPTX_CLR_MAP_NAMES_FOR_DOCUMENT_GENERATION = { bg1: 'lt1', tx1: 'dk1', bg2: 'lt2', tx2: 'dk2' };
+
+  // The theme part's colour scheme, as [name, hex] pairs.
+  function pptxSchemeForDocumentGeneration(theme) {
+    var colors = theme.colors;
+    var accentText = colors.accentText || colors.accent;
+    return [
+      ['dk1', colors.text], ['lt1', 'FFFFFF'], ['dk2', colors.heading], ['lt2', pptxTintForDocumentGeneration(colors.primary, 0.92)],
+      ['accent1', colors.primary], ['accent2', accentText], ['accent3', pptxTintForDocumentGeneration(colors.primary, 0.45)],
+      ['accent4', colors.muted], ['accent5', pptxTintForDocumentGeneration(accentText, 0.45)], ['accent6', colors.tableBorder || colors.muted],
+      ['hlink', colors.link || colors.accent], ['folHlink', colors.muted]
+    ].map(function (pair) { return [pair[0], String(pair[1]).toUpperCase()]; });
+  }
+
+  // A colour with PowerPoint's luminance modulation and offset, which work on HSL lightness.
+  function pptxLumHexForDocumentGeneration(hex, mod, off) {
+    var rgb = pptxRgbFromHexForDocumentGeneration(hex);
+    var max = Math.max(rgb[0], rgb[1], rgb[2]);
+    var min = Math.min(rgb[0], rgb[1], rgb[2]);
+    var lightness = (max + min) / 2;
+    var hue = 0;
+    var saturation = 0;
+    var spread = max - min;
+    if (spread > 0) {
+      saturation = lightness > 0.5 ? spread / (2 - max - min) : spread / (max + min);
+      if (max === rgb[0]) hue = (rgb[1] - rgb[2]) / spread + (rgb[1] < rgb[2] ? 6 : 0);
+      else if (max === rgb[1]) hue = (rgb[2] - rgb[0]) / spread + 2;
+      else hue = (rgb[0] - rgb[1]) / spread + 4;
+      hue /= 6;
+    }
+    lightness = Math.max(0, Math.min(1, lightness * mod + off));
+    if (saturation === 0) return pptxHexFromRgbForDocumentGeneration([lightness, lightness, lightness]);
+    var upper = lightness < 0.5 ? lightness * (1 + saturation) : lightness + saturation - lightness * saturation;
+    var lower = 2 * lightness - upper;
+    var channel = function (at) {
+      var t = at < 0 ? at + 1 : (at > 1 ? at - 1 : at);
+      if (t < 1 / 6) return lower + (upper - lower) * 6 * t;
+      if (t < 1 / 2) return upper;
+      if (t < 2 / 3) return lower + (upper - lower) * (2 / 3 - t) * 6;
+      return lower;
+    };
+    return pptxHexFromRgbForDocumentGeneration([channel(hue + 1 / 3), channel(hue), channel(hue - 1 / 3)]);
+  }
+
+  // The hex colour a fill element names: an srgbClr, or a scheme colour with its luminance
+  // modulation and offset. '' for anything else.
+  function pptxFillHexForDocumentGeneration(theme, fill) {
+    var text = String(fill || '');
+    var rgbMatch = /<a:srgbClr val="([0-9A-Fa-f]{6})"/.exec(text);
+    if (rgbMatch) return rgbMatch[1].toUpperCase();
+    var schemeMatch = /<a:schemeClr val="([A-Za-z0-9]+)"/.exec(text);
+    if (!schemeMatch) return '';
+    var name = PPTX_CLR_MAP_NAMES_FOR_DOCUMENT_GENERATION[schemeMatch[1]] || schemeMatch[1];
+    var hex = '';
+    pptxSchemeForDocumentGeneration(theme).forEach(function (pair) { if (pair[0] === name) hex = pair[1]; });
+    if (!hex) return '';
+    var mod = /<a:lumMod val="(\d+)"/.exec(text);
+    var off = /<a:lumOff val="(\d+)"/.exec(text);
+    if (mod || off) hex = pptxLumHexForDocumentGeneration(hex, mod ? Number(mod[1]) / 100000 : 1, off ? Number(off[1]) / 100000 : 0);
+    return hex;
+  }
+
+  // A text shape: its box, how the text sits in it (anchor t, b or ctr; align l, ctr or r), the
+  // theme font it uses (heading or body), and its paragraphs.
+  function pptxDrawTextForDocumentGeneration(draw, box, options, paragraphs) {
+    if (!draw || !paragraphs.length) return;
+    draw.push({
+      kind: 'text', box: box, anchor: options.anchor, align: options.align || 'l', font: options.font,
+      lineHeight: options.lineHeight, paragraphs: paragraphs
+    });
+  }
+  // One paragraph of plain text, as pptxSimpleParagraphXmlForDocumentGeneration writes it.
+  function pptxDrawParagraphForDocumentGeneration(text, size, bold, fill) {
+    return { runs: pptxRunsForDocumentGeneration(text), size: size, bold: !!bold, fill: fill, spaceBefore: 0, bullet: null };
+  }
+  // A body paragraph, as pptxBodyParagraphXmlForDocumentGeneration writes it.
+  function pptxDrawBodyParagraphForDocumentGeneration(paragraph, size, index, ink) {
+    var paragraphSize = pptxSubSizeForDocumentGeneration(size, paragraph.level);
+    var fill = paragraph.heading
+      ? pptxInkFillForDocumentGeneration(ink, 'title', PPTX_TITLE_FILL_FOR_DOCUMENT_GENERATION)
+      : pptxInkFillForDocumentGeneration(ink, 'body', PPTX_TEXT_FILL_FOR_DOCUMENT_GENERATION);
+    var drawn = pptxDrawParagraphForDocumentGeneration(paragraph.text, paragraphSize, paragraph.bold, fill);
+    drawn.spaceBefore = index ? paragraphSize * 0.5 : 0;
+    if (paragraph.bullet) {
+      var indent = pptxIndentForDocumentGeneration(size, paragraph.level);
+      drawn.bullet = {
+        char: PPTX_BULLET_CHARS_FOR_DOCUMENT_GENERATION[paragraph.level ? 1 : 0],
+        fill: pptxInkFillForDocumentGeneration(ink, 'bullet', PPTX_ACCENT_FILL_FOR_DOCUMENT_GENERATION),
+        left: indent.left,
+        hang: indent.hang
+      };
+    }
+    return drawn;
+  }
+
+  // The title and subtitle boxes of a section slide. A filled section lines up with the cover.
+  function pptxSectionBoxesForDocumentGeneration(look) {
+    var box = PPTX_BOX_FOR_DOCUMENT_GENERATION;
+    if (look.cover !== 'fill') return { title: box.sectionTitle, subtitle: box.sectionSubtitle };
+    return {
+      title: { x: 72, y: box.sectionTitle.y, w: 816, h: box.sectionTitle.h },
+      subtitle: { x: 72, y: box.sectionSubtitle.y, w: 816, h: box.sectionSubtitle.h }
+    };
+  }
+
+  // What a layout draws behind a slide's own shapes: the filled colour of a title or section slide
+  // ('' for the master's white), and its band, bar, or accent rule. The layout XML and the slide
+  // PDF are both drawn from this.
+  function pptxLayoutDecorForDocumentGeneration(part, look) {
+    var box = PPTX_BOX_FOR_DOCUMENT_GENERATION;
+    var filled = look.cover === 'fill';
+    var decor = { background: '', rects: [] };
+    var rect = function (name, rectBox, fill) { decor.rects.push({ name: name, box: rectBox, fill: fill }); };
+    // The band is the accent colour, or a tint of the primary when the two are the same (a shade
+    // on a light primary, where a tint would vanish).
+    var bandFill = PPTX_ACCENT_FILL_FOR_DOCUMENT_GENERATION;
+    if (look.sameAccent) {
+      bandFill = look.coverText === 'tx1'
+        ? '<a:schemeClr val="accent1"><a:lumMod val="75000"/></a:schemeClr>'
+        : '<a:schemeClr val="accent1"><a:lumMod val="60000"/><a:lumOff val="40000"/></a:schemeClr>';
+    }
+    if (part === 1) {
+      if (filled) {
+        decor.background = '<a:schemeClr val="accent1"/>';
+        rect('Accent Band', box.coverBand, bandFill);
+      } else if (look.rule) {
+        var coverRule = look.align === 'ctr' ? { x: (960 - box.coverRule.w) / 2, y: box.coverRule.y, w: box.coverRule.w, h: box.coverRule.h } : box.coverRule;
+        rect('Accent Rule', coverRule, PPTX_ACCENT_FILL_FOR_DOCUMENT_GENERATION);
+      }
+    } else if (part === 2) {
+      // A plain section is marked with a bar beside a left-aligned title, or a short rule under a
+      // centred one.
+      if (filled) {
+        decor.background = '<a:schemeClr val="accent1"/>';
+        rect('Accent Band', box.coverBand, bandFill);
+      } else if (look.align === 'l') {
+        rect('Accent Bar', box.sectionBar, PPTX_ACCENT_FILL_FOR_DOCUMENT_GENERATION);
+      } else if (look.rule) {
+        rect('Accent Rule', box.sectionRule, PPTX_ACCENT_FILL_FOR_DOCUMENT_GENERATION);
+      }
+    } else if (part >= 3 && part <= 5) {
+      if (look.rule) rect('Accent Rule', box.rule, PPTX_ACCENT_FILL_FOR_DOCUMENT_GENERATION);
+    } else if (part === 7 || part === 8) {
+      if (look.rule) rect('Accent Rule', pptxPictureBoxesForDocumentGeneration(part === 7 ? 'right' : 'left').rule, PPTX_ACCENT_FILL_FOR_DOCUMENT_GENERATION);
+    }
+    return decor;
+  }
+
   // Where the text and picture sit on a slide with a picture beside the text.
   function pptxPictureBoxesForDocumentGeneration(side) {
     var textX = side === 'left' ? 522 : 54;
@@ -6179,7 +6359,12 @@
       + '<p:spPr>' + pptxXfrmForDocumentGeneration(box) + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>'
       + '<p:txBody><a:bodyPr wrap="square" lIns="0" tIns="0" rIns="0" bIns="0" anchor="' + anchor + '"><a:noAutofit/></a:bodyPr><a:lstStyle/>' + paragraphs + '</p:txBody></p:sp>';
   }
-  function pptxSlideNumberForDocumentGeneration(id, number, ink) {
+  // box is the layout's number placeholder, which the slide's number inherits.
+  function pptxSlideNumberForDocumentGeneration(id, number, ink, box, draw) {
+    pptxDrawTextForDocumentGeneration(draw, box, { anchor: 'ctr', align: 'r', font: 'body', lineHeight: PPTX_BODY_LINE_FOR_DOCUMENT_GENERATION }, [
+      pptxDrawParagraphForDocumentGeneration(String(number), PPTX_NUMBER_SIZE_FOR_DOCUMENT_GENERATION, false,
+        pptxInkFillForDocumentGeneration(ink, 'muted', PPTX_MUTED_FILL_FOR_DOCUMENT_GENERATION))
+    ]);
     var props = ink ? '<a:rPr lang="en-US"><a:solidFill><a:srgbClr val="' + ink.muted + '"/></a:solidFill></a:rPr>' : '<a:rPr lang="en-US"/>';
     return '<p:sp><p:nvSpPr><p:cNvPr id="' + id + '" name="Slide Number"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="sldNum" sz="quarter" idx="12"/></p:nvPr></p:nvSpPr><p:spPr/>'
       + '<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:fld id="' + PPTX_SLIDENUM_FIELD_ID_FOR_DOCUMENT_GENERATION + '" type="slidenum">' + props + '<a:t>' + number + '</a:t></a:fld><a:endParaRPr lang="en-US"/></a:p></p:txBody></p:sp>';
@@ -6188,9 +6373,10 @@
   // "cover" fills the area and crops the picture's edges, "contain" fits all of the picture
   // inside it. The position is always written out: PowerPoint does not draw a picture that leaves
   // its position to the layout's picture placeholder.
-  function pptxPictureForDocumentGeneration(id, relId, entry, alt, ph, area, fit) {
+  function pptxPictureForDocumentGeneration(id, relId, entry, alt, ph, area, fit, draw) {
     var box = fit === 'contain' ? pptxContainBoxForDocumentGeneration(entry.width, entry.height, area) : area;
     var crop = fit === 'contain' ? { l: 0, t: 0, r: 0, b: 0 } : pptxCoverCropForDocumentGeneration(entry.width, entry.height, area.w, area.h);
+    if (draw) draw.push({ kind: 'picture', image: entry, box: box, crop: crop, alt: alt || '' });
     var spPr = '<p:spPr>' + pptxXfrmForDocumentGeneration(box) + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>';
     return '<p:pic><p:nvPicPr><p:cNvPr id="' + id + '" name="Picture"' + (alt ? ' descr="' + pptxTextForDocumentGeneration(alt) + '"' : '') + '/>'
       + '<p:cNvPicPr><a:picLocks' + (ph ? ' noGrp="1"' : '') + ' noChangeAspect="1"/></p:cNvPicPr><p:nvPr>' + (ph || '') + '</p:nvPr></p:nvPicPr>'
@@ -6217,29 +6403,39 @@
     return size >= 18 || (bold && size >= 14) ? 3 : 4.5;
   }
 
-  function pptxTitleShapeForDocumentGeneration(slide, look, issues, ink, probe, box, maxLines) {
+  function pptxTitleShapeForDocumentGeneration(slide, look, issues, ink, probe, box, maxLines, draw) {
     if (!slide.title) return '';
     var titleBox = box || PPTX_BOX_FOR_DOCUMENT_GENERATION.title;
     var plain = pptxPlainForDocumentGeneration(slide.title);
-    var fit = pptxFitTextForDocumentGeneration(plain, PPTX_SIZES_FOR_DOCUMENT_GENERATION.title, titleBox, look.headingKind, look.titleBold, maxLines || 2, 1.1);
+    var fit = pptxFitTextForDocumentGeneration(plain, PPTX_SIZES_FOR_DOCUMENT_GENERATION.title, titleBox, look.headingKind, look.titleBold, maxLines || 2, PPTX_TITLE_LINE_FOR_DOCUMENT_GENERATION);
     if (!fit.fits) issues.overflowHere = true;
-    pptxReportAreaForDocumentGeneration(probe, titleBox, pptxLineCountForDocumentGeneration(plain, fit.size, titleBox.w, look.headingKind, look.titleBold) * fit.size * 1.1, 'b', 3, 'title');
+    pptxReportAreaForDocumentGeneration(probe, titleBox, pptxLineCountForDocumentGeneration(plain, fit.size, titleBox.w, look.headingKind, look.titleBold) * fit.size * PPTX_TITLE_LINE_FOR_DOCUMENT_GENERATION, 'b', 3, 'title');
+    // The master's title style: left-aligned, bottom-anchored, in the heading font and colour.
+    pptxDrawTextForDocumentGeneration(draw, titleBox, { anchor: 'b', align: 'l', font: 'heading', lineHeight: PPTX_TITLE_LINE_FOR_DOCUMENT_GENERATION }, [
+      pptxDrawParagraphForDocumentGeneration(slide.title, fit.size, look.titleBold, pptxInkFillForDocumentGeneration(ink, 'title', PPTX_TITLE_FILL_FOR_DOCUMENT_GENERATION))
+    ]);
     return pptxPlaceholderForDocumentGeneration(2, 'Title', '<p:ph type="title"/>',
       pptxSimpleParagraphXmlForDocumentGeneration(slide.title, fit.size, { fill: pptxInkFillForDocumentGeneration(ink, 'title') }));
   }
 
-  function pptxCoverShapesForDocumentGeneration(slide, look, issues, ink, probe) {
+  function pptxCoverShapesForDocumentGeneration(slide, look, issues, ink, probe, draw) {
     var isCover = slide.layout === 'title';
     var titleBox = isCover ? PPTX_BOX_FOR_DOCUMENT_GENERATION.coverTitle : PPTX_BOX_FOR_DOCUMENT_GENERATION.sectionTitle;
     var subtitleBox = isCover ? PPTX_BOX_FOR_DOCUMENT_GENERATION.coverSubtitle : PPTX_BOX_FOR_DOCUMENT_GENERATION.sectionSubtitle;
+    // Where the layout puts the text, which on a filled section is wider than the box it is fitted to.
+    var drawBoxes = isCover ? { title: titleBox, subtitle: subtitleBox } : pptxSectionBoxesForDocumentGeneration(look);
     var shapes = '';
     if (slide.title) {
       var plainTitle = pptxPlainForDocumentGeneration(slide.title);
       var titleFit = pptxFitTextForDocumentGeneration(plainTitle,
         isCover ? PPTX_SIZES_FOR_DOCUMENT_GENERATION.coverTitle : PPTX_SIZES_FOR_DOCUMENT_GENERATION.sectionTitle,
-        titleBox, look.headingKind, look.titleBold, 3, 1.1);
+        titleBox, look.headingKind, look.titleBold, 3, PPTX_TITLE_LINE_FOR_DOCUMENT_GENERATION);
       if (!titleFit.fits) issues.overflowHere = true;
-      pptxReportAreaForDocumentGeneration(probe, titleBox, pptxLineCountForDocumentGeneration(plainTitle, titleFit.size, titleBox.w, look.headingKind, look.titleBold) * titleFit.size * 1.1, 'b', 3, 'title');
+      pptxReportAreaForDocumentGeneration(probe, titleBox, pptxLineCountForDocumentGeneration(plainTitle, titleFit.size, titleBox.w, look.headingKind, look.titleBold) * titleFit.size * PPTX_TITLE_LINE_FOR_DOCUMENT_GENERATION, 'b', 3, 'title');
+      pptxDrawTextForDocumentGeneration(draw, drawBoxes.title, { anchor: 'b', align: look.align, font: 'heading', lineHeight: PPTX_TITLE_LINE_FOR_DOCUMENT_GENERATION }, [
+        pptxDrawParagraphForDocumentGeneration(slide.title, titleFit.size, look.titleBold,
+          pptxInkFillForDocumentGeneration(ink, 'title', pptxCoverTextFillForDocumentGeneration(look, false)))
+      ]);
       shapes += pptxPlaceholderForDocumentGeneration(2, 'Title', isCover ? '<p:ph type="ctrTitle"/>' : '<p:ph type="title"/>',
         pptxSimpleParagraphXmlForDocumentGeneration(slide.title, titleFit.size, { fill: pptxInkFillForDocumentGeneration(ink, 'title') }));
     }
@@ -6247,22 +6443,28 @@
       var plainSubtitle = pptxPlainForDocumentGeneration(slide.subtitle);
       var subtitleFit = pptxFitTextForDocumentGeneration(plainSubtitle,
         isCover ? PPTX_SIZES_FOR_DOCUMENT_GENERATION.coverSubtitle : PPTX_SIZES_FOR_DOCUMENT_GENERATION.sectionSubtitle,
-        subtitleBox, look.bodyKind, false, 4, 1.2);
+        subtitleBox, look.bodyKind, false, 4, PPTX_BODY_LINE_FOR_DOCUMENT_GENERATION);
       if (!subtitleFit.fits) issues.overflowHere = true;
-      pptxReportAreaForDocumentGeneration(probe, subtitleBox, pptxLineCountForDocumentGeneration(plainSubtitle, subtitleFit.size, subtitleBox.w, look.bodyKind, false) * subtitleFit.size * 1.2, 't',
+      pptxReportAreaForDocumentGeneration(probe, subtitleBox, pptxLineCountForDocumentGeneration(plainSubtitle, subtitleFit.size, subtitleBox.w, look.bodyKind, false) * subtitleFit.size * PPTX_BODY_LINE_FOR_DOCUMENT_GENERATION, 't',
         pptxTargetForSizeForDocumentGeneration(subtitleFit.size, false), 'body');
+      pptxDrawTextForDocumentGeneration(draw, drawBoxes.subtitle, { anchor: 't', align: look.align, font: 'body', lineHeight: PPTX_BODY_LINE_FOR_DOCUMENT_GENERATION }, [
+        pptxDrawParagraphForDocumentGeneration(slide.subtitle, subtitleFit.size, false,
+          pptxInkFillForDocumentGeneration(ink, 'body', pptxCoverTextFillForDocumentGeneration(look, true)))
+      ]);
       shapes += pptxPlaceholderForDocumentGeneration(3, 'Subtitle', isCover ? '<p:ph type="subTitle" idx="1"/>' : '<p:ph type="body" idx="1"/>',
         pptxSimpleParagraphXmlForDocumentGeneration(slide.subtitle, subtitleFit.size, { fill: pptxInkFillForDocumentGeneration(ink, 'body') }));
     }
     return shapes;
   }
 
-  function pptxBulletsShapeForDocumentGeneration(slide, look, issues, ink, probe, box, sizes, ph) {
+  function pptxBulletsShapeForDocumentGeneration(slide, look, issues, ink, probe, box, sizes, ph, draw) {
     var area = box || PPTX_BOX_FOR_DOCUMENT_GENERATION.body;
     var fit = pptxFitParagraphsForDocumentGeneration(slide.bullets, sizes || PPTX_SIZES_FOR_DOCUMENT_GENERATION.body, area, look.bodyKind);
     if (!fit.fits) issues.overflowHere = true;
     pptxReportAreaForDocumentGeneration(probe, area, pptxParagraphsHeightForDocumentGeneration(slide.bullets, fit.size, area.w, look.bodyKind), 't',
       pptxTargetForSizeForDocumentGeneration(fit.size, false), 'body');
+    pptxDrawTextForDocumentGeneration(draw, area, { anchor: 't', align: 'l', font: 'body', lineHeight: PPTX_BODY_LINE_FOR_DOCUMENT_GENERATION },
+      slide.bullets.map(function (paragraph, index) { return pptxDrawBodyParagraphForDocumentGeneration(paragraph, fit.size, index, ink); }));
     return pptxPlaceholderForDocumentGeneration(3, 'Content', ph || '<p:ph idx="1"/>',
       slide.bullets.map(function (paragraph, index) { return pptxBodyParagraphXmlForDocumentGeneration(paragraph, fit.size, index, ink); }).join(''), true);
   }
@@ -6273,7 +6475,7 @@
     return paragraphs.concat(column.bullets);
   }
   // Both columns take one size, the largest at which both fit, so they read as a pair.
-  function pptxColumnsShapesForDocumentGeneration(slide, look, issues, ink, probe) {
+  function pptxColumnsShapesForDocumentGeneration(slide, look, issues, ink, probe, draw) {
     var leftParagraphs = pptxColumnParagraphsForDocumentGeneration(slide.left);
     var rightParagraphs = pptxColumnParagraphsForDocumentGeneration(slide.right);
     var leftBox = PPTX_BOX_FOR_DOCUMENT_GENERATION.left;
@@ -6296,6 +6498,8 @@
       if (!paragraphs.length) return '';
       pptxReportAreaForDocumentGeneration(probe, box, pptxParagraphsHeightForDocumentGeneration(paragraphs, size, box.w, look.bodyKind), 't',
         pptxTargetForSizeForDocumentGeneration(size, false), 'body');
+      pptxDrawTextForDocumentGeneration(draw, box, { anchor: 't', align: 'l', font: 'body', lineHeight: PPTX_BODY_LINE_FOR_DOCUMENT_GENERATION },
+        paragraphs.map(function (paragraph, index) { return pptxDrawBodyParagraphForDocumentGeneration(paragraph, size, index, ink); }));
       return pptxPlaceholderForDocumentGeneration(id, name, '<p:ph sz="half" idx="' + idx + '"/>',
         paragraphs.map(function (paragraph, index) { return pptxBodyParagraphXmlForDocumentGeneration(paragraph, size, index, ink); }).join(''), true);
     };
@@ -6303,7 +6507,7 @@
   }
 
   // One to four figures side by side, each with its label under it.
-  function pptxStatsShapesForDocumentGeneration(slide, look, issues, ink, probe) {
+  function pptxStatsShapesForDocumentGeneration(slide, look, issues, ink, probe, draw) {
     var count = slide.stats.length;
     var gap = 32;
     var area = PPTX_BOX_FOR_DOCUMENT_GENERATION.body;
@@ -6318,6 +6522,9 @@
       var valueBox = { x: x, y: 166, w: width, h: 156 };
       var labelBox = { x: x, y: 334, w: width, h: 140 };
       pptxReportAreaForDocumentGeneration(probe, valueBox, valueSize * 1.1, 'b', 3, 'accent');
+      pptxDrawTextForDocumentGeneration(draw, valueBox, { anchor: 'b', align: 'ctr', font: 'heading', lineHeight: PPTX_BODY_LINE_FOR_DOCUMENT_GENERATION }, [
+        pptxDrawParagraphForDocumentGeneration(stat.value, valueSize, true, pptxInkFillForDocumentGeneration(ink, 'accent', PPTX_ACCENT_FILL_FOR_DOCUMENT_GENERATION))
+      ]);
       shapes += pptxTextBoxForDocumentGeneration(10 + index * 2, 'Figure ' + (index + 1), valueBox, 'b',
         pptxSimpleParagraphXmlForDocumentGeneration(stat.value, valueSize, { align: 'ctr', bold: true, fill: pptxInkFillForDocumentGeneration(ink, 'accent', '<a:schemeClr val="accent2"/>'), majorFont: true }));
       if (stat.label) {
@@ -6326,6 +6533,9 @@
         if (!labelFit.fits) issues.overflowHere = true;
         pptxReportAreaForDocumentGeneration(probe, labelBox, pptxLineCountForDocumentGeneration(plainLabel, labelFit.size, labelBox.w, look.bodyKind, false) * labelFit.size * 1.2, 't',
           pptxTargetForSizeForDocumentGeneration(labelFit.size, false), 'muted');
+        pptxDrawTextForDocumentGeneration(draw, labelBox, { anchor: 't', align: 'ctr', font: 'body', lineHeight: PPTX_BODY_LINE_FOR_DOCUMENT_GENERATION }, [
+          pptxDrawParagraphForDocumentGeneration(stat.label, labelFit.size, false, pptxInkFillForDocumentGeneration(ink, 'muted', PPTX_MUTED_FILL_FOR_DOCUMENT_GENERATION))
+        ]);
         shapes += pptxTextBoxForDocumentGeneration(11 + index * 2, 'Label ' + (index + 1), labelBox, 't',
           pptxSimpleParagraphXmlForDocumentGeneration(stat.label, labelFit.size, { align: 'ctr', fill: pptxInkFillForDocumentGeneration(ink, 'muted', PPTX_MUTED_FILL_FOR_DOCUMENT_GENERATION) }));
       }
@@ -6340,7 +6550,7 @@
   // The theme's table style, as in DOCX: a filled header with light row lines (header-fill),
   // rules only (lines, booktabs), or every cell boxed (grid). On a background picture or colour
   // the table is a white card, so its text keeps the theme's colours.
-  function pptxTableShapeForDocumentGeneration(slide, theme, look, issues, ink) {
+  function pptxTableShapeForDocumentGeneration(slide, theme, look, issues, ink, draw) {
     var colors = theme.colors;
     var style = theme.table && theme.table.style ? theme.table.style : 'lines';
     var zebra = !!(theme.table && theme.table.zebra) && !!colors.tableStripe;
@@ -6400,6 +6610,7 @@
     var headerText = headerFill ? (colors.tableHeaderText || colors.heading) : colors.heading;
     var ruleColor = colors.tableHeaderRule || colors.text;
     var heights = keptRows.map(function (row, rowIndex) { return rowHeight(row, rowIndex, size); });
+    var drawnRows = [];
     var rowsXml = keptRows.map(function (row, rowIndex) {
       var isHeader = header && rowIndex === 0;
       var isTotal = hasTotal && rowIndex === keptLast;
@@ -6408,6 +6619,8 @@
       if (isHeader) fill = headerFill;
       else if (zebra && !isTotal && bodyIndex % 2 === 1) fill = colors.tableStripe;
       if (!fill && card) fill = 'FFFFFF';
+      var drawnCells = [];
+      drawnRows.push({ height: heights[rowIndex], cells: drawnCells });
       var cellsXml = row.map(function (cell, column) {
         var top = [0, ''];
         var bottom = [0, ''];
@@ -6425,6 +6638,11 @@
         if (isTotal) top = [1, ruleColor];
         var align = numeric[column] ? 'r' : 'l';
         var textColor = isHeader ? headerText : colors.text;
+        drawnCells.push({
+          runs: cell ? pptxRunsForDocumentGeneration(cell) : [], bold: isHeader || isTotal, color: String(textColor).toUpperCase(),
+          fill: fill ? String(fill).toUpperCase() : '', align: align,
+          borders: { l: sides, r: sides, t: top, b: bottom }
+        });
         var runs = cell
           ? pptxRunsXmlForDocumentGeneration(cell, size, { bold: isHeader || isTotal, fill: '<a:srgbClr val="' + textColor + '"/>' })
           : '';
@@ -6439,6 +6657,12 @@
       return '<a:tr h="' + pptxEmuForDocumentGeneration(heights[rowIndex]) + '">' + cellsXml + '</a:tr>';
     }).join('');
     var tableHeight = heights.reduce(function (sum, height) { return sum + height; }, 0);
+    if (draw) {
+      draw.push({
+        kind: 'table', box: { x: area.x, y: area.y, w: area.w, h: tableHeight }, widths: widths, size: size,
+        padX: 8, padY: size * 0.35, lineHeight: PPTX_BODY_LINE_FOR_DOCUMENT_GENERATION, rows: drawnRows
+      });
+    }
     return '<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="4" name="Table"/><p:cNvGraphicFramePr><a:graphicFrameLocks noGrp="1"/></p:cNvGraphicFramePr><p:nvPr/></p:nvGraphicFramePr>'
       + '<p:xfrm><a:off x="' + pptxEmuForDocumentGeneration(area.x) + '" y="' + pptxEmuForDocumentGeneration(area.y) + '"/><a:ext cx="' + pptxEmuForDocumentGeneration(area.w) + '" cy="' + pptxEmuForDocumentGeneration(tableHeight) + '"/></p:xfrm>'
       + '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblPr firstRow="' + (header ? 1 : 0) + '" bandRow="' + (zebra ? 1 : 0) + '"/>'
@@ -6448,7 +6672,7 @@
 
   // An image slide: the picture beside the bullets on its own half of the slide, under the title
   // in the content area, or across the whole slide.
-  function pptxImageShapesForDocumentGeneration(slide, look, issues, ink, probe, rels) {
+  function pptxImageShapesForDocumentGeneration(slide, look, issues, ink, probe, rels, draw) {
     var entry = rels.images[slide.image.blobId];
     var relId = rels.image(slide.image.blobId);
     var fit = slide.image.fit;
@@ -6459,19 +6683,19 @@
         ? { x: boxes.picture.x + 36, y: boxes.picture.y + 36, w: boxes.picture.w - 72, h: boxes.picture.h - 72 }
         : boxes.picture;
       pptxCheckResolutionForDocumentGeneration(entry, fit === 'contain' ? pptxContainBoxForDocumentGeneration(entry.width, entry.height, pictureArea).w : pptxCoverShownWidthForDocumentGeneration(entry, pictureArea), label, issues);
-      return pptxTitleShapeForDocumentGeneration(slide, look, issues, ink, probe, boxes.title, 3)
-        + pptxBulletsShapeForDocumentGeneration(slide, look, issues, ink, probe, boxes.body, PPTX_SIZES_FOR_DOCUMENT_GENERATION.column, '<p:ph type="body" sz="half" idx="2"/>')
-        + pptxPictureForDocumentGeneration(5, relId, entry, slide.image.alt, '<p:ph type="pic" idx="1"/>', pictureArea, fit);
+      return pptxTitleShapeForDocumentGeneration(slide, look, issues, ink, probe, boxes.title, 3, draw)
+        + pptxBulletsShapeForDocumentGeneration(slide, look, issues, ink, probe, boxes.body, PPTX_SIZES_FOR_DOCUMENT_GENERATION.column, '<p:ph type="body" sz="half" idx="2"/>', draw)
+        + pptxPictureForDocumentGeneration(5, relId, entry, slide.image.alt, '<p:ph type="pic" idx="1"/>', pictureArea, fit, draw);
     }
     if (slide.imageVariant === 'below') {
       var below = PPTX_BOX_FOR_DOCUMENT_GENERATION.body;
       pptxCheckResolutionForDocumentGeneration(entry, fit === 'contain' ? pptxContainBoxForDocumentGeneration(entry.width, entry.height, below).w : pptxCoverShownWidthForDocumentGeneration(entry, below), label, issues);
-      return pptxTitleShapeForDocumentGeneration(slide, look, issues, ink, probe)
-        + pptxPictureForDocumentGeneration(4, relId, entry, slide.image.alt, '<p:ph idx="1"/>', below, fit);
+      return pptxTitleShapeForDocumentGeneration(slide, look, issues, ink, probe, null, null, draw)
+        + pptxPictureForDocumentGeneration(4, relId, entry, slide.image.alt, '<p:ph idx="1"/>', below, fit, draw);
     }
     var full = PPTX_BOX_FOR_DOCUMENT_GENERATION.fullSlide;
     pptxCheckResolutionForDocumentGeneration(entry, fit === 'contain' ? pptxContainBoxForDocumentGeneration(entry.width, entry.height, full).w : pptxCoverShownWidthForDocumentGeneration(entry, full), label, issues);
-    return pptxPictureForDocumentGeneration(4, relId, entry, slide.image.alt, '', full, fit);
+    return pptxPictureForDocumentGeneration(4, relId, entry, slide.image.alt, '', full, fit, draw);
   }
   // The width, in points, that the whole picture would have if it were shown uncropped at the
   // scale a cover fit gives it.
@@ -6480,23 +6704,26 @@
     return entry.width * Math.max(area.w / entry.width, area.h / entry.height);
   }
 
-  function pptxSlideShapesForDocumentGeneration(slide, theme, look, showNumbers, issues, ink, probe, rels) {
+  // draw, when given, collects what the slide draws for the slide PDF (null on the probe pass).
+  function pptxSlideShapesForDocumentGeneration(slide, theme, look, showNumbers, issues, ink, probe, rels, draw) {
     var shapes = '';
     var numbered = false;
+    var numberBox = PPTX_BOX_FOR_DOCUMENT_GENERATION.number;
     if (slide.layout === 'title' || slide.layout === 'section') {
-      shapes = pptxCoverShapesForDocumentGeneration(slide, look, issues, ink, probe);
+      shapes = pptxCoverShapesForDocumentGeneration(slide, look, issues, ink, probe, draw);
     } else if (slide.layout === 'image') {
-      shapes = pptxImageShapesForDocumentGeneration(slide, look, issues, ink, probe, rels);
+      shapes = pptxImageShapesForDocumentGeneration(slide, look, issues, ink, probe, rels, draw);
       numbered = showNumbers && slide.imageVariant !== 'full';
+      if (slide.imageVariant === 'half') numberBox = pptxPictureBoxesForDocumentGeneration(slide.image.side).number;
     } else {
-      shapes = pptxTitleShapeForDocumentGeneration(slide, look, issues, ink, probe);
-      if (slide.layout === 'bullets') shapes += pptxBulletsShapeForDocumentGeneration(slide, look, issues, ink, probe);
-      else if (slide.layout === 'two_column') shapes += pptxColumnsShapesForDocumentGeneration(slide, look, issues, ink, probe);
-      else if (slide.layout === 'big_number') shapes += pptxStatsShapesForDocumentGeneration(slide, look, issues, ink, probe);
-      else if (slide.layout === 'table') shapes += pptxTableShapeForDocumentGeneration(slide, theme, look, issues, ink);
+      shapes = pptxTitleShapeForDocumentGeneration(slide, look, issues, ink, probe, null, null, draw);
+      if (slide.layout === 'bullets') shapes += pptxBulletsShapeForDocumentGeneration(slide, look, issues, ink, probe, null, null, null, draw);
+      else if (slide.layout === 'two_column') shapes += pptxColumnsShapesForDocumentGeneration(slide, look, issues, ink, probe, draw);
+      else if (slide.layout === 'big_number') shapes += pptxStatsShapesForDocumentGeneration(slide, look, issues, ink, probe, draw);
+      else if (slide.layout === 'table') shapes += pptxTableShapeForDocumentGeneration(slide, theme, look, issues, ink, draw);
       numbered = showNumbers;
     }
-    if (numbered) shapes += pptxSlideNumberForDocumentGeneration(30, slide.number, ink);
+    if (numbered) shapes += pptxSlideNumberForDocumentGeneration(30, slide.number, ink, numberBox, draw);
     return shapes;
   }
 
@@ -6527,37 +6754,63 @@
     return rels;
   }
 
-  function pptxSlideXmlForDocumentGeneration(slide, theme, look, showNumbers, issues, rels) {
+  // record, when given, is filled with what the slide draws, for the slide PDF: its layout part,
+  // its own background, the overlay on a photo, whether the layout's shapes are hidden, and the
+  // shapes in the order they are drawn.
+  function pptxSlideXmlForDocumentGeneration(slide, theme, look, showNumbers, issues, rels, record) {
     var background = slide.background;
     var backgroundXml = '';
     var ink = null;
     var overlay = null;
     var hideLayoutShapes = false;
+    var drawnBackground = null;
     if (background && background.image) {
       var entry = rels.images[background.image.blobId];
       // A first pass over the slide's shapes finds where its text sits; the overlay is set for
       // those areas, and the shapes are then built for real with text in the overlay's colours.
       var areas = [];
-      pptxSlideShapesForDocumentGeneration(slide, theme, look, showNumbers, pptxIssuesForDocumentGeneration(), null, areas, rels);
+      pptxSlideShapesForDocumentGeneration(slide, theme, look, showNumbers, pptxIssuesForDocumentGeneration(), null, areas, rels, null);
       overlay = pptxOverlayForDocumentGeneration(entry.sample, areas, theme);
       ink = overlay.ink;
       pptxCheckResolutionForDocumentGeneration(entry, pptxCoverShownWidthForDocumentGeneration(entry, PPTX_BOX_FOR_DOCUMENT_GENERATION.fullSlide), 'slide ' + slide.number + ' background', issues);
+      var backgroundCrop = pptxCoverCropForDocumentGeneration(entry.width, entry.height, 960, 540);
       backgroundXml = '<p:bg><p:bgPr><a:blipFill dpi="0" rotWithShape="1"><a:blip r:embed="' + rels.image(background.image.blobId) + '"/>'
-        + pptxSrcRectXmlForDocumentGeneration(pptxCoverCropForDocumentGeneration(entry.width, entry.height, 960, 540))
+        + pptxSrcRectXmlForDocumentGeneration(backgroundCrop)
         + '<a:stretch><a:fillRect/></a:stretch></a:blipFill><a:effectLst/></p:bgPr></p:bg>';
       hideLayoutShapes = true;
+      drawnBackground = { image: entry, crop: backgroundCrop };
     } else if (background && background.color) {
       ink = pptxInkForColorForDocumentGeneration(background.color, theme);
       backgroundXml = '<p:bg><p:bgPr><a:solidFill><a:srgbClr val="' + background.color + '"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>';
       hideLayoutShapes = true;
+      drawnBackground = { fill: '<a:srgbClr val="' + background.color + '"/>' };
     } else if (background && background.pattern) {
+      var patternColours = pptxPatternColoursForDocumentGeneration(slide, theme, look);
       backgroundXml = '<p:bg><p:bgPr><a:blipFill dpi="0" rotWithShape="1"><a:blip r:embed="'
-        + rels.pattern(pptxPatternColoursForDocumentGeneration(slide, theme, look)) + '"/>'
+        + rels.pattern(patternColours) + '"/>'
         + '<a:stretch><a:fillRect/></a:stretch></a:blipFill><a:effectLst/></p:bgPr></p:bg>';
+      // A content slide drawn on the main colour takes its text colour from that colour, as on a
+      // colour background. A title or section slide's layout already has cover colours.
+      if (background.filled) {
+        ink = pptxInkForColorForDocumentGeneration(patternColours.base, theme);
+        hideLayoutShapes = true;
+      }
+      drawnBackground = { pattern: patternColours.key };
     }
     issues.overflowHere = false;
-    var shapes = pptxSlideShapesForDocumentGeneration(slide, theme, look, showNumbers, issues, ink, null, rels);
-    if (overlay && overlay.opacity >= 0.01) shapes = pptxOverlayShapeForDocumentGeneration(overlay) + shapes;
+    var draw = record ? [] : null;
+    var shapes = pptxSlideShapesForDocumentGeneration(slide, theme, look, showNumbers, issues, ink, null, rels, draw);
+    if (overlay && overlay.opacity >= 0.01) {
+      shapes = pptxOverlayShapeForDocumentGeneration(overlay) + shapes;
+      if (draw) draw.unshift({ kind: 'rect', box: PPTX_BOX_FOR_DOCUMENT_GENERATION.fullSlide, fill: '<a:srgbClr val="' + overlay.scrim + '"/>', opacity: overlay.opacity });
+    }
+    if (record) {
+      record.number = slide.number;
+      record.layoutPart = pptxLayoutPartForDocumentGeneration(slide);
+      record.background = drawnBackground;
+      record.hideLayoutShapes = hideLayoutShapes;
+      record.shapes = draw;
+    }
     if (issues.overflowHere) issues.overflow.push(slide.number);
     // A slide on its own picture or colour hides the layout's rule and band, which are drawn for
     // the theme's own background.
@@ -6588,19 +6841,20 @@
   function pptxSlideMasterXmlForDocumentGeneration(look) {
     var box = PPTX_BOX_FOR_DOCUMENT_GENERATION;
     var titleStyle = '<a:lvl1pPr algn="l" defTabSz="914400" rtl="0" eaLnBrk="1" latinLnBrk="0" hangingPunct="1"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:spcBef><a:spcPct val="0"/></a:spcBef><a:buNone/>'
-      + '<a:defRPr sz="3600"' + (look.titleBold ? ' b="1"' : '') + ' kern="1200"><a:solidFill><a:schemeClr val="tx2"/></a:solidFill><a:latin typeface="+mj-lt"/><a:ea typeface="+mj-ea"/><a:cs typeface="+mj-cs"/></a:defRPr></a:lvl1pPr>';
+      + '<a:defRPr sz="3600"' + (look.titleBold ? ' b="1"' : '') + ' kern="1200"><a:solidFill>' + PPTX_TITLE_FILL_FOR_DOCUMENT_GENERATION + '</a:solidFill><a:latin typeface="+mj-lt"/><a:ea typeface="+mj-ea"/><a:cs typeface="+mj-cs"/></a:defRPr></a:lvl1pPr>';
     var bodyLevel = function (level, marL, indent, size, char) {
       return '<a:lvl' + level + 'pPr marL="' + marL + '" indent="' + indent + '" algn="l" defTabSz="914400" rtl="0" eaLnBrk="1" latinLnBrk="0" hangingPunct="1"><a:lnSpc><a:spcPct val="100000"/></a:lnSpc><a:spcBef><a:spcPts val="1000"/></a:spcBef>'
-        + '<a:buClr><a:schemeClr val="accent2"/></a:buClr><a:buFont typeface="Arial" panose="020B0604020202020204" pitchFamily="34" charset="0"/><a:buChar char="' + char + '"/>'
-        + '<a:defRPr sz="' + size + '" kern="1200"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="+mn-lt"/><a:ea typeface="+mn-ea"/><a:cs typeface="+mn-cs"/></a:defRPr></a:lvl' + level + 'pPr>';
+        + '<a:buClr>' + PPTX_ACCENT_FILL_FOR_DOCUMENT_GENERATION + '</a:buClr><a:buFont typeface="Arial" panose="020B0604020202020204" pitchFamily="34" charset="0"/><a:buChar char="' + char + '"/>'
+        + '<a:defRPr sz="' + size + '" kern="1200"><a:solidFill>' + PPTX_TEXT_FILL_FOR_DOCUMENT_GENERATION + '</a:solidFill><a:latin typeface="+mn-lt"/><a:ea typeface="+mn-ea"/><a:cs typeface="+mn-cs"/></a:defRPr></a:lvl' + level + 'pPr>';
     };
-    var bodyStyle = bodyLevel(1, 274320, -274320, 2400, '\u2022') + bodyLevel(2, 685800, -228600, 2000, '\u2013') + bodyLevel(3, 1097280, -228600, 1800, '\u2013');
+    var bullets = PPTX_BULLET_CHARS_FOR_DOCUMENT_GENERATION;
+    var bodyStyle = bodyLevel(1, 274320, -274320, 2400, bullets[0]) + bodyLevel(2, 685800, -228600, 2000, bullets[1]) + bodyLevel(3, 1097280, -228600, 1800, bullets[2]);
     var otherStyle = '<a:defPPr><a:defRPr lang="en-US"/></a:defPPr><a:lvl1pPr marL="0" algn="l" defTabSz="914400" rtl="0" eaLnBrk="1" latinLnBrk="0" hangingPunct="1"><a:defRPr sz="1800" kern="1200"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="+mn-lt"/><a:ea typeface="+mn-ea"/><a:cs typeface="+mn-cs"/></a:defRPr></a:lvl1pPr>';
     var shapes = pptxPlaceholderDefForDocumentGeneration(2, 'Title Placeholder', '<p:ph type="title"/>', box.title, 'b', '', 'Click to edit Master title style')
       + pptxPlaceholderDefForDocumentGeneration(3, 'Text Placeholder', '<p:ph type="body" idx="1"/>', box.body, 't', '', 'Click to edit Master text styles')
       + '<p:sp><p:nvSpPr><p:cNvPr id="4" name="Slide Number Placeholder"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="sldNum" sz="quarter" idx="4"/></p:nvPr></p:nvSpPr>'
       + '<p:spPr>' + pptxXfrmForDocumentGeneration(box.number) + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>'
-      + '<p:txBody><a:bodyPr vert="horz" lIns="0" tIns="0" rIns="0" bIns="0" rtlCol="0" anchor="ctr"/><a:lstStyle><a:lvl1pPr algn="r"><a:defRPr sz="1100"><a:solidFill>' + PPTX_MUTED_FILL_FOR_DOCUMENT_GENERATION + '</a:solidFill><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl1pPr></a:lstStyle>'
+      + '<p:txBody><a:bodyPr vert="horz" lIns="0" tIns="0" rIns="0" bIns="0" rtlCol="0" anchor="ctr"/><a:lstStyle><a:lvl1pPr algn="r"><a:defRPr sz="' + (PPTX_NUMBER_SIZE_FOR_DOCUMENT_GENERATION * 100) + '"><a:solidFill>' + PPTX_MUTED_FILL_FOR_DOCUMENT_GENERATION + '</a:solidFill><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl1pPr></a:lstStyle>'
       + '<a:p><a:fld id="' + PPTX_SLIDENUM_FIELD_ID_FOR_DOCUMENT_GENERATION + '" type="slidenum"><a:rPr lang="en-US"/><a:t>\u2039#\u203a</a:t></a:fld><a:endParaRPr lang="en-US"/></a:p></p:txBody></p:sp>';
     var layoutIds = '';
     for (var i = 1; i <= PPTX_LAYOUT_PART_COUNT_FOR_DOCUMENT_GENERATION; i++) layoutIds += '<p:sldLayoutId id="' + (2147483648 + i) + '" r:id="rId' + i + '"/>';
@@ -6620,62 +6874,42 @@
 
   function pptxLayoutXmlForDocumentGeneration(part, look) {
     var box = PPTX_BOX_FOR_DOCUMENT_GENERATION;
-    var filled = look.cover === 'fill';
-    var background = '';
+    var decor = pptxLayoutDecorForDocumentGeneration(part, look);
+    var background = decor.background ? '<p:bg><p:bgPr><a:solidFill>' + decor.background + '</a:solidFill><a:effectLst/></p:bgPr></p:bg>' : '';
+    // The band, bar, or rule goes after the placeholders.
+    var decorShapes = decor.rects.map(function (rect) { return pptxRectForDocumentGeneration(10, rect.name, rect.box, rect.fill); }).join('');
     var shapes = '';
     var type = '';
     var name = '';
-    var ruleShape = look.rule ? pptxRectForDocumentGeneration(10, 'Accent Rule', box.rule, '<a:schemeClr val="accent2"/>') : '';
-    // The band is the accent colour, or a tint of the primary when the two are the same (a shade
-    // on a light primary, where a tint would vanish).
-    var bandFill = '<a:schemeClr val="accent2"/>';
-    if (look.sameAccent) {
-      bandFill = look.coverText === 'tx1'
-        ? '<a:schemeClr val="accent1"><a:lumMod val="75000"/></a:schemeClr>'
-        : '<a:schemeClr val="accent1"><a:lumMod val="60000"/><a:lumOff val="40000"/></a:schemeClr>';
-    }
     if (part === 1) {
       type = 'title';
       name = 'Title Slide';
-      if (filled) background = '<p:bg><p:bgPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>';
       shapes = pptxPlaceholderDefForDocumentGeneration(2, 'Title', '<p:ph type="ctrTitle"/>', box.coverTitle, 'b', pptxCoverLstStyleForDocumentGeneration(look, 54, false, look.titleBold), 'Click to edit Master title style')
         + pptxPlaceholderDefForDocumentGeneration(3, 'Subtitle', '<p:ph type="subTitle" idx="1"/>', box.coverSubtitle, 't', pptxCoverLstStyleForDocumentGeneration(look, 24, true, false), 'Click to edit Master subtitle style');
-      if (filled) shapes += pptxRectForDocumentGeneration(10, 'Accent Band', box.coverBand, bandFill);
-      else if (look.rule) {
-        var coverRule = look.align === 'ctr' ? { x: (960 - box.coverRule.w) / 2, y: box.coverRule.y, w: box.coverRule.w, h: box.coverRule.h } : box.coverRule;
-        shapes += pptxRectForDocumentGeneration(10, 'Accent Rule', coverRule, '<a:schemeClr val="accent2"/>');
-      }
     } else if (part === 2) {
       type = 'secHead';
       name = 'Section Header';
-      if (filled) background = '<p:bg><p:bgPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>';
-      // A filled section lines up with the cover. A plain one marks the section with a bar beside a
-      // left-aligned title, or a short rule under a centred one.
-      var sectionTitleBox = filled ? { x: 72, y: box.sectionTitle.y, w: 816, h: box.sectionTitle.h } : box.sectionTitle;
-      var sectionSubtitleBox = filled ? { x: 72, y: box.sectionSubtitle.y, w: 816, h: box.sectionSubtitle.h } : box.sectionSubtitle;
-      shapes = pptxPlaceholderDefForDocumentGeneration(2, 'Title', '<p:ph type="title"/>', sectionTitleBox, 'b', pptxCoverLstStyleForDocumentGeneration(look, 44, false, look.titleBold), 'Click to edit Master title style')
-        + pptxPlaceholderDefForDocumentGeneration(3, 'Text', '<p:ph type="body" idx="1"/>', sectionSubtitleBox, 't', pptxCoverLstStyleForDocumentGeneration(look, 22, true, false), 'Click to edit Master text styles');
-      if (filled) shapes += pptxRectForDocumentGeneration(10, 'Accent Band', box.coverBand, bandFill);
-      else if (look.align === 'l') shapes += pptxRectForDocumentGeneration(10, 'Accent Bar', box.sectionBar, '<a:schemeClr val="accent2"/>');
-      else if (look.rule) shapes += pptxRectForDocumentGeneration(10, 'Accent Rule', box.sectionRule, '<a:schemeClr val="accent2"/>');
+      var sectionBoxes = pptxSectionBoxesForDocumentGeneration(look);
+      shapes = pptxPlaceholderDefForDocumentGeneration(2, 'Title', '<p:ph type="title"/>', sectionBoxes.title, 'b', pptxCoverLstStyleForDocumentGeneration(look, 44, false, look.titleBold), 'Click to edit Master title style')
+        + pptxPlaceholderDefForDocumentGeneration(3, 'Text', '<p:ph type="body" idx="1"/>', sectionBoxes.subtitle, 't', pptxCoverLstStyleForDocumentGeneration(look, 22, true, false), 'Click to edit Master text styles');
     } else if (part === 3) {
       type = 'obj';
       name = 'Title and Content';
       shapes = pptxPlaceholderDefForDocumentGeneration(2, 'Title', '<p:ph type="title"/>', box.title, '', '', 'Click to edit Master title style')
         + pptxPlaceholderDefForDocumentGeneration(3, 'Content', '<p:ph idx="1"/>', box.body, '', '', 'Click to edit Master text styles')
-        + pptxSlideNumberDefForDocumentGeneration(4, 12) + ruleShape;
+        + pptxSlideNumberDefForDocumentGeneration(4, 12);
     } else if (part === 4) {
       type = 'twoObj';
       name = 'Two Content';
       shapes = pptxPlaceholderDefForDocumentGeneration(2, 'Title', '<p:ph type="title"/>', box.title, '', '', 'Click to edit Master title style')
         + pptxPlaceholderDefForDocumentGeneration(3, 'Left', '<p:ph sz="half" idx="1"/>', box.left, '', '', 'Click to edit Master text styles')
         + pptxPlaceholderDefForDocumentGeneration(4, 'Right', '<p:ph sz="half" idx="2"/>', box.right, '', '', 'Click to edit Master text styles')
-        + pptxSlideNumberDefForDocumentGeneration(5, 12) + ruleShape;
+        + pptxSlideNumberDefForDocumentGeneration(5, 12);
     } else if (part === 5) {
       type = 'titleOnly';
       name = 'Title Only';
       shapes = pptxPlaceholderDefForDocumentGeneration(2, 'Title', '<p:ph type="title"/>', box.title, '', '', 'Click to edit Master title style')
-        + pptxSlideNumberDefForDocumentGeneration(3, 12) + ruleShape;
+        + pptxSlideNumberDefForDocumentGeneration(3, 12);
     } else if (part === 6) {
       type = 'blank';
       name = 'Blank';
@@ -6688,9 +6922,9 @@
       shapes = pptxPlaceholderDefForDocumentGeneration(2, 'Title', '<p:ph type="title"/>', pictureBoxes.title, 'b', '', 'Click to edit Master title style')
         + pptxPlaceholderDefForDocumentGeneration(3, 'Text', '<p:ph type="body" sz="half" idx="2"/>', pictureBoxes.body, 't', '', 'Click to edit Master text styles')
         + pptxPicturePlaceholderDefForDocumentGeneration(4, pictureBoxes.picture)
-        + pptxSlideNumberDefForDocumentGeneration(5, 12, pictureBoxes.number)
-        + (look.rule ? pptxRectForDocumentGeneration(10, 'Accent Rule', pictureBoxes.rule, '<a:schemeClr val="accent2"/>') : '');
+        + pptxSlideNumberDefForDocumentGeneration(5, 12, pictureBoxes.number);
     }
+    shapes += decorShapes;
     return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
       + '<p:sldLayout ' + PPTX_NS_FOR_DOCUMENT_GENERATION + ' type="' + type + '" preserve="1"><p:cSld name="' + name + '">' + background
       + '<p:spTree>' + pptxGroupHeaderForDocumentGeneration() + shapes + '</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>';
@@ -6712,15 +6946,8 @@
   // The theme part: the document theme's colours and its installed (Office) fonts, so the colour
   // and font pickers in PowerPoint offer the deck's own palette.
   function pptxThemeXmlForDocumentGeneration(theme) {
-    var colors = theme.colors;
-    var accentText = colors.accentText || colors.accent;
-    var scheme = [
-      ['dk1', colors.text], ['lt1', 'FFFFFF'], ['dk2', colors.heading], ['lt2', pptxTintForDocumentGeneration(colors.primary, 0.92)],
-      ['accent1', colors.primary], ['accent2', accentText], ['accent3', pptxTintForDocumentGeneration(colors.primary, 0.45)],
-      ['accent4', colors.muted], ['accent5', pptxTintForDocumentGeneration(accentText, 0.45)], ['accent6', colors.tableBorder || colors.muted],
-      ['hlink', colors.link || colors.accent], ['folHlink', colors.muted]
-    ].map(function (pair) {
-      return '<a:' + pair[0] + '><a:srgbClr val="' + String(pair[1]).toUpperCase() + '"/></a:' + pair[0] + '>';
+    var scheme = pptxSchemeForDocumentGeneration(theme).map(function (pair) {
+      return '<a:' + pair[0] + '><a:srgbClr val="' + pair[1] + '"/></a:' + pair[0] + '>';
     }).join('');
     var label = pptxTextForDocumentGeneration(theme.label || theme.name || 'Theme');
     return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -6765,35 +6992,196 @@
 
   // deps.loadImage(blobId) gives a picture's attachment record; without it a deck that names a
   // picture is still made, without the picture and with a warning.
-  function buildPptxForDocumentGeneration(inputForDocumentGeneration, contextForPptx, depsForPptx) {
+  // Everything a deck needs before its slides are drawn: the slides as normalized from the input,
+  // their pictures loaded and settled, and the pattern images. The PPTX writer and the slide PDF
+  // both start here, so they make the same decisions about every slide.
+  function pptxPrepareDeckForDocumentGeneration(inputForDocumentGeneration, contextForPptx, depsForPptx) {
+    var safeContext = contextForPptx || {};
+    var theme = safeContext.theme || PPTX_FALLBACK_THEME_FOR_DOCUMENT_GENERATION;
+    var deck = {
+      theme: theme,
+      look: pptxLookForDocumentGeneration(theme),
+      showNumbers: safeContext.pageNumbers !== false,
+      issues: pptxIssuesForDocumentGeneration(),
+      slides: null,
+      images: null,
+      patterns: null
+    };
+    deck.slides = normalizeDeckForDocumentGeneration(inputForDocumentGeneration, deck.issues);
+    var slides = deck.slides;
+    var look = deck.look;
+    // A number on a deck's only slide says nothing, so it is left off unless asked for.
+    if (slides.length === 1 && inputForDocumentGeneration.page_numbers !== true) deck.showNumbers = false;
+    return pptxLoadImagesForDocumentGeneration(slides, depsForPptx, deck.issues).then(function (loaded) {
+      deck.images = loaded;
+      pptxSettleImagesForDocumentGeneration(slides, deck.images, deck.issues);
+      slides.forEach(function (slide) {
+        if (slide.image) notePictureForDocumentGeneration(safeContext, slide.image.blobId);
+        if (slide.background && slide.background.image) notePictureForDocumentGeneration(safeContext, slide.background.image.blobId);
+      });
+      // A cover or section slide with nothing behind it gets the theme's pattern, including one
+      // whose picture could not be used. A deck's only slide is its cover too: with no picture and
+      // nothing behind it, it is drawn on the main colour with the pattern, whatever its layout.
+      if (look.cover === 'fill' && look.coverPattern) {
+        slides.forEach(function (slide) {
+          if (slide.background) return;
+          if (slide.layout === 'title' || slide.layout === 'section') slide.background = { pattern: look.coverPattern };
+          else if (slides.length === 1 && !slide.image) slide.background = { pattern: look.coverPattern, filled: true };
+        });
+      }
+      return pptxPatternPngsForDocumentGeneration(slides, deck.theme, look);
+    }).then(function (patterns) {
+      deck.patterns = patterns;
+      return deck;
+    });
+  }
+
+  // Each slide's XML, and, when records is an array, what each slide draws.
+  function pptxDrawDeckForDocumentGeneration(deck, records) {
+    var deckMedia = { parts: [], byKey: {} };
+    var slideRels = deck.slides.map(function () { return pptxSlideRelsForDocumentGeneration(deckMedia, deck.images, deck.patterns); });
+    var slideXml = deck.slides.map(function (slide, index) {
+      var record = records ? {} : null;
+      var xml = pptxSlideXmlForDocumentGeneration(slide, deck.theme, deck.look, deck.showNumbers, deck.issues, slideRels[index], record);
+      if (records) records.push(record);
+      return xml;
+    });
+    return { deckMedia: deckMedia, slideRels: slideRels, slideXml: slideXml };
+  }
+
+  // keep, when given, receives the prepared deck and what each slide draws, so a PDF of the same
+  // deck is printed from this drawing rather than a second one.
+  function buildPptxForDocumentGeneration(inputForDocumentGeneration, contextForPptx, depsForPptx, keep) {
     if (!globalScopeForDocumentGeneration.JSZip) {
       throw new Error('PPTX generator is unavailable.');
     }
-    var safeContext = contextForPptx || {};
-    var warnings = safeContext.warnings || [];
-    var theme = safeContext.theme || PPTX_FALLBACK_THEME_FOR_DOCUMENT_GENERATION;
-    var look = pptxLookForDocumentGeneration(theme);
-    var showNumbers = safeContext.pageNumbers !== false;
-    var issues = pptxIssuesForDocumentGeneration();
-    var slides = normalizeDeckForDocumentGeneration(inputForDocumentGeneration, issues);
-    var images = null;
-    return pptxLoadImagesForDocumentGeneration(slides, depsForPptx, issues).then(function (loaded) {
-      images = loaded;
-      pptxSettleImagesForDocumentGeneration(slides, images, issues);
-      // A cover or section slide with nothing behind it gets the theme's pattern, including one
-      // whose picture could not be used.
-      if (look.cover === 'fill' && look.coverPattern) {
-        slides.forEach(function (slide) {
-          if (!slide.background && (slide.layout === 'title' || slide.layout === 'section')) slide.background = { pattern: look.coverPattern };
-        });
+    var warnings = (contextForPptx && contextForPptx.warnings) || [];
+    return pptxPrepareDeckForDocumentGeneration(inputForDocumentGeneration, contextForPptx, depsForPptx).then(function (deck) {
+      var records = keep ? [] : null;
+      var drawn = pptxDrawDeckForDocumentGeneration(deck, records);
+      if (keep) {
+        keep.deck = deck;
+        keep.records = records;
       }
-      return pptxPatternPngsForDocumentGeneration(slides, theme, look);
-    }).then(function (patterns) {
-      var deckMedia = { parts: [], byKey: {} };
-      var slideRels = slides.map(function () { return pptxSlideRelsForDocumentGeneration(deckMedia, images, patterns); });
-      var slideXml = slides.map(function (slide, index) { return pptxSlideXmlForDocumentGeneration(slide, theme, look, showNumbers, issues, slideRels[index]); });
-      pptxWarningsForDocumentGeneration(issues).forEach(function (warning) { warnings.push(warning); });
-      return pptxWriteDeckForDocumentGeneration(inputForDocumentGeneration, slides, slideXml, slideRels, deckMedia, theme, look);
+      pptxWarningsForDocumentGeneration(deck.issues).forEach(function (warning) { warnings.push(warning); });
+      return pptxWriteDeckForDocumentGeneration(inputForDocumentGeneration, deck.slides, drawn.slideXml, drawn.slideRels, drawn.deckMedia, deck.theme, deck.look);
+    });
+  }
+
+  // ---- A deck as a PDF ----
+  // The slides the PPTX writer would make, drawn as HTML pages for Chrome to print. Only Chrome
+  // can print them: the built-in PDF writer lays out flowing text and has no way to place a slide.
+
+  function pptxImageForPrintForDocumentGeneration(entry) {
+    return { bytes: entry.bytes, type: 'image/' + entry.ext };
+  }
+
+  // The deck as documentPrint.renderSlides draws it: each slide's background, its layout's band or
+  // rule, and its shapes, with every colour resolved to hex from the theme.
+  function pptxPrintDeckForDocumentGeneration(deck, records) {
+    var theme = deck.theme;
+    var hex = function (fill) { return pptxFillHexForDocumentGeneration(theme, fill); };
+    var decorByPart = {};
+    var slides = records.map(function (record) {
+      var part = record.layoutPart;
+      if (!decorByPart[part]) decorByPart[part] = pptxLayoutDecorForDocumentGeneration(part, deck.look);
+      var decor = decorByPart[part];
+      // The master's background is white; a filled title or section layout has its own colour.
+      var background = { color: decor.background ? hex(decor.background) : 'FFFFFF' };
+      var own = record.background;
+      if (own && own.fill) {
+        background = { color: hex(own.fill) };
+      } else if (own && own.image) {
+        background.image = pptxImageForPrintForDocumentGeneration(own.image);
+        background.crop = own.crop;
+      } else if (own && own.pattern && deck.patterns[own.pattern]) {
+        background.image = { bytes: deck.patterns[own.pattern].bytes, type: 'image/png' };
+        background.crop = { l: 0, t: 0, r: 0, b: 0 };
+      }
+      var shapes = [];
+      if (!record.hideLayoutShapes) {
+        decor.rects.forEach(function (rect) { shapes.push({ kind: 'rect', box: rect.box, color: hex(rect.fill), opacity: 1 }); });
+      }
+      record.shapes.forEach(function (shape) {
+        if (shape.kind === 'rect') {
+          shapes.push({ kind: 'rect', box: shape.box, color: hex(shape.fill), opacity: shape.opacity });
+        } else if (shape.kind === 'picture') {
+          shapes.push({ kind: 'picture', box: shape.box, crop: shape.crop, alt: shape.alt, image: pptxImageForPrintForDocumentGeneration(shape.image) });
+        } else if (shape.kind === 'text') {
+          shapes.push({
+            kind: 'text', box: shape.box, anchor: shape.anchor, align: shape.align, font: shape.font, lineHeight: shape.lineHeight,
+            paragraphs: shape.paragraphs.map(function (paragraph) {
+              return {
+                runs: paragraph.runs, size: paragraph.size, bold: paragraph.bold, color: hex(paragraph.fill), spaceBefore: paragraph.spaceBefore,
+                bullet: paragraph.bullet ? { char: paragraph.bullet.char, color: hex(paragraph.bullet.fill), left: paragraph.bullet.left, hang: paragraph.bullet.hang } : null
+              };
+            })
+          });
+        } else if (shape.kind === 'table') {
+          shapes.push(shape);
+        }
+      });
+      return { number: record.number, background: background, shapes: shapes };
+    });
+    // The fonts the theme part names, which are the ones PowerPoint shows.
+    return {
+      widthPt: 960,
+      heightPt: 540,
+      fonts: {
+        heading: { office: theme.fonts.heading.office, kind: theme.fonts.heading.kind },
+        body: { office: theme.fonts.body.office, kind: theme.fonts.body.kind }
+      },
+      slides: slides
+    };
+  }
+
+  // Why a slide PDF could not be made, as the error the tool returns. With also_pdf the PPTX already
+  // exists, so the advice is to tell the user, not to make the deck again.
+  function slidePdfFailureForDocumentGeneration(printed, isCompanion) {
+    var code = printed && printed.code;
+    var cause;
+    if (code === 'declined') cause = 'the user chose the built-in PDF writer, which cannot draw slides';
+    else if (code === 'no-consent') cause = 'the user has not yet said whether Chrome may print PDFs';
+    else cause = 'Chrome could not print the slides (' + ((printed && printed.error) || 'no answer from the printer') + ')';
+    var settings = code === 'no-consent'
+      ? 'ask the user to answer the print prompt'
+      : (code === 'declined' ? 'tell the user that turning on Print PDFs with Chrome in Settings lets you make slide PDFs' : 'tell the user');
+    if (isCompanion) return 'The PPTX was made, but not its PDF: a PDF of slides needs Chrome\'s printer, and ' + cause + '. Do not make the deck again; ' + settings + '.';
+    return 'A PDF of slides needs Chrome\'s printer, and ' + cause + '. Make the deck as a PPTX instead, and ' + settings + '.';
+  }
+
+  function buildSlidePdfForDocumentGeneration(inputForDocumentGeneration, contextForPdf, depsForPdf, optionsForPdf) {
+    var safeOptions = optionsForPdf || {};
+    var warnings = (contextForPdf && contextForPdf.warnings) || [];
+    var printPdf = depsForPdf && typeof depsForPdf.printPdf === 'function' ? depsForPdf.printPdf : null;
+    var printer = agentNamespaceForDocumentGeneration.documentPrint;
+    if (!printPdf || !printer || typeof printer.renderSlides !== 'function') {
+      return Promise.reject(new Error(safeOptions.drawn
+        ? 'The PPTX was made, but not its PDF: a PDF of slides can only be printed by Chrome, which is not available here. Do not make the deck again.'
+        : 'A PDF of slides can only be printed by Chrome, which is not available here. Make the deck as a PPTX instead.'));
+    }
+    var kept = safeOptions.drawn && safeOptions.drawn.deck ? safeOptions.drawn : null;
+    var drawing = kept ? Promise.resolve(kept) : pptxPrepareDeckForDocumentGeneration(inputForDocumentGeneration, contextForPdf, depsForPdf).then(function (deck) {
+      var records = [];
+      pptxDrawDeckForDocumentGeneration(deck, records);
+      return { deck: deck, records: records };
+    });
+    return drawing.then(function (drawnDeck) {
+      pptxWarningsForDocumentGeneration(drawnDeck.deck.issues).forEach(function (warning) { warnings.push(warning); });
+      var navigator = globalScopeForDocumentGeneration.navigator;
+      var rendered = printer.renderSlides(pptxPrintDeckForDocumentGeneration(drawnDeck.deck, drawnDeck.records), {
+        title: safeOptions.title,
+        lang: navigator && navigator.language
+      });
+      return Promise.resolve(printPdf({ html: rendered.html, title: safeOptions.title || '', fonts: rendered.fonts, templates: rendered.templates }));
+    }).then(function (printed) {
+      if (!printed || !printed.ok || !printed.base64) throw new Error(slidePdfFailureForDocumentGeneration(printed, !!safeOptions.drawn));
+      (Array.isArray(printed.warnings) ? printed.warnings : []).forEach(function (warning) { if (warning) warnings.push(String(warning)); });
+      return {
+        mimeType: PDF_MIME_FOR_DOCUMENT_GENERATION,
+        dataUrl: 'data:' + PDF_MIME_FOR_DOCUMENT_GENERATION + ';base64,' + printed.base64,
+        size: base64ByteLengthForDocumentGeneration(printed.base64)
+      };
     });
   }
 
@@ -6974,7 +7362,7 @@
   }
 
   function buildRenderContextForDocumentGeneration(inputForContext, formatForContext) {
-    var contextForRender = { theme: null, page: null, pageNumbers: false, headerText: '', warnings: [] };
+    var contextForRender = { theme: null, page: null, pageNumbers: false, headerText: '', warnings: [], pictureBlobIds: [] };
     if (formatForContext !== 'docx' && formatForContext !== 'pdf' && formatForContext !== 'xlsx' && formatForContext !== 'pptx') return contextForRender;
     var themesForContext = agentNamespaceForDocumentGeneration.documentThemes;
     if (isSourceDocumentInputForDocumentGeneration(inputForContext)) {
@@ -7149,7 +7537,58 @@
     return resultForCut;
   }
 
+  // A PDF whose content is slides: the deck the PPTX writer would make, printed page by page.
+  function isSlidePdfInputForDocumentGeneration(input, format) {
+    return format === 'pdf'
+      && Array.isArray(input.slides) && input.slides.length > 0
+      && !Array.isArray(input.blocks)
+      && !(typeof input.html === 'string' && input.html.trim());
+  }
+
+  // The filename of the PDF made beside a DOCX or PPTX: the same name with .pdf.
+  function companionPdfFilenameForDocumentGeneration(primaryFilename) {
+    return String(primaryFilename || 'generated-document').replace(/\.(docx|pptx)$/i, '') + '.pdf';
+  }
+
+  // also_pdf on a DOCX or PPTX makes a PDF from the same spec in the same call, so the model does
+  // not write the content twice. A deck's PDF is printed from the drawing the PPTX was written
+  // from, so its pictures are loaded once and its slides match the PPTX's. The PDF carries only
+  // the note and warnings the first file did not already give; when it cannot be made, the first
+  // file still stands and companionError says why.
   function createDocumentForDocumentGeneration(inputForDocumentGeneration, depsForDocumentGeneration) {
+    var safeInputForCompanion = inputForDocumentGeneration || {};
+    var formatForCompanion = String(safeInputForCompanion.format || '').toLowerCase();
+    var wantsCompanion = safeInputForCompanion.also_pdf === true && (formatForCompanion === 'docx' || formatForCompanion === 'pptx');
+    if (!wantsCompanion) return createSingleDocumentForDocumentGeneration(safeInputForCompanion, depsForDocumentGeneration, null);
+    var keptDeck = formatForCompanion === 'pptx' ? {} : null;
+    return createSingleDocumentForDocumentGeneration(safeInputForCompanion, depsForDocumentGeneration, { keepDeck: keptDeck }).then(function (primaryResult) {
+      var companionInput = Object.assign({}, safeInputForCompanion, {
+        format: 'pdf',
+        also_pdf: false,
+        filename: companionPdfFilenameForDocumentGeneration(primaryResult.filename)
+      });
+      var companionOptions = keptDeck ? { slidePdf: true, drawn: keptDeck } : null;
+      return createSingleDocumentForDocumentGeneration(companionInput, depsForDocumentGeneration, companionOptions).then(function (companionResult) {
+        var primaryWarnings = primaryResult.warnings || [];
+        var newWarnings = (companionResult.warnings || []).filter(function (warning) { return primaryWarnings.indexOf(warning) === -1; });
+        if (newWarnings.length) companionResult.warnings = newWarnings;
+        else delete companionResult.warnings;
+        if (companionResult.note && companionResult.note === primaryResult.note) delete companionResult.note;
+        if (!companionResult.pictureBlobIds && primaryResult.pictureBlobIds) companionResult.pictureBlobIds = primaryResult.pictureBlobIds.slice();
+        primaryResult.companion = companionResult;
+        return primaryResult;
+      }, function (companionErr) {
+        primaryResult.companionError = (companionErr && companionErr.message) || 'The PDF could not be made.';
+        return primaryResult;
+      });
+    });
+  }
+
+  // options.slidePdf prints a PDF as slides whatever the input holds (a deck made from content or a
+  // title alone has no slides array); options.keepDeck and options.drawn pass a PPTX's drawing on
+  // to its PDF.
+  function createSingleDocumentForDocumentGeneration(inputForDocumentGeneration, depsForDocumentGeneration, optionsForSingle) {
+    var safeOptionsForSingle = optionsForSingle || {};
     var safeInputForDocumentGeneration = inputForDocumentGeneration || {};
     var formatForDocumentGeneration = String(safeInputForDocumentGeneration.format || '').toLowerCase();
     if (['xlsx', 'docx', 'pdf', 'pptx', 'csv'].indexOf(formatForDocumentGeneration) === -1) {
@@ -7160,11 +7599,15 @@
       formatForDocumentGeneration,
       safeInputForDocumentGeneration.title
     );
-    var renderContextForDocumentGeneration = buildRenderContextForDocumentGeneration(safeInputForDocumentGeneration, formatForDocumentGeneration);
-    return prepareInputWithBlocksForDocumentGeneration(safeInputForDocumentGeneration, formatForDocumentGeneration, depsForDocumentGeneration)
+    // A slide PDF is themed, numbered, and prepared as the deck it prints.
+    var isSlidePdfForDocumentGeneration = formatForDocumentGeneration === 'pdf'
+      && (safeOptionsForSingle.slidePdf === true || isSlidePdfInputForDocumentGeneration(safeInputForDocumentGeneration, formatForDocumentGeneration));
+    var buildFormatForDocumentGeneration = isSlidePdfForDocumentGeneration ? 'pptx' : formatForDocumentGeneration;
+    var renderContextForDocumentGeneration = buildRenderContextForDocumentGeneration(safeInputForDocumentGeneration, buildFormatForDocumentGeneration);
+    return prepareInputWithBlocksForDocumentGeneration(safeInputForDocumentGeneration, buildFormatForDocumentGeneration, depsForDocumentGeneration)
       .then(function (preparedForPictures) {
-        if (formatForDocumentGeneration !== 'docx' && formatForDocumentGeneration !== 'pdf') return preparedForPictures;
-        return docPicturesForDocumentGeneration(preparedForPictures.input, formatForDocumentGeneration, renderContextForDocumentGeneration, depsForDocumentGeneration)
+        if (buildFormatForDocumentGeneration !== 'docx' && buildFormatForDocumentGeneration !== 'pdf') return preparedForPictures;
+        return docPicturesForDocumentGeneration(preparedForPictures.input, buildFormatForDocumentGeneration, renderContextForDocumentGeneration, depsForDocumentGeneration)
           .then(function (inputWithPictures) {
             return Object.assign({}, preparedForPictures, { input: inputWithPictures });
           });
@@ -7172,10 +7615,15 @@
       .then(function (preparedForDocumentGeneration) {
         var preparedInputForDocumentGeneration = preparedForDocumentGeneration.input;
         var noteForDocumentGeneration = preparedForDocumentGeneration.note;
-        var cutWarningsForDocumentGeneration = contentCutWarningsForDocumentGeneration(safeInputForDocumentGeneration, preparedForDocumentGeneration, formatForDocumentGeneration);
+        var cutWarningsForDocumentGeneration = contentCutWarningsForDocumentGeneration(safeInputForDocumentGeneration, preparedForDocumentGeneration, buildFormatForDocumentGeneration);
         Array.prototype.push.apply(renderContextForDocumentGeneration.warnings, cutWarningsForDocumentGeneration.now);
         var builtForDocumentGeneration;
-        if (formatForDocumentGeneration === 'xlsx') {
+        if (isSlidePdfForDocumentGeneration) {
+          builtForDocumentGeneration = buildSlidePdfForDocumentGeneration(preparedInputForDocumentGeneration, renderContextForDocumentGeneration, depsForDocumentGeneration, {
+            title: safeInputForDocumentGeneration.title || filenameForDocumentGeneration.replace(/\.pdf$/i, ''),
+            drawn: safeOptionsForSingle.drawn || null
+          });
+        } else if (formatForDocumentGeneration === 'xlsx') {
           builtForDocumentGeneration = buildXlsxForDocumentGeneration(preparedInputForDocumentGeneration, renderContextForDocumentGeneration);
         } else if (formatForDocumentGeneration === 'csv') {
           builtForDocumentGeneration = buildCsvForDocumentGeneration(preparedInputForDocumentGeneration, renderContextForDocumentGeneration);
@@ -7192,7 +7640,7 @@
             }
           );
         } else {
-          builtForDocumentGeneration = buildPptxForDocumentGeneration(preparedInputForDocumentGeneration, renderContextForDocumentGeneration, depsForDocumentGeneration);
+          builtForDocumentGeneration = buildPptxForDocumentGeneration(preparedInputForDocumentGeneration, renderContextForDocumentGeneration, depsForDocumentGeneration, safeOptionsForSingle.keepDeck || null);
         }
         return Promise.resolve(builtForDocumentGeneration).then(function (resultForDocumentGeneration) {
           if (!resultForDocumentGeneration.builtIn) {
@@ -7207,6 +7655,7 @@
             size: resultForDocumentGeneration.size
           };
           if (renderContextForDocumentGeneration.theme) responseForDocumentGeneration.theme = renderContextForDocumentGeneration.theme.name;
+          if (renderContextForDocumentGeneration.pictureBlobIds.length) responseForDocumentGeneration.pictureBlobIds = renderContextForDocumentGeneration.pictureBlobIds.slice();
           // The built-in PDF writer re-counts dropped images after rasterizing, and may add why
           // Chrome did not print the file, so its note replaces the one from preparing the input.
           if (typeof resultForDocumentGeneration.note === 'string') noteForDocumentGeneration = resultForDocumentGeneration.note;

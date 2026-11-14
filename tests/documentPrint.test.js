@@ -275,3 +275,147 @@ test('a printed cover is its own named page with no margins, passes the printer 
   assert.match(html, /<p class="picture-caption">Figure 1\. The quay<\/p>/);
   assert.strictEqual(loadPrinterForTest().checkHtml(html), '');
 });
+
+// ---- Slides as a PDF ----
+// A PDF with slides is the deck the PPTX writer draws, printed one slide to a page by Chrome.
+//
+// Replayed against the generator before slide PDFs: a format "pdf" call with slides was refused for
+// having no blocks, html, or content, so the first two tests fail on that error; also_pdf was
+// ignored, so no PDF was printed and no companion or companionError came back; and the size test had
+// no printed page to read. In copies of the new code: with the companion PDF drawing the deck a
+// second time instead of reusing the PPTX's drawing, the picture-load count is 2; with the renderer
+// adding 1pt to each paragraph's size, the size test fails (both checked).
+
+const SLIDE_PDF_OK_FOR_TEST = { ok: true, base64: Buffer.from('%PDF-1.7 slides').toString('base64') };
+
+const DECK_SLIDES_FOR_TEST = [
+  { title: 'Q3 business review', subtitle: 'Northwind Retail' },
+  { title: 'Revenue beat plan by 9%', stats: [{ value: '$4.97M', label: 'Q3 revenue' }, { value: '38.2%', label: 'Gross margin' }] },
+  { title: 'Every region grew', table: { header: true, rows: [['Region', 'Q2', 'Q3'], ['North', '$1.48M', '$1.66M'], ['South', '$1.21M', '$1.40M']] } },
+  { title: 'Decisions we need today', bullets: ['Approve a 3% price rise', { text: 'Staple lines only', level: 1 }, 'Release $180K for hiring'], notes: 'Secret speaker note' },
+  { layout: 'section', title: 'Next quarter' },
+  { title: 'Before and after', left: { heading: 'Before', bullets: ['Manual matching'] }, right: { heading: 'After', bullets: ['Rules engine'] } },
+  { title: 'The new store', bullets: ['Opens in May', 'Two floors'], image: { blob_id: 7, fit: 'cover', alt: 'Store front' } }
+];
+
+test('a deck prints as one 16:9 page per slide, passes the printer check, and leaves out speaker notes', async function () {
+  const generation = generatorForTest.ABChatAgent.documentGeneration;
+  let seenJob = null;
+  const printed = await generation.createDocument({ format: 'pdf', title: 'Q3 review', theme: 'professional', slides: DECK_SLIDES_FOR_TEST }, {
+    loadImage: (blobId) => Promise.resolve(blobId === 7 ? pngHeaderForTest(1600, 1200) : null),
+    printPdf: (job) => { seenJob = job; return Promise.resolve(SLIDE_PDF_OK_FOR_TEST); }
+  });
+  assert.strictEqual(printed.format, 'pdf');
+  assert.strictEqual(printed.filename, 'Q3 review.pdf');
+  assert.strictEqual(printed.mimeType, 'application/pdf');
+  assert.strictEqual(printed.theme, 'professional');
+  assert.strictEqual(Buffer.from(printed.dataUrl.split(',')[1], 'base64').toString(), '%PDF-1.7 slides');
+  const html = seenJob.html;
+  assert.match(html, /@page \{ size: 960pt 540pt; margin: 0; \}/);
+  assert.strictEqual((html.match(/<section class="slide"/g) || []).length, DECK_SLIDES_FOR_TEST.length);
+  assert.ok(html.includes('Revenue beat plan by 9%'));
+  assert.ok(html.includes('Staple lines only'));
+  assert.match(html, /<img alt="Store front" src="data:image\/png;base64,/);
+  assert.doesNotMatch(html, /Secret speaker note/);
+  assert.doesNotMatch(html, /style="[^"]*font-family/);
+  assert.ok(Array.isArray(seenJob.fonts) && seenJob.fonts.length > 0);
+  assert.strictEqual(loadPrinterForTest().checkHtml(html), '');
+});
+
+test('a slide PDF is made only by Chrome, never by the built-in writer', async function () {
+  const generation = generatorForTest.ABChatAgent.documentGeneration;
+  const spec = { format: 'pdf', title: 'Deck', slides: [{ title: 'One', bullets: ['a', 'b'] }] };
+  await assert.rejects(generation.createDocument(spec, { printPdf: () => Promise.resolve({ ok: false, code: 'declined' }) }), /chose the built-in PDF writer, which cannot draw slides\. Make the deck as a PPTX instead/);
+  await assert.rejects(generation.createDocument(spec, { printPdf: () => Promise.resolve({ ok: false, code: 'no-consent' }) }), /has not yet said whether Chrome may print PDFs/);
+  await assert.rejects(generation.createDocument(spec, { printPdf: () => Promise.resolve({ ok: false, code: 'failed', error: 'printing took too long' }) }), /Chrome could not print the slides \(printing took too long\)/);
+  await assert.rejects(generation.createDocument(spec, {}), /can only be printed by Chrome/);
+  // A PDF with blocks or html as well as slides is a document of pages, as before.
+  const pages = await generation.createDocument({ format: 'pdf', slides: [{ title: 'x' }], blocks: [{ type: 'paragraph', text: 'Body' }] }, { printPdf: () => Promise.resolve({ ok: false, code: 'declined' }) });
+  assert.match(Buffer.from(pages.dataUrl.split(',')[1], 'base64').toString('latin1'), /^%PDF-1\.4/);
+});
+
+test('also_pdf on a deck adds a PDF printed from the drawing the PPTX was written from', async function () {
+  const generation = generatorForTest.ABChatAgent.documentGeneration;
+  let loads = 0;
+  const jobs = [];
+  const slides = [{ layout: 'title', title: 'Cover', subtitle: 'Sub', bullets: ['left out with a warning'] }].concat(DECK_SLIDES_FOR_TEST.slice(1));
+  const built = await generation.createDocument({ format: 'pptx', filename: 'q3-review', also_pdf: true, theme: 'modern', slides }, {
+    loadImage: (blobId) => { loads++; return Promise.resolve(blobId === 7 ? pngHeaderForTest(1600, 1200) : null); },
+    printPdf: (job) => { jobs.push(job); return Promise.resolve(Object.assign({ warnings: ['a font warning'] }, SLIDE_PDF_OK_FOR_TEST)); }
+  });
+  assert.strictEqual(built.format, 'pptx');
+  assert.strictEqual(built.filename, 'q3-review.pptx');
+  assert.ok(built.warnings.some((warning) => /left out/.test(warning)), JSON.stringify(built.warnings));
+  assert.strictEqual(loads, 1);
+  assert.strictEqual(jobs.length, 1);
+  const companion = built.companion;
+  assert.strictEqual(companion.format, 'pdf');
+  assert.strictEqual(companion.filename, 'q3-review.pdf');
+  assert.strictEqual(companion.mimeType, 'application/pdf');
+  assert.strictEqual(companion.theme, 'modern');
+  // Only what the PPTX did not already report.
+  assert.deepStrictEqual(plain(companion.warnings), ['a font warning']);
+  assert.deepStrictEqual(plain(companion.pictureBlobIds), plain(built.pictureBlobIds));
+  assert.deepStrictEqual(plain(built.pictureBlobIds), [7]);
+  assert.strictEqual((jobs[0].html.match(/<section class="slide"/g) || []).length, slides.length);
+  assert.strictEqual(built.companionError, undefined);
+});
+
+test('also_pdf keeps the first file when the PDF cannot be made, and covers DOCX and decks made from content', async function () {
+  const generation = generatorForTest.ABChatAgent.documentGeneration;
+  const declined = await generation.createDocument({ format: 'pptx', title: 'Deck', also_pdf: true, slides: [{ title: 'One', bullets: ['a'] }] }, {
+    printPdf: () => Promise.resolve({ ok: false, code: 'declined' })
+  });
+  assert.strictEqual(declined.ok, true);
+  assert.strictEqual(declined.format, 'pptx');
+  assert.strictEqual(declined.companion, undefined);
+  assert.match(declined.companionError, /^The PPTX was made, but not its PDF: .*Do not make the deck again; tell the user that turning on Print PDFs with Chrome in Settings/);
+  assert.doesNotMatch(declined.companionError, /Make the deck as a PPTX/);
+
+  const jobs = [];
+  const printPdf = (job) => { jobs.push(job); return Promise.resolve(SLIDE_PDF_OK_FOR_TEST); };
+  const cv = await generation.createDocument({ format: 'docx', filename: 'cv.docx', also_pdf: true, theme: 'modern', blocks: REPORT_BLOCKS }, { printPdf });
+  assert.strictEqual(cv.format, 'docx');
+  assert.strictEqual(cv.companion.filename, 'cv.pdf');
+  assert.ok(jobs[0].html.includes('Project Atlas'));
+  assert.doesNotMatch(jobs[0].html, /class="slide"/);
+
+  // A deck written as content has no slides array, and its PDF is still slides.
+  const fromContent = await generation.createDocument({ format: 'pptx', title: 'Plan', also_pdf: true, content: 'Goals\nGrow revenue\n\nRisks\nHiring' }, { printPdf });
+  assert.strictEqual(fromContent.companion.filename, 'Plan.pdf');
+  assert.match(jobs[1].html, /<section class="slide"/);
+
+  // also_pdf means nothing on a PDF or a spreadsheet.
+  const pdfOnly = await generation.createDocument({ format: 'pdf', also_pdf: true, blocks: REPORT_BLOCKS }, { printPdf });
+  assert.strictEqual(pdfOnly.companion, undefined);
+  assert.strictEqual(jobs.length, 3);
+});
+
+// The slide PDF reads its text sizes from the same fitting as the PPTX; a size picked separately
+// would wrap lines differently from the deck the user also has.
+test('every text on a printed slide has the size the PPTX gives it', async function () {
+  const generation = generatorForTest.ABChatAgent.documentGeneration;
+  let seenJob = null;
+  const built = await generation.createDocument({ format: 'pptx', title: 'Sizes', also_pdf: true, theme: 'classic', slides: DECK_SLIDES_FOR_TEST }, {
+    loadImage: (blobId) => Promise.resolve(blobId === 7 ? pngHeaderForTest(1600, 1200) : null),
+    printPdf: (job) => { seenJob = job; return Promise.resolve(SLIDE_PDF_OK_FOR_TEST); }
+  });
+  const zip = await generatorForTest.JSZip.loadAsync(Buffer.from(built.dataUrl.split(',')[1], 'base64'));
+  const xmlSizes = {};
+  for (const name of Object.keys(zip.files)) {
+    if (!/^ppt\/slides\/slide\d+\.xml$/.test(name)) continue;
+    const xml = await zip.file(name).async('string');
+    const runPattern = /<a:r><a:rPr[^>]*\bsz="(\d+)"[^>]*?(?:\/>|>.*?<\/a:rPr>)<a:t>([^<]*)<\/a:t><\/a:r>/g;
+    let match;
+    while ((match = runPattern.exec(xml)) !== null) xmlSizes[match[2]] = Number(match[1]) / 100;
+  }
+  const htmlSizes = {};
+  const textPattern = /<(?:p|td) style="(?:padding: [^;]+; )?font-size: ([\d.]+)pt;[^"]*">(?:<span class="bullet"[^>]*>[^<]*<\/span>)?(?:<strong>)?([^<]+)/g;
+  let match;
+  while ((match = textPattern.exec(seenJob.html)) !== null) htmlSizes[match[2].replace(/&amp;/g, '&')] = Number(match[1]);
+  const checked = ['Q3 business review', 'Northwind Retail', 'Revenue beat plan by 9%', '$4.97M', 'Q3 revenue', 'Region', 'North', 'Approve a 3% price rise', 'Staple lines only', 'Next quarter', 'Before', 'Rules engine', 'Opens in May'];
+  checked.forEach(function (text) {
+    assert.ok(xmlSizes[text] > 0, 'no PPTX size for ' + text);
+    assert.strictEqual(htmlSizes[text], xmlSizes[text], text);
+  });
+});

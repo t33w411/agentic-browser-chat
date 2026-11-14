@@ -567,6 +567,9 @@
           && !Array.isArray(safeMessageForPanelRuntime.pageChanges))
           ? safeMessageForPanelRuntime.pageChanges
           : undefined,
+        pictureBlobIds: Array.isArray(safeMessageForPanelRuntime.pictureBlobIds)
+          ? safeMessageForPanelRuntime.pictureBlobIds.slice()
+          : undefined,
         isHidden: Boolean(safeMessageForPanelRuntime.isHidden),
         usagePromptTokens: Number.isFinite(Number(safeMessageForPanelRuntime.usagePromptTokens)) ? Number(safeMessageForPanelRuntime.usagePromptTokens) : 0,
         usageCompletionTokens: Number.isFinite(Number(safeMessageForPanelRuntime.usageCompletionTokens)) ? Number(safeMessageForPanelRuntime.usageCompletionTokens) : 0,
@@ -1324,7 +1327,7 @@
     // mutation failed, must not claim action was taken. memory always writes; skill mutates only
     // for specific operations.
     const MUTATING_TOOL_NAMES_FOR_PANEL_RUNTIME = {
-      write: true, edit: true, create_document: true, edit_document: true, generate_image: true,
+      write: true, edit: true, create_document: true, edit_document: true, convert_document: true, generate_image: true,
       generate_questions: true, page_act: true, memory: true, page_spreadsheet: true
     };
     function isMutatingToolCallForPanelRuntime(nameForMutCheck, parsedArgsForMutCheck) {
@@ -3023,7 +3026,10 @@
       const docBlobRefRegexForLoad = /#abchat-docblob-(\d+)/g;
       const imageIdsToLoad = [];
       const docIdsToLoad = [];
+      // A picture shown only in its document is not drawn, so its bytes are not fetched.
+      const hiddenIndexesForBlobScan = getHiddenGeneratedFileIndexesForPanelRuntime(messages);
       for (var bmi = 0; bmi < messages.length; bmi++) {
+        if (hiddenIndexesForBlobScan.has(bmi)) continue;
         const mdForBlobScan = String((messages[bmi] && messages[bmi].md) || '');
         if (!mdForBlobScan) continue;
         imageBlobRefRegexForLoad.lastIndex = 0;
@@ -3056,9 +3062,10 @@
       return Promise.all(imageLoadsForPanelRuntime.concat(docLoadsForPanelRuntime)).then(function () {});
     }
 
-    // Indexes of automatic file links to leave out: one the reply already links, or an older file
-    // remade under the same name in the same reply. Read per call so a re-injection picks up the
-    // new copy; with the module missing every link is drawn, as before.
+    // Indexes of automatic file links and pictures to leave out: a file the reply already links, an
+    // older file remade under the same name in the same reply, or a generated image a document in
+    // the same reply holds. Read per call so a re-injection picks up the new copy; with the module
+    // missing everything is drawn, as before.
     function getHiddenGeneratedFileIndexesForPanelRuntime(messagesForHiddenFiles) {
       const generatedFileLinksForPanelRuntime = (globalThis.ABChatContent || {}).generatedFileLinks;
       if (!generatedFileLinksForPanelRuntime || typeof generatedFileLinksForPanelRuntime.hiddenDisplayIndexes !== 'function') {
@@ -18474,6 +18481,9 @@
         if (draftMountedScopeForPanelRuntime !== draftScopeForSend) return;
         const msgsForAutoChipScanOffscreen = (CHAT_STORE_FOR_PANEL_RUNTIME[chatId] || {}).messages || [];
         const blobIdPatternForAutoChipOffscreen = /__blob:(\d+)__/;
+        // A picture made for a document is shown in the document, not the chat, so it is not
+        // attached to the next message either.
+        const hiddenIndexesForAutoChipOffscreen = getHiddenGeneratedFileIndexesForPanelRuntime(msgsForAutoChipScanOffscreen);
         let lastUserIndexForAutoChipOffscreen = -1;
         for (var aciOffscreen = msgsForAutoChipScanOffscreen.length - 1; aciOffscreen >= 0; aciOffscreen--) {
           const msgForAutoChipOffscreen = msgsForAutoChipScanOffscreen[aciOffscreen];
@@ -18482,6 +18492,7 @@
         for (var acjOffscreen = lastUserIndexForAutoChipOffscreen + 1; acjOffscreen < msgsForAutoChipScanOffscreen.length; acjOffscreen++) {
           const msgForAutoChipAssistantOffscreen = msgsForAutoChipScanOffscreen[acjOffscreen];
           if (!msgForAutoChipAssistantOffscreen || msgForAutoChipAssistantOffscreen.role !== 'assistant') continue;
+          if (hiddenIndexesForAutoChipOffscreen.has(acjOffscreen)) continue;
           const autoChipMatchOffscreen = blobIdPatternForAutoChipOffscreen.exec(String(msgForAutoChipAssistantOffscreen.md || ''));
           if (!autoChipMatchOffscreen) continue;
           const autoChipBlobIdOffscreen = Number(autoChipMatchOffscreen[1]);

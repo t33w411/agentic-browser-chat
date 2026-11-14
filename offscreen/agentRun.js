@@ -78,7 +78,7 @@
   // mutation failed, must not claim action was taken. memory always writes; skill and page_layout
   // mutate only for specific operations.
   var MUTATING_TOOL_NAMES_FOR_AGENT_RUN = {
-    write: true, edit: true, create_document: true, edit_document: true, generate_image: true,
+    write: true, edit: true, create_document: true, edit_document: true, convert_document: true, generate_image: true,
     generate_questions: true, page_act: true, memory: true, page_spreadsheet: true
   };
   function isMutatingToolCallForAgentRun(nameForMutCheck, parsedArgsForMutCheck) {
@@ -94,11 +94,13 @@
     return false;
   }
 
-  // What the model sees after a document is made, by create_document, edit_document, or eval
+  // What the model sees after a document is made, by create_document, edit_document, convert_document, or eval
   // returning __document__. The file itself (dataUrl) is saved and shown to the user, never sent back. The
   // generator's own note (images it could not re-embed), the theme it used and its warnings
   // (characters a PDF could not show, rows it left out) are passed on, so the model can tell the
-  // user and reuse the theme for the next file.
+  // user and reuse the theme for the next file. A PDF made in the same call (also_pdf) is described
+  // under pdf, with only the note and warnings the first file did not already give; when it could
+  // not be made, pdf_error says why and the first file still stands.
   function documentResultForModelForRun(documentForModel) {
     var safeDocumentForModel = documentForModel || {};
     var resultForModel = {
@@ -107,12 +109,27 @@
       filename: safeDocumentForModel.filename || '',
       mimeType: safeDocumentForModel.mimeType || '',
       size: Number(safeDocumentForModel.size) || 0,
-      note: 'The generated document has been saved and displayed to the user.'
+      note: (safeDocumentForModel.companion && typeof safeDocumentForModel.companion.dataUrl === 'string'
+        ? 'The generated document and its PDF have been saved and displayed to the user.'
+        : 'The generated document has been saved and displayed to the user.')
         + (safeDocumentForModel.note ? ' ' + String(safeDocumentForModel.note) : '')
     };
     if (safeDocumentForModel.theme) resultForModel.theme = String(safeDocumentForModel.theme);
     if (Array.isArray(safeDocumentForModel.warnings) && safeDocumentForModel.warnings.length) {
       resultForModel.warnings = safeDocumentForModel.warnings.map(String);
+    }
+    var companionForModel = safeDocumentForModel.companion;
+    if (companionForModel && typeof companionForModel.dataUrl === 'string') {
+      resultForModel.pdf = {
+        filename: companionForModel.filename || '',
+        size: Number(companionForModel.size) || 0
+      };
+      if (companionForModel.note) resultForModel.pdf.note = String(companionForModel.note);
+      if (Array.isArray(companionForModel.warnings) && companionForModel.warnings.length) {
+        resultForModel.pdf.warnings = companionForModel.warnings.map(String);
+      }
+    } else if (safeDocumentForModel.companionError) {
+      resultForModel.pdf_error = String(safeDocumentForModel.companionError);
     }
     return resultForModel;
   }
@@ -1157,9 +1174,9 @@
             if (imagesShownToUserCountForRun > 0) {
               toolResultForModel.note = 'You had already generated and shown the user '
                 + imagesShownToUserCountForRun + ' image' + (imagesShownToUserCountForRun === 1 ? '' : 's')
-                + ' earlier in this turn. This one did NOT replace them: every image stays visible in the chat and each one was billed. If you made this one to replace an earlier image, your reply must say so, why, and which of the images shown is the final one.';
+                + ' earlier in this turn. This one did NOT replace them: each one was billed, and every image stays in the chat unless a document you make in this turn uses it. If you made this one to replace an earlier image, your reply must say so, why, and which of the images shown is the final one.';
             }
-          } else if ((tcNameForResult === 'create_document' || tcNameForResult === 'edit_document') && toolResult && toolResult.ok && typeof toolResult.dataUrl === 'string') {
+          } else if ((tcNameForResult === 'create_document' || tcNameForResult === 'edit_document' || tcNameForResult === 'convert_document') && toolResult && toolResult.ok && typeof toolResult.dataUrl === 'string') {
             toolResultForModel = documentResultForModelForRun(toolResult);
           } else if (tcNameForResult === 'eval' && toolResult && toolResult.ok && toolResult._generatedDocument && typeof toolResult._generatedDocument.dataUrl === 'string') {
             toolResultForModel = { ok: true, result: toolResult.result, document: documentResultForModelForRun(toolResult._generatedDocument) };
@@ -1293,35 +1310,50 @@
           var tcNameForDoc = toolCallsForLoop[gdi].function && toolCallsForLoop[gdi].function.name;
           var toolResultForDoc = toolResultsForRun[gdi];
           if (!toolResultForDoc || !toolResultForDoc.ok) continue;
-          var docPayloadForRun = (tcNameForDoc === 'create_document' || tcNameForDoc === 'edit_document')
+          var docPayloadForRun = (tcNameForDoc === 'create_document' || tcNameForDoc === 'edit_document' || tcNameForDoc === 'convert_document')
             ? toolResultForDoc
             : (tcNameForDoc === 'eval' ? toolResultForDoc._generatedDocument : null);
           if (!docPayloadForRun || typeof docPayloadForRun.dataUrl !== 'string' || docPayloadForRun.dataUrl.indexOf('data:') !== 0) continue;
           if (typeof repoForRun.createAttachmentBlob !== 'function') continue;
-          try {
-            var filenameForDoc = String(docPayloadForRun.filename || 'generated-document');
-            var blobRecordForDoc = await repoForRun.createAttachmentBlob({ name: filenameForDoc, kind: 'generated_document', mimeType: String(docPayloadForRun.mimeType || ''), dataUrl: docPayloadForRun.dataUrl, size: Number(docPayloadForRun.size) || docPayloadForRun.dataUrl.length, textContent: '' });
-            if (controllerForRun.signal.aborted) {
-              markRunStoppedForRun();
-              if (blobRecordForDoc && blobRecordForDoc.id != null && typeof repoForRun.deleteAttachmentBlob === 'function') { try { await repoForRun.deleteAttachmentBlob(Number(blobRecordForDoc.id)); } catch (e) {} }
-              break;
-            }
-            if (blobRecordForDoc && blobRecordForDoc.id != null) {
-              var blobIdForDoc = Number(blobRecordForDoc.id);
-              var docMsgPersisted = await repoForRun.createMessage(chatId, {
-                role: 'assistant',
-                content: '',
-                md: '[' + filenameForDoc.replace(/[\[\]]/g, '') + '](#abchat-docblob-' + blobIdForDoc + ')',
-                // Rendering-only: contextBuilder folds this marker into the tool result that
-                // generated the document rather than sending it as its own model turn.
-                displayOnly: true,
-                tool_call_id: toolCallsForLoop[gdi].id
-              }, { touchChat: false });
-              if (docMsgPersisted) messagesForRun.push(docMsgPersisted);
-              hasAppendedRenderableAssistantMessageForRun = true;
-              emitForAgentRun('stream_message_persisted', chatId, null);
-            }
-          } catch (e) {}
+          // A PDF made in the same call (also_pdf) is saved as a second file under the same tool
+          // call, after the first.
+          var docPayloadsForRun = [docPayloadForRun];
+          var companionPayloadForRun = docPayloadForRun.companion;
+          if (companionPayloadForRun && typeof companionPayloadForRun.dataUrl === 'string' && companionPayloadForRun.dataUrl.indexOf('data:') === 0) {
+            docPayloadsForRun.push(companionPayloadForRun);
+          }
+          for (var gdpi = 0; gdpi < docPayloadsForRun.length; gdpi++) {
+            docPayloadForRun = docPayloadsForRun[gdpi];
+            if (controllerForRun.signal.aborted) break;
+            try {
+              var filenameForDoc = String(docPayloadForRun.filename || 'generated-document');
+              var blobRecordForDoc = await repoForRun.createAttachmentBlob({ name: filenameForDoc, kind: 'generated_document', mimeType: String(docPayloadForRun.mimeType || ''), dataUrl: docPayloadForRun.dataUrl, size: Number(docPayloadForRun.size) || docPayloadForRun.dataUrl.length, textContent: '' });
+              if (controllerForRun.signal.aborted) {
+                markRunStoppedForRun();
+                if (blobRecordForDoc && blobRecordForDoc.id != null && typeof repoForRun.deleteAttachmentBlob === 'function') { try { await repoForRun.deleteAttachmentBlob(Number(blobRecordForDoc.id)); } catch (e) {} }
+                break;
+              }
+              if (blobRecordForDoc && blobRecordForDoc.id != null) {
+                var blobIdForDoc = Number(blobRecordForDoc.id);
+                var docMsgPersisted = await repoForRun.createMessage(chatId, {
+                  role: 'assistant',
+                  content: '',
+                  md: '[' + filenameForDoc.replace(/[\[\]]/g, '') + '](#abchat-docblob-' + blobIdForDoc + ')',
+                  // Rendering-only: contextBuilder folds this marker into the tool result that
+                  // generated the document rather than sending it as its own model turn.
+                  displayOnly: true,
+                  tool_call_id: toolCallsForLoop[gdi].id,
+                  // The pictures the document holds. The chat leaves out a generated image from the
+                  // same reply that is listed here, since the user sees it in the document.
+                  pictureBlobIds: Array.isArray(docPayloadForRun.pictureBlobIds) ? docPayloadForRun.pictureBlobIds : undefined
+                }, { touchChat: false });
+                if (docMsgPersisted) messagesForRun.push(docMsgPersisted);
+                hasAppendedRenderableAssistantMessageForRun = true;
+                emitForAgentRun('stream_message_persisted', chatId, null);
+              }
+            } catch (e) {}
+          }
+          if (controllerForRun.signal.aborted) { markRunStoppedForRun(); break; }
         }
         if (controllerForRun.signal.aborted) { markRunStoppedForRun(); break; }
 

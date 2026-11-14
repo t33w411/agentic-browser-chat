@@ -1,6 +1,6 @@
 // Document themes (agent/documentThemes.js), the themed DOCX, PDF, XLSX, and PPTX builders
 // (agent/documentGeneration.js), and the drift between the theme module, the create_document
-// schema in agent/tools.js, and the builtin-documents guide.
+// schema in agent/tools.js, and the document guides (builtin-documents and its four parts).
 //
 // The builders run in a vm context with the bundled JSZip, the way the offscreen document loads
 // them. There is no DOMParser in Node, so only the blocks and content paths are covered here; the
@@ -68,7 +68,10 @@ async function pdfTextForTest(spec, ctx) {
   return { result: built.result, text: built.bytes.toString('latin1') };
 }
 
-const DOCUMENTS_GUIDE_FOR_TEST = guides.get('builtin-documents').body;
+// The documents guide is split by task; the drift checks read all of its parts together.
+const DOCUMENTS_GUIDE_FOR_TEST = ['builtin-documents', 'builtin-docx-pdf', 'builtin-xlsx-csv', 'builtin-pptx', 'builtin-docx-edit']
+  .map(function (slugForGuide) { return guides.get(slugForGuide).body; })
+  .join('\n\n');
 
 function createDocumentPropsForTest() {
   const def = globalThis.ABChatAgent.toolDefs.find(function (d) { return d.function.name === 'create_document'; });
@@ -714,6 +717,24 @@ test('speaker notes get a notes master and a notes slide, and a deck without not
   assert.doesNotMatch(plain.parts['ppt/presentation.xml'], /notesMaster/);
 });
 
+// Notes go wherever the file goes, so a deck gets them only when the user asks. The guide is the only
+// thing that decides whether the model writes them; outside the notes field and the size limit, no
+// line may mention them, and the example deck has none, since the model copies it. Checked against
+// the guide before this change, which said "Detail and talking points go in notes." and put notes in
+// its example: the field line had no rule, and with only the field line fixed, the directive and the
+// example were both still found.
+test('the pptx guide has the model write speaker notes only when the user asks for them', function () {
+  const bodyForNotes = guides.get('builtin-pptx').body;
+  const fieldLineForNotes = bodyForNotes.split('\n').find(function (line) { return line.indexOf('- notes, on any slide:') === 0; });
+  assert.ok(fieldLineForNotes, 'notes field line');
+  assert.match(fieldLineForNotes, /only when the user asks for speaker notes, talking points, or a script/);
+  assert.match(fieldLineForNotes, /left out, not moved to notes/);
+  const otherLinesForNotes = bodyForNotes.split('\n').filter(function (line) {
+    return /\bnotes\b/i.test(line) && line !== fieldLineForNotes && line.indexOf('- Per slide:') !== 0;
+  });
+  assert.deepStrictEqual(otherLinesForNotes, []);
+});
+
 test('content slides are numbered unless page_numbers is false, and title and section slides never are', async function () {
   const slides = [{ title: 'Cover' }, { title: 'List', bullets: ['x'] }, { layout: 'section', title: 'Part' }, { title: 'Figures', stats: ['3'] }];
   const numbered = await docxPartsForTest({ format: 'pptx', slides });
@@ -1107,6 +1128,60 @@ test('a filled cover or section slide gets the theme\'s pattern unless it has a 
   assert.doesNotMatch(minimal.parts['ppt/slides/slide1.xml'], /<p:bg>/);
 });
 
+// Checked against the writer before a lone slide was drawn as a cover: the first assertion fails,
+// since the slide had no background. With only the number rule taken out, the slide number check
+// fails, and with only the accent's fallback to the heading colour taken out, the yellow figures
+// check fails.
+test('a deck of one slide is drawn as its cover, with no number, unless it has a picture, a background, or a plain theme', async function () {
+  const target = function (parts) {
+    const match = (parts['ppt/slides/_rels/slide1.xml.rels'] || '').match(/Target="\.\.\/media\/([^"]+)"/);
+    return match ? match[1] : '';
+  };
+  const lone = await pptxWithPicturesForTest({ format: 'pptx', theme: 'professional', slides: [{ title: 'Decisions we need today', bullets: ['Approve the price rise', 'Release the hiring budget'] }] }, {});
+  const slide = lone.parts['ppt/slides/slide1.xml'];
+  assert.match(slide, /<p:sld [^>]*showMasterSp="0"><p:cSld><p:bg><p:bgPr><a:blipFill/);
+  assert.match(target(lone.parts), /\.png$/);
+  assert.match(slide, /<a:srgbClr val="FFFFFF"\/><\/a:solidFill><\/a:rPr><a:t>Decisions we need today<\/a:t>/);
+  assert.match(slide, /<a:buClr><a:srgbClr val="FFFFFF"\/><\/a:buClr>/);
+  assert.doesNotMatch(slide, /type="slidenum"/);
+  // The pattern is drawn on the main colour, as on a filled cover.
+  const png = lone.binary['ppt/media/' + target(lone.parts)];
+  let at = 8;
+  const idat = [];
+  while (at < png.length) {
+    const length = png.readUInt32BE(at);
+    if (png.toString('latin1', at + 4, at + 8) === 'IDAT') idat.push(png.subarray(at + 8, at + 8 + length));
+    at += 12 + length;
+  }
+  const rows = zlib.inflateSync(Buffer.concat(idat));
+  assert.strictEqual(rows.subarray(20 * 5761 + 1 + 20 * 3, 20 * 5761 + 1 + 21 * 3).toString('hex').toUpperCase(), themes.resolveTheme('professional').theme.colors.primary);
+
+  const numbered = await pptxWithPicturesForTest({ format: 'pptx', theme: 'professional', page_numbers: true, slides: [{ title: 'One', bullets: ['a'] }] }, {});
+  assert.match(numbered.parts['ppt/slides/slide1.xml'], /type="slidenum"/);
+
+  const keptWhite = [
+    { format: 'pptx', theme: 'professional', slides: [{ title: 'One', bullets: ['a'], background: 'none' }] },
+    { format: 'pptx', theme: 'minimal', slides: [{ title: 'One', bullets: ['a'] }] },
+    { format: 'pptx', theme: 'professional', slides: [{ title: 'One', bullets: ['a'], image: { blob_id: 101 } }] }
+  ];
+  for (const spec of keptWhite) {
+    const built = await pptxWithPicturesForTest(spec, PHOTO_RECORDS_FOR_TEST);
+    assert.doesNotMatch(built.parts['ppt/slides/slide1.xml'], /<p:bg>/, JSON.stringify(spec.slides[0]) + ' ' + spec.theme);
+    assert.ok(!Object.keys(built.binary).some(function (name) { return /\.png$/.test(name); }));
+  }
+
+  // Two slides with no title slide keep the plain content look and their numbers.
+  const two = await pptxWithPicturesForTest({ format: 'pptx', theme: 'professional', slides: [{ title: 'One', bullets: ['a'] }, { title: 'Two', bullets: ['b'] }] }, {});
+  assert.doesNotMatch(two.parts['ppt/slides/slide1.xml'], /<p:bg>/);
+  assert.match(two.parts['ppt/slides/slide1.xml'], /type="slidenum"/);
+
+  // On a light brand colour the text is dark, and figures and bullets, which use the accent (a
+  // shade of that colour), take the heading colour instead.
+  const yellowTheme = themes.resolveTheme('modern', { primary_color: '#F5C400' }).theme;
+  const yellow = await pptxWithPicturesForTest({ format: 'pptx', theme: 'modern', style: { primary_color: '#F5C400' }, slides: [{ title: 'In numbers', stats: [{ value: '55,000', label: 'Visitors' }] }] }, {});
+  assert.match(yellow.parts['ppt/slides/slide1.xml'], new RegExp('<a:srgbClr val="' + yellowTheme.colors.heading + '"/></a:solidFill><a:latin typeface="\\+mj-lt"/></a:rPr><a:t>55,000</a:t>'));
+});
+
 // Checked by giving the grid a repeat of 60 pixels instead of 64: the test fails on the grid, at
 // a pixel the drawing puts on a line and the copy leaves plain.
 test('a pattern copied from one repeat has the pixels of the pattern drawn point by point', function () {
@@ -1393,6 +1468,34 @@ test('the built-in PDF writer draws the cover on page 1 with no number or header
   const plain = await pdfWithPicturesForTest(Object.assign({}, spec, { theme: 'classic', cover: { title: 'Terms of supply' } }), {});
   assert.doesNotMatch(plain.text, /\/Subtype \/Image/);
   assert.match(pdfPageStreamsForTest(plain.text)[0], /\(Terms of supply\) Tj/);
+});
+
+// Checked against the code before the result listed its pictures: the field was missing and this
+// test fails on the first assertion.
+test('the result lists the blob ids of the pictures the document holds, and only those', async function () {
+  const deck = await pptxWithPicturesForTest({ format: 'pptx', theme: 'professional', slides: [
+    { title: 'Harbour Lights', subtitle: 'Festival plan', background: { image: 9 } },
+    { title: 'The quay', bullets: ['Twelve stages'], image: { blob_id: 7 } },
+    { title: 'Missing', bullets: ['One'], image: { blob_id: 99 } },
+    { title: 'Again', bullets: ['Two'], image: { blob_id: 7 } }
+  ] }, COVER_RECORDS_FOR_TEST);
+  assert.deepStrictEqual(Array.from(deck.result.pictureBlobIds), [9, 7]);
+
+  const docx = await docxWithPicturesForTest({
+    format: 'docx', theme: 'professional', cover: { title: 'Harbour Lights', image: 7 },
+    blocks: [{ type: 'paragraph', text: 'Body.' }, { type: 'image', blob_id: 8 }, { type: 'image', blob_id: 99 }]
+  }, COVER_RECORDS_FOR_TEST);
+  assert.deepStrictEqual(Array.from(docx.result.pictureBlobIds).sort(), [7, 8]);
+
+  // A cover photo that cannot be used falls back to the theme's cover and is not listed.
+  const pdf = await pdfWithPicturesForTest({
+    format: 'pdf', theme: 'professional', cover: { title: 'Harbour Lights', image: 99 },
+    blocks: [{ type: 'paragraph', text: 'Body.' }, { type: 'image', blob_id: 9 }]
+  }, COVER_RECORDS_FOR_TEST);
+  assert.deepStrictEqual(Array.from(pdf.result.pictureBlobIds), [9]);
+
+  const plain = await docxWithPicturesForTest({ format: 'docx', blocks: [{ type: 'paragraph', text: 'No pictures.' }] }, {});
+  assert.strictEqual(plain.result.pictureBlobIds, undefined);
 });
 
 test('the documents guide and the create_document schema describe the same cover and picture fields', function () {

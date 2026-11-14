@@ -5,7 +5,13 @@
 // times. Verified against the code without this module (nothing hidden): every test that expects
 // a hidden index fails. Also verified against three broken variants of the module, each failing
 // the named test: without the code stripping, "a link inside code"; without the per-reply scope,
-// "a link in a later reply"; without the "!" lookbehind, "image syntax". Run with:
+// "a link in a later reply"; without the "!" lookbehind, "image syntax".
+//
+// The tests from "pictures a deck holds" on cover generated images that a document holds. They
+// replay the chat that showed the problem: two photos made for a deck showed full size above the
+// reply. Verified against the module before pictureBlobIds was read: the tests that expect a
+// hidden picture fail. Also verified against a variant that counts a superseded document, which
+// fails "an older copy". Run with:
 //
 //   node --test tests/
 
@@ -39,6 +45,16 @@ function fileLinkMessageForTest(callId, filename, blobId) {
     displayOnly: true,
     tool_call_id: callId
   };
+}
+
+function pictureMessageForTest(callId, blobId) {
+  return { role: 'assistant', content: '', md: '![Generated image](__blob:' + blobId + '__)', displayOnly: true, tool_call_id: callId };
+}
+
+function documentMessageForTest(callId, filename, blobId, pictureBlobIds) {
+  const messageForDocument = fileLinkMessageForTest(callId, filename, blobId);
+  messageForDocument.pictureBlobIds = pictureBlobIds;
+  return messageForDocument;
 }
 
 function replyMessageForTest(text) {
@@ -176,4 +192,66 @@ test('generated images and messages before the first user message are handled', 
   ];
   assert.deepStrictEqual(hiddenIndexesForTest(messagesForTest), [0]);
   assert.deepStrictEqual(hiddenIndexesForTest(null), []);
+});
+
+test('pictures a deck holds are left out of the chat, and the deck the reply links shows once', function () {
+  const messagesForTest = [
+    userMessageForTest('I need something much fancier'),
+    toolCallMessageForTest('c1', 'generate_image'),
+    toolResultMessageForTest('c1'),
+    pictureMessageForTest('c1', 259),
+    toolCallMessageForTest('c2', 'generate_image'),
+    toolResultMessageForTest('c2'),
+    pictureMessageForTest('c2', 260),
+    toolCallMessageForTest('c3', 'create_document'),
+    toolResultMessageForTest('c3'),
+    documentMessageForTest('c3', 'residency-fit-premium.pptx', 261, [259, 260]),
+    replyMessageForTest('I have made a more polished version: [residency-fit-premium.pptx](#abchat-docblob-261)')
+  ];
+  assert.deepStrictEqual(hiddenIndexesForTest(messagesForTest), [3, 6, 9]);
+});
+
+test('a picture the document does not hold stays in the chat', function () {
+  const messagesForTest = [
+    userMessageForTest('make a deck and a separate banner'),
+    pictureMessageForTest('c1', 30),
+    pictureMessageForTest('c2', 31),
+    documentMessageForTest('c3', 'deck.pptx', 32, [30]),
+    replyMessageForTest('Done.')
+  ];
+  assert.deepStrictEqual(hiddenIndexesForTest(messagesForTest), [1]);
+});
+
+test('a picture from an earlier reply stays when a later document uses it', function () {
+  const messagesForTest = [
+    userMessageForTest('draw a lighthouse'),
+    pictureMessageForTest('c1', 40),
+    replyMessageForTest('Here it is.'),
+    userMessageForTest('now put it on the cover of a report'),
+    documentMessageForTest('c2', 'report.docx', 41, [40]),
+    replyMessageForTest('The report is ready.')
+  ];
+  assert.deepStrictEqual(hiddenIndexesForTest(messagesForTest), []);
+});
+
+test('an older copy that is left out does not hide its pictures; the newest copy does', function () {
+  const messagesForTest = [
+    userMessageForTest('make a deck'),
+    pictureMessageForTest('c1', 50),
+    pictureMessageForTest('c2', 51),
+    documentMessageForTest('c3', 'deck.pptx', 52, [50, 51]),
+    documentMessageForTest('c4', 'deck.pptx', 53, [51]),
+    replyMessageForTest('Done.')
+  ];
+  assert.deepStrictEqual(hiddenIndexesForTest(messagesForTest), [2, 3]);
+});
+
+test('a document saved before it listed its pictures hides none', function () {
+  const messagesForTest = [
+    userMessageForTest('make a deck'),
+    pictureMessageForTest('c1', 60),
+    fileLinkMessageForTest('c2', 'deck.pptx', 61),
+    replyMessageForTest('Done.')
+  ];
+  assert.deepStrictEqual(hiddenIndexesForTest(messagesForTest), []);
 });

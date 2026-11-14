@@ -24,11 +24,13 @@
         payloadForBuiltinGuideGate.messages
       );
       if (!gateForBuiltinGuideGate) return;
+      // guide is absent when another call of the same response already delivered every missing
+      // guide; the reason then says where they are.
       return {
         block: {
           reason: gateForBuiltinGuideGate.reason,
           code: 'builtin-guide-required',
-          result: { guide: gateForBuiltinGuideGate.guide }
+          result: gateForBuiltinGuideGate.guide ? { guide: gateForBuiltinGuideGate.guide } : {}
         }
       };
     }
