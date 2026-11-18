@@ -54,6 +54,8 @@
     "panel/panelData.js",
     "panel/panelDraftSync.js",
     "panel/panelComposerCopy.js",
+    "panel/panelPickerSelection.js",
+    "panel/panelChipIdentity.js",
     "panel/panelSpeechChunk.js",
     "panel/panelGeneratedFiles.js",
     "agent/apiLogger.js",

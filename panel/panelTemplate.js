@@ -1161,7 +1161,7 @@
 </div>
 
 <!-- ============================================================
-     PICKER OVERLAY (note / chat selection)
+     PICKER OVERLAY (note / chat / clip / tab selection, one or several at once)
 ============================================================ -->
 <div id="picker-overlay" class="hidden" data-theme="light">
   <div class="picker-modal">
@@ -1182,6 +1182,11 @@
       <button class="lfb-clear" data-action="clear-search" data-search-id="pk-search" title="Clear search">Clear</button>
     </div>
     <div class="pk-list" id="pk-list"></div>
+    <div class="pk-footer hidden" id="pk-footer">
+      <span class="pk-footer-text" id="pk-footer-text" role="status" aria-live="polite"></span>
+      <button type="button" class="btn-ghost btn-sm pk-footer-btn" id="pk-footer-clear" data-action="clear-picker-selection">Clear</button>
+      <button type="button" class="btn-primary btn-sm pk-footer-btn" id="pk-footer-attach" data-action="attach-picker-selection">Attach</button>
+    </div>
   </div>
 </div>
 

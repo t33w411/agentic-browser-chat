@@ -3688,6 +3688,64 @@ mjx-container svg { overflow: visible; max-width: 6px; min-height: 17px; }
 .pk-window-group-header:first-child { margin-top: 0; border-top: none; }
 #picker-overlay[data-theme="dark"] .pk-window-group-header { color: #64748b; border-top-color: #1e3048; }
 
+/* Multi-select. The icon slot doubles as the row's checkbox: the checkbox takes the icon's place
+   on hover, on a ticked row, while a selection is in progress, on keyboard focus, and always on a
+   screen with no hover. The whole 30px slot is the click target, not only the 16px box. A row
+   that cannot be ticked has no checkbox and no data-action on its slot. */
+.pk-item-lead {
+  position: relative; width: 30px; height: 30px; flex-shrink: 0; border-radius: 7px;
+}
+.pk-item-lead[data-action] { cursor: pointer; }
+.pk-select-cb {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: 16px; height: 16px; margin: 0; cursor: pointer;
+  accent-color: var(--abchat-accent);
+  opacity: 0;
+}
+.pk-item:hover .pk-select-cb,
+.pk-item.is-selected .pk-select-cb,
+.pk-list.is-selecting .pk-select-cb,
+.pk-select-cb:focus-visible { opacity: 1; }
+.pk-item:hover .pk-item-lead[data-action] .pk-item-icon,
+.pk-item.is-selected .pk-item-lead[data-action] .pk-item-icon,
+.pk-list.is-selecting .pk-item-lead[data-action] .pk-item-icon,
+.pk-select-cb:focus-visible + .pk-item-icon { visibility: hidden; }
+@media (hover: none) {
+  .pk-select-cb { opacity: 1; }
+  .pk-item-lead[data-action] .pk-item-icon { visibility: hidden; }
+}
+.pk-item.is-selected,
+.pk-item.is-selected:hover { background: var(--abchat-bg-active); }
+#picker-overlay[data-theme="dark"] .pk-item.is-selected,
+#picker-overlay[data-theme="dark"] .pk-item.is-selected:hover { background: var(--abchat-bg-active); }
+#picker-overlay[data-theme="dark"] .pk-select-cb { color-scheme: dark; }
+/* At the limit, rows that are not ticked cannot be ticked. The list carries the state, so a tick
+   never has to visit every rendered row. */
+.pk-list.is-full .pk-item:not(.is-selected):not(.pk-item--attached):not(.pk-item--inaccessible) { opacity: 0.5; cursor: not-allowed; }
+.pk-list.is-full .pk-item:not(.is-selected),
+.pk-list.is-full .pk-item:not(.is-selected) .pk-item-lead,
+.pk-list.is-full .pk-item:not(.is-selected) .pk-select-cb { cursor: not-allowed; }
+.pk-list.is-full .pk-item:not(.is-selected):hover,
+#picker-overlay[data-theme="dark"] .pk-list.is-full .pk-item:not(.is-selected):hover { background: transparent; }
+.pk-item--attached { opacity: 0.6; cursor: default; }
+.pk-item--attached:hover,
+#picker-overlay[data-theme="dark"] .pk-item--attached:hover { background: transparent; }
+.pk-item-title-row { display: flex; align-items: center; gap: 6px; min-width: 0; margin-bottom: 2px; }
+.pk-item-title-row .pk-item-title { flex: 0 1 auto; min-width: 0; margin-bottom: 0; }
+.pk-tab-badge--attached { background: var(--abchat-bg-chip); color: var(--abchat-text-secondary); border: 1px solid transparent; }
+.pk-footer {
+  display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  padding: 8px 10px; border-top: 1px solid #e2e8f0;
+}
+#picker-overlay[data-theme="dark"] .pk-footer { border-color: #2d3f56; }
+/* The text grows and wraps rather than pushing the buttons out of a narrow modal. */
+.pk-footer-text {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 12px; line-height: 1.35; color: var(--abchat-text-secondary);
+  overflow-wrap: anywhere;
+}
+.pk-footer-btn { flex-shrink: 0; white-space: nowrap; }
+
 /* ============================================================
    NOTE VERSION HISTORY OVERLAY
 ============================================================ */

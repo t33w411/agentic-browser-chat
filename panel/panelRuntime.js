@@ -470,6 +470,15 @@
     // delegated select-picker-tab action can resolve a row back to its tab. Reset by
     // renderTabPickerList, which is also called with a search-filtered subset.
     var pickerCurrentTabsForPanelRuntime = [];
+    // Picker multi-select. Keys are record ids (tab ids for the tab picker), in the order they were
+    // ticked, so a tick survives search re-renders and paging, both of which reassign row indexes.
+    // The map holds each ticked item's row data, since a search can hide a ticked row before Attach
+    // is pressed. Cleared on every open and close, and never shared with other tabs.
+    var pickerSelectedKeysForPanelRuntime = [];
+    var pickerSelectedItemsForPanelRuntime = new Map();
+    // Identity keys (panel/panelChipIdentity.js) of the chips already in the composer, read once
+    // per render, so the rows they came from are marked "Attached" and cannot be ticked.
+    var pickerAttachedKeysForPanelRuntime = new Set();
 
     // Set of chat IDs whose messages have been fetched from DB (lazy loading).
     // Startup only loads chat metadata; messages are pulled on first selectChat().
@@ -4264,10 +4273,20 @@
         const tagsHtmlForPickerPage = tagsForPickerPage.map(function(tForPickerPage) {
           return `<span class="pk-tag">${escHtml(tForPickerPage)}</span>`;
         }).join('');
+        const keyForPickerPage = String(itemForPickerPage.id);
+        const isAttachedForPickerPage = isPickerItemAttachedForPanelRuntime(typeForPickerPage, itemForPickerPage);
         divForPickerPage.innerHTML =
-          `<div class="pk-item-icon ${typeForPickerPage === 'chat' ? 'chat-icon' : ''}">${typeForPickerPage === 'note' ? ic.fileText14 : (typeForPickerPage === 'clip' ? ic.bookmark12 : ic.message14)}</div>` +
+          buildPickerRowLeadHtmlForPanelRuntime(
+            typeForPickerPage === 'chat' ? 'chat-icon' : '',
+            typeForPickerPage === 'note' ? ic.fileText14 : (typeForPickerPage === 'clip' ? ic.bookmark12 : ic.message14),
+            itemForPickerPage.title,
+            !isAttachedForPickerPage
+          ) +
           `<div class="pk-item-body">` +
+          `<div class="pk-item-title-row">` +
           `<div class="pk-item-title">${escHtml(itemForPickerPage.title)}</div>` +
+          (isAttachedForPickerPage ? '<span class="pk-tab-badge pk-tab-badge--attached">Attached</span>' : '') +
+          `</div>` +
           `<div class="pk-item-excerpt">${escHtml(itemForPickerPage.excerpt)}</div>` +
           (attachHtmlForPickerPage || tagsHtmlForPickerPage
             ? '<div class="pk-item-meta">' + attachHtmlForPickerPage + tagsHtmlForPickerPage + '</div>'
@@ -4275,10 +4294,37 @@
           `</div>`;
         // The row's identity travels as an index into pickerCurrentItemsForPanelRuntime, which is
         // reassigned alongside pickerCurrentTypeForPanelRuntime by renderPickerList on every render.
+        // The key is the record id, which is what a tick is stored under.
         divForPickerPage.dataset.action = 'select-picker-item';
         divForPickerPage.dataset.pickerIndex = String(iForPickerPage);
+        divForPickerPage.dataset.pickerKey = keyForPickerPage;
+        if (isAttachedForPickerPage) divForPickerPage.classList.add('pk-item--attached');
+        paintPickerRowTickForPanelRuntime(divForPickerPage, pickerSelectedKeysForPanelRuntime.indexOf(keyForPickerPage) !== -1);
         listForPickerPage.appendChild(divForPickerPage);
       }
+    }
+
+    // The icon slot doubles as the row's checkbox. panel.css shows the checkbox in place of the icon
+    // on hover, on a ticked row, while a selection is in progress, on keyboard focus, and always on
+    // a screen with no hover. The data-action sits on the whole slot, so a click anywhere in it
+    // toggles, and a click on the box itself reaches the same case through closest(). A row that
+    // cannot be ticked (already attached, or a tab the extension cannot read) gets neither, so a
+    // click on its icon is a click on the row. The checkbox comes before the icon so the focus
+    // rule in panel.css can hide the icon with a sibling selector.
+    function buildPickerRowLeadHtmlForPanelRuntime(iconClassForLead, iconHtmlForLead, titleForLead, canTickForLead) {
+      return (canTickForLead ? '<div class="pk-item-lead" data-action="toggle-picker-row">' : '<div class="pk-item-lead">') +
+        (canTickForLead
+          ? '<input type="checkbox" class="pk-select-cb" aria-label="Select ' + escHtml(String(titleForLead || '')) + '">'
+          : '') +
+        '<div class="pk-item-icon ' + iconClassForLead + '">' + iconHtmlForLead + '</div>' +
+        '</div>';
+    }
+
+    function paintPickerRowTickForPanelRuntime(rowForPaint, isSelectedForPaint) {
+      if (!rowForPaint) return;
+      rowForPaint.classList.toggle('is-selected', Boolean(isSelectedForPaint));
+      const checkboxForPaint = rowForPaint.querySelector('.pk-select-cb');
+      if (checkboxForPaint) checkboxForPaint.checked = Boolean(isSelectedForPaint);
     }
 
     function setupPickerSentinelForPanelRuntime(listElForPickerSentinel) {
@@ -6714,12 +6760,53 @@
       return idsForPending;
     }
 
-    function addInputChipForPanelRuntime(chipDataForPanelRuntime) {
+    // The composer's chips as plain records, for the duplicate check. Loading chips are included,
+    // so a second copy is refused while the first is still being read; failed chips are not, so
+    // an attachment that failed can be added again.
+    function readComposerChipIdentityRecordsForPanelRuntime() {
+      const rowForIdentity = root.querySelector('.input-chips-row');
+      if (!rowForIdentity) return [];
+      return Array.from(rowForIdentity.querySelectorAll('.ic')).filter(function (chipForIdentity) {
+        return String(chipForIdentity.dataset.attachStatus || '') !== 'error';
+      }).map(function (chipForIdentity) {
+        return {
+          type: chipForIdentity.dataset.attachType || '',
+          kind: chipForIdentity.dataset.attachKind || '',
+          label: chipForIdentity.dataset.attachName || '',
+          refId: chipForIdentity.dataset.attachRefId || '',
+          size: chipForIdentity.dataset.attachSize || '',
+          pageUrl: chipForIdentity.dataset.attachPageUrl || '',
+          content: chipForIdentity.dataset.attachContent || ''
+        };
+      });
+    }
+
+    function getChipIdentityNsForPanelRuntime() {
+      const nsForIdentity = (globalThis.ABChatContent || {}).chipIdentity;
+      return nsForIdentity && typeof nsForIdentity.keyFor === 'function' ? nsForIdentity : null;
+    }
+
+    // Every chip goes through here: pickers, uploads, drops, pastes, the page element picker in
+    // tools/contentSelector.js, and draft restore. A chip that is the same attachment as one
+    // already in the composer (panel/panelChipIdentity.js decides) is refused, except when
+    // `optionsForAdd.allowDuplicate` is set, which only draft restore does. The refusal says
+    // "Already attached" unless `optionsForAdd.quietDuplicate` is set, for chips the extension
+    // adds by itself rather than on a click.
+    function addInputChipForPanelRuntime(chipDataForPanelRuntime, optionsForAdd) {
       const rowForPanelRuntime = root.querySelector('.input-chips-row');
       if (!rowForPanelRuntime || !chipDataForPanelRuntime || typeof chipDataForPanelRuntime !== 'object') return null;
       const chipTypeForPanelRuntime = String(chipDataForPanelRuntime.type || '').trim();
       const chipLabelForPanelRuntime = String(chipDataForPanelRuntime.label || '').trim();
       if (!chipTypeForPanelRuntime || !chipLabelForPanelRuntime) return null;
+      const identityNsForAdd = getChipIdentityNsForPanelRuntime();
+      if (identityNsForAdd && !(optionsForAdd && optionsForAdd.allowDuplicate)
+        && identityNsForAdd.findDuplicate(readComposerChipIdentityRecordsForPanelRuntime(), chipDataForPanelRuntime)) {
+        const toastForDuplicate = ABChatContent && ABChatContent.ui && ABChatContent.ui.toast;
+        if (!(optionsForAdd && optionsForAdd.quietDuplicate) && toastForDuplicate && typeof toastForDuplicate.show === 'function') {
+          toastForDuplicate.show('Already attached: ' + truncateChipLabelForPanelRuntime(chipLabelForPanelRuntime), { durationMs: 4000 });
+        }
+        return null;
+      }
       const existingChipCountForCap = rowForPanelRuntime.querySelectorAll('.ic').length;
       if (existingChipCountForCap >= MAX_INPUT_CHIPS_FOR_PANEL_RUNTIME) {
         const toastForChipCap = ABChatContent && ABChatContent.ui && ABChatContent.ui.toast;
@@ -10583,6 +10670,7 @@
           const pendingChipForImg = addInputChipForPanelRuntime({
             type: 'image',
             label: String(fileForAttach.name || 'Image'),
+            size: Number(fileForAttach.size) || 0,
             status: 'loading',
             statusText: 'Processing image...'
           });
@@ -10599,6 +10687,7 @@
         const pendingChipForFile = addInputChipForPanelRuntime({
           type: 'file',
           label: String(fileForAttach.name || 'File'),
+          size: Number(fileForAttach.size) || 0,
           status: 'loading',
           statusText: 'Parsing file...'
         });
@@ -11771,6 +11860,7 @@
       root.getElementById('pk-title').textContent = 'Attach Note';
       root.getElementById('pk-search').placeholder = 'Search notes...';
       resetPickerSearchForPanelRuntime();
+      resetPickerSelectionForPanelRuntime();
       renderPickerList(getPickerNotesForPanelRuntime(), 'note');
       pickerOverlay.classList.remove('hidden');
       writePanelStateSyncForPanelRuntime({ pickerOpen: true, pickerMode: 'note' });
@@ -11782,6 +11872,7 @@
       root.getElementById('pk-title').textContent = 'Attach Chat Summary';
       root.getElementById('pk-search').placeholder = 'Search chats...';
       resetPickerSearchForPanelRuntime();
+      resetPickerSelectionForPanelRuntime();
       renderPickerList(getPickerChatsForPanelRuntime(), 'chat');
       pickerOverlay.classList.remove('hidden');
       writePanelStateSyncForPanelRuntime({ pickerOpen: true, pickerMode: 'chat' });
@@ -11805,25 +11896,27 @@
       pickerCurrentItemsForPanelRuntime = items;
       pickerCurrentTypeForPanelRuntime = type;
       pickerRenderedCountForPanelRuntime = 0;
+      pickerAttachedKeysForPanelRuntime = collectAttachedPickerKeysForPanelRuntime();
       list.innerHTML = '';
       renderNextPickerPageForPanelRuntime();
       if (pickerRenderedCountForPanelRuntime < items.length) {
         setupPickerSentinelForPanelRuntime(list);
       }
+      refreshPickerSelectionUiForPanelRuntime();
     }
 
-    function selectPickerItem(item, type) {
+    // Adds one note, chat or clip chip without closing the picker, so a multi-select commit can
+    // add several. Returns the chip, or null when none was added.
+    function attachPickerItemChipForPanelRuntime(item, type) {
+      if (!item) return null;
       // Guard against attaching the active chat to itself, in case it ever surfaces in the list.
-      if (type === 'chat' && item && Number(item.id) === Number(S.activeChatId)) {
-        closePickerModal();
-        return;
-      }
+      if (type === 'chat' && Number(item.id) === Number(S.activeChatId)) return null;
       // A clip IS a note row, so it rides the note chip type (and therefore the existing
       // <note_reference> + read tool path). Only `kind` marks it as a clip, for the icon
       // and label.
       const chipTypeForPicker = type === 'clip' ? 'note' : type;
-      const clipRecordForPicker = type === 'clip' ? getClipRecordForPanelRuntime(item && item.id) : null;
-      addInputChipForPanelRuntime({
+      const clipRecordForPicker = type === 'clip' ? getClipRecordForPanelRuntime(item.id) : null;
+      return addInputChipForPanelRuntime({
         type: chipTypeForPicker,
         label: String(item.title || ''),
         content: '',
@@ -11833,7 +11926,217 @@
         pageUrl: clipRecordForPicker ? String(clipRecordForPicker.sourceUrl || '') : '',
         pageTitle: clipRecordForPicker ? String(clipRecordForPicker.sourceTitle || '') : ''
       });
+    }
+
+    function selectPickerItem(item, type) {
+      attachPickerItemChipForPanelRuntime(item, type);
       closePickerModal();
+    }
+
+    /* ---- Picker multi-select ----
+       A row click attaches that one item, as before. Ticking a row's checkbox starts a selection:
+       row clicks then toggle, and the footer's Attach button adds every ticked item at once. The
+       limits (10 chips in the composer, 5 tabs per message) and every decision about them live in
+       panel/panelPickerSelection.js; these functions gather the counts and carry out its answers. */
+
+    function getPickerSelectionNsForPanelRuntime() {
+      return (globalThis.ABChatContent || {}).pickerSelection || null;
+    }
+
+    function countComposerChipsForPanelRuntime() {
+      const rowForCount = root.querySelector('.input-chips-row');
+      return rowForCount ? rowForCount.querySelectorAll('.ic').length : 0;
+    }
+
+    // Loading and failed tab chips count too, as they do toward the 10-chip limit.
+    function countComposerTabChipsForPanelRuntime() {
+      const rowForTabCount = root.querySelector('.input-chips-row');
+      return rowForTabCount ? rowForTabCount.querySelectorAll('.ic[data-attach-type="tab"]').length : 0;
+    }
+
+    // The identity keys of the composer's chips. A row is Attached when the chip it would add has
+    // one of these keys, which is the same test addInputChipForPanelRuntime refuses a duplicate by.
+    function collectAttachedPickerKeysForPanelRuntime() {
+      const keysForAttached = new Set();
+      const identityNsForAttached = getChipIdentityNsForPanelRuntime();
+      if (!identityNsForAttached) return keysForAttached;
+      readComposerChipIdentityRecordsForPanelRuntime().forEach(function (recordForAttached) {
+        const keyForAttached = identityNsForAttached.keyFor(recordForAttached);
+        if (keyForAttached) keysForAttached.add(keyForAttached);
+      });
+      return keysForAttached;
+    }
+
+    // The identity key of the chip a picker row would add. Clips are note chips; a tab is keyed
+    // by its URL.
+    function pickerRowChipKeyForPanelRuntime(pickerTypeForRowKey, itemForRowKey) {
+      const identityNsForRowKey = getChipIdentityNsForPanelRuntime();
+      if (!identityNsForRowKey || !itemForRowKey) return '';
+      if (pickerTypeForRowKey === 'tab') return identityNsForRowKey.keyFor({ type: 'tab', pageUrl: itemForRowKey.url });
+      return identityNsForRowKey.keyFor({ type: pickerTypeForRowKey === 'chat' ? 'chat' : 'note', refId: itemForRowKey.id });
+    }
+
+    function isPickerItemAttachedForPanelRuntime(pickerTypeForAttachedItem, itemForAttachedItem) {
+      const keyForAttachedItem = pickerRowChipKeyForPanelRuntime(pickerTypeForAttachedItem, itemForAttachedItem);
+      return Boolean(keyForAttachedItem) && pickerAttachedKeysForPanelRuntime.has(keyForAttachedItem);
+    }
+
+    function getPickerSelectionInputForPanelRuntime() {
+      return {
+        type: S.pickerMode,
+        existingChipCount: countComposerChipsForPanelRuntime(),
+        existingTabChipCount: countComposerTabChipsForPanelRuntime(),
+        maxChips: MAX_INPUT_CHIPS_FOR_PANEL_RUNTIME,
+        selectedCount: pickerSelectedKeysForPanelRuntime.length
+      };
+    }
+
+    // Resolves a row to its selection key and data. Tab rows index into
+    // pickerCurrentTabsForPanelRuntime and every other row into pickerCurrentItemsForPanelRuntime.
+    function resolvePickerRowForPanelRuntime(rowForResolve) {
+      if (!rowForResolve || !rowForResolve.dataset) return null;
+      if (rowForResolve.dataset.action === 'select-picker-tab') {
+        const tabForResolve = pickerCurrentTabsForPanelRuntime[Number(rowForResolve.dataset.tabIndex)];
+        if (!tabForResolve) return null;
+        return { isTab: true, key: String(tabForResolve.id), item: tabForResolve, attached: isPickerItemAttachedForPanelRuntime('tab', tabForResolve), blocked: tabForResolve.accessible === false };
+      }
+      const itemForResolve = pickerCurrentItemsForPanelRuntime[Number(rowForResolve.dataset.pickerIndex)];
+      if (!itemForResolve) return null;
+      const keyForResolve = String(itemForResolve.id);
+      return { isTab: false, key: keyForResolve, item: itemForResolve, attached: isPickerItemAttachedForPanelRuntime(pickerCurrentTypeForPanelRuntime, itemForResolve), blocked: false };
+    }
+
+    function handlePickerRowClickForPanelRuntime(rowForClick) {
+      const resolvedForClick = resolvePickerRowForPanelRuntime(rowForClick);
+      if (!resolvedForClick) return;
+      const nsForClick = getPickerSelectionNsForPanelRuntime();
+      let actionForClick = 'attach';
+      if (nsForClick) {
+        const inputForClick = getPickerSelectionInputForPanelRuntime();
+        actionForClick = nsForClick.rowClickAction({
+          attached: resolvedForClick.attached,
+          blocked: resolvedForClick.blocked,
+          selected: pickerSelectedKeysForPanelRuntime.indexOf(resolvedForClick.key) !== -1,
+          selectedCount: inputForClick.selectedCount,
+          limit: nsForClick.selectionLimit(inputForClick).limit
+        });
+      }
+      if (actionForClick === 'none') return;
+      if (actionForClick === 'toggle') {
+        togglePickerRowForPanelRuntime(rowForClick);
+        return;
+      }
+      // 'attach', and 'explain' for a tab the extension cannot read: the single-item path already
+      // tells the user why such a tab cannot be attached.
+      if (resolvedForClick.isTab) selectTabItem(resolvedForClick.item);
+      else selectPickerItem(resolvedForClick.item, pickerCurrentTypeForPanelRuntime);
+    }
+
+    // Called for a click on the row's checkbox, and for a row click once a selection has started.
+    // A checkbox has already flipped itself by the time the click reaches the delegated handler,
+    // so the row is always repainted from the stored selection, which also undoes a refused tick.
+    function togglePickerRowForPanelRuntime(rowForToggle) {
+      const resolvedForToggle = resolvePickerRowForPanelRuntime(rowForToggle);
+      const nsForToggle = getPickerSelectionNsForPanelRuntime();
+      if (!resolvedForToggle || !nsForToggle || resolvedForToggle.attached || resolvedForToggle.blocked) {
+        paintPickerRowTickForPanelRuntime(rowForToggle, false);
+        return;
+      }
+      const keyForToggle = resolvedForToggle.key;
+      const limitForToggle = nsForToggle.selectionLimit(getPickerSelectionInputForPanelRuntime()).limit;
+      const resultForToggle = nsForToggle.toggleKey(pickerSelectedKeysForPanelRuntime, keyForToggle, limitForToggle);
+      pickerSelectedKeysForPanelRuntime = resultForToggle.keys;
+      if (resultForToggle.selected) pickerSelectedItemsForPanelRuntime.set(keyForToggle, resolvedForToggle.item);
+      else if (!resultForToggle.refused) pickerSelectedItemsForPanelRuntime.delete(keyForToggle);
+      paintPickerRowTickForPanelRuntime(rowForToggle, pickerSelectedKeysForPanelRuntime.indexOf(keyForToggle) !== -1);
+      refreshPickerSelectionUiForPanelRuntime();
+    }
+
+    // Updates the list's state classes and the footer. Only the list element and the footer are
+    // touched, never each row, so a tick costs the same in a list of ten rows or ten thousand:
+    // panel.css dims the unticked rows through the list's is-full class.
+    function refreshPickerSelectionUiForPanelRuntime() {
+      const listForRefresh = root.getElementById('pk-list');
+      const nsForRefresh = getPickerSelectionNsForPanelRuntime();
+      const inputForRefresh = getPickerSelectionInputForPanelRuntime();
+      const limitForRefresh = nsForRefresh ? nsForRefresh.selectionLimit(inputForRefresh).limit : Infinity;
+      if (listForRefresh) {
+        listForRefresh.classList.toggle('is-selecting', inputForRefresh.selectedCount > 0);
+        listForRefresh.classList.toggle('is-full', inputForRefresh.selectedCount >= limitForRefresh);
+      }
+      const footerForRefresh = root.getElementById('pk-footer');
+      if (!footerForRefresh) return;
+      const footerInfoForRefresh = nsForRefresh
+        ? nsForRefresh.footer(inputForRefresh)
+        : { visible: false, canAttach: false, canClear: false, text: '' };
+      footerForRefresh.classList.toggle('hidden', !footerInfoForRefresh.visible);
+      const textForRefresh = root.getElementById('pk-footer-text');
+      if (textForRefresh) textForRefresh.textContent = footerInfoForRefresh.text;
+      const clearForRefresh = root.getElementById('pk-footer-clear');
+      if (clearForRefresh) clearForRefresh.classList.toggle('hidden', !footerInfoForRefresh.canClear);
+      const attachForRefresh = root.getElementById('pk-footer-attach');
+      if (attachForRefresh) {
+        attachForRefresh.classList.toggle('hidden', !footerInfoForRefresh.canAttach);
+        attachForRefresh.textContent = 'Attach ' + inputForRefresh.selectedCount;
+      }
+    }
+
+    function resetPickerSelectionForPanelRuntime() {
+      pickerSelectedKeysForPanelRuntime = [];
+      pickerSelectedItemsForPanelRuntime.clear();
+    }
+
+    function clearPickerSelectionForPanelRuntime() {
+      resetPickerSelectionForPanelRuntime();
+      const listForClear = root.getElementById('pk-list');
+      if (listForClear) {
+        listForClear.querySelectorAll('.pk-item.is-selected').forEach(function (rowForClear) {
+          paintPickerRowTickForPanelRuntime(rowForClear, false);
+        });
+      }
+      refreshPickerSelectionUiForPanelRuntime();
+    }
+
+    async function attachPickerSelectionForPanelRuntime() {
+      const nsForCommit = getPickerSelectionNsForPanelRuntime();
+      const typeForCommit = S.pickerMode;
+      const keysForCommit = pickerSelectedKeysForPanelRuntime.slice();
+      if (!nsForCommit || !typeForCommit || keysForCommit.length === 0) return;
+      // closePickerModal clears the selection, so take the ticked items first.
+      const itemsByKeyForCommit = new Map(pickerSelectedItemsForPanelRuntime);
+      // Recount what is attached now, in case another tab's draft added one of the ticked items.
+      pickerAttachedKeysForPanelRuntime = collectAttachedPickerKeysForPanelRuntime();
+      const attachedSelectedKeysForCommit = keysForCommit.filter(function (keyForAttachedCheck) {
+        return isPickerItemAttachedForPanelRuntime(typeForCommit, itemsByKeyForCommit.get(keyForAttachedCheck));
+      });
+      const planForCommit = nsForCommit.planCommit({
+        type: typeForCommit,
+        selectedKeys: keysForCommit,
+        attachedKeys: attachedSelectedKeysForCommit,
+        existingChipCount: countComposerChipsForPanelRuntime(),
+        existingTabChipCount: countComposerTabChipsForPanelRuntime(),
+        maxChips: MAX_INPUT_CHIPS_FOR_PANEL_RUNTIME
+      });
+      closePickerModal();
+      const itemsForCommit = planForCommit.attach
+        .map(function (keyForItem) { return itemsByKeyForCommit.get(keyForItem); })
+        .filter(Boolean);
+      let tabBatchForCommit = null;
+      if (typeForCommit === 'tab') {
+        tabBatchForCommit = attachTabsForPanelRuntime(itemsForCommit);
+      } else {
+        itemsForCommit.forEach(function (itemForCommit) {
+          attachPickerItemChipForPanelRuntime(itemForCommit, typeForCommit);
+        });
+      }
+      if (planForCommit.skipped > 0) {
+        const nounsForCommit = { note: ['note', 'notes'], chat: ['chat', 'chats'], clip: ['clip', 'clips'], tab: ['tab', 'tabs'] };
+        const nounForCommit = (nounsForCommit[typeForCommit] || ['item', 'items'])[planForCommit.skipped === 1 ? 0 : 1];
+        showFilePickerToastForPanelRuntime(planForCommit.limitedBy === 'tabs'
+          ? 'Tab limit reached: ' + planForCommit.skipped + ' ' + nounForCommit + ' not added (max ' + nsForCommit.MAX_TAB_CHIPS + ' per message).'
+          : 'Attachment limit reached: ' + planForCommit.skipped + ' ' + nounForCommit + ' not added (max ' + MAX_INPUT_CHIPS_FOR_PANEL_RUNTIME + ').');
+      }
+      if (tabBatchForCommit) await tabBatchForCommit;
     }
 
     /* ============================================================
@@ -12264,6 +12567,7 @@
       root.getElementById('pk-title').textContent = 'Attach Saved Clip';
       root.getElementById('pk-search').placeholder = 'Search clips...';
       resetPickerSearchForPanelRuntime();
+      resetPickerSelectionForPanelRuntime();
       renderPickerList(getPickerClipsForPanelRuntime(), 'clip');
       pickerOverlay.classList.remove('hidden');
       writePanelStateSyncForPanelRuntime({ pickerOpen: true, pickerMode: 'clip' });
@@ -13035,8 +13339,14 @@
     window.addEventListener('keydown', handleContentSearchHotkeyForPanelRuntime, true);
 
     function closePickerModal() {
+      // Reset the scroll while the list still has a box. Once the overlay is hidden the list has
+      // none, so emptying and refilling it on the next open keeps the old offset, and the picker
+      // would open partway down its list.
+      const listForClose = root.getElementById('pk-list');
+      if (listForClose) listForClose.scrollTop = 0;
       pickerOverlay.classList.add('hidden');
       S.pickerMode = null;
+      resetPickerSelectionForPanelRuntime();
       if (pickerObserverForPanelRuntime) {
         pickerObserverForPanelRuntime.disconnect();
         pickerObserverForPanelRuntime = null;
@@ -15171,9 +15481,11 @@
           }
           const rowForApply = root.querySelector('.input-chips-row');
           if (rowForApply) rowForApply.innerHTML = '';
+          // A restored draft keeps every chip it holds. The duplicate check is for new additions;
+          // dropping a chip here would also republish the draft without it to every other tab.
           normalizedForDraftApply.chips.forEach(function (chipDataForApply) {
             if (chipDataForApply && chipDataForApply.type && chipDataForApply.label) {
-              addInputChipForPanelRuntime(chipDataForApply);
+              addInputChipForPanelRuntime(chipDataForApply, { allowDuplicate: true });
             }
           });
         } finally {
@@ -18495,7 +18807,7 @@
           // Do not stage a generated image for a text-only model: it would be sent as an image_url
           // the model cannot read. The image is still saved in the finished assistant turn.
           if (isModelKnownNonVisionForPanelRuntime(modelForOffscreen)) continue;
-          addInputChipForPanelRuntime({ type: 'image', label: 'Generated image', mimeType: 'image/png', refId: autoChipBlobIdOffscreen, size: 0, kind: 'generated_image' });
+          addInputChipForPanelRuntime({ type: 'image', label: 'Generated image', mimeType: 'image/png', refId: autoChipBlobIdOffscreen, size: 0, kind: 'generated_image' }, { quietDuplicate: true });
         }
         // Last line of defence: a chip whose source is gone would otherwise be sent as a
         // <note_reference>/<chat_reference> the read tool cannot resolve. Broken chips are marked
@@ -19939,6 +20251,7 @@
       root.getElementById('pk-title').textContent = 'Attach Browser Tab Content';
       root.getElementById('pk-search').placeholder = 'Search open tabs...';
       resetPickerSearchForPanelRuntime();
+      resetPickerSelectionForPanelRuntime();
       S.pickerTabs = await fetchOpenTabsForPanelRuntime();
       renderTabPickerList(getPickerTabsForPanelRuntime());
       pickerOverlay.classList.remove('hidden');
@@ -19947,6 +20260,7 @@
     function renderTabPickerList(tabs) {
       const list = root.getElementById('pk-list');
       list.innerHTML = '';
+      pickerAttachedKeysForPanelRuntime = collectAttachedPickerKeysForPanelRuntime();
       pickerCurrentTabsForPanelRuntime = Array.isArray(tabs) ? tabs : [];
       pickerCurrentTabsForPanelRuntime.forEach((tab, indexForTabRow) => {
         if (tab.windowLabel) {
@@ -19959,12 +20273,13 @@
         const isActive = Boolean(tab && tab.active);
         const isAccessible = tab && tab.accessible !== false;
         const isDiscarded = Boolean(tab && tab.discarded);
-        div.className = 'pk-item' + (isAccessible ? '' : ' pk-item--inaccessible');
-        div.innerHTML = `
-          <div class="pk-item-icon tab-icon">${tab.favicon}</div>
+        const isAttachedTab = isAccessible && isPickerItemAttachedForPanelRuntime('tab', tab);
+        div.className = 'pk-item' + (isAccessible ? '' : ' pk-item--inaccessible') + (isAttachedTab ? ' pk-item--attached' : '');
+        div.innerHTML = buildPickerRowLeadHtmlForPanelRuntime('tab-icon', tab.favicon, tab.title, isAccessible && !isAttachedTab) + `
           <div class="pk-item-body">
             <div class="pk-item-title" style="display:flex;align-items:center;gap:6px;overflow:hidden">
               <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">${escHtml(tab.title)}</span>
+              ${isAttachedTab ? '<span class="pk-tab-badge pk-tab-badge--attached">Attached</span>' : ''}
               ${isActive && tab.isCurrentWindow ? '<span class="pk-tab-badge pk-tab-badge--current">Current</span>' : ''}
               ${isDiscarded && isAccessible ? '<span class="pk-tab-badge pk-tab-badge--sleeping" title="Chrome suspended this tab to save memory. Selecting it will reload the page.">Sleeping</span>' : ''}
               ${!isAccessible ? '<span class="pk-tab-badge pk-tab-badge--blocked" title="This page cannot be read by extensions">Not accessible</span>' : ''}
@@ -19973,8 +20288,11 @@
           </div>`;
         div.dataset.action = 'select-picker-tab';
         div.dataset.tabIndex = String(indexForTabRow);
+        div.dataset.pickerKey = String(tab.id);
+        paintPickerRowTickForPanelRuntime(div, pickerSelectedKeysForPanelRuntime.indexOf(String(tab.id)) !== -1);
         list.appendChild(div);
       });
+      refreshPickerSelectionUiForPanelRuntime();
     }
 
     async function selectTabItem(tab) {
@@ -19986,12 +20304,58 @@
         return;
       }
       closePickerModal();
-      const pendingChipForPanelRuntime = addInputChipForPanelRuntime({
+      const pendingChipForPanelRuntime = addPendingTabChipForPanelRuntime(tab);
+      // No chip means the composer was full, and addInputChipForPanelRuntime has said so. Reading
+      // the tab anyway would wake a sleeping one for nothing.
+      if (!pendingChipForPanelRuntime) return;
+      await fillTabChipContentForPanelRuntime(pendingChipForPanelRuntime, tab);
+    }
+
+    // Every new tab chip is made here, so the per-message tab limit is checked here as well as in
+    // the picker. It is not checked in addInputChipForPanelRuntime, because restoring a saved draft
+    // goes through that too, and a draft saved with more tabs than the limit must keep them all.
+    function addPendingTabChipForPanelRuntime(tab) {
+      const nsForTabLimit = getPickerSelectionNsForPanelRuntime();
+      if (nsForTabLimit) {
+        const limitInfoForTab = nsForTabLimit.selectionLimit({
+          type: 'tab',
+          existingChipCount: countComposerChipsForPanelRuntime(),
+          existingTabChipCount: countComposerTabChipsForPanelRuntime(),
+          maxChips: MAX_INPUT_CHIPS_FOR_PANEL_RUNTIME
+        });
+        // A full composer falls through, so addInputChipForPanelRuntime reports it as it always has.
+        if (limitInfoForTab.limit === 0 && limitInfoForTab.limitedBy === 'tabs') {
+          showFilePickerToastForPanelRuntime('Tab limit reached (max ' + nsForTabLimit.MAX_TAB_CHIPS + ' per message).');
+          return null;
+        }
+      }
+      return addInputChipForPanelRuntime({
         type: 'tab',
         label: String((tab && tab.title) || (tab && tab.url) || 'Browser Tab'),
+        // The URL is the tab chip's identity: the picker marks the tab Attached by it and a second
+        // chip for the same page is refused. contextBuilder.js also sends it as the tab's url.
+        pageUrl: String((tab && tab.url) || ''),
+        pageTitle: String((tab && tab.title) || ''),
         status: 'loading',
         statusText: tab && tab.discarded ? 'Waking tab...' : 'Reading tab content...'
       });
+    }
+
+    // Adds a loading chip for every tab first, so each holds its place in the composer, then reads
+    // the tabs one at a time. Reading them together would wake every sleeping tab in the batch at
+    // once. The chips are added before the first await, so they are in the row when this returns
+    // its promise.
+    async function attachTabsForPanelRuntime(tabsForBatch) {
+      const pendingForBatch = (Array.isArray(tabsForBatch) ? tabsForBatch : []).map(function (tabForPending) {
+        return { tab: tabForPending, chip: addPendingTabChipForPanelRuntime(tabForPending) };
+      });
+      for (let iForBatch = 0; iForBatch < pendingForBatch.length; iForBatch++) {
+        if (!pendingForBatch[iForBatch].chip) continue;
+        await fillTabChipContentForPanelRuntime(pendingForBatch[iForBatch].chip, pendingForBatch[iForBatch].tab);
+      }
+    }
+
+    async function fillTabChipContentForPanelRuntime(pendingChipForPanelRuntime, tab) {
       try {
         const tabContentResultForPanelRuntime = await fetchTabPageContentForPanelRuntime(tab && tab.id);
         if (!tabContentResultForPanelRuntime.ok) {
@@ -20756,6 +21120,7 @@
         const pendingChipForPanelRuntime = addInputChipForPanelRuntime({
           type: 'image',
           label: String(fileForPanelRuntime.name || 'Image'),
+          size: Number(fileForPanelRuntime.size) || 0,
           status: 'loading',
           statusText: 'Processing image...'
         });
@@ -20797,6 +21162,7 @@
         const pendingChipForPanelRuntime = addInputChipForPanelRuntime({
           type: 'file',
           label: String(fileForPanelRuntime.name || 'File'),
+          size: Number(fileForPanelRuntime.size) || 0,
           status: 'loading',
           statusText: 'Parsing file...'
         });
@@ -22292,18 +22658,19 @@
             case 'submit-mcq':           submitMcq(); break;
             case 'next-question':        nextQuestion(); break;
             case 'skip-question':        skipQuestion(); break;
-            case 'select-picker-item': {
-              const itemForPickerSelect =
-                pickerCurrentItemsForPanelRuntime[Number(tgtForRuntime.dataset.pickerIndex)];
-              if (itemForPickerSelect) selectPickerItem(itemForPickerSelect, pickerCurrentTypeForPanelRuntime);
+            // Both row kinds resolve their item at click time from the array the last render
+            // holds (pickerCurrentItemsForPanelRuntime or pickerCurrentTabsForPanelRuntime).
+            case 'select-picker-item':
+            case 'select-picker-tab':
+              handlePickerRowClickForPanelRuntime(tgtForRuntime);
+              break;
+            case 'toggle-picker-row': {
+              const rowForPickerToggle = tgtForRuntime.closest('.pk-item');
+              if (rowForPickerToggle) togglePickerRowForPanelRuntime(rowForPickerToggle);
               break;
             }
-            case 'select-picker-tab': {
-              const tabForPickerSelect =
-                pickerCurrentTabsForPanelRuntime[Number(tgtForRuntime.dataset.tabIndex)];
-              if (tabForPickerSelect) selectTabItem(tabForPickerSelect);
-              break;
-            }
+            case 'attach-picker-selection': attachPickerSelectionForPanelRuntime(); break;
+            case 'clear-picker-selection':  clearPickerSelectionForPanelRuntime(); break;
             case 'toggle-pause-question': {
               const dataForPauseToggle = QUIZ_STORE_FOR_PANEL_RUNTIME[QS.activeQid];
               if (dataForPauseToggle && getQuizStatusForPanelRuntime(dataForPauseToggle) === 'paused') {
