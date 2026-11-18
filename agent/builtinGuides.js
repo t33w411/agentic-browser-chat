@@ -487,7 +487,7 @@ Make an HTML file when the user wants something to open and use in their browser
 
 ## 2. The file
 Pass the whole page as html, starting with <!DOCTYPE html>. The user downloads it and opens it from their computer as a file:// page, with no web server and no other files beside it. So:
-- Put everything in the one file: CSS in <style>, JavaScript in <script>, and pictures as inline <svg>, <canvas> drawing, or data: URLs. A reference to another file (styles.css, app.js, images/logo.png) breaks, because that file does not exist.
+- Put everything in the one file: CSS in <style>, JavaScript in <script>, and pictures as inline <svg>, <canvas> drawing, or images from this conversation (section 3). A reference to another file (styles.css, app.js, images/logo.png) breaks, because that file does not exist.
 - Use classic <script> elements. Chrome blocks ES module imports of local files, fetch() of local files, and service workers on file:// pages.
 - A library from a CDN, such as Chart.js from https://cdn.jsdelivr.net, works only while the user is online. Prefer plain JavaScript, SVG, and canvas. Use a library only when it saves a lot of code, pin its version in the URL, and tell the user the page needs an internet connection.
 - Start <head> with <meta charset="utf-8">, then <meta name="viewport" content="width=device-width, initial-scale=1"> and a <title>. A saved file has no other record of its encoding, so a browser without the charset line has to guess it. The writer adds the line when it is missing and says so in the warnings.
@@ -495,7 +495,14 @@ Pass the whole page as html, starting with <!DOCTYPE html>. The user downloads i
 - Do not ask the user for passwords, payment details, or API keys, and do not send what they enter to any server unless the page exists to do that and the user asked for it.
 - For a page built on a lot of data computed from attachments, build it in eval: compute the data, write it into the page in the code, and return { __document__: { format: "html", filename, html } }.
 
-## 3. Making it work the first time
+## 3. Pictures
+A page can show an image from this conversation, named by its blob id as abchat-blob:N wherever a URL goes: <img src="abchat-blob:42" alt="...">, url(abchat-blob:42) in CSS, or 'abchat-blob:42' in a script. The id is the N in "__blob:N__" from generate_image, the blob_id on an <image> or <screenshot> placeholder, or the "(blob id: N)" in a note's attachment list. Never make one up.
+- The downloaded file holds the pictures. The saved source keeps abchat-blob:N, which is what edit, grep, and read show.
+- Each abchat-blob:N is a full copy of the picture, so name a picture used in several places once, in a CSS class or a JavaScript constant.
+- Add pictures when the user asks, or when the page exists to be looked at, such as a landing page, a menu, or an invitation. A tool or a game needs none. Generated images have no transparent background, so draw game pieces and icons with SVG or canvas.
+- For new pictures, read the builtin-images guide, make them all in one response, then make the page with their ids. If generate_image fails or is not available, make the page without them and tell the user why.
+
+## 4. Making it work the first time
 The user sees the page, not your code, and cannot fix it. Before you call:
 - Check that every function you call is defined, every id or class you look up exists in the markup, and every handler is attached after its element exists. Put scripts at the end of <body>, or run them on DOMContentLoaded.
 - Leave nothing unfinished: no placeholder text, "TODO" notes, or buttons that do nothing.
@@ -503,13 +510,13 @@ The user sees the page, not your code, and cannot fix it. Before you call:
 - Write the source readably, with line breaks and indentation, never minified. A read shows at most 2,000 characters of a line, and a later edit has to match the text exactly.
 - Handle empty and invalid input, such as an empty field, a negative number, or text where a number belongs.
 
-## 4. Design
+## 5. Design
 - Make it responsive. It must work in a phone-width window as well as on a desktop. Use flex or grid, relative units, a max-width on the content, and buttons and inputs large enough to tap. Give an element that should shrink in a flex row min-width: 0.
 - Give it a clear look of its own: a small type scale, one accent colour, consistent spacing and corner radius, and a visible focus style.
 - Label every input, give pictures alt text, and keep text contrast readable.
 - Follow the system's light or dark mode with prefers-color-scheme when the page is mostly reading, or a tool the user keeps open for a long time.
 
-## 5. Changing a file
+## 6. Changing a file
 Do not write the page out again to change it. Change the saved file with edit:
 1. Find the file's blob id in the link in displayed_to_user: #abchat-docblob-12 is blob id 12.
 2. Call edit with type "attachment", id 12, the rev from the result that made the file, and old_string and new_string, as for a note. Copy old_string exactly from the page as it now stands, which is your create_document call with the edits you have made since. Put several changes in one call with edits.
@@ -518,11 +525,11 @@ The edit saves a new copy and shows it to the user. Its result has the new copy'
 Make the page again with create_document only when most of it changes, and give it the same filename, so the earlier version's html is left out of the conversation with a note in its place. Use a new filename only when the user wants to keep both versions, such as a light one and a dark one side by side; "redo it" or "make it light" replaces the page.
 Do not read back a file you just made to check it. It holds exactly the html you sent, apart from any repair the warnings name.
 
-## 6. The result
-The result has format, filename, size, rev, and a note. It has warnings when the writer added a doctype or a charset line. The file is shown to the user, so do not repeat the code in your reply. To point to the file, copy the link from displayed_to_user, such as [budget-planner.html](#abchat-docblob-12), and tell the user to download it and open it in their browser. Make each file once. Call again only to fix a problem or to make a change the user asked for.
+## 7. The result
+The result has format, filename, size, rev, and a note. It has warnings when the writer added a doctype or a charset line, or could not use a picture, which then shows as missing. The file is shown to the user, so do not repeat the code in your reply. To point to the file, copy the link from displayed_to_user, such as [budget-planner.html](#abchat-docblob-12), and tell the user to download it and open it in their browser. Make each file once. Call again only to fix a problem or to make a change the user asked for.
 
-## 7. Limits
-A page can be up to 1,000,000 characters. A larger one is refused and nothing is made. Generate repeated markup with a script, or keep large data out of the page.`;
+## 8. Limits
+A page can be up to 1,000,000 characters, and the file with its pictures up to 16 MB. A larger one is refused and nothing is made. Generate repeated markup with a script, or keep large data out of the page. A page shows up to 30 different pictures, and any more show as missing.`;
 
   const DOCUMENT_FORMATS_FOR_BUILTIN_GUIDES = ['docx', 'pdf', 'xlsx', 'csv', 'pptx', 'html'];
 

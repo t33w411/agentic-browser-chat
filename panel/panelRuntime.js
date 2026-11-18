@@ -399,9 +399,6 @@
     const GENERATED_IMAGE_BLOB_CACHE_MAX_FOR_PANEL_RUNTIME = 50;
     const GENERATED_IMAGE_BLOB_CACHE_FOR_PANEL_RUNTIME = {};
     const GENERATED_IMAGE_BLOB_CACHE_ORDER_FOR_PANEL_RUNTIME = [];
-    const GENERATED_DOCUMENT_BLOB_CACHE_MAX_FOR_PANEL_RUNTIME = 50;
-    const GENERATED_DOCUMENT_BLOB_CACHE_FOR_PANEL_RUNTIME = {};
-    const GENERATED_DOCUMENT_BLOB_CACHE_ORDER_FOR_PANEL_RUNTIME = [];
     function setImageBlobCacheForPanelRuntime(id, dataUrl) {
       if (GENERATED_IMAGE_BLOB_CACHE_FOR_PANEL_RUNTIME[id] !== undefined) return;
       if (GENERATED_IMAGE_BLOB_CACHE_ORDER_FOR_PANEL_RUNTIME.length >= GENERATED_IMAGE_BLOB_CACHE_MAX_FOR_PANEL_RUNTIME) {
@@ -410,20 +407,6 @@
       }
       GENERATED_IMAGE_BLOB_CACHE_FOR_PANEL_RUNTIME[id] = dataUrl;
       GENERATED_IMAGE_BLOB_CACHE_ORDER_FOR_PANEL_RUNTIME.push(id);
-    }
-    function setDocumentBlobCacheForPanelRuntime(id, recordForPanelRuntime) {
-      if (GENERATED_DOCUMENT_BLOB_CACHE_FOR_PANEL_RUNTIME[id] !== undefined) return;
-      if (GENERATED_DOCUMENT_BLOB_CACHE_ORDER_FOR_PANEL_RUNTIME.length >= GENERATED_DOCUMENT_BLOB_CACHE_MAX_FOR_PANEL_RUNTIME) {
-        var evictedDocIdForPanelRuntime = GENERATED_DOCUMENT_BLOB_CACHE_ORDER_FOR_PANEL_RUNTIME.shift();
-        delete GENERATED_DOCUMENT_BLOB_CACHE_FOR_PANEL_RUNTIME[evictedDocIdForPanelRuntime];
-      }
-      GENERATED_DOCUMENT_BLOB_CACHE_FOR_PANEL_RUNTIME[id] = {
-        dataUrl: String((recordForPanelRuntime && recordForPanelRuntime.dataUrl) || ''),
-        name: String((recordForPanelRuntime && recordForPanelRuntime.name) || 'generated-document'),
-        mimeType: String((recordForPanelRuntime && recordForPanelRuntime.mimeType) || ''),
-        size: Number((recordForPanelRuntime && recordForPanelRuntime.size) || 0) || 0
-      };
-      GENERATED_DOCUMENT_BLOB_CACHE_ORDER_FOR_PANEL_RUNTIME.push(id);
     }
     // SIDEBAR WINDOWING: only the first SIDEBAR_PAGE_SIZE items are rendered into the DOM at
     // startup. Additional pages are appended by IntersectionObserver sentinels as the user
@@ -2950,17 +2933,19 @@
       });
     }
 
+    // A file link is drawn without its file, which is read when the link is clicked. Opening a chat
+    // used to read every file it shows and put each one whole into its link's href, in every tab
+    // showing the chat; an HTML page with photos is saved again on every edit, so that grew with
+    // each change. The href stays "#abchat-docblob-N", and the click handler prevents it, since
+    // followed it would change the address of the page the panel sits on.
     function hydrateGeneratedDocumentsForPanelRuntime(containerForPanelRuntime) {
       if (!containerForPanelRuntime) return;
       const docLinksForHydrate = containerForPanelRuntime.querySelectorAll('a[href^="#abchat-docblob-"]');
       docLinksForHydrate.forEach(function (linkForHydrate) {
         const matchForHydrate = String(linkForHydrate.getAttribute('href') || '').match(/^#abchat-docblob-(\d+)$/);
         if (!matchForHydrate) return;
-        const blobIdForHydrate = Number(matchForHydrate[1]);
-        const docRecordForHydrate = GENERATED_DOCUMENT_BLOB_CACHE_FOR_PANEL_RUNTIME[blobIdForHydrate];
-        if (!docRecordForHydrate || !docRecordForHydrate.dataUrl) return;
-        linkForHydrate.href = docRecordForHydrate.dataUrl;
-        linkForHydrate.download = docRecordForHydrate.name || 'generated-document';
+        linkForHydrate.dataset.action = 'download-generated-document';
+        linkForHydrate.dataset.docBlobId = matchForHydrate[1];
         linkForHydrate.removeAttribute('target');
         linkForHydrate.rel = 'noopener noreferrer';
         linkForHydrate.classList.add('generated-document-link');
@@ -2971,6 +2956,47 @@
           iconForHydrate.innerHTML = ic.paperclip12 || '';
           linkForHydrate.insertBefore(iconForHydrate, linkForHydrate.firstChild);
         }
+      });
+    }
+
+    const generatedDocumentDownloadsInFlightForPanelRuntime = new Set();
+
+    function showGeneratedDocumentToastForPanelRuntime(messageForDocumentToast) {
+      const toastForDocument = ABChatContent && ABChatContent.ui && ABChatContent.ui.toast;
+      if (toastForDocument && typeof toastForDocument.show === 'function') {
+        toastForDocument.show(messageForDocumentToast, { durationMs: 4000 });
+      }
+    }
+
+    // Reads the file behind a link and hands it to the browser as a download, through a link made
+    // for the purpose. That link sits outside the mount, so the delegated click handler never sees
+    // its click, and it is removed at once, so the file's data: URL is kept only for the download.
+    function downloadGeneratedDocumentForPanelRuntime(blobIdForDownload) {
+      const numericBlobIdForDownload = Number(blobIdForDownload);
+      if (!Number.isSafeInteger(numericBlobIdForDownload) || numericBlobIdForDownload <= 0) return;
+      if (generatedDocumentDownloadsInFlightForPanelRuntime.has(numericBlobIdForDownload)) return;
+      const repoForDownload = (globalThis.ABChatShared || {}).panelDataRepo;
+      if (!repoForDownload || typeof repoForDownload.getAttachmentBlob !== 'function') return;
+      generatedDocumentDownloadsInFlightForPanelRuntime.add(numericBlobIdForDownload);
+      Promise.resolve().then(function () {
+        return repoForDownload.getAttachmentBlob(numericBlobIdForDownload);
+      }).then(function (recordForDownload) {
+        if (!recordForDownload || typeof recordForDownload.dataUrl !== 'string' || recordForDownload.dataUrl.indexOf('data:') !== 0) {
+          showGeneratedDocumentToastForPanelRuntime('This file is no longer available.');
+          return;
+        }
+        const anchorForDownload = document.createElement('a');
+        anchorForDownload.href = recordForDownload.dataUrl;
+        anchorForDownload.download = String(recordForDownload.name || 'generated-document');
+        anchorForDownload.rel = 'noopener noreferrer';
+        anchorForDownload.style.display = 'none';
+        root.appendChild(anchorForDownload);
+        anchorForDownload.click();
+        anchorForDownload.remove();
+      }).catch(function () {
+        showGeneratedDocumentToastForPanelRuntime('The file could not be read. Try again.');
+      }).then(function () {
+        generatedDocumentDownloadsInFlightForPanelRuntime.delete(numericBlobIdForDownload);
       });
     }
 
@@ -3085,10 +3111,10 @@
       if (!panelDataRepoForBlobLoad || typeof panelDataRepoForBlobLoad.getAttachmentBlob !== 'function') {
         return Promise.resolve();
       }
+      // Only generated images are read here, since they are drawn in the chat. A file is read when
+      // its link is clicked (downloadGeneratedDocumentForPanelRuntime).
       const imageBlobRefRegexForLoad = /__blob:(\d+)__/g;
-      const docBlobRefRegexForLoad = /#abchat-docblob-(\d+)/g;
       const imageIdsToLoad = [];
-      const docIdsToLoad = [];
       // A picture shown only in its document is not drawn, so its bytes are not fetched.
       const hiddenIndexesForBlobScan = getHiddenGeneratedFileIndexesForPanelRuntime(messages);
       for (var bmi = 0; bmi < messages.length; bmi++) {
@@ -3101,13 +3127,8 @@
           const blobIdForScan = Number(matchForBlobScan[1]);
           if (!GENERATED_IMAGE_BLOB_CACHE_FOR_PANEL_RUNTIME[blobIdForScan]) imageIdsToLoad.push(blobIdForScan);
         }
-        docBlobRefRegexForLoad.lastIndex = 0;
-        while ((matchForBlobScan = docBlobRefRegexForLoad.exec(mdForBlobScan)) !== null) {
-          const docBlobIdForScan = Number(matchForBlobScan[1]);
-          if (!GENERATED_DOCUMENT_BLOB_CACHE_FOR_PANEL_RUNTIME[docBlobIdForScan]) docIdsToLoad.push(docBlobIdForScan);
-        }
       }
-      if (!imageIdsToLoad.length && !docIdsToLoad.length) return Promise.resolve();
+      if (!imageIdsToLoad.length) return Promise.resolve();
       var imageLoadsForPanelRuntime = imageIdsToLoad.map(function (blobIdForLoad) {
         return panelDataRepoForBlobLoad.getAttachmentBlob(blobIdForLoad).then(function (rec) {
           if (rec && typeof rec.dataUrl === 'string' && rec.dataUrl.indexOf('data:image/') === 0) {
@@ -3115,14 +3136,7 @@
           }
         }).catch(function () {});
       });
-      var docLoadsForPanelRuntime = docIdsToLoad.map(function (blobIdForLoad) {
-        return panelDataRepoForBlobLoad.getAttachmentBlob(blobIdForLoad).then(function (rec) {
-          if (rec && typeof rec.dataUrl === 'string' && rec.dataUrl.indexOf('data:') === 0) {
-            setDocumentBlobCacheForPanelRuntime(blobIdForLoad, rec);
-          }
-        }).catch(function () {});
-      });
-      return Promise.all(imageLoadsForPanelRuntime.concat(docLoadsForPanelRuntime)).then(function () {});
+      return Promise.all(imageLoadsForPanelRuntime).then(function () {});
     }
 
     // Indexes of automatic file links and pictures to leave out: a file the reply already links, an
@@ -22353,6 +22367,11 @@
             case 'save-chat-edit':       saveChatEditForPanelRuntime(Number(tgtForRuntime.dataset.chatEditMsgId)); break;
             case 'cancel-chat-edit':     cancelChatEditForPanelRuntime(); break;
             case 'copy-message':         copyMessageForPanelRuntime(Number(tgtForRuntime.dataset.messageId), tgtForRuntime); break;
+            // The link's href is "#abchat-docblob-N", which would change the page's address.
+            case 'download-generated-document':
+              evtForRuntime.preventDefault();
+              downloadGeneratedDocumentForPanelRuntime(tgtForRuntime.dataset.docBlobId);
+              break;
             case 'read-message-aloud': {
               readMessageAloudForPanelRuntime(Number(tgtForRuntime.dataset.messageId));
               break;

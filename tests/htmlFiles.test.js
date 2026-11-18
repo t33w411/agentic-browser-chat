@@ -178,6 +178,174 @@ test('an HTML edit is refused for a stale rev, a failing pair, a cut file, or an
   assert.strictEqual(missingForTest.error, 'Attachment not found: blob id 99');
 });
 
+// Pictures in an HTML file. The page names each one as abchat-blob:N, the downloaded file holds the
+// picture as a data: URL, and the saved source keeps the name. Node has no canvas, so the pictures
+// here go in as they are; the browser suite in tests/browser/extension/generatedFiles.mjs covers
+// shrinking a large one. Checked against the code before pictures: the first two tests fail there,
+// the first because the file keeps every placeholder, and the second because edit encoded the
+// changed text alone, which gives a copy with every picture missing. The limits test fails there
+// too, since nothing counted or loaded pictures.
+
+// The header bytes the picture reader needs, padded to a size.
+function pngBytesForTest(widthForPng, heightForPng, totalBytesForPng) {
+  const bytesForPng = Buffer.alloc(Math.max(33, totalBytesForPng || 0));
+  Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]).copy(bytesForPng, 0);
+  bytesForPng.writeUInt32BE(13, 8);
+  bytesForPng.write('IHDR', 12, 'latin1');
+  bytesForPng.writeUInt32BE(widthForPng, 16);
+  bytesForPng.writeUInt32BE(heightForPng, 20);
+  return bytesForPng;
+}
+
+function jpegBytesForTest(widthForJpeg, heightForJpeg) {
+  return Buffer.from([0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, heightForJpeg >> 8, heightForJpeg & 255, widthForJpeg >> 8, widthForJpeg & 255, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xD9]);
+}
+
+function imageBlobForTest(mimeForBlob, bytesForBlob) {
+  return { name: 'generated-image', kind: 'generated_image', mimeType: 'image/png', dataUrl: 'data:' + mimeForBlob + ';base64,' + Buffer.from(bytesForBlob).toString('base64') };
+}
+
+// Records the blob ids read, so a test can tell how often each picture was loaded.
+function countBlobReadsForTest() {
+  const repoForCount = globalThis.ABChatShared.panelDataRepo;
+  const readForCount = repoForCount.getAttachmentBlob;
+  const idsForCount = [];
+  repoForCount.getAttachmentBlob = async function (idForGet) { idsForCount.push(Number(idForGet)); return readForCount(idForGet); };
+  return idsForCount;
+}
+
+const PICTURE_PAGE_FOR_TEST = [
+  '<!DOCTYPE html>', '<html lang="en">', '<head>', '<meta charset="utf-8">', '<title>Bakery</title>',
+  '<style>.hero { background-image: url(abchat-blob:6); }</style>', '</head>', '<body>',
+  '<img src="abchat-blob:5" alt="Logo">', '<div class="hero"></div>', '<img src="abchat-blob:5" alt="Logo again">',
+  '<img src="abchat-blob:9" alt="Missing">', '<img src="abchat-blob:8" alt="Not a picture">',
+  '<p data-note="myabchat-blob:5">Fresh bread daily</p>',
+  '<script>var badgeForPage = \'abchat-blob:7\';</script>', '</body>', '</html>'
+].join('\n');
+
+const PNG_FOR_TEST = pngBytesForTest(40, 30);
+const JPEG_FOR_TEST = jpegBytesForTest(64, 48);
+const SVG_FOR_TEST = '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>';
+
+// 5 is a PNG, 6 a JPEG saved under image/png as generated images are, 7 an SVG whose data: URL
+// holds quotes, 8 a page and not a picture, and 9 does not exist.
+function pictureBlobsForTest(extraForBlobs) {
+  return Object.assign({
+    5: imageBlobForTest('image/png', PNG_FOR_TEST),
+    6: imageBlobForTest('image/png', JPEG_FOR_TEST),
+    7: { name: 'badge.svg', mimeType: 'image/svg+xml', dataUrl: 'data:image/svg+xml;utf8,' + SVG_FOR_TEST },
+    8: { name: 'menu.html', mimeType: 'text/html', dataUrl: 'data:text/html;base64,PGI+', textContent: '<b>' }
+  }, extraForBlobs || {});
+}
+
+// The page as the user's file holds it, with each usable picture in place of its name.
+function withPicturesForTest(pageForPictures) {
+  return pageForPictures
+    .split('abchat-blob:6').join('data:image/jpeg;base64,' + JPEG_FOR_TEST.toString('base64'))
+    .split('"abchat-blob:5"').join('"data:image/png;base64,' + PNG_FOR_TEST.toString('base64') + '"')
+    .split('abchat-blob:7').join('data:image/svg+xml;base64,' + Buffer.from(SVG_FOR_TEST).toString('base64'));
+}
+
+const MISSING_PICTURES_WARNING_FOR_TEST = 'These pictures could not be used, so the page shows them as missing: blob 9 was not found; blob 8 is not an image. Use the blob id of an image in this conversation, and change the page with edit.';
+
+test('a picture named abchat-blob:N is in the downloaded file, and the saved source keeps the name', async function () {
+  installRepoForTest(pictureBlobsForTest());
+  const readsForTest = countBlobReadsForTest();
+  const resultForTest = await createHtmlForTest({ filename: 'bakery', html: PICTURE_PAGE_FOR_TEST });
+  assert.strictEqual(resultForTest.ok, true, resultForTest.error);
+
+  // In an img src, a CSS url() and a script string alike, as base64, so the SVG's quotes cannot
+  // close the attribute. A longer name that ends in the placeholder is left alone.
+  const fileForTest = decodeDataUrlForTest(resultForTest.dataUrl);
+  assert.strictEqual(fileForTest, withPicturesForTest(PICTURE_PAGE_FOR_TEST));
+  assert.ok(fileForTest.includes('data-note="myabchat-blob:5"'));
+  assert.strictEqual(resultForTest.size, Buffer.byteLength(fileForTest, 'utf8'));
+  assert.deepStrictEqual(resultForTest.pictureBlobIds, [6, 5, 7]);
+  assert.deepStrictEqual(resultForTest.warnings, [MISSING_PICTURES_WARNING_FOR_TEST]);
+  // A picture named twice is loaded once.
+  assert.deepStrictEqual(readsForTest, [6, 5, 9, 8, 7]);
+
+  // The source and its rev are the page as written, which is what read and edit see.
+  assert.strictEqual(resultForTest.textContent, PICTURE_PAGE_FOR_TEST);
+  installRepoForTest({ 12: { name: 'bakery.html', mimeType: 'text/html', textContent: resultForTest.textContent } });
+  const readForTest = await agentNsForTest.executeTool('read', { type: 'attachment', id: 12 }, {});
+  assert.strictEqual(readForTest.rev, resultForTest.rev);
+  assert.ok(readForTest.content.some(function (lineForRead) { return lineForRead.lc === '<img src="abchat-blob:5" alt="Logo">'; }));
+});
+
+test('an edited copy holds its pictures too, including one the edit adds', async function () {
+  installRepoForTest(pictureBlobsForTest({ 12: { name: 'bakery.html', mimeType: 'text/html', textContent: PICTURE_PAGE_FOR_TEST } }));
+  const revForTest = (await agentNsForTest.executeTool('read', { type: 'attachment', id: 12 }, {})).rev;
+  const editedForTest = await agentNsForTest.executeTool('edit', {
+    type: 'attachment', id: 12, rev: revForTest,
+    edits: [
+      { old_string: 'Fresh bread daily', new_string: 'Fresh bread every morning' },
+      { old_string: '<img src="abchat-blob:9" alt="Missing">', new_string: '<img src="abchat-blob:7" alt="Badge">' }
+    ]
+  }, {});
+  assert.strictEqual(editedForTest.ok, true, editedForTest.error);
+  const changedForTest = PICTURE_PAGE_FOR_TEST.replace('Fresh bread daily', 'Fresh bread every morning')
+    .replace('<img src="abchat-blob:9" alt="Missing">', '<img src="abchat-blob:7" alt="Badge">');
+  assert.strictEqual(editedForTest.textContent, changedForTest);
+  assert.strictEqual(decodeDataUrlForTest(editedForTest.dataUrl), withPicturesForTest(changedForTest));
+  assert.strictEqual(editedForTest.size, Buffer.byteLength(withPicturesForTest(changedForTest), 'utf8'));
+  assert.deepStrictEqual(editedForTest.pictureBlobIds, [6, 5, 7]);
+  assert.deepStrictEqual(editedForTest.warnings, ['These pictures could not be used, so the page shows them as missing: blob 8 is not an image. Use the blob id of an image in this conversation, and change the page with edit.']);
+});
+
+test('a page shows at most 30 pictures, one over 4 MB is left out, and a file over 16 MB is refused', async function () {
+  const manyBlobsForTest = {};
+  const manyTagsForTest = [];
+  for (let idForMany = 1; idForMany <= 31; idForMany++) {
+    manyBlobsForTest[idForMany] = imageBlobForTest('image/png', PNG_FOR_TEST);
+    manyTagsForTest.push('<img src="abchat-blob:' + idForMany + '" alt="">');
+  }
+  manyBlobsForTest[40] = imageBlobForTest('image/png', pngBytesForTest(4000, 3000, Math.round(4.5 * 1024 * 1024)));
+  installRepoForTest(manyBlobsForTest);
+  // The pictures count in the order the page names them, so the large one is among the first 30.
+  const manyForTest = await createHtmlForTest({ html: PAGE_FOR_TEST.replace('<h1>', '<img src="abchat-blob:40" alt="Big">\n' + manyTagsForTest.join('\n') + '\n<h1>') });
+  assert.strictEqual(manyForTest.ok, true, manyForTest.error);
+  assert.deepStrictEqual(manyForTest.pictureBlobIds, Array.from({ length: 29 }, function (unused, indexForIds) { return indexForIds + 1; }));
+  const manyFileForTest = decodeDataUrlForTest(manyForTest.dataUrl);
+  assert.ok(manyFileForTest.includes('<img src="abchat-blob:40" alt="Big">'));
+  assert.ok(manyFileForTest.includes('<img src="abchat-blob:30" alt="">'));
+  assert.ok(manyFileForTest.includes('<img src="abchat-blob:31" alt="">'));
+  assert.ok(!manyFileForTest.includes('src="abchat-blob:29"'));
+  assert.deepStrictEqual(manyForTest.warnings, [
+    'These pictures could not be used, so the page shows them as missing: blob 40 is 4.5 MB, over the 4.0 MB one picture in a page can be, and it could not be made smaller. Use the blob id of an image in this conversation, and change the page with edit.',
+    'An HTML file holds at most 30 different pictures, so these show as missing: blob 30, blob 31.'
+  ]);
+
+  // Five pictures of 3.9 MB come to more than 16 MB. The call stops at the fourth, the first that
+  // takes the file past the limit, and makes nothing; an edit that adds the fifth is refused too.
+  const bigBlobsForTest = {};
+  for (let idForBig = 1; idForBig <= 5; idForBig++) bigBlobsForTest[idForBig] = imageBlobForTest('image/png', pngBytesForTest(1600, 1200, Math.round(3.9 * 1024 * 1024)));
+  const bigPageForTest = PAGE_FOR_TEST.replace('<h1>', '<img src="abchat-blob:1"><img src="abchat-blob:2"><img src="abchat-blob:3"><img src="abchat-blob:4"><img src="abchat-blob:5">\n<h1>');
+  installRepoForTest(bigBlobsForTest);
+  const bigReadsForTest = countBlobReadsForTest();
+  const bigForTest = await createHtmlForTest({ html: bigPageForTest });
+  assert.strictEqual(bigForTest.ok, false);
+  assert.ok(/^With its pictures the page comes to \d+\.\d MB, over the 16\.0 MB an HTML file can hold\. No file was made\./.test(bigForTest.error), bigForTest.error);
+  assert.strictEqual(bigForTest.dataUrl, undefined);
+  assert.deepStrictEqual(bigReadsForTest, [1, 2, 3, 4]);
+
+  const threeForTest = PAGE_FOR_TEST.replace('<h1>', '<img src="abchat-blob:1"><img src="abchat-blob:2"><img src="abchat-blob:3">\n<h1>');
+  installRepoForTest(Object.assign({ 12: { name: 'big.html', mimeType: 'text/html', textContent: threeForTest } }, bigBlobsForTest));
+  const revForTest = (await agentNsForTest.executeTool('read', { type: 'attachment', id: 12 }, {})).rev;
+  const grownForTest = await agentNsForTest.executeTool('edit', { type: 'attachment', id: 12, rev: revForTest, old_string: '<img src="abchat-blob:3">', new_string: '<img src="abchat-blob:3"><img src="abchat-blob:4">' }, {});
+  assert.strictEqual(grownForTest.ok, false);
+  assert.ok(/over the 16\.0 MB an HTML file can hold/.test(grownForTest.error), grownForTest.error);
+  assert.strictEqual(grownForTest.dataUrl, undefined);
+});
+
+test('the HTML guide says how to name a picture and when a page should have one', function () {
+  const bodyForTest = agentNsForTest.builtinGuides.get('builtin-html').body;
+  assert.ok(bodyForTest.includes('<img src="abchat-blob:42" alt="...">'));
+  assert.ok(bodyForTest.includes('read the builtin-images guide'));
+  assert.ok(bodyForTest.includes('A tool or a game needs none.'));
+  assert.ok(bodyForTest.includes('A page shows up to 30 different pictures'));
+});
+
 test('edits works on notes too, in order and in one save, and the single pair behaves as before', async function () {
   const notesForTest = { 3: { id: 3, title: 'Plan', body: 'one two three' } };
   const stateForTest = installRepoForTest({}, notesForTest);

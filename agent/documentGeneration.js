@@ -12,6 +12,26 @@
   var MAX_HTML_FILE_CHARS_FOR_DOCUMENT_GENERATION = 1000000;
   // A browser honours a charset declaration only within the first 1024 bytes of the file.
   var HTML_CHARSET_SCAN_BYTES_FOR_DOCUMENT_GENERATION = 1024;
+  // A picture in an HTML file is named by blob id as abchat-blob:N wherever a URL goes: an img
+  // src, a CSS url(), or a string in a script. The literal is required, so this never matches
+  // empty text, and the lookbehind leaves out a longer name that happens to end in it.
+  var HTML_PICTURE_PLACEHOLDER_RE_FOR_DOCUMENT_GENERATION = /(?<![A-Za-z0-9_-])abchat-blob:(\d+)/g;
+  var MAX_HTML_PICTURES_FOR_DOCUMENT_GENERATION = 30;
+  // A picture over either limit is drawn smaller and written again, as JPEG, or as PNG when it has
+  // transparency. 1600 pixels covers a picture across a wide screen.
+  var HTML_PICTURE_MAX_SIDE_FOR_DOCUMENT_GENERATION = 1600;
+  var HTML_PICTURE_KEEP_BYTES_FOR_DOCUMENT_GENERATION = 300 * 1024;
+  var HTML_PICTURE_JPEG_QUALITY_FOR_DOCUMENT_GENERATION = 0.85;
+  // One picture after any re-encoding, and the whole file with its pictures. The file is saved as a
+  // data: URL a third larger again, and it reaches IndexedDB in a runtime message, which Chrome
+  // caps at 64 MB.
+  var HTML_PICTURE_MAX_BYTES_FOR_DOCUMENT_GENERATION = 4 * 1024 * 1024;
+  var MAX_HTML_FILE_BYTES_WITH_PICTURES_FOR_DOCUMENT_GENERATION = 16 * 1024 * 1024;
+  // The picture types a page keeps as they are. Any other is converted when it decodes: HEIC and
+  // TIFF, which Chrome cannot show, and BMP, which is uncompressed.
+  var HTML_PICTURE_SHOWN_TYPES_FOR_DOCUMENT_GENERATION = {
+    'image/png': true, 'image/jpeg': true, 'image/gif': true, 'image/webp': true, 'image/svg+xml': true, 'image/avif': true
+  };
   var MAX_DOCX_BLOCKS_FOR_DOCUMENT_GENERATION = 500;
   var MAX_HTML_INPUT_CHARS_FOR_DOCUMENT_GENERATION = 200000;
   var MAX_PPTX_SLIDES_FOR_DOCUMENT_GENERATION = 100;
@@ -1333,7 +1353,9 @@
     return sourceForPrepare;
   }
 
-  function buildHtmlFileForDocumentGeneration(inputForHtmlFile, filenameForHtmlFile) {
+  // The saved source (textContent) keeps each abchat-blob:N, so the model edits, searches and reads
+  // the page without the picture bytes. Only the file the user downloads holds them.
+  function buildHtmlFileForDocumentGeneration(inputForHtmlFile, filenameForHtmlFile, depsForHtmlFile) {
     var rawForHtmlFile = typeof inputForHtmlFile.html === 'string' ? inputForHtmlFile.html : '';
     if (!rawForHtmlFile.trim()) {
       throw new Error('An HTML file needs html: the whole page, starting with <!DOCTYPE html>.');
@@ -1344,18 +1366,152 @@
     }
     var warningsForHtmlFile = [];
     var sourceForHtmlFile = prepareHtmlSourceForDocumentGeneration(rawForHtmlFile, warningsForHtmlFile);
-    var bytesForHtmlFile = new TextEncoder().encode(sourceForHtmlFile);
-    var responseForHtmlFile = {
-      ok: true,
-      format: 'html',
-      filename: filenameForHtmlFile,
-      mimeType: HTML_MIME_FOR_DOCUMENT_GENERATION,
-      dataUrl: uint8ToDataUrlForDocumentGeneration(bytesForHtmlFile, HTML_MIME_FOR_DOCUMENT_GENERATION),
-      size: bytesForHtmlFile.length,
-      textContent: sourceForHtmlFile
+    return packHtmlFileForDocumentGeneration(sourceForHtmlFile, depsForHtmlFile).then(function (packedForHtmlFile) {
+      var responseForHtmlFile = {
+        ok: true,
+        format: 'html',
+        filename: filenameForHtmlFile,
+        mimeType: HTML_MIME_FOR_DOCUMENT_GENERATION,
+        dataUrl: packedForHtmlFile.dataUrl,
+        size: packedForHtmlFile.size,
+        textContent: sourceForHtmlFile
+      };
+      var allWarningsForHtmlFile = warningsForHtmlFile.concat(packedForHtmlFile.warnings);
+      if (allWarningsForHtmlFile.length) responseForHtmlFile.warnings = allWarningsForHtmlFile;
+      if (packedForHtmlFile.pictureBlobIds.length) responseForHtmlFile.pictureBlobIds = packedForHtmlFile.pictureBlobIds;
+      return responseForHtmlFile;
+    });
+  }
+
+  function htmlMegabytesForDocumentGeneration(byteCount) {
+    return (byteCount / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
+  // One picture for an HTML file, as { mime, bytes }, or { error }. A picture of a type the page
+  // keeps goes in as it is when it is at most 300 KB and 1600 pixels on its longest side. SVG and
+  // GIF always go in as they are, since a canvas would turn a drawing into pixels and stop an
+  // animation. Anything else is drawn smaller and written again, and the original is kept when
+  // that comes out no smaller. Without a canvas (tests in Node) a picture of a kept type goes in as
+  // it is, up to the limit for one picture.
+  function htmlPictureForDocumentGeneration(recordForPicture) {
+    if (!recordForPicture) return Promise.resolve({ error: 'was not found' });
+    var dataUrlForPicture = typeof recordForPicture.dataUrl === 'string' ? recordForPicture.dataUrl : '';
+    if (dataUrlForPicture.indexOf('data:image/') !== 0) return Promise.resolve({ error: 'is not an image' });
+    var decodedForPicture = pptxBytesFromDataUrlForDocumentGeneration(dataUrlForPicture);
+    if (!decodedForPicture || !decodedForPicture.bytes.length) return Promise.resolve({ error: 'could not be read' });
+    var bytesForPicture = decodedForPicture.bytes;
+    var infoForPicture = pptxImageInfoForDocumentGeneration(bytesForPicture);
+    // The header decides the type when it is one the reader knows, so a JPEG saved as image/png is
+    // still labelled as a JPEG in the page.
+    var mimeForPicture = infoForPicture ? 'image/' + infoForPicture.ext
+      : (decodedForPicture.mime === 'image/jpg' ? 'image/jpeg' : decodedForPicture.mime);
+    var originalForPicture = { mime: mimeForPicture, bytes: bytesForPicture };
+    var keptTypeForPicture = HTML_PICTURE_SHOWN_TYPES_FOR_DOCUMENT_GENERATION[mimeForPicture] === true;
+    var fitsAsIsForPicture = keptTypeForPicture && bytesForPicture.length <= HTML_PICTURE_MAX_BYTES_FOR_DOCUMENT_GENERATION;
+    var sideForPicture = infoForPicture && infoForPicture.width && infoForPicture.height ? Math.max(infoForPicture.width, infoForPicture.height) : 0;
+    var withinSideForPicture = sideForPicture <= HTML_PICTURE_MAX_SIDE_FOR_DOCUMENT_GENERATION;
+    var tooLargeForPicture = 'is ' + htmlMegabytesForDocumentGeneration(bytesForPicture.length) + ', over the '
+      + htmlMegabytesForDocumentGeneration(HTML_PICTURE_MAX_BYTES_FOR_DOCUMENT_GENERATION) + ' one picture in a page can be';
+    if (mimeForPicture === 'image/svg+xml' || mimeForPicture === 'image/gif') {
+      return Promise.resolve(fitsAsIsForPicture ? originalForPicture : { error: tooLargeForPicture });
+    }
+    if (fitsAsIsForPicture && withinSideForPicture && bytesForPicture.length <= HTML_PICTURE_KEEP_BYTES_FOR_DOCUMENT_GENERATION) {
+      return Promise.resolve(originalForPicture);
+    }
+    return pptxReencodeForDocumentGeneration(bytesForPicture, mimeForPicture, HTML_PICTURE_MAX_SIDE_FOR_DOCUMENT_GENERATION, HTML_PICTURE_JPEG_QUALITY_FOR_DOCUMENT_GENERATION).then(function (entryForPicture) {
+      var redrawnForPicture = entryForPicture && entryForPicture.bytes && entryForPicture.bytes.length
+        ? { mime: 'image/' + entryForPicture.ext, bytes: entryForPicture.bytes }
+        : null;
+      if (!redrawnForPicture) {
+        if (fitsAsIsForPicture) return originalForPicture;
+        return { error: keptTypeForPicture ? tooLargeForPicture + ', and it could not be made smaller' : 'is ' + mimeForPicture + ', which a browser cannot show, and it could not be converted' };
+      }
+      if (fitsAsIsForPicture && withinSideForPicture && redrawnForPicture.bytes.length >= bytesForPicture.length) return originalForPicture;
+      if (redrawnForPicture.bytes.length > HTML_PICTURE_MAX_BYTES_FOR_DOCUMENT_GENERATION) {
+        return { error: 'is still ' + htmlMegabytesForDocumentGeneration(redrawnForPicture.bytes.length) + ' after it was made smaller, over the '
+          + htmlMegabytesForDocumentGeneration(HTML_PICTURE_MAX_BYTES_FOR_DOCUMENT_GENERATION) + ' one picture in a page can be' };
+      }
+      return redrawnForPicture;
+    });
+  }
+
+  // The file the user downloads, built from the page's source: each abchat-blob:N becomes that
+  // picture as a data: URL. create_document and edit with type "attachment" both build the file
+  // here, so an edited copy holds its pictures as the first one did. A picture that cannot be used
+  // keeps its placeholder, which the browser shows as a missing picture, and a warning names it.
+  // Pictures load one at a time through deps.loadImage, as a deck's do, so only one is decoded at
+  // once. Resolves to { dataUrl, size, pictureBlobIds, warnings }, and rejects when the file with
+  // its pictures is over the limit, since a file cut short is a broken page.
+  function packHtmlFileForDocumentGeneration(sourceForPack, depsForPack) {
+    var textForPack = String(sourceForPack || '');
+    var idsForPack = [];
+    var seenForPack = {};
+    Array.from(textForPack.matchAll(HTML_PICTURE_PLACEHOLDER_RE_FOR_DOCUMENT_GENERATION)).forEach(function (matchForPack) {
+      var idForPack = Number(matchForPack[1]);
+      if (!Number.isSafeInteger(idForPack) || idForPack <= 0 || seenForPack[idForPack]) return;
+      seenForPack[idForPack] = true;
+      idsForPack.push(idForPack);
+    });
+    var cutForPack = idsForPack.slice(MAX_HTML_PICTURES_FOR_DOCUMENT_GENERATION);
+    var loadIdsForPack = idsForPack.slice(0, MAX_HTML_PICTURES_FOR_DOCUMENT_GENERATION);
+    var picturesForPack = {};
+    var problemsForPack = [];
+    var loaderForPack = depsForPack && typeof depsForPack.loadImage === 'function' ? depsForPack.loadImage : null;
+    // A file already past the limit with the pictures loaded so far ends the call before the rest
+    // are loaded. The count is the page without its placeholders plus each picture once, which is
+    // never more than the finished file, so this refuses nothing the final check would accept.
+    var runningCharsForPack = loadIdsForPack.length ? textForPack.replace(HTML_PICTURE_PLACEHOLDER_RE_FOR_DOCUMENT_GENERATION, '').length : 0;
+    var overLimitErrorForPack = function (byteCount) {
+      return new Error('With its pictures the page comes to ' + htmlMegabytesForDocumentGeneration(byteCount) + ', over the '
+        + htmlMegabytesForDocumentGeneration(MAX_HTML_FILE_BYTES_WITH_PICTURES_FOR_DOCUMENT_GENERATION)
+        + ' an HTML file can hold. No file was made. Use fewer or smaller pictures, and name each picture once: every abchat-blob:N in the page is a full copy of it.');
     };
-    if (warningsForHtmlFile.length) responseForHtmlFile.warnings = warningsForHtmlFile;
-    return responseForHtmlFile;
+    var chainForPack = Promise.resolve();
+    loadIdsForPack.forEach(function (blobIdForPack) {
+      chainForPack = chainForPack.then(function () {
+        if (!loaderForPack) return { error: 'could not be loaded here' };
+        return Promise.resolve().then(function () { return loaderForPack(blobIdForPack); }).then(function (recordForPack) {
+          return htmlPictureForDocumentGeneration(recordForPack);
+        }, function () {
+          return { error: 'was not found' };
+        }).catch(function () {
+          return { error: 'could not be read' };
+        });
+      }).then(function (entryForPack) {
+        if (entryForPack.error) {
+          problemsForPack.push('blob ' + blobIdForPack + ' ' + entryForPack.error);
+          return;
+        }
+        var dataUrlForPack = uint8ToDataUrlForDocumentGeneration(entryForPack.bytes, entryForPack.mime);
+        runningCharsForPack += dataUrlForPack.length;
+        if (runningCharsForPack > MAX_HTML_FILE_BYTES_WITH_PICTURES_FOR_DOCUMENT_GENERATION) throw overLimitErrorForPack(runningCharsForPack);
+        picturesForPack[blobIdForPack] = dataUrlForPack;
+      });
+    });
+    return chainForPack.then(function () {
+      var fileTextForPack = loadIdsForPack.length
+        ? textForPack.replace(HTML_PICTURE_PLACEHOLDER_RE_FOR_DOCUMENT_GENERATION, function (wholeForPack, idTextForPack) {
+          return picturesForPack[Number(idTextForPack)] || wholeForPack;
+        })
+        : textForPack;
+      var bytesForPack = new TextEncoder().encode(fileTextForPack);
+      if (bytesForPack.length > MAX_HTML_FILE_BYTES_WITH_PICTURES_FOR_DOCUMENT_GENERATION) throw overLimitErrorForPack(bytesForPack.length);
+      var warningsForPack = [];
+      if (problemsForPack.length) {
+        warningsForPack.push('These pictures could not be used, so the page shows them as missing: ' + problemsForPack.join('; ')
+          + '. Use the blob id of an image in this conversation, and change the page with edit.');
+      }
+      if (cutForPack.length) {
+        warningsForPack.push('An HTML file holds at most ' + MAX_HTML_PICTURES_FOR_DOCUMENT_GENERATION + ' different pictures, so these show as missing: '
+          + cutForPack.map(function (idForCut) { return 'blob ' + idForCut; }).join(', ') + '.');
+      }
+      return {
+        dataUrl: uint8ToDataUrlForDocumentGeneration(bytesForPack, HTML_MIME_FOR_DOCUMENT_GENERATION),
+        size: bytesForPack.length,
+        pictureBlobIds: loadIdsForPack.filter(function (idForEmbedded) { return !!picturesForPack[idForEmbedded]; }),
+        warnings: warningsForPack
+      };
+    });
   }
 
   function htmlInlineRunsFromNodesForDocumentGeneration(topNodesForDocumentGeneration, baseFlagsForDocumentGeneration) {
@@ -5354,11 +5510,13 @@
     });
   }
 
-  function pptxReencodeForDocumentGeneration(bytes, mime) {
+  // maxSide and quality default to a deck's; an HTML file passes its own.
+  function pptxReencodeForDocumentGeneration(bytes, mime, maxSide, quality) {
     if (!pptxCanDrawForDocumentGeneration()) return Promise.resolve(null);
+    var sideLimit = maxSide || PPTX_MAX_IMAGE_SIDE_FOR_DOCUMENT_GENERATION;
     return pptxDecodeForDocumentGeneration(bytes, mime).then(function (decoded) {
       // A vector picture has no pixels of its own, so it is drawn as large as the limit allows.
-      var fitScale = PPTX_MAX_IMAGE_SIDE_FOR_DOCUMENT_GENERATION / Math.max(decoded.width, decoded.height);
+      var fitScale = sideLimit / Math.max(decoded.width, decoded.height);
       var scale = mime === 'image/svg+xml' ? fitScale : Math.min(1, fitScale);
       var width = Math.max(1, Math.round(decoded.width * scale));
       var height = Math.max(1, Math.round(decoded.height * scale));
@@ -5374,7 +5532,7 @@
           if (pixels[i] < 255) { opaque = false; break; }
         }
       }
-      return pptxEncodeCanvasForDocumentGeneration(canvas, opaque ? 'image/jpeg' : 'image/png').then(function (encoded) {
+      return pptxEncodeCanvasForDocumentGeneration(canvas, opaque ? 'image/jpeg' : 'image/png', quality).then(function (encoded) {
         return encoded ? { bytes: encoded, ext: opaque ? 'jpeg' : 'png', width: width, height: height } : null;
       });
     }).catch(function () { return null; });
@@ -7689,7 +7847,7 @@
     // html case, so its last branch would hand the page to the PPTX writer.
     if (formatForDocumentGeneration === 'html') {
       try {
-        return Promise.resolve(buildHtmlFileForDocumentGeneration(safeInputForDocumentGeneration, filenameForDocumentGeneration));
+        return buildHtmlFileForDocumentGeneration(safeInputForDocumentGeneration, filenameForDocumentGeneration, depsForDocumentGeneration);
       } catch (errForHtmlFile) {
         return Promise.reject(errForHtmlFile);
       }
@@ -7766,6 +7924,9 @@
 
   agentNamespaceForDocumentGeneration.documentGeneration = {
     createDocument: createDocumentForDocumentGeneration,
+    // edit with type "attachment" builds a changed HTML file through this, as create_document does,
+    // so the copy holds the pictures its source names.
+    packHtmlFile: packHtmlFileForDocumentGeneration,
     // Shared with agent/documentPrint.js, which renders the same blocks as HTML for Chrome to
     // print, so a PDF and a DOCX made from one spec lay out their tables and lists the same way.
     layout: {

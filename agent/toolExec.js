@@ -1126,15 +1126,6 @@
     return { ok: true, content: currentForApply };
   }
 
-  function utf8DataUrlForToolExec(textForDataUrl, mimeForDataUrl) {
-    var bytesForDataUrl = new TextEncoder().encode(textForDataUrl);
-    var binaryForDataUrl = '';
-    for (var offsetForDataUrl = 0; offsetForDataUrl < bytesForDataUrl.length; offsetForDataUrl += 0x8000) {
-      binaryForDataUrl += String.fromCharCode.apply(null, bytesForDataUrl.subarray(offsetForDataUrl, offsetForDataUrl + 0x8000));
-    }
-    return { dataUrl: 'data:' + mimeForDataUrl + ';base64,' + btoa(binaryForDataUrl), size: bytesForDataUrl.length };
-  }
-
   // An HTML file the model made with create_document, or one the user attached. Its stored text
   // is then the page source: create_document saves it, and an attached text/html file is decoded
   // as text. A DOCX or other office file stores extracted text, which is not the file.
@@ -1185,7 +1176,19 @@
     }
     var appliedForEdit = applyContentEditsForToolExec(sourceForEdit, editsForAttachment);
     if (!appliedForEdit.ok) return { ok: false, error: appliedForEdit.error };
-    var encodedForEdit = utf8DataUrlForToolExec(appliedForEdit.content, HTML_FILE_MIME_FOR_TOOL_EXEC);
+    // The saved text names each picture as abchat-blob:N, and the file holds the picture itself.
+    // The copy is built by the step create_document uses. Encoding the text alone would give a page
+    // with every picture missing, and no error.
+    var documentGenerationForEdit = (globalScopeForToolExec.ABChatAgent || {}).documentGeneration;
+    if (!documentGenerationForEdit || typeof documentGenerationForEdit.packHtmlFile !== 'function') {
+      return { ok: false, error: 'Document generator is unavailable.' };
+    }
+    var packedForEdit;
+    try {
+      packedForEdit = await documentGenerationForEdit.packHtmlFile(appliedForEdit.content, documentDepsForToolExec());
+    } catch (errForPack) {
+      return { ok: false, error: (errForPack && errForPack.message) || 'The changed page could not be saved.' };
+    }
     var changeCountForEdit = editsForAttachment.length;
     var responseForAttachmentEdit = {
       ok: true,
@@ -1194,13 +1197,15 @@
       format: 'html',
       filename: nameForEdit,
       mimeType: HTML_FILE_MIME_FOR_TOOL_EXEC,
-      dataUrl: encodedForEdit.dataUrl,
-      size: encodedForEdit.size,
+      dataUrl: packedForEdit.dataUrl,
+      size: packedForEdit.size,
       textContent: appliedForEdit.content,
       rev: computeRevTokenForToolExec(appliedForEdit.content),
       note: 'Made ' + changeCountForEdit + ' change' + (changeCountForEdit === 1 ? '' : 's') + ' and saved the result as a new copy of ' + nameForEdit
         + '; blob id ' + blobIdForEdit + ' is unchanged. For the next change, use the new copy\'s blob id from displayed_to_user and the rev in this result.'
     };
+    if (packedForEdit.warnings.length) responseForAttachmentEdit.warnings = packedForEdit.warnings;
+    if (packedForEdit.pictureBlobIds.length) responseForAttachmentEdit.pictureBlobIds = packedForEdit.pictureBlobIds;
     var ignoredForAttachmentEdit = ['title', 'due_at', 'reminder_at', 'is_completed'].filter(function (keyForIgnored) {
       return args[keyForIgnored] !== undefined;
     });
