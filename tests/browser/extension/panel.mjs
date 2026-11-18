@@ -1,36 +1,39 @@
 // The chat panel's per-reply page-change row with the real extension: a chat whose tool message
 // holds a real page_layout record, a page reload, then Apply and Undo clicked in the panel with
 // real mouse events, and the same chat opened on another origin.
-import { wait } from '../lib/cdp.mjs';
+import { wait, waitUntil } from '../lib/cdp.mjs';
 import { checkList, startWithExtension } from '../lib/extension.mjs';
+import { openPage, prepareExtension, reloadPage, togglePanel, waitForPanelReady } from '../lib/panelPage.mjs';
 
 const ALL_SHOWN = 'answered:block,answered:block,pending:block,answered:block';
 const PENDING_HIDDEN = 'answered:block,answered:block,pending:none,answered:block';
+// How long a click the panel must ignore is given to act, before the check that it did nothing.
+// A real click on Apply hides the row within 70 ms.
+const IGNORED_CLICK_SETTLE_MS = 700;
+// How long the chat on another site is given to show a page-change row, before the check that it
+// shows none. On the same site the row is there about 60 ms after the chat opens.
+const OTHER_ORIGIN_ROW_SETTLE_MS = 1000;
 
 export async function run({ extPath, urls }) {
   const pageUrl = urls.qa;
   const otherUrl = urls.feedOtherOrigin;
-  const { checks, check } = checkList();
+  const { checks, check, checkSoon } = checkList();
   const ext = await startWithExtension(extPath, { windowSize: '1600,1000' });
   const { chrome } = ext;
-  const openPanelIn = async (url) => {
-    const worker = await ext.serviceWorker();
-    await chrome.evaluate(worker, `(async () => { const tabs = await chrome.tabs.query({}); const tab = tabs.find((t) => (t.url || '').startsWith(${JSON.stringify(url)})); await toggleFloatingPanelFromActionButtonForServiceWorker(tab); return true; })()`);
-  };
   const click = async (page, x, y) => {
     await chrome.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y }, page);
     await chrome.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 }, page);
     await chrome.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 }, page);
   };
   try {
-    await wait(2500);
-    const worker = await ext.serviceWorker();
-    await chrome.evaluate(worker, `new Promise((r) => chrome.storage.local.set({ abchat_api_key: 'sk-or-test-not-used' }, () => chrome.storage.sync.set({ abchat_tour_done: true }, r)))`);
-    const created = await chrome.send('Target.createTarget', { url: pageUrl });
-    await wait(5000);
-    const page = await chrome.attach(created.result.targetId);
-    await chrome.send('Runtime.enable', {}, page);
+    const worker = await prepareExtension(ext);
+    const page = await openPage(ext, pageUrl);
     await chrome.send('Page.enable', {}, page);
+    // openPage returns once the worker has settled the tab, so a second copy would have landed.
+    // The worker used to load one into every tab it caught loading, which here dropped the scan
+    // made before it; checked against that worker, where this reads 2.
+    const generation = await chrome.evaluate(page, 'window.abchatListenerGeneration', ext.isolatedContextId(page));
+    check('a page opened in the foreground runs the content scripts once', generation === 1, generation);
     const rowStates = () => chrome.evaluate(page, `Array.from(document.querySelectorAll('.qa-item')).map((el) => el.dataset.status + ':' + getComputedStyle(el).display).join(',')`);
 
     const chat = await chrome.evaluate(worker, `ABChatShared.panelDataRepo.createChat({ title: 'Replay test', type: 'chat' })`);
@@ -58,56 +61,52 @@ export async function run({ extPath, urls }) {
     })()`);
     check('the record is stored on the tool message and kept out of its content', persisted && persisted.toolHasRecord && !persisted.toolContentHasRecord, persisted);
 
-    await chrome.send('Page.reload', {}, page);
-    await wait(5000);
-    check('the reload cleared the change', (await rowStates()) === ALL_SHOWN, await rowStates());
+    await reloadPage(ext, page);
+    await checkSoon('the reload cleared the change', rowStates, (r) => r === ALL_SHOWN);
 
-    await openPanelIn(pageUrl);
-    await wait(3500);
+    await togglePanel(ext, pageUrl);
+    await waitForPanelReady(ext, page);
     const ctx = ext.isolatedContextId(page);
     const inPanel = (body) => chrome.evaluate(page, `(() => { const host = document.getElementById('abchat-panel-shadow-host'); const root = host && host.shadowRoot; if (!root) return { noPanel: true }; ${body} })()`, ctx);
-    const opened = await inPanel(`const item = root.querySelector('[data-action="select-chat"][data-chat-id="${chatId}"]'); if (!item) return { noItem: true }; item.click(); return { clicked: true };`);
-    check('the panel opened and the chat was selected', opened && opened.clicked, opened);
-    await wait(2000);
+    const selectChat = () => inPanel(`const item = root.querySelector('[data-action="select-chat"][data-chat-id="${chatId}"]'); if (!item) return { noItem: true }; item.click(); return { clicked: true };`);
+    await checkSoon('the panel opened and the chat was selected', selectChat, (o) => o && o.clicked);
     const rowState = () => inPanel(`const row = root.querySelector('.msg-page-changes'); if (!row) return { noRow: true }; const btn = row.querySelector('button'); const r = btn ? btn.getBoundingClientRect() : null; return { hidden: row.hidden, cls: row.className, text: row.textContent.trim(), button: btn ? btn.textContent : '', x: r ? r.left + r.width / 2 : 0, y: r ? r.top + r.height / 2 : 0 };`);
-    const before = await rowState();
-    check('the reply shows Apply for its change on the same site', before && !before.hidden && before.button === 'Apply' && /pending question/.test(before.text), before);
+    const before = await checkSoon('the reply shows Apply for its change on the same site', rowState, (r) => r && !r.hidden && r.button === 'Apply' && /pending question/.test(r.text));
 
     await inPanel(`root.querySelector('.msg-page-changes button').click(); return true;`);
-    await wait(700);
+    await wait(IGNORED_CLICK_SETTLE_MS);
     check('a script click on Apply does nothing', (await rowStates()) === ALL_SHOWN, await rowStates());
 
     await click(page, before.x, before.y);
-    await wait(900);
-    check('a real click on Apply hides the pending row again', (await rowStates()) === PENDING_HIDDEN, await rowStates());
-    const afterApply = await rowState();
-    check('the reply now offers Undo', afterApply.button === 'Undo' && /is-active/.test(afterApply.cls), afterApply);
+    await checkSoon('a real click on Apply hides the pending row again', rowStates, (r) => r === PENDING_HIDDEN);
+    await checkSoon('the reply now offers Undo', rowState, (r) => r.button === 'Undo' && /is-active/.test(r.cls));
 
-    const keys = await chrome.evaluate(page, `(() => (globalThis.ABChatContent || {}).pageLayout.listChatChanges(${chatId}).map((c) => c.key).join(','))()`, ctx);
-    check('the replayed change is tagged with the chat and the original key', keys === 'call_apply_1:0', keys);
+    await checkSoon('the replayed change is tagged with the chat and the original key',
+      () => chrome.evaluate(page, `(() => (globalThis.ABChatContent || {}).pageLayout.listChatChanges(${chatId}).map((c) => c.key).join(','))()`, ctx), (keys) => keys === 'call_apply_1:0');
 
     await inPanel(`root.querySelector('.msg-page-changes button').click(); return true;`);
-    await wait(700);
-    check('Undo in the chat shows the pending row again', (await rowStates()) === ALL_SHOWN, await rowStates());
-    const afterUndo = await rowState();
-    check('the reply offers Apply again after Undo', afterUndo.button === 'Apply', afterUndo);
+    await checkSoon('Undo in the chat shows the pending row again', rowStates, (r) => r === ALL_SHOWN);
+    const afterUndo = await checkSoon('the reply offers Apply again after Undo', rowState, (r) => r.button === 'Apply');
 
     // An undo made on the page itself (the tool's reset, standing in for the bar) updates the row.
+    // Wait for the apply to show as Undo first, or the check below would pass on the row as it was.
     await click(page, afterUndo.x, afterUndo.y);
-    await wait(600);
+    await waitUntil(rowState, (r) => r.button === 'Undo');
     await chrome.evaluate(page, `(globalThis.ABChatContent || {}).pageLayout.run({ operation: 'reset' })`, ctx);
-    await wait(500);
-    const afterReset = await rowState();
-    check('an undo made outside the chat flips the row back to Apply', afterReset.button === 'Apply', afterReset);
+    await checkSoon('an undo made outside the chat flips the row back to Apply', rowState, (r) => r.button === 'Apply');
 
     const teardown = await chrome.evaluate(page, `(() => { try { globalThis.ABChatContent.ui.panelRuntime.teardown(); return 'ok'; } catch (e) { return String(e); } })()`, ctx);
     check('the panel teardown runs without throwing', teardown === 'ok', teardown);
 
-    await chrome.send('Page.navigate', { url: otherUrl }, page);
-    await wait(5000);
-    await openPanelIn(otherUrl);
-    await wait(3500);
-    const other = await chrome.evaluate(page, `(() => { const root = document.getElementById('abchat-panel-shadow-host').shadowRoot; const item = root.querySelector('[data-action="select-chat"][data-chat-id="${chatId}"]'); if (item) item.click(); return new Promise((r) => setTimeout(() => { const row = root.querySelector('.msg-page-changes'); r({ hasRow: !!row, hidden: row ? row.hidden : null, bubble: !!root.querySelector('.msg-bubble.asst') }); }, 2000)); })()`, ext.isolatedContextId(page));
+    await reloadPage(ext, page, otherUrl);
+    await togglePanel(ext, otherUrl);
+    await waitForPanelReady(ext, page);
+    const otherCtx = ext.isolatedContextId(page);
+    const otherState = () => chrome.evaluate(page, `(() => { const root = document.getElementById('abchat-panel-shadow-host').shadowRoot; const row = root.querySelector('.msg-page-changes'); return { hasRow: !!row, hidden: row ? row.hidden : null, bubble: !!root.querySelector('.msg-bubble.asst') }; })()`, otherCtx);
+    await waitUntil(() => chrome.evaluate(page, `(() => { const root = document.getElementById('abchat-panel-shadow-host').shadowRoot; const item = root.querySelector('[data-action="select-chat"][data-chat-id="${chatId}"]'); if (!item) return false; item.click(); return true; })()`, otherCtx), (v) => v === true);
+    await waitUntil(otherState, (o) => o.bubble);
+    await wait(OTHER_ORIGIN_ROW_SETTLE_MS);
+    const other = await otherState();
     check('on another origin the reply shows no page-change row', other && other.bubble && (!other.hasRow || other.hidden === true), other);
     return checks;
   } finally {

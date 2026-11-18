@@ -52,17 +52,30 @@
       type: 'function',
       function: {
         name: 'edit',
-        description: 'Make a targeted edit in a note, task, or question by exact-string find and replace. Requires the rev token from a prior read. Can update the title, the content, or both in one call. For tasks it can additionally update the structured fields due_at, reminder_at, and is_completed (these can be changed alone, without any title or content change). At least one of title, a content change (old_string with new_string), or a task field (due_at, reminder_at, is_completed) must be provided. Content editing: provide old_string (the exact text to find) and new_string (its replacement; pass an empty string to delete the match). Fails if old_string is empty, is not found, or matches more than once without replace_all. To replace an item\'s entire content, use the write tool with the item\'s id and rev instead of this tool. Fails if rev is stale. Returns the updated id, type, and rev.',
+        description: 'Make a targeted edit in a note, task, or question by exact-string find and replace, or an HTML file (type "attachment", id its blob id), which is saved and shown as a new copy. Requires the rev token from a prior read. Can update the title, the content, or both in one call. For tasks it can additionally update the structured fields due_at, reminder_at, and is_completed (these can be changed alone, without any title or content change). At least one of title, a content change (old_string with new_string), or a task field (due_at, reminder_at, is_completed) must be provided. Content editing: provide old_string (the exact text to find) and new_string (its replacement; pass an empty string to delete the match), or edits for several changes in one call. Fails if old_string is empty, is not found, or matches more than once without replace_all. To replace an item\'s entire content, use the write tool with the item\'s id and rev instead of this tool. Fails if rev is stale. Returns the updated id, type, and rev.',
         parameters: {
           type: 'object',
           properties: {
-            type: { type: 'string', enum: ['note', 'task', 'question'], description: 'The data type to edit.' },
+            type: { type: 'string', enum: ['note', 'task', 'question', 'attachment'], description: 'The data type to edit.' },
             id: { type: 'integer', description: 'ID of the item to edit.' },
             rev: { type: 'string', description: 'Revision token from the most recent read of this item.' },
             title: { type: 'string', description: 'New title for the item. Can be provided alone for a title-only rename, or alongside a content change.' },
             old_string: { type: 'string', description: 'Exact, non-empty text to find and replace. Matched exactly, including whitespace. Must be unique in the content unless replace_all is true; if it is not unique, include more surrounding context until it is. For a small change inside a very long line, such as minified JSON, give a short unique snippet around the exact spot rather than the whole line.' },
             new_string: { type: 'string', description: 'Replacement text for old_string. May span multiple lines. Pass an empty string to delete the matched text. Omit when only updating the title or task fields.' },
             replace_all: { type: 'boolean', description: 'Replace every occurrence of old_string instead of requiring a unique match. Defaults to false.' },
+            edits: {
+              type: 'array',
+              description: 'Several changes in one call, instead of old_string and new_string. Applied in order; if one fails, none is made.',
+              items: {
+                type: 'object',
+                properties: {
+                  old_string: { type: 'string' },
+                  new_string: { type: 'string' },
+                  replace_all: { type: 'boolean' }
+                },
+                required: ['old_string', 'new_string']
+              }
+            },
             due_at: { type: 'string', description: "Tasks only: ignored (and reported in the response's ignored array) for other types. New ISO 8601 due date/time. When you change this without also setting reminder_at, the reminder is automatically moved to fire before the new due date/time." },
             reminder_at: { type: 'string', description: "Tasks only: ignored (and reported in the response's ignored array) for other types. New ISO 8601 reminder date/time. Must be before the task's due date/time (the new due_at if you are also changing it in this call), otherwise the edit is rejected." },
             is_completed: { type: 'boolean', description: "Tasks only: ignored (and reported in the response's ignored array) for other types. Set the task's completion status (true = complete, false = incomplete)." }
@@ -82,7 +95,7 @@
           properties: {
             pattern: { type: 'string', description: "JavaScript regular expression. Examples: 'closure', 'TODO:', '^##\\\\s', 'TODO|FIXME|HACK' (alternation to match any of several terms in one call). In title scope, also: 'meeting|standup' (alternation across title keywords), '^Q[1-4] ' (anchored prefix)." },
             scope: { type: 'string', enum: ['content', 'title'], description: 'What to search. "content" (default): match the pattern against item body text and return matching lines. "title": match the pattern against item titles and return matching items with no line content. Use "title" when looking up items by name without knowing an ID.' },
-            type: { type: 'string', enum: ['note', 'chat', 'task', 'question'], description: 'The data type to search. Required when scope is "content". Optional when scope is "title" (omit to search titles across all types).' },
+            type: { type: 'string', enum: ['note', 'chat', 'task', 'question', 'attachment'], description: 'The data type to search. Required when scope is "content". Optional when scope is "title" (omit to search titles across all types). "attachment": one file\'s text, by blob id in id; the result has its rev.' },
             id: { type: 'integer', description: 'Content scope only: restrict to one specific item by ID. Omit to search all items of the given type. Ignored in title scope.' },
             noteType: { type: 'string', enum: ['user', 'agent', 'clip'], description: "When type is 'note', further filter by noteType: 'user' notes, 'agent' notes, or 'clip' snapshots the user captured from a page. Omit to search all three." },
             case_insensitive: { type: 'boolean', description: 'Match case-insensitively. Defaults to true.' },
@@ -415,16 +428,16 @@
       type: 'function',
       function: {
         name: 'create_document',
-        description: 'Create a downloadable DOCX, XLSX, PDF, PPTX, or CSV file and show it in the chat. Use it when the user wants a file rather than an answer in text. Before your first file in a format, read its guide with the skill tool (builtin-docx-pdf, builtin-xlsx-csv, or builtin-pptx): it has the fields, the formatting and layout rules, and the size limits. A call made before the guide is in the conversation is not run, and its result carries the guide. For a large or computed document, build it in eval and return it as __document__ instead. Returns metadata only; the file is saved and shown to the user automatically.',
+        description: 'Create a downloadable DOCX, XLSX, PDF, PPTX, CSV, or HTML file and show it in the chat. Use it when the user wants a file rather than an answer in text, including a page or app they open in their browser (HTML). Before your first file in a format, read its guide with the skill tool (builtin-docx-pdf, builtin-xlsx-csv, builtin-pptx, or builtin-html): it has the fields, the formatting and layout rules, and the size limits. A call made before the guide is in the conversation is not run, and its result carries the guide. For a large or computed document, build it in eval and return it as __document__ instead. Returns metadata only; the file is saved and shown to the user automatically.',
         parameters: {
           type: 'object',
           properties: {
-            format: { type: 'string', enum: ['docx', 'xlsx', 'pdf', 'pptx', 'csv'], description: 'Document format to create.' },
+            format: { type: 'string', enum: ['docx', 'xlsx', 'pdf', 'pptx', 'csv', 'html'], description: 'Document format to create.' },
             filename: { type: 'string', description: 'Optional filename. The extension is added if omitted.' },
             also_pdf: { type: 'boolean', description: 'DOCX and PPTX: also make a PDF of the same document in this call. Needs Chrome printing.' },
             title: { type: 'string', description: 'Optional. Used as the filename when filename is omitted; never rendered as a heading in DOCX or PDF.' },
             content: { type: 'string', description: 'Plain text, for a simple document. The guide describes how each format reads it.' },
-            html: { type: 'string', description: 'DOCX and PDF only: an HTML document to render, in the subset the guide describes.' },
+            html: { type: 'string', description: 'DOCX and PDF: an HTML document to render, in the subset the guide describes. HTML: the whole page.' },
             theme: { type: 'string', enum: ['professional', 'modern', 'classic', 'minimal', 'academic', 'vibrant'], description: 'DOCX, PDF, XLSX, and PPTX: the look of a new document.' },
             style: {
               type: 'object',

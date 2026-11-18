@@ -51,7 +51,7 @@
       "When the user asks to change how the current page looks or is arranged (sort or filter a list of results, hide a sidebar, banner, or section, enlarge text, widen a column), use page_layout, following the builtin-page-layout guide.",
       "Page content reaches you in a flattened HTML format: a simplified, cleaned representation of the live DOM, not the original page source HTML. It arrives as the result of page_read mode content and web_fetch, and inside <attached_context> as <page_snapshot>, <tab>, and <page_element> elements (a <page_element> states in its own text which format it carries, since the user can attach raw HTML instead). Key conventions:\n- Images are replaced with type-suffixed placeholders: <img_jpg>, <img_png>, <img_webp>, <img_svg>, <img_gif>, etc. This applies to both <img> elements (suffix derived from the src) and inline <svg> elements (always become <img_svg>). An image whose alt text is descriptive additionally keeps that alt text and its absolute URL on the placeholder, so you can tell what it depicts and where it lives; decorative images, icons, and images without usable alt text keep the bare placeholder.@@EX_START@@ Example: <img_png alt=\"Quarterly revenue by region\" src=\"https://example.com/chart.png\">.@@EX_END@@ You may embed one of these images in your reply using Markdown image syntax, ![alt](src), but only when the image itself is part of the answer, for example when the user asks to see it or asks about a chart, diagram, photo, or product shown on the page. Do not add page images for decoration, do not embed more than one or two, and never use an image URL that did not appear in the page content.\n- When an element had more than 50 children, a comment marks the omission: <!-- ... N elements omitted (M total) -->. This means that section of the page has more content than is shown.\n- Elements that were hidden on the page (via CSS or the native hidden attribute) are marked with hidden=\"\" in the flattened output. Their content was not visible to the user.\n- The following element types are stripped entirely: <script>, <style>, <noscript>, <meta>, <link>, <canvas>.\n- <iframe>, <audio>, and <video> elements are reduced to their opening tag with only the src attribute retained; their children are removed. A large <iframe> loaded from a different site is a separate embedded app whose own content is NOT present in this flattened text (see embedded cross-origin apps below).\n- Redundant nested <div> and <span> wrappers are collapsed, so nesting is shallower than the real DOM.\n- Most HTML attributes are removed; only semantically meaningful ones remain (href on links, action on forms, colspan/rowspan on tables, name on form fields, alt and src on image placeholders).",
       "Use the sandboxed compute environment (eval) whenever a task involves arithmetic, counting, sorting, filtering, date math, regex extraction, or any data transformation that would be error-prone if reasoned about in context. Do not approximate or eyeball results you can compute exactly. Pass data to it by reference rather than retyping it: vars_from with the result_ref stamped on a prior tool result, and blob_ids with the blob id of an attachment. Re-emitting a large tool result or attachment into vars or the code string wastes tokens and causes truncation and transcription errors; use vars only for small literals, thresholds, or hand-built subsets.@@EX_START@@\n\nExample (filtering and sorting page data via vars_from): The user asks 'which of the products on this page are under $50, sorted cheapest first?' You call page_observe (or page_read) and the tool result includes result_ref: 1234 plus an items array. Next call: vars_from: { obs: 1234 }, code: 'return obs.items.filter(x => parseFloat(String(x.name||x.innerText||\"\").replace(/[^0-9.]/g,\"\")) < 50);'. Use the returned array to answer the user.\n\nExample (date math with a small literal): The user asks 'how many days until my task is due?' You have dueAt from a prior tool result. Scalar values are fine in vars: vars: { due: '2026-06-15T09:00:00.000Z' }, code: 'var ms = new Date(due) - Date.now(); return { days: Math.ceil(ms / 86400000) };'. Or if the whole task object arrived as a tool result with result_ref, use vars_from instead.\n\nExample (arithmetic on fetched data): web_fetch returns a result with result_ref: 5678. vars_from: { fetchResult: 5678 }, code that reads the fields you need from fetchResult and returns totals. Do NOT add numbers in context.\n\nExample (regex extraction from page content): page_read content mode returns result_ref: 9012. Prefer vars_from: { page: 9012 } and run the regex on page.content (or the field that holds the flattened HTML) rather than pasting the HTML into vars.\n\nExample (grouping and aggregating): A prior tool result with result_ref returned an array of task objects. vars_from: { listResult: 3456 }, code: 'return listResult.items.reduce((acc, t) => { var k = t.priority || \"none\"; acc[k] = (acc[k] || 0) + 1; return acc; }, {});' (adjust field names to match that tool's shape).\n\nExample (counting): Prefer eval over counting by eye. With a result_ref, use vars_from; for a short string literal, vars: { text: '...' } is fine.\n\nExample (attachment content via blob_ids): the user attaches a CSV shown as <file name=\"data.csv\" blob_id=\"122\"> and asks for the 1000th row; call eval with blob_ids: [122] and code: const lines = blobs[0].text.trim().split(\"\\n\"); return lines[1000]; and do not paste the file rows into the code.@@EX_END@@",
-      "When the user wants the output as a downloadable file (spreadsheet, CSV, report, document, slides) rather than as text, use create_document for a small document you write out by hand, and build the file in eval returning __document__ when it is large or computed (hundreds of rows, or anything derived by filtering, sorting, or aggregating data), so you never enumerate every row in tool arguments. Both follow the guide for the file's format.",
+      "When the user wants the output as a downloadable file (spreadsheet, CSV, report, document, slides, or a web page or app to open in their browser) rather than as text, use create_document for a small document you write out by hand, and build the file in eval returning __document__ when it is large or computed (hundreds of rows, or anything derived by filtering, sorting, or aggregating data), so you never enumerate every row in tool arguments. Both follow the guide for the file's format.",
       "An attached DOCX's extracted text (inside its <file name=\"name.docx\" blob_id=\"N\"> element) is flat: it drops headings, lists, tables, and bold/italic, though each hyperlink's URL is kept inline as \"text (url)\". That text is enough for plain questions about the file (summarize it, look something up, list its links), so do nothing special for those. When the task is to change the DOCX and hand it back@@EX_START@@ (for example \"fix the typos in this .docx\", \"update the dates and send it back\", \"add a section to this document\", or \"redline this contract\")@@EX_END@@, use read_document_structure and then edit_document, which changes only what you edit and keeps the rest of the file exactly as it was. Rebuild it with create_document only when the user wants a new layout@@EX_START@@ (for example \"reformat this resume\" or \"turn this into a PDF\")@@EX_END@@. The builtin-docx-edit guide describes both. Only DOCX can be edited this way; PDF and other formats expose just their extracted text.",
       EM_DASH_LINE_FOR_CONTEXT_BUILDER,
       TODAY_LINE_FOR_CONTEXT_BUILDER,
@@ -368,6 +368,64 @@
     } catch (compareErr) {
       return contentStrForCompare;
     }
+  }
+
+  // A create_document call for an HTML file carries the whole page as its html argument, and an
+  // assistant message is sent again on every later iteration and turn. When the model makes the
+  // same file again (same file name, from the result), the earlier version is out of date, so the
+  // request's copy of its argument is replaced by a short note. The latest version is never
+  // replaced: the model edits the page with old_string copied from that call. Replacing it made
+  // the model take the note for a placeholder it had sent, read the whole file back to check, and
+  // tell the user it could not explain the file; that read was about twice the size of the
+  // argument and stayed in every later request. Pages under the minimum are left alone, since the
+  // note would save little. Only HTML: an office file's spec cannot be read back from the file.
+  // The note says how to get the version back, and only for when the user asks: the model never
+  // needs it to change the newer page. It names no blob id, because an edit made after this call
+  // saved the version the user last saw as a copy with an id of its own.
+  var HTML_FILE_ARGUMENT_STUB_MIN_LENGTH_FOR_CONTEXT_BUILDER = 1000;
+
+  function isHtmlFileCallForContextBuilder(nameForHtmlCall, parsedArgsForHtmlCall) {
+    if (nameForHtmlCall !== "create_document" || !parsedArgsForHtmlCall) return false;
+    if (String(parsedArgsForHtmlCall.format || "").trim().toLowerCase() !== "html") return false;
+    return typeof parsedArgsForHtmlCall.html === "string";
+  }
+
+  // The saved file's name, lower-cased, when the result says an HTML file was made, else "".
+  // The name comes from the result because the writer normalises it (it adds .html).
+  function savedHtmlFileNameForContextBuilder(contentForSaved) {
+    if (typeof contentForSaved !== "string" || !contentForSaved) return "";
+    try {
+      var parsedForSaved = JSON.parse(contentForSaved);
+      if (!parsedForSaved || parsedForSaved.ok !== true || parsedForSaved.format !== "html") return "";
+      return typeof parsedForSaved.filename === "string" ? parsedForSaved.filename.trim().toLowerCase() : "";
+    } catch (savedParseErr) {
+      return "";
+    }
+  }
+
+  function htmlFileArgumentStubForContextBuilder(lengthForStub) {
+    return "[An earlier version of this page (" + lengthForStub.toLocaleString("en-US") + " characters), left out here"
+      + " because a later create_document call made the same file again. That later call has the newer page."
+      + " This version is still saved, and so is each copy an edit made of it. If the user asks for one, search it"
+      + " with grep or read it with read, type \"attachment\", and the blob id in the link in its call's result.]";
+  }
+
+  // The tool_calls array and the call are copied before the argument is replaced: the message the
+  // request was built from is the persisted record, and it keeps the full page.
+  function stubHtmlFileArgumentForContextBuilder(toolInfoForStub) {
+    var apiMessageForStub = toolInfoForStub.apiMessage;
+    var indexForStub = toolInfoForStub.toolCallIndex;
+    if (!apiMessageForStub || !Array.isArray(apiMessageForStub.tool_calls)) return;
+    var callForStub = apiMessageForStub.tool_calls[indexForStub];
+    if (!callForStub || !callForStub.function) return;
+    var argsForStub = Object.assign({}, toolInfoForStub.parsedArgs, {
+      html: htmlFileArgumentStubForContextBuilder(toolInfoForStub.parsedArgs.html.length)
+    });
+    var toolCallsForStub = apiMessageForStub.tool_calls.slice();
+    toolCallsForStub[indexForStub] = Object.assign({}, callForStub, {
+      function: Object.assign({}, callForStub.function, { arguments: JSON.stringify(argsForStub) })
+    });
+    apiMessageForStub.tool_calls = toolCallsForStub;
   }
 
   function describeToolCallForContextBuilder(nameForContextBuilder, parsedArgsForContextBuilder) {
@@ -854,6 +912,8 @@
     const toolCallInfoByIdForBuild = {};
     // logical-call signature -> { content, descriptor } of its most recent prior result.
     const lastToolResultBySignatureForBuild = {};
+    // saved HTML file name -> tool call info of the latest create_document that made it.
+    const latestHtmlFileCallByNameForBuild = {};
 
     for (var i = startIndexForBuild; i < msgsForBuild.length; i++) {
       const msg = msgsForBuild[i];
@@ -882,6 +942,7 @@
       }
 
       if (msg.tool_calls) {
+        var assistantApiMessageForBuild = { role: "assistant", content: text || null, tool_calls: msg.tool_calls };
         if (Array.isArray(msg.tool_calls)) {
           for (var tcIdxForBuild = 0; tcIdxForBuild < msg.tool_calls.length; tcIdxForBuild++) {
             var toolCallForBuild = msg.tool_calls[tcIdxForBuild];
@@ -893,14 +954,28 @@
               name: toolNameForBuild,
               parsedArgs: parsedArgsForBuild.parsed,
               signature: toolNameForBuild + "\x00" + parsedArgsForBuild.canonical,
-              collapsible: isCollapsibleToolCallForContextBuilder(toolNameForBuild, parsedArgsForBuild.parsed)
+              collapsible: isCollapsibleToolCallForContextBuilder(toolNameForBuild, parsedArgsForBuild.parsed),
+              htmlFile: isHtmlFileCallForContextBuilder(toolNameForBuild, parsedArgsForBuild.parsed),
+              apiMessage: assistantApiMessageForBuild,
+              toolCallIndex: tcIdxForBuild
             };
           }
         }
-        apiMessages.push({ role: "assistant", content: text || null, tool_calls: msg.tool_calls });
+        apiMessages.push(assistantApiMessageForBuild);
       } else if (msg.tool_call_id) {
         var toolContentForBuild = text;
         var toolInfoForBuild = toolCallInfoByIdForBuild[String(msg.tool_call_id)];
+        var savedHtmlNameForBuild = toolInfoForBuild && toolInfoForBuild.htmlFile
+          ? savedHtmlFileNameForContextBuilder(toolContentForBuild)
+          : "";
+        if (savedHtmlNameForBuild) {
+          var replacedHtmlCallForBuild = latestHtmlFileCallByNameForBuild[savedHtmlNameForBuild];
+          if (replacedHtmlCallForBuild
+              && replacedHtmlCallForBuild.parsedArgs.html.length >= HTML_FILE_ARGUMENT_STUB_MIN_LENGTH_FOR_CONTEXT_BUILDER) {
+            stubHtmlFileArgumentForContextBuilder(replacedHtmlCallForBuild);
+          }
+          latestHtmlFileCallByNameForBuild[savedHtmlNameForBuild] = toolInfoForBuild;
+        }
         if (toolInfoForBuild && toolInfoForBuild.collapsible) {
           var signatureForBuild = toolInfoForBuild.signature;
           var contentStrForBuild = typeof toolContentForBuild === "string"

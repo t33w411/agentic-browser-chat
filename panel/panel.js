@@ -179,7 +179,11 @@
     if (!panelHostForPanelBoot) return;
     // Anchor only applies in reduced mode; expanded uses CSS centering.
     if (!panelHostForPanelBoot.classList.contains('mode-reduced')) return;
-    const widthForPanelBoot = panelHostForPanelBoot.offsetWidth || 520;
+    // The width comes from panel.css only. With no layout box there is nothing
+    // to measure, so leave the panel at its CSS default corner instead of
+    // guessing a width that drifts from the stylesheet.
+    const widthForPanelBoot = panelHostForPanelBoot.offsetWidth;
+    if (!widthForPanelBoot) return;
     const heightForPanelBoot = panelHostForPanelBoot.offsetHeight || 0;
     const viewportWidthForPanelBoot = window.innerWidth;
     const viewportHeightForPanelBoot = window.innerHeight;

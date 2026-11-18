@@ -7,6 +7,11 @@
   var PDF_MIME_FOR_DOCUMENT_GENERATION = 'application/pdf';
   var PPTX_MIME_FOR_DOCUMENT_GENERATION = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
   var CSV_MIME_FOR_DOCUMENT_GENERATION = 'text/csv;charset=utf-8';
+  var HTML_MIME_FOR_DOCUMENT_GENERATION = 'text/html;charset=utf-8';
+  // An HTML file is refused above this, never cut: a page cut short is a broken page.
+  var MAX_HTML_FILE_CHARS_FOR_DOCUMENT_GENERATION = 1000000;
+  // A browser honours a charset declaration only within the first 1024 bytes of the file.
+  var HTML_CHARSET_SCAN_BYTES_FOR_DOCUMENT_GENERATION = 1024;
   var MAX_DOCX_BLOCKS_FOR_DOCUMENT_GENERATION = 500;
   var MAX_HTML_INPUT_CHARS_FOR_DOCUMENT_GENERATION = 200000;
   var MAX_PPTX_SLIDES_FOR_DOCUMENT_GENERATION = 100;
@@ -285,12 +290,14 @@
   }
 
   function normalizeFilenameForDocumentGeneration(filenameForDocumentGeneration, formatForDocumentGeneration, titleForDocumentGeneration) {
-    var extensionForDocumentGeneration = formatForDocumentGeneration === 'docx'
-      ? 'docx'
-      : (formatForDocumentGeneration === 'xlsx' ? 'xlsx' : (formatForDocumentGeneration === 'pptx' ? 'pptx' : (formatForDocumentGeneration === 'csv' ? 'csv' : 'pdf')));
+    var extensionForDocumentGeneration = ['docx', 'xlsx', 'pptx', 'csv', 'html'].indexOf(formatForDocumentGeneration) !== -1
+      ? formatForDocumentGeneration
+      : 'pdf';
     var baseForDocumentGeneration = String(filenameForDocumentGeneration || titleForDocumentGeneration || ('generated-document.' + extensionForDocumentGeneration)).trim();
     if (!baseForDocumentGeneration) baseForDocumentGeneration = 'generated-document.' + extensionForDocumentGeneration;
     baseForDocumentGeneration = baseForDocumentGeneration.replace(/[<>:"/\\|?*\x00-\x1F]/g, '-').replace(/\s+/g, ' ').trim();
+    // An HTML file the model named .htm keeps that extension rather than becoming .htm.html.
+    if (extensionForDocumentGeneration === 'html' && /\.htm$/i.test(baseForDocumentGeneration)) return baseForDocumentGeneration;
     if (baseForDocumentGeneration.toLowerCase().slice(-(extensionForDocumentGeneration.length + 1)) !== '.' + extensionForDocumentGeneration) {
       baseForDocumentGeneration += '.' + extensionForDocumentGeneration;
     }
@@ -1271,6 +1278,84 @@
       dataUrl: uint8ToDataUrlForDocumentGeneration(uint8ForCsv, CSV_MIME_FOR_DOCUMENT_GENERATION),
       size: uint8ForCsv.length
     };
+  }
+
+  // An HTML file is a page the user downloads and opens in their browser. It is written as the
+  // model gave it, apart from two repairs that matter only once the file is on disk:
+  //   - <!DOCTYPE html> when it is missing, or Chrome lays the page out in quirks mode.
+  //   - A UTF-8 charset declaration in the first 1024 bytes. The data URL says UTF-8, but a saved
+  //     file loses that, and the browser then guesses the encoding from the bytes. Chrome guessed
+  //     UTF-8 for every saved test page, short and mostly-ASCII ones included, but a guess is not a
+  //     declaration, and the HTML spec requires one. A declaration of another charset is changed to
+  //     utf-8, since the bytes are always UTF-8.
+  // textContent is the source as written to the file, so the saved blob can be read and edited
+  // with the read and edit tools.
+  function htmlUtf8LengthForDocumentGeneration(textForLength) {
+    return new TextEncoder().encode(textForLength).length;
+  }
+
+  function prepareHtmlSourceForDocumentGeneration(rawSourceForPrepare, warningsForPrepare) {
+    var sourceForPrepare = rawSourceForPrepare;
+    var doctypeMatchForPrepare = /^﻿?\s*<!doctype\s+html\b[^>]*>/i.exec(sourceForPrepare);
+    if (!doctypeMatchForPrepare) {
+      sourceForPrepare = '<!DOCTYPE html>\n' + sourceForPrepare;
+      doctypeMatchForPrepare = /^<!DOCTYPE html>/.exec(sourceForPrepare);
+      warningsForPrepare.push('The page had no <!DOCTYPE html>, so one was added at the top.');
+    }
+    var charsetMatchForPrepare = /<meta\b[^>]*?\bcharset\s*=\s*["']?\s*([A-Za-z0-9_.:-]+)/i.exec(sourceForPrepare);
+    var charsetEndForPrepare = charsetMatchForPrepare
+      ? htmlUtf8LengthForDocumentGeneration(sourceForPrepare.slice(0, charsetMatchForPrepare.index + charsetMatchForPrepare[0].length))
+      : Infinity;
+    if (charsetMatchForPrepare && charsetEndForPrepare <= HTML_CHARSET_SCAN_BYTES_FOR_DOCUMENT_GENERATION) {
+      var declaredForPrepare = charsetMatchForPrepare[1];
+      if (!/^utf-?8$/i.test(declaredForPrepare)) {
+        var nameStartForPrepare = charsetMatchForPrepare.index + charsetMatchForPrepare[0].length - declaredForPrepare.length;
+        sourceForPrepare = sourceForPrepare.slice(0, nameStartForPrepare) + 'utf-8' + sourceForPrepare.slice(nameStartForPrepare + declaredForPrepare.length);
+        warningsForPrepare.push('The page declared the character set "' + declaredForPrepare + '", but the file is saved as UTF-8, so the declaration now says utf-8.');
+      }
+      return sourceForPrepare;
+    }
+    // Inside <head> when that tag ends early enough, else straight after the doctype, where the
+    // parser opens the head for it.
+    var metaForPrepare = '\n<meta charset="utf-8">';
+    var headMatchForPrepare = /<head\b[^>]*>/i.exec(sourceForPrepare);
+    var insertAtForPrepare = doctypeMatchForPrepare.index + doctypeMatchForPrepare[0].length;
+    if (headMatchForPrepare) {
+      var headEndForPrepare = headMatchForPrepare.index + headMatchForPrepare[0].length;
+      if (htmlUtf8LengthForDocumentGeneration(sourceForPrepare.slice(0, headEndForPrepare)) + metaForPrepare.length <= HTML_CHARSET_SCAN_BYTES_FOR_DOCUMENT_GENERATION) {
+        insertAtForPrepare = headEndForPrepare;
+      }
+    }
+    sourceForPrepare = sourceForPrepare.slice(0, insertAtForPrepare) + metaForPrepare + sourceForPrepare.slice(insertAtForPrepare);
+    warningsForPrepare.push(charsetMatchForPrepare
+      ? 'The page declared its character set too far down the file for a browser to use it, so <meta charset="utf-8"> was added near the top.'
+      : 'The page did not declare its character set, so <meta charset="utf-8"> was added near the top.');
+    return sourceForPrepare;
+  }
+
+  function buildHtmlFileForDocumentGeneration(inputForHtmlFile, filenameForHtmlFile) {
+    var rawForHtmlFile = typeof inputForHtmlFile.html === 'string' ? inputForHtmlFile.html : '';
+    if (!rawForHtmlFile.trim()) {
+      throw new Error('An HTML file needs html: the whole page, starting with <!DOCTYPE html>.');
+    }
+    if (rawForHtmlFile.length > MAX_HTML_FILE_CHARS_FOR_DOCUMENT_GENERATION) {
+      throw new Error('The page is ' + rawForHtmlFile.length.toLocaleString('en-US') + ' characters, over the '
+        + MAX_HTML_FILE_CHARS_FOR_DOCUMENT_GENERATION.toLocaleString('en-US') + ' an HTML file can hold. Nothing was made. Make the page smaller, for example by generating repeated markup in a script instead of writing it out.');
+    }
+    var warningsForHtmlFile = [];
+    var sourceForHtmlFile = prepareHtmlSourceForDocumentGeneration(rawForHtmlFile, warningsForHtmlFile);
+    var bytesForHtmlFile = new TextEncoder().encode(sourceForHtmlFile);
+    var responseForHtmlFile = {
+      ok: true,
+      format: 'html',
+      filename: filenameForHtmlFile,
+      mimeType: HTML_MIME_FOR_DOCUMENT_GENERATION,
+      dataUrl: uint8ToDataUrlForDocumentGeneration(bytesForHtmlFile, HTML_MIME_FOR_DOCUMENT_GENERATION),
+      size: bytesForHtmlFile.length,
+      textContent: sourceForHtmlFile
+    };
+    if (warningsForHtmlFile.length) responseForHtmlFile.warnings = warningsForHtmlFile;
+    return responseForHtmlFile;
   }
 
   function htmlInlineRunsFromNodesForDocumentGeneration(topNodesForDocumentGeneration, baseFlagsForDocumentGeneration) {
@@ -7591,14 +7676,24 @@
     var safeOptionsForSingle = optionsForSingle || {};
     var safeInputForDocumentGeneration = inputForDocumentGeneration || {};
     var formatForDocumentGeneration = String(safeInputForDocumentGeneration.format || '').toLowerCase();
-    if (['xlsx', 'docx', 'pdf', 'pptx', 'csv'].indexOf(formatForDocumentGeneration) === -1) {
-      return Promise.reject(new Error('format must be xlsx, docx, pdf, pptx, or csv.'));
+    if (['xlsx', 'docx', 'pdf', 'pptx', 'csv', 'html'].indexOf(formatForDocumentGeneration) === -1) {
+      return Promise.reject(new Error('format must be xlsx, docx, pdf, pptx, csv, or html.'));
     }
     var filenameForDocumentGeneration = normalizeFilenameForDocumentGeneration(
       safeInputForDocumentGeneration.filename,
       formatForDocumentGeneration,
       safeInputForDocumentGeneration.title
     );
+    // An HTML file is the model's own page source. It takes no theme, style or page setup, and it
+    // must not reach the steps below: they resolve a theme, and the format switch at the end has no
+    // html case, so its last branch would hand the page to the PPTX writer.
+    if (formatForDocumentGeneration === 'html') {
+      try {
+        return Promise.resolve(buildHtmlFileForDocumentGeneration(safeInputForDocumentGeneration, filenameForDocumentGeneration));
+      } catch (errForHtmlFile) {
+        return Promise.reject(errForHtmlFile);
+      }
+    }
     // A slide PDF is themed, numbered, and prepared as the deck it prints.
     var isSlidePdfForDocumentGeneration = formatForDocumentGeneration === 'pdf'
       && (safeOptionsForSingle.slidePdf === true || isSlidePdfInputForDocumentGeneration(safeInputForDocumentGeneration, formatForDocumentGeneration));

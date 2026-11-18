@@ -1,6 +1,6 @@
 // Loads the unpacked extension into a fresh headless Chrome and reaches the page tools the way the
 // agent does: the service worker sends runDelegatedPageTool to the tab's content scripts.
-import { launchChrome, wait } from './cdp.mjs';
+import { launchChrome, passes, wait, waitUntil } from './cdp.mjs';
 
 export async function startWithExtension(extPath, { windowSize } = {}) {
   const chrome = await launchChrome({ windowSize, extensionDebugging: true });
@@ -54,8 +54,16 @@ export async function startWithExtension(extPath, { windowSize } = {}) {
   return { chrome, extId, serviceWorker, callTool, isolatedContextId, isolatedContextIds };
 }
 
+// check records a result now. checkSoon is for state that settles after an action: it reads until
+// test passes, or for `timeout` ms, and records the test on the last value read, so the value a
+// check passes on is the value it reports.
 export function checkList() {
   const checks = [];
   const check = (name, ok, detail) => checks.push({ name, ok: !!ok, detail: ok ? undefined : detail });
-  return { checks, check };
+  const checkSoon = async (name, read, test, options) => {
+    const value = await waitUntil(read, test, options);
+    check(name, passes(test, value), value);
+    return value;
+  };
+  return { checks, check, checkSoon };
 }

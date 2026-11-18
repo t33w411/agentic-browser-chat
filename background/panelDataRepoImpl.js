@@ -541,18 +541,31 @@
     });
   }
 
+  // Reads every key in chrome.storage.local, and rejects when the read fails. It must not resolve
+  // {} on failure: an empty store returns {} too, and the blob reference scan would read a failed
+  // read as "no drafts" and delete every blob that only a draft holds, such as a file attached to a
+  // message not sent yet. chrome.storage reports a failure only through chrome.runtime.lastError.
   function readAllLocalStorageForPanelDataRepo() {
-    return new Promise(function (resolveForStorageRead) {
+    return new Promise(function (resolveForStorageRead, rejectForStorageRead) {
       try {
-        if (!chrome || !chrome.storage || !chrome.storage.local) {
-          resolveForStorageRead({});
+        if (typeof chrome === 'undefined' || !chrome || !chrome.storage || !chrome.storage.local) {
+          rejectForStorageRead(new Error('chrome.storage.local is not available'));
           return;
         }
         chrome.storage.local.get(null, function (itemsForStorageRead) {
-          resolveForStorageRead(itemsForStorageRead && typeof itemsForStorageRead === 'object' ? itemsForStorageRead : {});
+          var lastErrorForStorageRead = chrome.runtime && chrome.runtime.lastError;
+          if (lastErrorForStorageRead) {
+            rejectForStorageRead(new Error(lastErrorForStorageRead.message || 'chrome.storage.local.get failed'));
+            return;
+          }
+          if (!itemsForStorageRead || typeof itemsForStorageRead !== 'object') {
+            rejectForStorageRead(new Error('chrome.storage.local.get returned no items'));
+            return;
+          }
+          resolveForStorageRead(itemsForStorageRead);
         });
       } catch (errForStorageRead) {
-        resolveForStorageRead({});
+        rejectForStorageRead(errForStorageRead);
       }
     });
   }
@@ -621,8 +634,9 @@
   // is what makes the set complete for every tab, including tabs with no panel mounted and
   // callers running in the service worker.
   //
-  // A storage read failure degrades to the table references alone, which is the behaviour that
-  // predates the draft scan; callers still pass their own protected ids as a second line.
+  // A failed read of the tables or the drafts rejects, so the set is never partial: a set missing
+  // the drafts would mark every draft-only blob as free. Both deletion paths delete nothing when it
+  // rejects. Callers still pass their own protected ids as a second line.
   async function collectReferencedBlobIdsForPanelDataRepo() {
     var dbForPanelDataRepo = requireDbForPanelDataRepo();
     var referencedBlobIdsForRefs = new Set();
@@ -703,7 +717,14 @@
     if (!Number.isFinite(numericBlobIdForPanelDataRepo) || numericBlobIdForPanelDataRepo <= 0) {
       throw new Error('Invalid attachment blob id');
     }
-    var referencedBlobIdsForDelete = await collectReferencedBlobIdsForPanelDataRepo();
+    var referencedBlobIdsForDelete;
+    try {
+      referencedBlobIdsForDelete = await collectReferencedBlobIdsForPanelDataRepo();
+    } catch (errForDeleteRefs) {
+      // Without the full reference set nothing shows the blob is free, so it stays. A later sweep
+      // frees it if it really is unreferenced.
+      return { deleted: false, reason: 'unreadable' };
+    }
     if (referencedBlobIdsForDelete.has(numericBlobIdForPanelDataRepo)) {
       return { deleted: false, reason: 'referenced' };
     }
@@ -726,7 +747,20 @@
       reconcileResultForPrune = { reclaimed: 0 };
     }
 
-    var referencedBlobIdsForPrune = await collectReferencedBlobIdsForPanelDataRepo();
+    // When the references cannot be read, delete nothing and say so, instead of throwing: deleteChats
+    // and the retention sweeps await this after their own deletes have landed, and a throw would
+    // report those as failed.
+    var referencedBlobIdsForPrune;
+    try {
+      referencedBlobIdsForPrune = await collectReferencedBlobIdsForPanelDataRepo();
+    } catch (errForPruneRefs) {
+      return {
+        deleted: 0,
+        draftsReclaimed: reconcileResultForPrune.reclaimed,
+        skipped: true,
+        error: (errForPruneRefs && errForPruneRefs.message) || 'The blob references could not be read'
+      };
+    }
     var protectedSetForPrune = buildProtectedBlobIdSetForPanelDataRepo(protectedBlobIdsForPanelDataRepo);
 
     var allBlobIdsForPrune = await dbForPanelDataRepo.attachmentBlobs.toCollection().primaryKeys();

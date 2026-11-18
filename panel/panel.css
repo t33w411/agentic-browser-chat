@@ -117,21 +117,33 @@
 .panel-host.mode-expanded .panel {
   width: 60%;
   max-width: calc(100vw - 40px);
-  min-width: 800px;
+  /* A bare 800px min-width overrides the max-width, so below an 840px
+     viewport the centred panel ran off both sides. It stops shrinking at
+     300px, the same floor as the reduced panel. */
+  min-width: max(300px, min(800px, calc(100vw - 40px)));
   height: 85vh;
   max-height: 88vh;
   border-radius: var(--abchat-r-xl);
 }
 
 /* REDUCED */
+/* The width lives on the host only. Dragging, edge clamping and the saved
+   anchor all measure host.offsetWidth, so a .panel wider than its host
+   overflows past the right edge of the viewport. The max-width keeps the
+   18px margin on both sides in a narrow window, down to 300px, the
+   narrowest the panel is laid out for. min-width wins over max-width, so a
+   window under 336px puts part of the panel off screen rather than
+   squeezing it further. */
 .panel-host.mode-reduced {
   top: 18px;
   right: 18px;
-  width: 520px;
+  width: 600px;
+  max-width: calc(100vw - 36px);
+  min-width: 300px;
 }
 .panel-host.mode-reduced .panel {
-  width: 520px;
-  height: 72vh;
+  width: 100%;
+  height: 78vh;
   max-height: 90vh;
   border-radius: var(--abchat-r-xl);
 }
@@ -232,6 +244,12 @@
   border-bottom-color: #1e3a8a;
 }
 
+.panel-tabs-wrap {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
 .panel-tabs {
   display: flex;
   align-items: center;
@@ -243,6 +261,62 @@
   min-width: 0;
 }
 .panel-tabs::-webkit-scrollbar { display: none; }
+
+/* Edge fades on the tab row, shown only on a side that has hidden tabs. The
+   scrollbar is hidden, so without them a clipped tab looks like a rendering
+   fault. They sit on the wrapper, not on the scroller, so they stay put while
+   the tabs scroll, and they are overlays rather than a mask because a mask on
+   .panel-tabs would also clip the position: fixed "+ New" dropdown inside it.
+   A scroll timeline drives their opacity. When the row does not overflow the
+   timeline is inactive and both stay at opacity 0.
+   Both ranges end 1px past the scroll range so neither animation can finish.
+   A scroll-driven animation that reaches the end of its range is finished,
+   and Chrome keeps a finished animation's last frame after its timeline goes
+   inactive: scroll the row to the end in a narrow window, widen the window,
+   and the left fade stayed over the first tab. The right fade's range is the
+   last 24px of scroll and reaches 0 at 95%, just short of where the end of
+   the scroll falls (24 / 25 = 96%), so it is exactly 0 there.
+   The @supports guard matters: a browser that ignored only
+   animation-timeline would play the animation on the clock and leave the
+   left fade showing for good. */
+@supports (animation-timeline: scroll()) and (timeline-scope: none) {
+  .panel-tabs-wrap { timeline-scope: --abchat-tab-row-scroll; }
+  .panel-tabs { scroll-timeline: --abchat-tab-row-scroll x; }
+  .panel-tabs-wrap::before,
+  .panel-tabs-wrap::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 28px;
+    z-index: 1;
+    pointer-events: none;
+    opacity: 0;
+    animation-timing-function: linear;
+    animation-fill-mode: both;
+    animation-timeline: --abchat-tab-row-scroll;
+  }
+  .panel-tabs-wrap::before {
+    left: 0;
+    background: linear-gradient(to right, var(--abchat-bg-panel), transparent);
+    animation-name: abchat-tab-row-fade-start;
+    animation-range: 0px calc(100% + 1px);
+  }
+  .panel-tabs-wrap::after {
+    right: 0;
+    background: linear-gradient(to left, var(--abchat-bg-panel), transparent);
+    animation-name: abchat-tab-row-fade-end;
+    animation-range: calc(100% - 24px) calc(100% + 1px);
+  }
+}
+@keyframes abchat-tab-row-fade-start {
+  0% { opacity: 0; }
+  12%, 100% { opacity: 1; }
+}
+@keyframes abchat-tab-row-fade-end {
+  0% { opacity: 1; }
+  95%, 100% { opacity: 0; }
+}
 
 .tab-btn {
   border: none;
@@ -481,7 +555,8 @@
   transition: background 0.1s, color 0.1s;
 }
 .collapse-btn:hover { background: var(--abchat-bg-hover); color: var(--abchat-text-primary); }
-.panel-host.mode-reduced .collapse-btn { display: none; }
+.panel-host.mode-reduced .collapse-btn,
+.panel-host.layout-narrow .collapse-btn { display: none; }
 
 .sidebar-search { position: relative; }
 .sidebar-search input {
@@ -967,11 +1042,13 @@
   max-width: 82%;
 }
 /* Reduced mode: user messages capped at 90% width, right-aligned */
-.panel-host.mode-reduced .msg-wrap.user-msg {
+.panel-host.mode-reduced .msg-wrap.user-msg,
+.panel-host.layout-narrow .msg-wrap.user-msg {
   align-self: flex-end;
   max-width: 90%;
 }
-.panel-host.mode-reduced .msg-wrap.user-msg.is-editing {
+.panel-host.mode-reduced .msg-wrap.user-msg.is-editing,
+.panel-host.layout-narrow .msg-wrap.user-msg.is-editing {
   width: 90%;
   max-width: 90%;
 }
@@ -1616,11 +1693,31 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
   cursor: default;
 }
 
+/* No gap here: .input-right's margin is the space between the two groups,
+   and the token counter brings its own space, so a hidden counter costs
+   nothing. A row gap would add 8px on each side of it even when hidden. */
 .input-bottom {
   display: flex; align-items: center; justify-content: space-between;
-  margin-top: 8px; gap: 8px;
+  margin-top: 8px;
 }
-.input-left { display: flex; align-items: center; gap: 6px; position: relative; }
+/* Session token counter, inserted by updateSessionTokenDisplayForPanelRuntime
+   between .input-left and .input-right. Its flex-basis is 0, so it only gets
+   the space the picker and the mic and send buttons leave over, and it gives
+   that up before the picker shrinks. Text that does not fit is hidden whole,
+   never cut: the empty ::before holds the first flex line, the text wraps to
+   a second line, and the one-line height clips it.
+   The ::before is the 8px space before the text, so the text only counts as
+   fitting with that space beside it. It must be the full line height: Chrome
+   does not break a flex line after an empty 0x0 item, and a shorter one
+   starts the wrapped line inside the clip, leaving the text partly visible. */
+#abchat-token-counter {
+  flex: 1 1 0; min-width: 0;
+  display: flex; flex-wrap: wrap; justify-content: center; align-content: flex-start;
+  height: 16px; line-height: 16px; overflow: hidden;
+  font-size: 11px; white-space: nowrap;
+}
+#abchat-token-counter::before { content: ""; width: 8px; height: 100%; }
+.input-left { display: flex; align-items: center; gap: 6px; position: relative; min-width: 0; }
 
 .attach-btn {
   border: 1px solid var(--abchat-border);
@@ -1661,7 +1758,11 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 .ap-item:hover { background: var(--abchat-bg-hover); }
 .ap-icon { width: 18px; height: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 
-.model-wrap { position: relative; display: flex; align-items: center; }
+/* The picker shrinks from 150px to no less than 100px, and only after the
+   token counter beside it has given up its space. The floor sits on the
+   wrapper, with the button filling it: a min-width on the button alone
+   would let the wrapper shrink past it. */
+.model-wrap { position: relative; display: flex; align-items: center; min-width: 100px; }
 
 .model-picker-btn {
   display: flex; align-items: center; gap: 4px;
@@ -1669,7 +1770,7 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
   padding: 5px 7px 5px 8px;
   background: var(--abchat-bg-input); color: var(--abchat-text-secondary);
   font-family: var(--abchat-font); font-size: 12px;
-  cursor: pointer; max-width: 150px; white-space: nowrap;
+  cursor: pointer; flex: 1 1 auto; min-width: 0; max-width: 150px; white-space: nowrap;
   transition: border-color 0.1s, color 0.1s;
 }
 .model-picker-btn:hover, .model-picker-btn.open {
@@ -1803,7 +1904,7 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 .send-btn[data-action="cancel-send"] { background: #b91c1c; }
 .send-btn[data-action="cancel-send"]:hover { background: #991b1b; }
 
-.input-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.input-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; margin-left: 8px; }
 
 .voice-btn {
   border: 1px solid var(--abchat-border);
@@ -1856,30 +1957,64 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 
 /* ============================================================
    CHAT — REDUCED MODE OVERRIDES
+   Every layout rule keyed on .mode-reduced has a .layout-narrow twin.
+   panelRuntime.js puts layout-narrow on the host in expanded mode when the
+   window is too narrow for the list and the open item side by side, and the
+   panel then shows one pane at a time, as reduced mode does. Rules about the
+   floating panel itself (position, size, drag, transparency, the reduce
+   button) stay reduced-only.
 ============================================================ */
-.panel-host.mode-reduced .chat-sidebar {
+/* Collapse is a two-pane control, and its state syncs across tabs. Both
+   single-column layouts show a collapsed sidebar in place and hide the
+   triggers that would expand it, because they have no collapse button: a
+   collapsed record arriving in one of them would otherwise leave an empty
+   list pane with no way back. The narrow layout leaves the state alone, so
+   the sidebar is still collapsed when the window widens again. Entering
+   reduced mode expands it, as it always has. */
+.panel-host.mode-reduced .chat-sidebar.collapsed,
+.panel-host.layout-narrow .chat-sidebar.collapsed,
+.panel-host.mode-reduced .notes-sidebar.collapsed,
+.panel-host.layout-narrow .notes-sidebar.collapsed { opacity: 1; pointer-events: auto; }
+.panel-host.mode-reduced .expand-sidebar-trigger,
+.panel-host.layout-narrow .expand-sidebar-trigger,
+.panel-host.mode-reduced .expand-notes-sidebar-trigger,
+.panel-host.layout-narrow .expand-notes-sidebar-trigger { display: none; }
+.panel-host.mode-reduced .chat-sidebar,
+.panel-host.layout-narrow .chat-sidebar {
   width: 100% !important;
   border-right: none;
   opacity: 1 !important;
 }
-.panel-host.mode-reduced .chat-main { display: none; }
-.panel-host.mode-reduced #view-chats.in-chat .chat-sidebar { display: none; }
-.panel-host.mode-reduced #view-chats.in-chat .chat-main { display: flex; width: 100%; }
-.panel-host.mode-reduced .chat-back-btn { display: flex; }
-.panel-host.mode-reduced .chat-sidebar.collapsed { display: none; }
+.panel-host.mode-reduced .chat-main,
+.panel-host.layout-narrow .chat-main { display: none; }
+.panel-host.mode-reduced #view-chats.in-chat .chat-sidebar,
+.panel-host.layout-narrow #view-chats.in-chat .chat-sidebar { display: none; }
+.panel-host.mode-reduced #view-chats.in-chat .chat-main,
+.panel-host.layout-narrow #view-chats.in-chat .chat-main { display: flex; width: 100%; }
+.panel-host.mode-reduced .chat-back-btn,
+.panel-host.layout-narrow .chat-back-btn { display: flex; }
 
 /* Fix stretched action buttons in reduced mode */
 .panel-host.mode-reduced .new-chat-btn,
-.panel-host.mode-reduced .sec-btn { flex: none; }
+.panel-host.layout-narrow .new-chat-btn,
+.panel-host.mode-reduced .sec-btn,
+.panel-host.layout-narrow .sec-btn { flex: none; }
 .panel-host.mode-reduced .sidebar-row1,
-.panel-host.mode-reduced .ns-row1 { justify-content: flex-start; }
-.panel-host.mode-reduced .favs-btn { margin-left: auto; }
+.panel-host.layout-narrow .sidebar-row1,
+.panel-host.mode-reduced .ns-row1,
+.panel-host.layout-narrow .ns-row1 { justify-content: flex-start; }
+.panel-host.mode-reduced .favs-btn,
+.panel-host.layout-narrow .favs-btn { margin-left: auto; }
 
 /* Card delineation for chat items in reduced mode */
-.panel-host.mode-reduced .chat-item { background: var(--abchat-bg-panel); border-color: var(--abchat-border); margin-bottom: 3px; }
-.panel-host.mode-reduced .chat-item:hover { border-color: var(--abchat-border-med); box-shadow: 0 2px 8px rgba(0,0,0,0.05); background: var(--abchat-bg-panel); }
-.panel-host[data-theme="dark"].mode-reduced .chat-item { background: var(--abchat-bg-panel); border-color: var(--abchat-border); }
-.panel-host[data-theme="dark"].mode-reduced .chat-item:hover { background: var(--abchat-bg-hover); border-color: var(--abchat-border-med); box-shadow: none; }
+.panel-host.mode-reduced .chat-item,
+.panel-host.layout-narrow .chat-item { background: var(--abchat-bg-panel); border-color: var(--abchat-border); margin-bottom: 3px; }
+.panel-host.mode-reduced .chat-item:hover,
+.panel-host.layout-narrow .chat-item:hover { border-color: var(--abchat-border-med); box-shadow: 0 2px 8px rgba(0,0,0,0.05); background: var(--abchat-bg-panel); }
+.panel-host[data-theme="dark"].mode-reduced .chat-item,
+.panel-host[data-theme="dark"].layout-narrow .chat-item { background: var(--abchat-bg-panel); border-color: var(--abchat-border); }
+.panel-host[data-theme="dark"].mode-reduced .chat-item:hover,
+.panel-host[data-theme="dark"].layout-narrow .chat-item:hover { background: var(--abchat-bg-hover); border-color: var(--abchat-border-med); box-shadow: none; }
 
 /* ============================================================
    NOTES VIEW
@@ -1896,16 +2031,24 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 .notes-sidebar.collapsed { width: 0; opacity: 0; pointer-events: none; overflow: hidden; }
 .note-editor { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
 
-.panel-host.mode-reduced .notes-sidebar { width: 100%; border-right: none; }
-.panel-host.mode-reduced .note-editor { display: none; }
-.panel-host.mode-reduced #view-notes.in-editor .notes-sidebar { display: none; }
-.panel-host.mode-reduced #view-notes.in-editor .note-editor { display: flex; width: 100%; }
+.panel-host.mode-reduced .notes-sidebar,
+.panel-host.layout-narrow .notes-sidebar { width: 100%; border-right: none; }
+.panel-host.mode-reduced .note-editor,
+.panel-host.layout-narrow .note-editor { display: none; }
+.panel-host.mode-reduced #view-notes.in-editor .notes-sidebar,
+.panel-host.layout-narrow #view-notes.in-editor .notes-sidebar { display: none; }
+.panel-host.mode-reduced #view-notes.in-editor .note-editor,
+.panel-host.layout-narrow #view-notes.in-editor .note-editor { display: flex; width: 100%; }
 
 /* Card delineation for note items in reduced mode */
-.panel-host.mode-reduced .note-item { background: var(--abchat-bg-panel); border-color: var(--abchat-border); }
-.panel-host.mode-reduced .note-item:hover { border-color: var(--abchat-border-med); box-shadow: 0 2px 8px rgba(0,0,0,0.05); background: var(--abchat-bg-panel); }
-.panel-host[data-theme="dark"].mode-reduced .note-item { background: var(--abchat-bg-panel); border-color: var(--abchat-border); }
-.panel-host[data-theme="dark"].mode-reduced .note-item:hover { background: var(--abchat-bg-hover); border-color: var(--abchat-border-med); box-shadow: none; }
+.panel-host.mode-reduced .note-item,
+.panel-host.layout-narrow .note-item { background: var(--abchat-bg-panel); border-color: var(--abchat-border); }
+.panel-host.mode-reduced .note-item:hover,
+.panel-host.layout-narrow .note-item:hover { border-color: var(--abchat-border-med); box-shadow: 0 2px 8px rgba(0,0,0,0.05); background: var(--abchat-bg-panel); }
+.panel-host[data-theme="dark"].mode-reduced .note-item,
+.panel-host[data-theme="dark"].layout-narrow .note-item { background: var(--abchat-bg-panel); border-color: var(--abchat-border); }
+.panel-host[data-theme="dark"].mode-reduced .note-item:hover,
+.panel-host[data-theme="dark"].layout-narrow .note-item:hover { background: var(--abchat-bg-hover); border-color: var(--abchat-border-med); box-shadow: none; }
 
 .ns-header {
   padding: 10px;
@@ -2108,7 +2251,8 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
   background: var(--abchat-bg-panel); width: 100%; text-align: left; font-family: var(--abchat-font); flex-shrink: 0;
 }
 .ne-back-btn:hover { background: var(--abchat-bg-hover); }
-.panel-host.mode-reduced .ne-back-btn { display: flex; }
+.panel-host.mode-reduced .ne-back-btn,
+.panel-host.layout-narrow .ne-back-btn { display: flex; }
 
 .ne-body {
   flex: 1; padding: 12px 14px; overflow-y: auto;
@@ -2459,9 +2603,12 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 }
 
 /* Reduced mode: hide editor pane by default, show it when in-editor, full-width */
-.panel-host.mode-reduced .task-editor-pane { display: none; }
-.panel-host.mode-reduced #view-tasks.in-editor .tasks-main { display: none; }
-.panel-host.mode-reduced #view-tasks.in-editor .task-editor-pane {
+.panel-host.mode-reduced .task-editor-pane,
+.panel-host.layout-narrow .task-editor-pane { display: none; }
+.panel-host.mode-reduced #view-tasks.in-editor .tasks-main,
+.panel-host.layout-narrow #view-tasks.in-editor .tasks-main { display: none; }
+.panel-host.mode-reduced #view-tasks.in-editor .task-editor-pane,
+.panel-host.layout-narrow #view-tasks.in-editor .task-editor-pane {
   display: flex; width: 100%; border-left: none;
 }
 
@@ -2472,13 +2619,14 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
   background: var(--abchat-bg-panel); width: 100%; text-align: left; font-family: var(--abchat-font); flex-shrink: 0;
 }
 .tep-back-btn:hover { background: var(--abchat-bg-hover); }
-.panel-host.mode-reduced .tep-back-btn { display: flex; }
+.panel-host.mode-reduced .tep-back-btn,
+.panel-host.layout-narrow .tep-back-btn { display: flex; }
 
 .tasks-header {
   padding: 10px 12px; border-bottom: 1px solid var(--abchat-border);
   display: flex; flex-direction: column; gap: 8px; flex-shrink: 0;
 }
-.tasks-row1 { display: flex; align-items: center; gap: 8px; }
+.tasks-row1 { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .filter-tabs {
   display: flex; gap: 2px;
   background: var(--abchat-bg-sidebar); border: 1px solid var(--abchat-border);
@@ -2704,26 +2852,31 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 .stg-field-footer .btn-primary:disabled { cursor: not-allowed; pointer-events: none; }
 
 /* Reduced mode: stack label + control vertically so neither squishes the other */
-.panel-host.mode-reduced .stg-row {
+.panel-host.mode-reduced .stg-row,
+.panel-host.layout-narrow .stg-row {
   flex-direction: column;
   align-items: flex-start;
   gap: 6px;
 }
 .panel-host.mode-reduced .stg-row .stg-input,
-.panel-host.mode-reduced .stg-row .stg-select {
+.panel-host.layout-narrow .stg-row .stg-input,
+.panel-host.mode-reduced .stg-row .stg-select,
+.panel-host.layout-narrow .stg-row .stg-select {
   width: 100%;
   min-width: unset;
 }
 /* Toggle rows stay horizontal — the switch is small and fits fine.
    Excludes .stg-row-col: those carry a toggle inside .stg-field-head but are
    stacked head/textarea/footer by design, and must not be pulled back to a row. */
-.panel-host.mode-reduced .stg-row:has(.ts):not(.stg-row-col) {
+.panel-host.mode-reduced .stg-row:has(.ts):not(.stg-row-col),
+.panel-host.layout-narrow .stg-row:has(.ts):not(.stg-row-col) {
   flex-direction: row;
   align-items: center;
 }
 /* Beats the flex-start above so head and footer span the full width,
    keeping the toggle and Save button on the right edge */
-.panel-host.mode-reduced .stg-row.stg-row-col {
+.panel-host.mode-reduced .stg-row.stg-row-col,
+.panel-host.layout-narrow .stg-row.stg-row-col {
   align-items: stretch;
 }
 
@@ -3030,8 +3183,10 @@ a.log-sources-title:hover { text-decoration: underline; }
 .stg-agent-manage-btn:hover { background: var(--abchat-bg-hover); border-color: var(--abchat-accent); }
 .stg-agent-manage-count { color: var(--abchat-text-muted); font-weight: 400; }
 /* Keep the manage buttons side by side even in reduced mode, where .stg-row is forced to a column */
-.panel-host.mode-reduced .stg-agent-manage-row { flex-direction: row; align-items: stretch; }
-.panel-host.mode-reduced .stg-agent-manage-row .stg-agent-manage-btn { min-width: 0; }
+.panel-host.mode-reduced .stg-agent-manage-row,
+.panel-host.layout-narrow .stg-agent-manage-row { flex-direction: row; align-items: stretch; }
+.panel-host.mode-reduced .stg-agent-manage-row .stg-agent-manage-btn,
+.panel-host.layout-narrow .stg-agent-manage-row .stg-agent-manage-btn { min-width: 0; }
 
 #view-skills, #view-memory {
   display: flex; flex-direction: column; height: 100%;
@@ -3931,9 +4086,12 @@ mark.abcs-hl-current { background: #f59e0b; color: #1f2937; box-shadow: 0 0 0 1p
   position: relative;
 }
 
-.panel-host.mode-reduced .quiz-editor-pane { display: none; }
-.panel-host.mode-reduced #view-quiz.in-editor .quiz-main { display: none; }
-.panel-host.mode-reduced #view-quiz.in-editor .quiz-editor-pane {
+.panel-host.mode-reduced .quiz-editor-pane,
+.panel-host.layout-narrow .quiz-editor-pane { display: none; }
+.panel-host.mode-reduced #view-quiz.in-editor .quiz-main,
+.panel-host.layout-narrow #view-quiz.in-editor .quiz-main { display: none; }
+.panel-host.mode-reduced #view-quiz.in-editor .quiz-editor-pane,
+.panel-host.layout-narrow #view-quiz.in-editor .quiz-editor-pane {
   display: flex; width: 100%;
 }
 
@@ -3944,7 +4102,8 @@ mark.abcs-hl-current { background: #f59e0b; color: #1f2937; box-shadow: 0 0 0 1p
   background: var(--abchat-bg-panel); width: 100%; text-align: left; font-family: var(--abchat-font); flex-shrink: 0;
 }
 .qep-back-btn:hover { background: var(--abchat-bg-hover); }
-.panel-host.mode-reduced .qep-back-btn { display: flex; }
+.panel-host.mode-reduced .qep-back-btn,
+.panel-host.layout-narrow .qep-back-btn { display: flex; }
 
 .quiz-header {
   padding: 10px 12px; border-bottom: 1px solid var(--abchat-border);

@@ -8,7 +8,8 @@
   // live message window. The gate finds the guide by its marker line, so every copy the model can
   // see (a skill read, or a refusal that carries the guide) must be built by guideTextForBuiltinGuides.
   // The documents guide is split by task, so a chat carries only the part it uses: builtin-documents
-  // holds the rules for every file and comes with whichever part is read first.
+  // holds the rules for every office file and comes with whichever part is read first. builtin-html
+  // stands alone, since a page needs none of the office rules.
 
   // Reserved for built-in guides. User skills may not take a slug with this prefix, from either the
   // skill tool or the Manage Skills editor, so a guide can never shadow a skill.
@@ -31,6 +32,7 @@ This guide holds the rules for every file you make or change with create_documen
 - XLSX: spreadsheets, including several sheets in one workbook.
 - CSV: one plain table to open in a spreadsheet app or import elsewhere.
 - PPTX: slide decks. A deck can also be made as a PDF, one slide per page, for reading or sending rather than presenting (builtin-pptx).
+- HTML: a page or app the user opens in their browser, such as an interactive tool, a game, or a chart they can explore (builtin-html).
 If the user names a format, use it. Before the first file in a format, read its guide with the skill tool: builtin-docx-pdf for DOCX and PDF, builtin-xlsx-csv for XLSX and CSV, and builtin-pptx for PPTX and a PDF of slides.
 
 When the user wants a DOCX or PPTX and a PDF of it, such as a CV in Word and PDF, make both in one call: set also_pdf to true on the DOCX or PPTX. The PDF is made from the same content and saved as a second file with the same name and .pdf. Do not make the PDF in a second call.
@@ -473,7 +475,56 @@ A cell is an A1 reference such as "B2". A range is two cells joined by a colon, 
 - "Add a header row": { "intent": "set_range", "anchor": "A1", "values": [["Name", "Email", "Score"]] }.
 - "What is in A1 to C3?": { "intent": "read_range", "range": "A1:C3" }.`;
 
-  const DOCUMENT_FORMATS_FOR_BUILTIN_GUIDES = ['docx', 'pdf', 'xlsx', 'csv', 'pptx'];
+  const HTML_GUIDE_BODY_FOR_BUILTIN_GUIDES = String.raw`# Making an HTML file
+
+This guide covers create_document with format "html", and eval code that returns __document__ with format "html". Once it is in the conversation you do not need to read it again.
+
+## 1. When to make one
+Make an HTML file when the user wants something to open and use in their browser: an interactive tool (a calculator, planner, tracker, converter, or form), a game, a quiz, a chart or dashboard they can explore, an animation, or a page to publish. The file runs on the user's computer, not inside this extension.
+- For a document to read, print, or edit, make a DOCX or PDF instead.
+- For code to read or paste somewhere else, put it in a code block in your reply. A file is for running.
+- There is no separate .js, .css, or .py file. Put the JavaScript and CSS inside the page.
+
+## 2. The file
+Pass the whole page as html, starting with <!DOCTYPE html>. The user downloads it and opens it from their computer as a file:// page, with no web server and no other files beside it. So:
+- Put everything in the one file: CSS in <style>, JavaScript in <script>, and pictures as inline <svg>, <canvas> drawing, or data: URLs. A reference to another file (styles.css, app.js, images/logo.png) breaks, because that file does not exist.
+- Use classic <script> elements. Chrome blocks ES module imports of local files, fetch() of local files, and service workers on file:// pages.
+- A library from a CDN, such as Chart.js from https://cdn.jsdelivr.net, works only while the user is online. Prefer plain JavaScript, SVG, and canvas. Use a library only when it saves a lot of code, pin its version in the URL, and tell the user the page needs an internet connection.
+- Start <head> with <meta charset="utf-8">, then <meta name="viewport" content="width=device-width, initial-scale=1"> and a <title>. A saved file has no other record of its encoding, so a browser without the charset line has to guess it. The writer adds the line when it is missing and says so in the warnings.
+- localStorage works, but every page the user opens from their computer shares it. Start each key with a name for the app.
+- Do not ask the user for passwords, payment details, or API keys, and do not send what they enter to any server unless the page exists to do that and the user asked for it.
+- For a page built on a lot of data computed from attachments, build it in eval: compute the data, write it into the page in the code, and return { __document__: { format: "html", filename, html } }.
+
+## 3. Making it work the first time
+The user sees the page, not your code, and cannot fix it. Before you call:
+- Check that every function you call is defined, every id or class you look up exists in the markup, and every handler is attached after its element exists. Put scripts at the end of <body>, or run them on DOMContentLoaded.
+- Leave nothing unfinished: no placeholder text, "TODO" notes, or buttons that do nothing.
+- Keep the data the page needs (a table from the chat, computed results) in a JavaScript array or object in the file.
+- Write the source readably, with line breaks and indentation, never minified. A read shows at most 2,000 characters of a line, and a later edit has to match the text exactly.
+- Handle empty and invalid input, such as an empty field, a negative number, or text where a number belongs.
+
+## 4. Design
+- Make it responsive. It must work in a phone-width window as well as on a desktop. Use flex or grid, relative units, a max-width on the content, and buttons and inputs large enough to tap. Give an element that should shrink in a flex row min-width: 0.
+- Give it a clear look of its own: a small type scale, one accent colour, consistent spacing and corner radius, and a visible focus style.
+- Label every input, give pictures alt text, and keep text contrast readable.
+- Follow the system's light or dark mode with prefers-color-scheme when the page is mostly reading, or a tool the user keeps open for a long time.
+
+## 5. Changing a file
+Do not write the page out again to change it. Change the saved file with edit:
+1. Find the file's blob id in the link in displayed_to_user: #abchat-docblob-12 is blob id 12.
+2. Call edit with type "attachment", id 12, the rev from the result that made the file, and old_string and new_string, as for a note. Copy old_string exactly from the page as it now stands, which is your create_document call with the edits you have made since. Put several changes in one call with edits.
+3. When you do not have the page's text, such as an earlier version or a file the user attached, find the lines to change with grep, type "attachment", id 12, and context_lines 3. Its result has the rev. Read the file, or a range of it with offset and limit, only when the matching lines are not enough.
+The edit saves a new copy and shows it to the user. Its result has the new copy's rev, and the new copy's blob id is in its displayed_to_user link. Make the next change to that copy, with that rev. The earlier copies stay as they were.
+Make the page again with create_document only when most of it changes, and give it the same filename, so the earlier version's html is left out of the conversation with a note in its place. Use a new filename only when the user wants to keep both versions, such as a light one and a dark one side by side; "redo it" or "make it light" replaces the page.
+Do not read back a file you just made to check it. It holds exactly the html you sent, apart from any repair the warnings name.
+
+## 6. The result
+The result has format, filename, size, rev, and a note. It has warnings when the writer added a doctype or a charset line. The file is shown to the user, so do not repeat the code in your reply. To point to the file, copy the link from displayed_to_user, such as [budget-planner.html](#abchat-docblob-12), and tell the user to download it and open it in their browser. Make each file once. Call again only to fix a problem or to make a change the user asked for.
+
+## 7. Limits
+A page can be up to 1,000,000 characters. A larger one is refused and nothing is made. Generate repeated markup with a script, or keep large data out of the page.`;
+
+  const DOCUMENT_FORMATS_FOR_BUILTIN_GUIDES = ['docx', 'pdf', 'xlsx', 'csv', 'pptx', 'html'];
 
   // eval is covered only when its code builds a file; ordinary computation needs no guide.
   function isDocumentEvalForBuiltinGuides(toolNameForEval, argsForEval) {
@@ -539,10 +590,17 @@ A cell is an A1 reference such as "B2". A range is two cells joined by a colon, 
       summary: 'the rules for every file, which each document guide brings with it',
       listed: false,
       body: DOCUMENTS_GUIDE_BODY_FOR_BUILTIN_GUIDES,
+      // An HTML file needs none of these rules: builtin-html stands alone, so a call that makes
+      // only HTML does not wait for (or pay for) the office-format rules.
       coversToolCall: function (toolNameForCovers, argsForCovers) {
-        if (toolNameForCovers === 'create_document' || toolNameForCovers === 'read_document_structure'
-          || toolNameForCovers === 'edit_document') return true;
-        return isDocumentEvalForBuiltinGuides(toolNameForCovers, argsForCovers);
+        if (toolNameForCovers === 'read_document_structure' || toolNameForCovers === 'edit_document') return true;
+        if (toolNameForCovers === 'create_document') {
+          return String((argsForCovers && argsForCovers.format) || '').trim().toLowerCase() !== 'html';
+        }
+        if (!isDocumentEvalForBuiltinGuides(toolNameForCovers, argsForCovers)) return false;
+        return documentFormatsForBuiltinGuides(toolNameForCovers, argsForCovers).some(function (formatForCovers) {
+          return formatForCovers !== 'html';
+        });
       }
     },
     {
@@ -578,6 +636,13 @@ A cell is an A1 reference such as "B2". A range is two cells joined by a colon, 
       coversToolCall: function (toolNameForCovers) {
         return toolNameForCovers === 'read_document_structure' || toolNameForCovers === 'edit_document';
       }
+    },
+    {
+      slug: 'builtin-html',
+      title: 'Making an HTML file',
+      summary: 'making an HTML page or app the user opens in their browser, and changing one',
+      body: HTML_GUIDE_BODY_FOR_BUILTIN_GUIDES,
+      coversToolCall: coversFormatsForBuiltinGuides(['html'])
     },
     {
       slug: 'builtin-page-layout',

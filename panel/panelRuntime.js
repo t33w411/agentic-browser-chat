@@ -1214,10 +1214,11 @@
     /* ============================================================
       REDUCED-VIEW PANE STATE
       Pane = 'list' | 'detail' per main tab. Updates S.pane<Tab>, syncs the
-      field, and (if this tab is the visible main tab and mode is reduced)
-      toggles the `in-*` class on the view container so the right pane is
-      visible immediately. setMode does NOT call this; mode switches read the
-      stored values to decide what to show.
+      field, and (if the panel shows one pane at a time: reduced mode, or
+      expanded mode on a narrow window) toggles the `in-*` class on the view
+      container so the right pane is visible immediately. setMode does NOT
+      call this; mode and layout switches read the stored values to decide
+      what to show.
     ============================================================ */
     const PANE_VIEW_CLASS_MAP_FOR_PANEL_RUNTIME = {
       chats: { viewId: 'view-chats', cls: 'in-chat', field: 'paneChats', stateKey: 'paneChats' },
@@ -1258,10 +1259,61 @@
       return false;
     }
 
+    // Below this window width, expanded mode shows one pane at a time, as
+    // reduced mode does: beside the 274px sidebar the chat column is too
+    // narrow for the composer and the model picker. panel.css keys that
+    // layout on the layout-narrow host class set from this value, so the
+    // width lives here only.
+    const SINGLE_COLUMN_BELOW_PX_FOR_PANEL_RUNTIME = 640;
+
+    function isNarrowExpandedLayoutForPanelRuntime() {
+      return S.mode === 'expanded' && window.innerWidth < SINGLE_COLUMN_BELOW_PX_FOR_PANEL_RUNTIME;
+    }
+
+    // True when the panel shows one pane at a time: always in reduced mode,
+    // and in expanded mode on a narrow window. Pane navigation must ask this
+    // rather than S.mode, or the narrow layout shows a list with no way into
+    // the open item.
+    function isSingleColumnLayoutForPanelRuntime() {
+      return S.mode === 'reduced' || host.classList.contains('layout-narrow');
+    }
+
+    // In a single-column layout, shows each tab's stored pane (the 1c
+    // fallback from detail to list is inside applyPaneClassForTabForPanelRuntime).
+    // In the two-pane layout both panes are visible, so the in-* classes go.
+    // The stored S.pane<Tab> values are kept either way.
+    function applyPaneLayoutForPanelRuntime() {
+      if (isSingleColumnLayoutForPanelRuntime()) {
+        applyPaneClassForTabForPanelRuntime('chats', S.paneChats);
+        applyPaneClassForTabForPanelRuntime('notes', S.paneNotes);
+        applyPaneClassForTabForPanelRuntime('tasks', S.paneTasks);
+        applyPaneClassForTabForPanelRuntime('questions', S.paneQuestions);
+        S.inChatView = S.paneChats === 'detail';
+        S.inNoteView = S.paneNotes === 'detail';
+        return;
+      }
+      Object.keys(PANE_VIEW_CLASS_MAP_FOR_PANEL_RUNTIME).forEach(function (tabNameForLayout) {
+        const cfgForLayout = PANE_VIEW_CLASS_MAP_FOR_PANEL_RUNTIME[tabNameForLayout];
+        const viewElForLayout = root.getElementById(cfgForLayout.viewId);
+        if (viewElForLayout) viewElForLayout.classList.remove(cfgForLayout.cls);
+      });
+      S.inChatView = false;
+      S.inNoteView = false;
+    }
+
+    // Called on window resize. Re-applies the panes only when the layout
+    // actually changes, so resizing within one layout leaves them alone.
+    function refreshNarrowLayoutForPanelRuntime() {
+      const isNarrowForRefresh = isNarrowExpandedLayoutForPanelRuntime();
+      if (isNarrowForRefresh === host.classList.contains('layout-narrow')) return;
+      host.classList.toggle('layout-narrow', isNarrowForRefresh);
+      applyPaneLayoutForPanelRuntime();
+    }
+
     function applyPaneClassForTabForPanelRuntime(tabNameForPane, paneValueForPane) {
       const cfgForPane = PANE_VIEW_CLASS_MAP_FOR_PANEL_RUNTIME[tabNameForPane];
       if (!cfgForPane) return;
-      if (S.mode !== 'reduced') return;
+      if (!isSingleColumnLayoutForPanelRuntime()) return;
       const viewElForPane = root.getElementById(cfgForPane.viewId);
       if (!viewElForPane) return;
       const resolvedPaneForApply =
@@ -3805,20 +3857,11 @@
       }
       host.classList.remove('mode-expanded', 'mode-reduced');
       host.classList.add('mode-' + mode);
+      host.classList.toggle('layout-narrow', isNarrowExpandedLayoutForPanelRuntime());
       const btn = root.getElementById('btn-mode');
       btn.textContent = mode === 'expanded' ? '⊡ Reduced View' : '⊞ Expanded View';
 
       if (mode === 'expanded') {
-        // In expanded mode both sidebar and content are visible side-by-side,
-        // so drill-down classes are not needed. The stored S.pane<Tab> values
-        // are intentionally preserved so the prior reduced-view pane is
-        // restored when the user switches back to reduced mode.
-        root.getElementById('view-chats').classList.remove('in-chat');
-        root.getElementById('view-notes').classList.remove('in-editor');
-        root.getElementById('view-tasks').classList.remove('in-editor');
-        root.getElementById('view-quiz').classList.remove('in-editor');
-        S.inChatView = false;
-        S.inNoteView = false;
         // Reset panel position (expanded is centered via CSS)
         host.style.left = '';
         host.style.top = '';
@@ -3827,16 +3870,6 @@
         // Switching to reduced: sidebars must be visible (collapse is an expanded-only feature).
         if (S.sidebarCollapsed) expandSidebar();
         if (S.notesSidebarCollapsed) expandNotesSidebar();
-
-        // Restore the last-visible pane per tab from stored intent. 1c
-        // fallback (detail → list when active record doesn't resolve) is
-        // handled inside applyPaneClassForTabForPanelRuntime.
-        applyPaneClassForTabForPanelRuntime('chats', S.paneChats);
-        applyPaneClassForTabForPanelRuntime('notes', S.paneNotes);
-        applyPaneClassForTabForPanelRuntime('tasks', S.paneTasks);
-        applyPaneClassForTabForPanelRuntime('questions', S.paneQuestions);
-        S.inChatView = S.paneChats === 'detail';
-        S.inNoteView = S.paneNotes === 'detail';
 
         // Restore the panel's last-known reduced-view position. Prefer a
         // remote-synced anchor stashed while we were in expanded mode; fall
@@ -3857,6 +3890,9 @@
           pendingSyncedPanelAnchorForPanelRuntime = null;
         }
       }
+      // Reduced mode, and expanded mode on a narrow window, show the stored
+      // pane per tab; wide expanded mode shows both panes.
+      applyPaneLayoutForPanelRuntime();
       updateChatBackTitleForPanelRuntime();
     }
 
@@ -6825,7 +6861,7 @@
         chipDataForPanelRuntime.statusText || ''
       );
       saveDraftForPanelRuntime();
-      if (S.mode === 'reduced') {
+      if (isSingleColumnLayoutForPanelRuntime()) {
         if (S.tab !== 'chats') setTab('chats');
         S.inChatView = true;
         setReducedPaneForPanelRuntime('chats', 'detail');
@@ -15830,7 +15866,8 @@
       if (!counterElForDisplay) {
         counterElForDisplay = document.createElement('div');
         counterElForDisplay.id = 'abchat-token-counter';
-        counterElForDisplay.style.cssText = 'font-size:11px;color:var(--text-muted,#888);display:flex;align-items:center;gap:4px;white-space:nowrap;padding:0 4px;';
+        // Layout lives in panel.css (#abchat-token-counter), which hides the counter
+        // when the composer is too narrow for it. Only the colour is set inline, below.
         // The counter sits as a direct child of .input-bottom, before the right-side
         // control group (mic + send). Insert before whichever anchor is a direct child.
         const anchorForCounter = inputBottomForCounter.querySelector(':scope > .input-right')
@@ -16238,8 +16275,14 @@
           return 'Creating ' + (args.type || 'item') + (args.title ? ' “' + trunc(args.title, 20) + '”' : '');
         case 'edit':
           if (isAgentNoteForLiveTurnLabel(args.type, args.id)) return 'Working';
+          if (args.type === 'attachment') return 'Editing file' + (args.id ? ' #' + args.id : '');
           return 'Editing ' + (args.type || 'item') + (args.id ? ' #' + args.id : '');
         case 'grep': {
+          if (args.type === 'attachment') {
+            var grepFilePatternForLt = args.pattern != null ? String(args.pattern) : '';
+            return 'Searching file' + (args.id ? ' #' + args.id : '')
+              + (grepFilePatternForLt.trim() ? ': "' + trunc(grepFilePatternForLt, 24) + '"' : '…');
+          }
           var grepTypePluralByKindForLt = { note: 'notes', chat: 'chats', task: 'tasks', question: 'questions' };
           var grepKindForLt = args.type;
           var grepTypeLabelForLt = grepTypePluralByKindForLt[grepKindForLt] || (grepKindForLt ? String(grepKindForLt) + 's' : 'items');
@@ -19444,6 +19487,10 @@
       }
       try {
         var resultForPanelRuntime = await repoForPanelRuntime.pruneOrphanedBlobs(getPendingBlobIdsForPanelRuntime());
+        if (resultForPanelRuntime && resultForPanelRuntime.skipped) {
+          if (resultElForPanelRuntime) resultElForPanelRuntime.textContent = 'Nothing removed: saved drafts could not be read. Try again.';
+          return;
+        }
         var deletedCountForPanelRuntime = (resultForPanelRuntime && resultForPanelRuntime.deleted) || 0;
         var draftsReclaimedForPanelRuntime = (resultForPanelRuntime && resultForPanelRuntime.draftsReclaimed) || 0;
         if (resultElForPanelRuntime) {
@@ -19549,7 +19596,8 @@
       // Re-clamp the panel into view when the viewport shrinks (window resize,
       // device rotation, extended-display attach/detach). Without this, a panel
       // previously positioned for a larger viewport stays at its old inline
-      // coords and ends up partially or fully off-screen.
+      // coords and ends up partially or fully off-screen. The same resize also
+      // switches expanded mode between its two-pane and narrow layouts.
       var capturedGenForPanelReclamp = window.abchatListenerGeneration || 0;
       function onViewportChangedForPanelReclamp() {
         if ((window.abchatListenerGeneration || 0) !== capturedGenForPanelReclamp) {
@@ -19566,10 +19614,36 @@
         } catch (e) {
           return;
         }
+        refreshNarrowLayoutForPanelRuntime();
         reclampPanelPositionForPanelRuntime();
       }
       window.addEventListener('resize', onViewportChangedForPanelReclamp);
       window.addEventListener('orientationchange', onViewportChangedForPanelReclamp);
+    })();
+
+    /* ============================================================
+      TAB ROW WHEEL SCROLL
+      The tab row scrolls only sideways and hides its scrollbar, and a mouse
+      wheel scrolls only vertically, so on a narrow panel the hidden tabs were
+      out of reach without a trackpad or Shift. While the row overflows, a
+      mostly vertical wheel over it scrolls it sideways instead. The listener
+      is on a panel element, so it goes when the panel host is removed.
+    ============================================================ */
+    (function bindTabRowWheelScrollForPanelRuntime() {
+      const tabRowForWheelScroll = root.querySelector('.panel-tabs');
+      if (!tabRowForWheelScroll) return;
+      tabRowForWheelScroll.addEventListener('wheel', function (eventForWheelScroll) {
+        // Ctrl + wheel is the browser's zoom, including a trackpad pinch.
+        if (eventForWheelScroll.ctrlKey) return;
+        if (tabRowForWheelScroll.scrollWidth - tabRowForWheelScroll.clientWidth <= 0) return;
+        if (Math.abs(eventForWheelScroll.deltaY) <= Math.abs(eventForWheelScroll.deltaX)) return;
+        // deltaMode 1 counts lines and 2 counts pages; Chrome sends pixels (0).
+        const pxPerUnitForWheelScroll = eventForWheelScroll.deltaMode === 1 ? 16
+          : eventForWheelScroll.deltaMode === 2 ? tabRowForWheelScroll.clientWidth
+          : 1;
+        tabRowForWheelScroll.scrollLeft += eventForWheelScroll.deltaY * pxPerUnitForWheelScroll;
+        eventForWheelScroll.preventDefault();
+      }, { passive: false });
     })();
 
     /* ============================================================

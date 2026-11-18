@@ -33,23 +33,25 @@
 
     <!-- HEADER -->
     <div class="panel-header">
-      <div class="panel-tabs">
-        <button class="tab-btn active" data-tab="chats" data-action="set-tab">Chats</button>
-        <button class="tab-btn" data-tab="notes" data-action="set-tab">Notes</button>
-        <button class="tab-btn" data-tab="tasks" data-action="set-tab">Tasks<span class="tab-badge-dot" id="tasks-tab-dot"></span></button>
-        <button class="tab-btn" data-tab="quiz" data-action="set-tab">Quiz<span class="tab-badge-dot" id="quiz-tab-dot"></span></button>
-        <!-- Content selector -->
-        <button class="tab-icon-btn" id="selector-tab" data-action="toggle-selector">
-          ${icForPanelTemplate.contentSelector18}
-        </button>
-        <!-- New menu (visible in reduced and expanded views) -->
-        <div class="new-menu-wrap">
-          <button class="new-menu-btn" id="new-menu-btn" title="Create new" data-action="toggle-new-menu">+ New</button>
-          <div class="new-menu-dropdown" id="new-menu-dropdown">
-            <button class="new-menu-item" data-action="new-menu-create" data-new-kind="chat">New Chat</button>
-            <button class="new-menu-item" data-action="new-menu-create" data-new-kind="note">New Note</button>
-            <button class="new-menu-item" data-action="new-menu-create" data-new-kind="task">New Task</button>
-            <button class="new-menu-item" data-action="new-menu-create" data-new-kind="quiz">New Quiz</button>
+      <div class="panel-tabs-wrap">
+        <div class="panel-tabs">
+          <button class="tab-btn active" data-tab="chats" data-action="set-tab">Chats</button>
+          <button class="tab-btn" data-tab="notes" data-action="set-tab">Notes</button>
+          <button class="tab-btn" data-tab="tasks" data-action="set-tab">Tasks<span class="tab-badge-dot" id="tasks-tab-dot"></span></button>
+          <button class="tab-btn" data-tab="quiz" data-action="set-tab">Quiz<span class="tab-badge-dot" id="quiz-tab-dot"></span></button>
+          <!-- Content selector -->
+          <button class="tab-icon-btn" id="selector-tab" data-action="toggle-selector">
+            ${icForPanelTemplate.contentSelector18}
+          </button>
+          <!-- New menu (visible in reduced and expanded views) -->
+          <div class="new-menu-wrap">
+            <button class="new-menu-btn" id="new-menu-btn" title="Create new" data-action="toggle-new-menu">+ New</button>
+            <div class="new-menu-dropdown" id="new-menu-dropdown">
+              <button class="new-menu-item" data-action="new-menu-create" data-new-kind="chat">New Chat</button>
+              <button class="new-menu-item" data-action="new-menu-create" data-new-kind="note">New Note</button>
+              <button class="new-menu-item" data-action="new-menu-create" data-new-kind="task">New Task</button>
+              <button class="new-menu-item" data-action="new-menu-create" data-new-kind="quiz">New Quiz</button>
+            </div>
           </div>
         </div>
       </div>

@@ -9,6 +9,33 @@ import { extname, join, normalize, sep } from 'node:path';
 
 export const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Calls read every `interval` ms until test passes on what it returned, then returns that value.
+// After `timeout` ms it returns the last value read, so the caller can test it and report it.
+// A read or a test that throws counts as not yet. Only use it to wait for something to happen.
+// A poll for "nothing changed" passes on its first read and proves nothing, so a check that
+// something did not happen keeps a fixed wait() long enough for it to have happened.
+export async function waitUntil(read, test, { timeout = 5000, interval = 25 } = {}) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    let value;
+    try {
+      value = await read();
+    } catch (errRead) {
+      value = { error: errRead.message };
+    }
+    if (passes(test, value) || Date.now() >= deadline) return value;
+    await wait(interval);
+  }
+}
+
+export function passes(test, value) {
+  try {
+    return !!test(value);
+  } catch (errTest) {
+    return false;
+  }
+}
+
 export function chromePath() {
   if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
   if (process.platform === 'darwin') return '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';

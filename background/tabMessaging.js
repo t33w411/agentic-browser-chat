@@ -17,6 +17,12 @@
   // two racing calls could both decide to inject and tear down a live panel
   // twice in a row.
   const inflightEnsureInjectedForTabMessaging = new Map();
+  // How often, and for how long, ensureContentInjected waits for a copy the manifest has started in
+  // a tab but not finished, before it loads one itself. The probe and the manifest's bundle both
+  // run at document_idle, so the copy is done within one or two polls of the first answer. Past
+  // the limit the worker loads its own copy, as it did before it waited at all.
+  const pendingCopyPollMsForTabMessaging = 50;
+  const pendingCopyWaitMsForTabMessaging = 5000;
 
   const injectableJsFilesForTabMessaging = [
     "content/keyboardShield.js",
@@ -335,6 +341,13 @@
   // extension instance, so after a genuine extension reload the old world's
   // nonce is invisible and the probe correctly reports "not injected".
   //
+  // It also reports `started`: whether content/keyboardShield.js has run in
+  // this world. The manifest runs that file at document_start, so in a page
+  // that loaded after this extension instance it is there long before the
+  // bundle, which the manifest runs at document_idle. Started with no nonce
+  // means the manifest's copy is still on its way. A page that loaded before
+  // this instance (the reload recovery case) has neither.
+  //
   // This replaces the previous message-based checkInjected handshake, whose
   // 700 ms timeout produced false "not injected" verdicts on any tab that was
   // slow to answer (throttled/frozen background tab, busy main thread, paused
@@ -350,34 +363,65 @@
           {
             target: { tabId: tabIdForTabMessaging },
             func: function readInjectionNonceForTabMessaging() {
-              return window.abchatMainInitNonce || null;
+              return {
+                nonce: window.abchatMainInitNonce || null,
+                started: typeof window.__abchatKeyboardShieldGeneration === "number"
+              };
             }
           },
           (probeResultsForTabMessaging) => {
             if (chrome.runtime.lastError) {
-              resolveForTabMessaging({ ok: false, nonce: null });
+              resolveForTabMessaging({ ok: false, nonce: null, started: false });
               return;
             }
             const firstResultForTabMessaging =
               Array.isArray(probeResultsForTabMessaging) && probeResultsForTabMessaging[0]
                 ? probeResultsForTabMessaging[0]
                 : null;
+            const readForTabMessaging =
+              firstResultForTabMessaging && firstResultForTabMessaging.result
+                ? firstResultForTabMessaging.result
+                : {};
             resolveForTabMessaging({
               ok: true,
-              nonce: firstResultForTabMessaging && firstResultForTabMessaging.result
-                ? firstResultForTabMessaging.result
-                : null
+              nonce: readForTabMessaging.nonce || null,
+              started: readForTabMessaging.started === true
             });
           }
         );
       } catch (errorForTabMessaging) {
-        resolveForTabMessaging({ ok: false, nonce: null });
+        resolveForTabMessaging({ ok: false, nonce: null, started: false });
       }
     });
   }
 
+  // Probes until the copy the manifest started in the tab has finished, the
+  // tab can no longer be probed, or the page no longer holds a started copy
+  // (it navigated to one that has not begun). Returns the last probe.
+  async function waitForPendingCopyForTabMessaging(tabIdForTabMessaging, firstProbeForTabMessaging) {
+    const deadlineForTabMessaging = Date.now() + pendingCopyWaitMsForTabMessaging;
+    let probeForTabMessaging = firstProbeForTabMessaging;
+    while (
+      probeForTabMessaging.ok &&
+      probeForTabMessaging.started &&
+      !probeForTabMessaging.nonce &&
+      Date.now() < deadlineForTabMessaging
+    ) {
+      await waitForRetryDelayForTabMessaging(pendingCopyPollMsForTabMessaging);
+      probeForTabMessaging = await probeInjectedNonceForTabMessaging(tabIdForTabMessaging);
+    }
+    return probeForTabMessaging;
+  }
+
   async function runEnsureContentInjectedForTabMessaging(tabIdForTabMessaging) {
-    const probeForTabMessaging = await probeInjectedNonceForTabMessaging(tabIdForTabMessaging);
+    let probeForTabMessaging = await probeInjectedNonceForTabMessaging(tabIdForTabMessaging);
+    // A tab that becomes active while its page loads is probed before the
+    // manifest's bundle has run. Loading a copy then put a second one in the
+    // same world about 100 ms later, which ran the whole bundle twice and
+    // dropped whatever the first copy held, so wait for the manifest's copy.
+    if (probeForTabMessaging.ok && probeForTabMessaging.started && !probeForTabMessaging.nonce) {
+      probeForTabMessaging = await waitForPendingCopyForTabMessaging(tabIdForTabMessaging, probeForTabMessaging);
+    }
     if (probeForTabMessaging.ok && probeForTabMessaging.nonce) {
       return true;
     }

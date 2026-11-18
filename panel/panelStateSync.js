@@ -80,6 +80,8 @@
     "paneNotes",
     "paneTasks",
     "paneQuestions",
+    "sidebarCollapsed",
+    "notesSidebarCollapsed",
     "chatSubTab",
     "noteSubTab",
     "taskFilter",
@@ -435,6 +437,22 @@
         typeof runtimeForPanelStateSync.setTab === "function"
       ) {
         runtimeForPanelStateSync.setTab(stateForPanelStateSync.tab);
+      }
+
+      // 3. Collapsed sidebars. Collapse is a two-pane control; reduced mode and
+      // the narrow expanded layout show a collapsed sidebar in place, so a
+      // collapsed record arriving in either one cannot hide the list.
+      if (hasField("sidebarCollapsed") &&
+        typeof stateForPanelStateSync.sidebarCollapsed === "boolean" &&
+        typeof runtimeForPanelStateSync.setSidebarCollapsed === "function"
+      ) {
+        runtimeForPanelStateSync.setSidebarCollapsed(stateForPanelStateSync.sidebarCollapsed);
+      }
+      if (hasField("notesSidebarCollapsed") &&
+        typeof stateForPanelStateSync.notesSidebarCollapsed === "boolean" &&
+        typeof runtimeForPanelStateSync.setNotesSidebarCollapsed === "function"
+      ) {
+        runtimeForPanelStateSync.setNotesSidebarCollapsed(stateForPanelStateSync.notesSidebarCollapsed);
       }
 
       // 4. Active chat

@@ -4,7 +4,12 @@
   }
 
   // Independent generation marker so stale handlers from extension re-injection
-  // can self-disable without depending on other modules.
+  // can self-disable without depending on other modules. The worker's injection
+  // probe (background/tabMessaging.js) also reads it: because the manifest runs
+  // this file at document_start and the rest of the bundle at document_idle,
+  // the marker without main.js's nonce tells it the manifest's copy is still
+  // on its way, so it waits instead of loading a second one. Keep the name, and
+  // keep this file in the manifest's document_start entry.
   window.__abchatKeyboardShieldGeneration = (window.__abchatKeyboardShieldGeneration || 0) + 1;
   var keyboardShieldGenerationForContent = window.__abchatKeyboardShieldGeneration;
 

@@ -144,9 +144,9 @@ test('a document call waits for the shared rules and the guide for its format', 
   assert.ok(/needs the builtin-documents and builtin-xlsx-csv guides,/.test(guidesForTest.gateToolCall('eval', evalXlsxForTest, []).reason));
   const evalAssignedForTest = { code: 'const spec = {}; spec.format = \'pdf\'; spec.content = "Hi"; return { __document__: spec };' };
   assert.ok(/needs the builtin-documents and builtin-docx-pdf guides,/.test(guidesForTest.gateToolCall('eval', evalAssignedForTest, []).reason));
-  // Code that picks the format at run time waits for every format guide.
+  // Code that picks the format at run time waits for every format guide, HTML included.
   const evalDynamicForTest = { code: 'const f = vars.kind; return { __document__: { format: f, rows: [[1]] } };' };
-  assert.ok(/needs the builtin-documents, builtin-docx-pdf, builtin-xlsx-csv, and builtin-pptx guides,/.test(guidesForTest.gateToolCall('eval', evalDynamicForTest, []).reason));
+  assert.ok(/needs the builtin-documents, builtin-docx-pdf, builtin-xlsx-csv, builtin-pptx, and builtin-html guides,/.test(guidesForTest.gateToolCall('eval', evalDynamicForTest, []).reason));
   assert.strictEqual(guidesForTest.gateToolCall('eval', evalXlsxForTest, [toolMessageForTest('x', guidesForTest.readResult('builtin-xlsx-csv', []))]), null);
 
   // A create_document call with a format the tool does not take needs only the shared rules, and
@@ -298,6 +298,7 @@ test('the system prompt lists guides only for a caller with tools', async functi
   assert.ok(withToolsForTest.includes('\n- builtin-xlsx-csv: '));
   assert.ok(withToolsForTest.includes('\n- builtin-pptx: '));
   assert.ok(withToolsForTest.includes('\n- builtin-docx-edit: '));
+  assert.ok(withToolsForTest.includes('\n- builtin-html: '));
   // The shared rules come with each document guide and are never read on their own.
   assert.ok(!withToolsForTest.includes('\n- builtin-documents: '));
   assert.ok(withToolsForTest.includes('\n- builtin-page-layout: '));

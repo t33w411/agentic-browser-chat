@@ -1040,20 +1040,189 @@
 
   // ---- Tool: edit ----
 
+  var MAX_EDITS_PER_CALL_FOR_TOOL_EXEC = 100;
+  var HTML_FILE_MIME_FOR_TOOL_EXEC = 'text/html;charset=utf-8';
+
+  // The content changes an edit call asks for: old_string and new_string, or an edits array of
+  // the same pairs. Returns { edits } (empty when the call changes no content) or { error }.
+  function collectContentEditsForToolExec(args) {
+    // Some models fill every field they are shown, so an empty old_string and new_string beside
+    // edits are read as absent rather than as a second request.
+    var hasPairForCollect = (typeof args.old_string === 'string' && args.old_string !== '')
+      || (typeof args.new_string === 'string' && args.new_string !== '');
+    if (Array.isArray(args.edits) && args.edits.length > 0) {
+      if (hasPairForCollect) return { error: 'Use either old_string and new_string, or edits, not both.' };
+      if (args.edits.length > MAX_EDITS_PER_CALL_FOR_TOOL_EXEC) {
+        return { error: 'edits holds at most ' + MAX_EDITS_PER_CALL_FOR_TOOL_EXEC + ' changes; split them across calls.' };
+      }
+      return {
+        edits: args.edits.map(function (editForCollect) {
+          var safeEditForCollect = editForCollect && typeof editForCollect === 'object' ? editForCollect : {};
+          return {
+            old_string: typeof safeEditForCollect.old_string === 'string' ? safeEditForCollect.old_string : null,
+            new_string: typeof safeEditForCollect.new_string === 'string' ? safeEditForCollect.new_string : null,
+            replace_all: Boolean(safeEditForCollect.replace_all)
+          };
+        })
+      };
+    }
+    var oldStringForCollect = typeof args.old_string === 'string' ? args.old_string : null;
+    var newStringForCollect = typeof args.new_string === 'string' ? args.new_string : null;
+    if (oldStringForCollect === null && newStringForCollect === null) return { edits: [] };
+    return { edits: [{ old_string: oldStringForCollect, new_string: newStringForCollect, replace_all: Boolean(args.replace_all) }] };
+  }
+
+  // With several edits an error names the failing one by its index in edits. A single edit keeps
+  // the messages the edit tool has always given.
+  function contentEditLabelForToolExec(editsForLabel, indexForLabel) {
+    return editsForLabel.length > 1 ? 'edits[' + indexForLabel + ']: ' : '';
+  }
+
+  // The first malformed pair, as an error message, or '' when every pair is usable. Checked before
+  // the item is fetched, so a malformed call fails without touching storage.
+  function contentEditShapeErrorForToolExec(editsForShape) {
+    for (var indexForShape = 0; indexForShape < editsForShape.length; indexForShape++) {
+      var labelForShape = contentEditLabelForToolExec(editsForShape, indexForShape);
+      var editForShape = editsForShape[indexForShape];
+      if (editForShape.old_string === null) return labelForShape + 'old_string is required to change content; provide the exact text to find and replace';
+      if (editForShape.old_string === '') return labelForShape + 'old_string cannot be empty; provide the exact text you want to replace';
+      if (editForShape.new_string === null) return labelForShape + 'new_string is required when old_string is provided; use an empty string to delete the matched text';
+    }
+    return '';
+  }
+
+  // Applies exact-string edits in order, each to the text the one before it left. All or nothing:
+  // the first edit that fails returns its error and none of them is applied.
+  function applyContentEditsForToolExec(contentForApply, editsForApply) {
+    var shapeErrorForApply = contentEditShapeErrorForToolExec(editsForApply);
+    if (shapeErrorForApply) return { ok: false, error: shapeErrorForApply };
+    var currentForApply = contentForApply;
+    for (var indexForApply = 0; indexForApply < editsForApply.length; indexForApply++) {
+      var editForApply = editsForApply[indexForApply];
+      var labelForApply = contentEditLabelForToolExec(editsForApply, indexForApply);
+      var oldForApply = editForApply.old_string;
+      var newForApply = editForApply.new_string;
+      var occurrencesForApply = 0;
+      var searchPosForApply = 0;
+      while (true) {
+        var foundAtForApply = currentForApply.indexOf(oldForApply, searchPosForApply);
+        if (foundAtForApply === -1) break;
+        occurrencesForApply++;
+        searchPosForApply = foundAtForApply + 1;
+      }
+      if (occurrencesForApply === 0) {
+        return { ok: false, error: labelForApply + 'old_string not found in content' + (indexForApply > 0 ? ' (as left by the edits before it)' : '') };
+      }
+      if (occurrencesForApply > 1 && !editForApply.replace_all) {
+        return { ok: false, error: labelForApply + 'old_string matches ' + occurrencesForApply + ' locations. Set replace_all: true or provide a more specific string.' };
+      }
+      if (editForApply.replace_all) {
+        currentForApply = currentForApply.split(oldForApply).join(newForApply);
+      } else {
+        var atForApply = currentForApply.indexOf(oldForApply);
+        currentForApply = currentForApply.slice(0, atForApply) + newForApply + currentForApply.slice(atForApply + oldForApply.length);
+      }
+    }
+    return { ok: true, content: currentForApply };
+  }
+
+  function utf8DataUrlForToolExec(textForDataUrl, mimeForDataUrl) {
+    var bytesForDataUrl = new TextEncoder().encode(textForDataUrl);
+    var binaryForDataUrl = '';
+    for (var offsetForDataUrl = 0; offsetForDataUrl < bytesForDataUrl.length; offsetForDataUrl += 0x8000) {
+      binaryForDataUrl += String.fromCharCode.apply(null, bytesForDataUrl.subarray(offsetForDataUrl, offsetForDataUrl + 0x8000));
+    }
+    return { dataUrl: 'data:' + mimeForDataUrl + ';base64,' + btoa(binaryForDataUrl), size: bytesForDataUrl.length };
+  }
+
+  // An HTML file the model made with create_document, or one the user attached. Its stored text
+  // is then the page source: create_document saves it, and an attached text/html file is decoded
+  // as text. A DOCX or other office file stores extracted text, which is not the file.
+  function isEditableHtmlBlobForToolExec(blobForCheck) {
+    var mimeForCheck = String(blobForCheck.mimeType || '').toLowerCase();
+    var nameForCheck = String(blobForCheck.name || '').toLowerCase();
+    return mimeForCheck.indexOf('text/html') === 0 || /\.html?$/.test(nameForCheck);
+  }
+
+  // edit with type "attachment" changes an HTML file. A blob is never changed in place, because a
+  // message, a note or a clip may point at the same one; the edited page comes back as a new
+  // file, which the agent loop saves and shows like a create_document result. The copy keeps the
+  // source's name, so within one reply the chat shows only the newest copy.
+  async function editAttachmentForToolExec(args, panelDataRepo, editsForAttachment) {
+    var blobIdForEdit = toPositiveIntegerForToolExec(args.id);
+    if (blobIdForEdit === null) return { ok: false, error: 'id must be a positive integer: the file\'s blob id' };
+    if (typeof args.rev !== 'string' || !args.rev) {
+      return { ok: false, error: 'rev is required and must be a non-empty string; use the rev from the result that made the file, or from grep or read with type "attachment"' };
+    }
+    if (!editsForAttachment.length) return { ok: false, error: 'Changing a file needs old_string and new_string, or edits.' };
+    var shapeErrorForAttachment = contentEditShapeErrorForToolExec(editsForAttachment);
+    if (shapeErrorForAttachment) return { ok: false, error: shapeErrorForAttachment };
+    if (typeof panelDataRepo.getAttachmentBlob !== 'function') return { ok: false, error: 'Attachment storage is not available' };
+    var blobForEdit;
+    try {
+      blobForEdit = await panelDataRepo.getAttachmentBlob(blobIdForEdit);
+    } catch (errForEditBlob) {
+      return { ok: false, error: errForEditBlob.message || 'Failed to read the file' };
+    }
+    if (!blobForEdit) return { ok: false, error: 'Attachment not found: blob id ' + blobIdForEdit };
+    var nameForEdit = String(blobForEdit.name || 'page.html');
+    if (!isEditableHtmlBlobForToolExec(blobForEdit)) {
+      var isDocxForEdit = String(blobForEdit.mimeType || '') === DOCX_MIME_FOR_TOOL_EXEC || /\.docx$/i.test(nameForEdit);
+      return {
+        ok: false,
+        error: 'Only HTML files can be changed with edit. ' + (isDocxForEdit
+          ? 'Change a DOCX with read_document_structure and edit_document.'
+          : 'Make the file again with create_document.')
+      };
+    }
+    if (blobForEdit.truncated) {
+      return { ok: false, error: nameForEdit + ' was cut short when it was attached, so an edit would lose the rest of it. Ask the user for a smaller file, or make the page again with create_document.' };
+    }
+    var sourceForEdit = String(blobForEdit.textContent || '');
+    if (!sourceForEdit) return { ok: false, error: nameForEdit + ' has no stored source to change. Make the page again with create_document.' };
+    if (computeRevTokenForToolExec(sourceForEdit) !== args.rev) {
+      return { ok: false, error: 'Stale rev: blob id ' + blobIdForEdit + ' holds different text from the rev you gave. Read it again with read (type "attachment", id ' + blobIdForEdit + '), or edit the copy whose result gave you this rev.' };
+    }
+    var appliedForEdit = applyContentEditsForToolExec(sourceForEdit, editsForAttachment);
+    if (!appliedForEdit.ok) return { ok: false, error: appliedForEdit.error };
+    var encodedForEdit = utf8DataUrlForToolExec(appliedForEdit.content, HTML_FILE_MIME_FOR_TOOL_EXEC);
+    var changeCountForEdit = editsForAttachment.length;
+    var responseForAttachmentEdit = {
+      ok: true,
+      type: 'attachment',
+      id: blobIdForEdit,
+      format: 'html',
+      filename: nameForEdit,
+      mimeType: HTML_FILE_MIME_FOR_TOOL_EXEC,
+      dataUrl: encodedForEdit.dataUrl,
+      size: encodedForEdit.size,
+      textContent: appliedForEdit.content,
+      rev: computeRevTokenForToolExec(appliedForEdit.content),
+      note: 'Made ' + changeCountForEdit + ' change' + (changeCountForEdit === 1 ? '' : 's') + ' and saved the result as a new copy of ' + nameForEdit
+        + '; blob id ' + blobIdForEdit + ' is unchanged. For the next change, use the new copy\'s blob id from displayed_to_user and the rev in this result.'
+    };
+    var ignoredForAttachmentEdit = ['title', 'due_at', 'reminder_at', 'is_completed'].filter(function (keyForIgnored) {
+      return args[keyForIgnored] !== undefined;
+    });
+    if (ignoredForAttachmentEdit.length) responseForAttachmentEdit.ignored = ignoredForAttachmentEdit;
+    return responseForAttachmentEdit;
+  }
+
   async function editToolForToolExec(args) {
     var panelDataRepo = getPanelDataRepoForToolExec();
     if (!panelDataRepo) return { ok: false, error: 'Database not ready' };
 
     var type = args.type;
+    var collectedEditsForEdit = collectContentEditsForToolExec(args);
+    if (collectedEditsForEdit.error) return { ok: false, error: collectedEditsForEdit.error };
+    var contentEditsForEdit = collectedEditsForEdit.edits;
+    if (type === 'attachment') return editAttachmentForToolExec(args, panelDataRepo, contentEditsForEdit);
     var id = toPositiveIntegerForToolExec(args.id);
     if (id === null) return { ok: false, error: 'id must be a positive integer referring to an existing item' };
     if (typeof args.rev !== 'string' || !args.rev) return { ok: false, error: 'rev is required and must be a non-empty string; read the item first to obtain its current rev token' };
     var rev = args.rev;
     var title = typeof args.title === 'string' ? args.title.trim() : null;
     if (title !== null && title === '') return { ok: false, error: 'title cannot be empty' };
-    var oldString = typeof args.old_string === 'string' ? args.old_string : null;
-    var newString = typeof args.new_string === 'string' ? args.new_string : null;
-    var replaceAll = Boolean(args.replace_all);
     // Empty/whitespace strings mean "no change", not an invalid date. Only tasks consume these
     // fields, so only validate them when the target is a task; for other types they are inert
     // and reported via ignoredFieldsForEdit below.
@@ -1068,9 +1237,9 @@
     var isCompletedForEdit = typeof args.is_completed === 'boolean' ? args.is_completed : null;
     var now = new Date().toISOString();
 
-    if (!type) return { ok: false, error: 'type is required; valid values are: note, task, question' };
+    if (!type) return { ok: false, error: 'type is required; valid values are: note, task, question, attachment' };
     if (type === 'chat') return { ok: false, error: 'Cannot edit chats' };
-    if (!isKnownTypeForToolExec(type)) return { ok: false, error: 'Unknown type "' + type + '"; valid values are: note, task, question' };
+    if (!isKnownTypeForToolExec(type)) return { ok: false, error: 'Unknown type "' + type + '"; valid values are: note, task, question, attachment' };
 
     // Task structured-field params are inert for other types; ignore and report them rather than
     // failing the whole edit (mirrors the write tool's cross-type handling).
@@ -1083,16 +1252,15 @@
     var hasTaskFieldChange = type === 'task' && (dueAtForEdit !== null || reminderAtForEdit !== null || isCompletedForEdit !== null);
 
     // Content editing is an exact-string find/replace: old_string is the text to find, new_string
-    // replaces it (empty string deletes the match). To replace an item's entire content, use the
-    // write tool with the item's id and rev.
-    var hasContentChange = oldString !== null || newString !== null;
+    // replaces it (empty string deletes the match), and edits holds several such pairs applied in
+    // order. To replace an item's entire content, use the write tool with the item's id and rev.
+    var hasContentChange = contentEditsForEdit.length > 0;
     if (!hasContentChange && title === null && !hasTaskFieldChange) {
-      return { ok: false, error: 'at least one of title, old_string (with new_string), or (for tasks) due_at, reminder_at, or is_completed must be provided' };
+      return { ok: false, error: 'at least one of title, old_string (with new_string), edits, or (for tasks) due_at, reminder_at, or is_completed must be provided' };
     }
     if (hasContentChange) {
-      if (oldString === null) return { ok: false, error: 'old_string is required to change content; provide the exact text to find and replace' };
-      if (oldString === '') return { ok: false, error: 'old_string cannot be empty; provide the exact text you want to replace' };
-      if (newString === null) return { ok: false, error: 'new_string is required when old_string is provided; use an empty string to delete the matched text' };
+      var shapeErrorForEdit = contentEditShapeErrorForToolExec(contentEditsForEdit);
+      if (shapeErrorForEdit) return { ok: false, error: shapeErrorForEdit };
     }
 
     try {
@@ -1110,23 +1278,9 @@
       var newContent;
 
       if (hasContentChange) {
-        var occurrences = 0;
-        var searchPos = 0;
-        while (true) {
-          var idx = got.contentString.indexOf(oldString, searchPos);
-          if (idx === -1) break;
-          occurrences++;
-          searchPos = idx + 1;
-        }
-
-        if (occurrences === 0) return { ok: false, error: 'old_string not found in content' };
-        if (occurrences > 1 && !replaceAll) {
-          return { ok: false, error: 'old_string matches ' + occurrences + ' locations. Set replace_all: true or provide a more specific string.' };
-        }
-
-        newContent = replaceAll
-          ? got.contentString.split(oldString).join(newString)
-          : got.contentString.slice(0, got.contentString.indexOf(oldString)) + newString + got.contentString.slice(got.contentString.indexOf(oldString) + oldString.length);
+        var appliedForEdit = applyContentEditsForToolExec(got.contentString, contentEditsForEdit);
+        if (!appliedForEdit.ok) return { ok: false, error: appliedForEdit.error };
+        newContent = appliedForEdit.content;
       }
 
       var contentForRev = newContent !== undefined ? newContent : got.contentString;
@@ -1184,6 +1338,21 @@
   }
 
   // ---- Word-truncation helper for grep ----
+
+  // How many times a global regular expression matches in a line. An empty match leaves lastIndex
+  // where it was, so without the step past it a pattern that can match empty text (x*, \s*, a|)
+  // loops forever, which froze the offscreen document and every agent run with it. With the step,
+  // each empty match is counted once, as matchAll counts them.
+  function countLineMatchesForToolExec(regexpGlobalForCount, lineForCount) {
+    regexpGlobalForCount.lastIndex = 0;
+    var countForCount = 0;
+    var matchForCount;
+    while ((matchForCount = regexpGlobalForCount.exec(lineForCount)) !== null) {
+      countForCount++;
+      if (matchForCount[0] === '') regexpGlobalForCount.lastIndex++;
+    }
+    return countForCount;
+  }
 
   function truncateLineByWordsForToolExec(line, matchIndex, matchLength, maxWords) {
     var words = line.split(' ');
@@ -1262,8 +1431,15 @@
       return { ok: false, error: 'Invalid output_mode "' + outputMode + '"; valid values are: content, items_with_matches' };
     }
     if (!pattern) return { ok: false, error: 'pattern is required' };
-    if (scope === 'content' && !type) return { ok: false, error: 'type is required when scope is "content"; valid values are: note, chat, task, question' };
-    if (type && !isKnownTypeForToolExec(type)) return { ok: false, error: 'Unknown type "' + type + '"; valid values are: note, chat, task, question' };
+    var isAttachmentGrep = type === 'attachment';
+    if (scope === 'content' && !type) return { ok: false, error: 'type is required when scope is "content"; valid values are: note, chat, task, question, attachment' };
+    if (type && !isAttachmentGrep && !isKnownTypeForToolExec(type)) return { ok: false, error: 'Unknown type "' + type + '"; valid values are: note, chat, task, question, attachment' };
+    if (isAttachmentGrep && scope === 'title') {
+      return { ok: false, error: 'type "attachment" searches the text of one file, so it works only in content scope, with id set to the file\'s blob id.' };
+    }
+    if (isAttachmentGrep && specificId === null) {
+      return { ok: false, error: 'id is required for type "attachment": the blob id of the file to search, from the link in displayed_to_user (#abchat-docblob-12 is blob id 12).' };
+    }
     // noteType is only consumed when notes are listed (type unset with title scope, or type
     // 'note'); for any other explicit type it is inert and is ignored rather than failing.
     var ignoredFieldsForGrep = [];
@@ -1282,6 +1458,12 @@
       regexpGlobal = new RegExp(pattern, caseInsensitive ? 'gi' : 'g');
     } catch (e) {
       return { ok: false, error: 'Invalid regular expression: ' + pattern + '. ' + e.message };
+    }
+
+    if (isAttachmentGrep) {
+      return grepAttachmentForToolExec(panelDataRepo, specificId, regexp, regexpGlobal, {
+        limit: limit, contextLines: contextLines, maxWords: maxWords, outputMode: outputMode, ignored: ignoredFieldsForGrep
+      });
     }
 
     if (scope === 'title') {
@@ -1369,9 +1551,7 @@
               var lineEntry = { ln: li + 1 };
 
               if (maxWords !== null) {
-                regexpGlobal.lastIndex = 0;
-                var mc = 0;
-                while (regexpGlobal.exec(lines[li]) !== null) mc++;
+                var mc = countLineMatchesForToolExec(regexpGlobal, lines[li]);
                 var trunc = truncateLineByWordsForToolExec(lines[li], execResult.index, execResult[0].length, maxWords);
                 lineEntry.lc = trunc.snippet;
                 if (trunc.truncated) lineEntry.truncated = true;
@@ -1415,6 +1595,128 @@
     } catch (err) {
       return { ok: false, error: err.message || 'Grep failed' };
     }
+  }
+
+  // grep with type "attachment" searches the stored text of one file, so a change to a saved HTML
+  // page, an earlier version of one, or a long attached file can start from the few lines it needs
+  // instead of a read of the whole file. The id is required: searching every attachment would load
+  // every blob, data URLs included. A file can hold up to a million characters, often on very long
+  // lines, so the result keeps read's limits: a line over the per-line cap is cut to a window
+  // around the match (context lines are cut from their start, as read cuts them), and lines stop
+  // being added at the byte ceiling, with a note. Without that, one broad pattern could pass the
+  // agent loop's size limit and come back as an error. The result carries the file's rev, which
+  // edit needs, so a grep can lead straight to an edit.
+  async function grepAttachmentForToolExec(panelDataRepo, blobIdForGrep, regexpForGrep, regexpGlobalForGrep, optsForGrep) {
+    if (typeof panelDataRepo.getAttachmentBlob !== 'function') return { ok: false, error: 'Attachment storage is not available' };
+    var blobForGrep;
+    try {
+      blobForGrep = await panelDataRepo.getAttachmentBlob(blobIdForGrep);
+    } catch (errForGrepBlob) {
+      return { ok: false, error: errForGrepBlob.message || 'Failed to read the file' };
+    }
+    if (!blobForGrep) return { ok: false, error: 'Attachment not found: blob id ' + blobIdForGrep };
+    var nameForGrep = String(blobForGrep.name || '');
+    var mimeForGrep = String(blobForGrep.mimeType || '');
+    if (mimeForGrep.indexOf('image/') === 0 || String(blobForGrep.dataUrl || '').indexOf('data:image/') === 0) {
+      return { ok: false, error: 'Blob id ' + blobIdForGrep + ' is an image and has no text to search. Read it (type "attachment") for a description.' };
+    }
+    var textForGrep = String(blobForGrep.textContent || '');
+    if (!textForGrep) return { ok: false, error: 'Blob id ' + blobIdForGrep + ' has no stored text to search.' };
+
+    var maxLineCharsForGrep = READ_MAX_LINE_CHARS_FOR_TOOL_EXEC;
+    var linesForGrep = textForGrep.split('\n');
+    var byteTallyForGrep = 0;
+    var stoppedAtCeilingForGrep = false;
+    var matchCountForGrep = 0;
+    var returnedLinesForGrep = [];
+
+    function capLineFromStartForGrep(lineForCap, lnForCap) {
+      var entryForCap = { ln: lnForCap, lc: lineForCap };
+      if (lineForCap.length > maxLineCharsForGrep) {
+        entryForCap.lc = lineForCap.slice(0, maxLineCharsForGrep);
+        entryForCap.lc_truncated = true;
+        entryForCap.lc_len = lineForCap.length;
+      }
+      return entryForCap;
+    }
+
+    for (var liForGrep = 0; liForGrep < linesForGrep.length; liForGrep++) {
+      var lineForGrep = linesForGrep[liForGrep];
+      var execForGrep = regexpForGrep.exec(lineForGrep);
+      if (!execForGrep) continue;
+      if (optsForGrep.outputMode === 'items_with_matches') {
+        matchCountForGrep++;
+        if (optsForGrep.limit !== null && matchCountForGrep >= optsForGrep.limit) break;
+        continue;
+      }
+
+      var entryForGrep = { ln: liForGrep + 1 };
+      if (optsForGrep.maxWords !== null) {
+        var occurrencesForGrep = countLineMatchesForToolExec(regexpGlobalForGrep, lineForGrep);
+        var wordsForGrep = truncateLineByWordsForToolExec(lineForGrep, execForGrep.index, execForGrep[0].length, optsForGrep.maxWords);
+        entryForGrep.lc = wordsForGrep.snippet;
+        if (wordsForGrep.truncated) entryForGrep.truncated = true;
+        if (occurrencesForGrep > 1) entryForGrep.match_count = occurrencesForGrep;
+      } else if (lineForGrep.length > maxLineCharsForGrep) {
+        var middleForGrep = execForGrep.index + Math.floor(execForGrep[0].length / 2);
+        var startForGrep = Math.max(0, Math.min(middleForGrep - Math.floor(maxLineCharsForGrep / 2), lineForGrep.length - maxLineCharsForGrep));
+        entryForGrep.lc = lineForGrep.slice(startForGrep, startForGrep + maxLineCharsForGrep);
+        entryForGrep.lc_truncated = true;
+        entryForGrep.lc_len = lineForGrep.length;
+      } else {
+        entryForGrep.lc = lineForGrep;
+      }
+      var bytesForEntry = utf8ByteLengthForToolExec(entryForGrep.lc) + 1;
+
+      if (optsForGrep.contextLines > 0) {
+        var beforeForGrep = [];
+        for (var biForGrep = Math.max(0, liForGrep - optsForGrep.contextLines); biForGrep < liForGrep; biForGrep++) {
+          beforeForGrep.push(capLineFromStartForGrep(linesForGrep[biForGrep], biForGrep + 1));
+        }
+        var afterForGrep = [];
+        for (var aiForGrep = liForGrep + 1; aiForGrep <= Math.min(linesForGrep.length - 1, liForGrep + optsForGrep.contextLines); aiForGrep++) {
+          afterForGrep.push(capLineFromStartForGrep(linesForGrep[aiForGrep], aiForGrep + 1));
+        }
+        beforeForGrep.concat(afterForGrep).forEach(function (contextEntryForGrep) {
+          bytesForEntry += utf8ByteLengthForToolExec(contextEntryForGrep.lc) + 1;
+        });
+        entryForGrep.context_before = beforeForGrep;
+        entryForGrep.context_after = afterForGrep;
+      }
+
+      if (returnedLinesForGrep.length > 0 && byteTallyForGrep + bytesForEntry > READ_MAX_BYTES_FOR_TOOL_EXEC) {
+        stoppedAtCeilingForGrep = true;
+        break;
+      }
+      byteTallyForGrep += bytesForEntry;
+      returnedLinesForGrep.push(entryForGrep);
+      if (optsForGrep.limit !== null && returnedLinesForGrep.length >= optsForGrep.limit) break;
+    }
+
+    var resultForGrep;
+    if (optsForGrep.outputMode === 'items_with_matches') {
+      resultForGrep = {
+        ok: true, total_matches: matchCountForGrep, total_items: matchCountForGrep ? 1 : 0,
+        items: matchCountForGrep ? [{ id: blobIdForGrep, type: 'attachment', title: nameForGrep, match_count: matchCountForGrep }] : []
+      };
+    } else {
+      resultForGrep = {
+        ok: true, total_lines: returnedLinesForGrep.length, total_items: returnedLinesForGrep.length ? 1 : 0,
+        matches: returnedLinesForGrep.length ? [{ id: blobIdForGrep, type: 'attachment', title: nameForGrep, lines: returnedLinesForGrep }] : []
+      };
+    }
+    resultForGrep.rev = computeRevTokenForToolExec(textForGrep);
+    var notesForGrep = [];
+    if (stoppedAtCeilingForGrep) {
+      notesForGrep.push('More lines matched than fit in one result, so it stops at line ' + returnedLinesForGrep[returnedLinesForGrep.length - 1].ln + '. Use a narrower pattern or set limit.');
+    }
+    if (blobForGrep.truncated) {
+      notesForGrep.push(nameForGrep + ' was cut short when it was attached, so text past the cut was not searched.');
+    }
+    if (notesForGrep.length) resultForGrep.note = notesForGrep.join(' ');
+    if (stoppedAtCeilingForGrep) resultForGrep.truncated = true;
+    if (optsForGrep.ignored.length) resultForGrep.ignored = optsForGrep.ignored;
+    return resultForGrep;
   }
 
   // ---- Tool: ls ----
@@ -8448,6 +8750,10 @@ self.onmessage = function (e) {
         note: built.note || '',
         warnings: Array.isArray(built.warnings) ? built.warnings : []
       };
+      if (typeof built.textContent === 'string' && built.textContent) {
+        baseResult._generatedDocument.textContent = built.textContent;
+        withTextFileRevForToolExec(baseResult._generatedDocument);
+      }
       if (Array.isArray(built.pictureBlobIds)) baseResult._generatedDocument.pictureBlobIds = built.pictureBlobIds;
       // __document__ with also_pdf: the PDF rides along and is saved beside the first file.
       if (built.companion) baseResult._generatedDocument.companion = built.companion;
@@ -10285,6 +10591,16 @@ self.onmessage = function (e) {
     return depsForDocument;
   }
 
+  // A file saved with its source text (an HTML file) can be changed with edit, which takes the
+  // same rev a read of the saved file returns. Giving it in the result lets the model make a
+  // first change without reading back the page it just wrote.
+  function withTextFileRevForToolExec(documentResultForRev) {
+    if (documentResultForRev && typeof documentResultForRev.textContent === 'string' && documentResultForRev.textContent) {
+      documentResultForRev.rev = computeRevTokenForToolExec(documentResultForRev.textContent);
+    }
+    return documentResultForRev;
+  }
+
   async function createDocumentToolForToolExec(args, context) {
     var signal = getAbortSignalForToolExec(context);
     if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
@@ -10294,8 +10610,12 @@ self.onmessage = function (e) {
     }
 
     var formatForDocumentTool = typeof args.format === 'string' ? args.format.toLowerCase().trim() : '';
-    if (['docx', 'xlsx', 'pdf', 'pptx', 'csv'].indexOf(formatForDocumentTool) === -1) {
-      return { ok: false, error: 'format must be docx, xlsx, pdf, pptx, or csv' };
+    if (['docx', 'xlsx', 'pdf', 'pptx', 'csv', 'html'].indexOf(formatForDocumentTool) === -1) {
+      return { ok: false, error: 'format must be docx, xlsx, pdf, pptx, csv, or html' };
+    }
+
+    if (formatForDocumentTool === 'html' && !(typeof args.html === 'string' && args.html.trim())) {
+      return { ok: false, error: 'HTML creation requires html: the whole page, starting with <!DOCTYPE html>' };
     }
 
     if (formatForDocumentTool === 'docx' || formatForDocumentTool === 'pdf') {
@@ -10342,7 +10662,7 @@ self.onmessage = function (e) {
     try {
       var documentResultForToolExec = await documentGenerationForToolExec.createDocument(args, documentDepsForToolExec());
       if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
-      return documentResultForToolExec;
+      return withTextFileRevForToolExec(documentResultForToolExec);
     } catch (errForDocumentTool) {
       if (isAbortedForToolExec(signal)) return cancelledResultForToolExec();
       return { ok: false, error: (errForDocumentTool && errForDocumentTool.message) || 'Document creation failed.' };

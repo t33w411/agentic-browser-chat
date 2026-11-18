@@ -94,8 +94,8 @@
     return false;
   }
 
-  // What the model sees after a document is made, by create_document, edit_document, convert_document, or eval
-  // returning __document__. The file itself (dataUrl) is saved and shown to the user, never sent back. The
+  // What the model sees after a document is made, by create_document, edit_document, convert_document, eval
+  // returning __document__, or edit on an HTML file. The file itself (dataUrl) is saved and shown to the user, never sent back. The
   // generator's own note (images it could not re-embed), the theme it used and its warnings
   // (characters a PDF could not show, rows it left out) are passed on, so the model can tell the
   // user and reuse the theme for the next file. A PDF made in the same call (also_pdf) is described
@@ -115,6 +115,8 @@
         + (safeDocumentForModel.note ? ' ' + String(safeDocumentForModel.note) : '')
     };
     if (safeDocumentForModel.theme) resultForModel.theme = String(safeDocumentForModel.theme);
+    // A file saved with its source text (an HTML file) carries the rev that edit takes.
+    if (typeof safeDocumentForModel.rev === 'string' && safeDocumentForModel.rev) resultForModel.rev = safeDocumentForModel.rev;
     if (Array.isArray(safeDocumentForModel.warnings) && safeDocumentForModel.warnings.length) {
       resultForModel.warnings = safeDocumentForModel.warnings.map(String);
     }
@@ -1176,7 +1178,7 @@
                 + imagesShownToUserCountForRun + ' image' + (imagesShownToUserCountForRun === 1 ? '' : 's')
                 + ' earlier in this turn. This one did NOT replace them: each one was billed, and every image stays in the chat unless a document you make in this turn uses it. If you made this one to replace an earlier image, your reply must say so, why, and which of the images shown is the final one.';
             }
-          } else if ((tcNameForResult === 'create_document' || tcNameForResult === 'edit_document' || tcNameForResult === 'convert_document') && toolResult && toolResult.ok && typeof toolResult.dataUrl === 'string') {
+          } else if ((tcNameForResult === 'create_document' || tcNameForResult === 'edit_document' || tcNameForResult === 'convert_document' || tcNameForResult === 'edit') && toolResult && toolResult.ok && typeof toolResult.dataUrl === 'string') {
             toolResultForModel = documentResultForModelForRun(toolResult);
           } else if (tcNameForResult === 'eval' && toolResult && toolResult.ok && toolResult._generatedDocument && typeof toolResult._generatedDocument.dataUrl === 'string') {
             toolResultForModel = { ok: true, result: toolResult.result, document: documentResultForModelForRun(toolResult._generatedDocument) };
@@ -1310,7 +1312,9 @@
           var tcNameForDoc = toolCallsForLoop[gdi].function && toolCallsForLoop[gdi].function.name;
           var toolResultForDoc = toolResultsForRun[gdi];
           if (!toolResultForDoc || !toolResultForDoc.ok) continue;
-          var docPayloadForRun = (tcNameForDoc === 'create_document' || tcNameForDoc === 'edit_document' || tcNameForDoc === 'convert_document')
+          // edit makes a file only when it changed an HTML file; a note edit has no dataUrl and is
+          // skipped below.
+          var docPayloadForRun = (tcNameForDoc === 'create_document' || tcNameForDoc === 'edit_document' || tcNameForDoc === 'convert_document' || tcNameForDoc === 'edit')
             ? toolResultForDoc
             : (tcNameForDoc === 'eval' ? toolResultForDoc._generatedDocument : null);
           if (!docPayloadForRun || typeof docPayloadForRun.dataUrl !== 'string' || docPayloadForRun.dataUrl.indexOf('data:') !== 0) continue;
@@ -1327,7 +1331,7 @@
             if (controllerForRun.signal.aborted) break;
             try {
               var filenameForDoc = String(docPayloadForRun.filename || 'generated-document');
-              var blobRecordForDoc = await repoForRun.createAttachmentBlob({ name: filenameForDoc, kind: 'generated_document', mimeType: String(docPayloadForRun.mimeType || ''), dataUrl: docPayloadForRun.dataUrl, size: Number(docPayloadForRun.size) || docPayloadForRun.dataUrl.length, textContent: '' });
+              var blobRecordForDoc = await repoForRun.createAttachmentBlob({ name: filenameForDoc, kind: 'generated_document', mimeType: String(docPayloadForRun.mimeType || ''), dataUrl: docPayloadForRun.dataUrl, size: Number(docPayloadForRun.size) || docPayloadForRun.dataUrl.length, textContent: typeof docPayloadForRun.textContent === 'string' ? docPayloadForRun.textContent : '' });
               if (controllerForRun.signal.aborted) {
                 markRunStoppedForRun();
                 if (blobRecordForDoc && blobRecordForDoc.id != null && typeof repoForRun.deleteAttachmentBlob === 'function') { try { await repoForRun.deleteAttachmentBlob(Number(blobRecordForDoc.id)); } catch (e) {} }
