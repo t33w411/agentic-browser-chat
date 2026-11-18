@@ -1052,16 +1052,15 @@
   width: 90%;
   max-width: 90%;
 }
+/* Every timestamp is inside a .msg-footer, which places it. */
 .msg-timestamp {
   font-size: 11px;
   line-height: 1.2;
   color: var(--abchat-text-muted);
-  padding: 0 2px;
-  align-self: flex-start;
-  margin-left: 16px;
   user-select: none;
 }
-.msg-wrap.user-msg .msg-timestamp { align-self: flex-end; margin-left: 0; margin-right: 8px; }
+/* The footer centres the read-aloud icon, the timestamp and the links on one line. A child given
+   its own align-self, or a negative margin on one side only, sits off that line. */
 .msg-footer {
   display: flex;
   align-items: center;
@@ -1069,15 +1068,55 @@
   align-self: flex-start;
   margin-left: 13px;
 }
-.msg-footer .msg-timestamp {
-  margin-left: 0;
-  padding-left: 0;
+.msg-wrap.user-msg .msg-footer { align-self: flex-end; margin-left: 0; margin-right: 10px; }
+
+/* Copy, Hide, Fork and Edit sit beside the timestamp and show while the message is hovered.
+   Opacity, not display, so the footer keeps its height and the timestamp never moves. Focus
+   reveals them only when it came from the keyboard: Chrome focuses a button on click, and
+   :focus-within would keep a clicked message's links showing after the pointer left. */
+.msg-hover-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+.msg-footer > .msg-timestamp + .msg-hover-actions { margin-left: 5px; }
+.msg-wrap.user-msg .msg-hover-actions { margin-right: 5px; }
+.msg-wrap:hover .msg-hover-actions,
+.msg-wrap:has(:focus-visible) .msg-hover-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (hover: none) {
+  .msg-hover-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+.msg-hover-action {
+  border: none;
+  background: transparent;
+  color: var(--abchat-text-muted);
+  font-family: var(--abchat-font);
+  font-size: 11px;
+  line-height: 1.2;
+  padding: 3px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.msg-hover-action:hover {
+  background: var(--abchat-bg-hover);
+  color: var(--abchat-text-primary);
 }
 .msg-read-aloud {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  margin-top: -4px;
+  margin: -4px 0;
   padding: 4px;
   border: none;
   background: transparent;
@@ -1151,9 +1190,6 @@
   line-height: 1.58;
   position: relative;
 }
-.msg-bubble.has-options {
-  padding-bottom: 10px;
-}
 .msg-bubble.user {
   background: var(--abchat-bg-msg-user);
   border-color: #bfdbfe;
@@ -1189,89 +1225,10 @@
 }
 .msg-bubble.asst.msg-system-notice .msg-text { color: var(--abchat-text-muted); }
 
-.msg-options-wrap {
-  position: absolute;
-  bottom: 8px;
-  right: 8px;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.12s ease;
-  z-index: 3;
-}
-.msg-wrap:hover .msg-options-wrap,
-.msg-wrap:focus-within .msg-options-wrap,
-.msg-options-wrap.open {
-  opacity: 1;
-  pointer-events: auto;
-}
-.msg-options-trigger {
-  border: 1px solid var(--abchat-border-med);
-  background: var(--abchat-bg-panel);
-  color: var(--abchat-text-secondary);
-  width: 30px;
-  height: 24px;
-  border-radius: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 14px;
-  line-height: 1;
-  cursor: pointer;
-  box-shadow: var(--abchat-shadow-float);
-  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
-}
-.msg-options-trigger:hover {
-  background: var(--abchat-bg-hover);
-  color: var(--abchat-text-primary);
-  border-color: var(--abchat-border);
-}
-.msg-options-wrap.open .msg-options-trigger {
-  background: var(--abchat-bg-hover);
-  color: var(--abchat-text-primary);
-}
-.msg-options-dropdown {
-  position: absolute;
-  top: calc(100% + 6px);
-  bottom: auto;
-  right: 0;
-  min-width: 116px;
-  padding: 4px;
-  border-radius: var(--abchat-r-md);
-  border: 1px solid var(--abchat-border);
-  background: var(--abchat-bg-panel);
-  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.16);
-  display: none;
-  z-index: 60;
-}
-.msg-options-wrap.open-upward .msg-options-dropdown {
-  top: auto;
-  bottom: calc(100% + 6px);
-}
-.msg-options-dropdown.open {
-  display: block;
-}
-.msg-dd-item {
-  width: 100%;
-  border: none;
-  background: transparent;
-  color: var(--abchat-text-secondary);
-  cursor: pointer;
-  text-align: left;
-  font-size: 13px;
-  font-family: var(--abchat-font);
-  border-radius: 6px;
-  padding: 6px 8px;
-  transition: background 0.1s, color 0.1s;
-}
-.msg-dd-item:hover {
-  background: var(--abchat-bg-hover);
-  color: var(--abchat-text-primary);
-}
-
 /* While a run is in flight for the active chat, hide the mutating per-message
    options (Edit rewrites history, Hide changes pair visibility). Copy stays. */
-#chat-messages-content.run-active .msg-dd-item[data-action="start-chat-edit"],
-#chat-messages-content.run-active .msg-dd-item[data-action="hide-pair"] {
+#chat-messages-content.run-active .msg-hover-action[data-action="start-chat-edit"],
+#chat-messages-content.run-active .msg-hover-action[data-action="hide-pair"] {
   display: none;
 }
 

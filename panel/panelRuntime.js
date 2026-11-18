@@ -3194,14 +3194,11 @@
               '</div>' +
             '</div>'
           : '';
-        const ddHtml =
-          '<div class="msg-options-wrap">' +
-            '<button class="msg-options-trigger" title="Message options" aria-label="Message options" data-action="toggle-message-dropdown">&#xB7;&#xB7;&#xB7;</button>' +
-            '<div class="msg-options-dropdown">' +
-              (hasGenImageForFlush ? '' : '<button class="msg-dd-item" data-action="copy-message" data-message-id="' + last.msgId + '">Copy</button>') +
-              '<button class="msg-dd-item" data-action="hide-pair" data-pair-msg-id="' + last.pairMsgId + '">Hide</button>' +
-              '<button class="msg-dd-item" data-action="fork-chat-from-message" data-message-id="' + last.msgId + '">Fork</button>' +
-            '</div>' +
+        const hoverActionsHtmlForFlush =
+          '<div class="msg-hover-actions" role="group" aria-label="Message actions">' +
+            (hasGenImageForFlush ? '' : '<button class="msg-hover-action" data-action="copy-message" data-message-id="' + last.msgId + '">Copy</button>') +
+            '<button class="msg-hover-action" data-action="hide-pair" data-pair-msg-id="' + last.pairMsgId + '">Hide</button>' +
+            '<button class="msg-hover-action" data-action="fork-chat-from-message" data-message-id="' + last.msgId + '">Fork</button>' +
           '</div>';
         const timestampHtmlForFlush = buildMessageTimestampHtmlForPanelRuntime(last.createdAt);
         const speakableTextForFlush = mergedMd.replace(/__blob:\d+__/g, '').trim();
@@ -3214,9 +3211,8 @@
               + (isSpeakingThisMsgForFlush ? ic.stopSquare13 : ic.volume13)
             + '</button>'
           : '';
-        const footerHtmlForFlush = (readAloudBtnHtmlForFlush || timestampHtmlForFlush)
-          ? '<div class="msg-footer">' + readAloudBtnHtmlForFlush + timestampHtmlForFlush + '</div>'
-          : '';
+        const footerHtmlForFlush =
+          '<div class="msg-footer">' + readAloudBtnHtmlForFlush + timestampHtmlForFlush + hoverActionsHtmlForFlush + '</div>';
         // Filled in by refreshPageChangeControlsForPanelRuntime once the page runtime has been asked.
         // The chat-wide row sits under the latest reply that changed this site.
         const pageChangesRowHtmlForFlush = (pageChangeGroupsForPanelRuntime.has(Number(last.msgId))
@@ -3227,8 +3223,7 @@
             : '');
         html +=
           '<div class="msg-wrap">' +
-            '<div class="msg-bubble asst has-options">' +
-              ddHtml +
+            '<div class="msg-bubble asst">' +
               '<div class="msg-text">' + renderMarkdown(mergedMd) + '</div>' +
               incompleteNoteHtmlForFlush +
               memoryBadgeHtmlForFlush +
@@ -3372,20 +3367,6 @@
           ? `<textarea class="msg-edit-textarea" data-chat-edit-msg-id="${msg.id}" rows="4">${escHtml(editingValueForPanelRuntime)}</textarea>`
           : `<div class="msg-text">${renderUserMsgContent(msg.content)}</div>`;
 
-        const messageDropdownItemsHtml =
-          `<button class="msg-dd-item" data-action="start-chat-edit" data-chat-edit-msg-id="${msg.id}">Edit</button>
-    <button class="msg-dd-item" data-action="copy-message" data-message-id="${msg.id}">Copy</button>
-    <button class="msg-dd-item" data-action="hide-pair" data-pair-msg-id="${pairMsgId}">Hide</button>`;
-
-        const messageDropdownHtml = !isEditingMessageForPanelRuntime
-          ? `<div class="msg-options-wrap">
-      <button class="msg-options-trigger" title="Message options" aria-label="Message options" data-action="toggle-message-dropdown">&#xB7;&#xB7;&#xB7;</button>
-      <div class="msg-options-dropdown">
-        ${messageDropdownItemsHtml}
-      </div>
-    </div>`
-          : '';
-
         const actionsHtml = isEditingMessageForPanelRuntime
           ? `<div class="msg-actions-bar">
       <button class="ma-btn ma-btn-save" data-action="save-chat-edit" data-chat-edit-msg-id="${msg.id}">Save</button>
@@ -3393,15 +3374,22 @@
     </div>`
           : '';
 
-        const userTimestampHtmlForPanelRuntime = isEditingMessageForPanelRuntime
+        const userFooterHtmlForPanelRuntime = isEditingMessageForPanelRuntime
           ? ''
-          : buildMessageTimestampHtmlForPanelRuntime(msg.createdAt);
+          : `<div class="msg-footer">
+      <div class="msg-hover-actions" role="group" aria-label="Message actions">
+        <button class="msg-hover-action" data-action="start-chat-edit" data-chat-edit-msg-id="${msg.id}">Edit</button>
+        <button class="msg-hover-action" data-action="copy-message" data-message-id="${msg.id}">Copy</button>
+        <button class="msg-hover-action" data-action="hide-pair" data-pair-msg-id="${pairMsgId}">Hide</button>
+      </div>
+      ${buildMessageTimestampHtmlForPanelRuntime(msg.createdAt)}
+    </div>`;
         html += `<div class="msg-wrap user-msg${isEditingMessageForPanelRuntime ? ' is-editing' : ''}">
-      <div class="msg-bubble user${messageDropdownHtml ? ' has-options' : ''}">
-        ${messageDropdownHtml}${chipsHtml}${contentHtml}
+      <div class="msg-bubble user">
+        ${chipsHtml}${contentHtml}
         ${actionsHtml}
       </div>
-      ${userTimestampHtmlForPanelRuntime}
+      ${userFooterHtmlForPanelRuntime}
     </div>`;
         i++;
       }
@@ -4441,25 +4429,11 @@
       }
     }
 
-    function closeMessageDropdownsForPanelRuntime() {
-      root.querySelectorAll('.msg-options-wrap.open').forEach(function (wrapForPanelRuntime) {
-        wrapForPanelRuntime.classList.remove('open');
-        wrapForPanelRuntime.classList.remove('open-upward');
-        wrapForPanelRuntime.classList.remove('open-downward');
-        const dropdownForPanelRuntime = wrapForPanelRuntime.querySelector('.msg-options-dropdown');
-        if (dropdownForPanelRuntime) {
-          dropdownForPanelRuntime.classList.remove('open');
-          dropdownForPanelRuntime.style.maxHeight = '';
-          dropdownForPanelRuntime.style.overflowY = '';
-        }
-      });
-    }
-
     // Every open state closeAllDropdownsForPanelRuntime clears. Esc reads it to decide whether a
     // dropdown is the top layer, so a dropdown added there and not here makes Esc hide the panel
     // instead of closing the dropdown.
     const OPEN_DROPDOWN_SELECTOR_FOR_PANEL_RUNTIME =
-      '.ci-dropdown.open, .ni-dropdown.open, .msg-options-wrap.open, #attach-picker.open, ' +
+      '.ci-dropdown.open, .ni-dropdown.open, #attach-picker.open, ' +
       '#model-picker-dropdown.open, #new-menu-dropdown.open';
 
     function closeAllDropdownsForPanelRuntime(evtForCloseDropdowns) {
@@ -4467,7 +4441,6 @@
         d.classList.remove('open');
         d.closest('.chat-item')?.classList.remove('ci-dropdown-open');
       });
-      closeMessageDropdownsForPanelRuntime();
       closeAttachPicker();
       const modelDropdown = root.getElementById('model-picker-dropdown');
       const modelBtn = root.getElementById('model-picker-btn');
@@ -4484,69 +4457,6 @@
       });
       const newMenuDropdownForClose = root.getElementById('new-menu-dropdown');
       if (newMenuDropdownForClose) newMenuDropdownForClose.classList.remove('open');
-    }
-
-    function measureMessageDropdownHeightForPanelRuntime(dropdownForPanelRuntime) {
-      if (!dropdownForPanelRuntime) return 0;
-      const hadInlineDisplayForPanelRuntime = dropdownForPanelRuntime.style.display;
-      const hadInlineVisibilityForPanelRuntime = dropdownForPanelRuntime.style.visibility;
-      const hadInlinePointerEventsForPanelRuntime = dropdownForPanelRuntime.style.pointerEvents;
-      const hadOpenClassForPanelRuntime = dropdownForPanelRuntime.classList.contains('open');
-      if (!hadOpenClassForPanelRuntime) {
-        dropdownForPanelRuntime.style.display = 'block';
-        dropdownForPanelRuntime.style.visibility = 'hidden';
-        dropdownForPanelRuntime.style.pointerEvents = 'none';
-      }
-      const measuredHeightForPanelRuntime = dropdownForPanelRuntime.getBoundingClientRect().height;
-      if (!hadOpenClassForPanelRuntime) {
-        dropdownForPanelRuntime.style.display = hadInlineDisplayForPanelRuntime;
-        dropdownForPanelRuntime.style.visibility = hadInlineVisibilityForPanelRuntime;
-        dropdownForPanelRuntime.style.pointerEvents = hadInlinePointerEventsForPanelRuntime;
-      }
-      return Math.max(0, measuredHeightForPanelRuntime);
-    }
-
-    function positionMessageDropdownForPanelRuntime(wrapForPanelRuntime, dropdownForPanelRuntime) {
-      if (!wrapForPanelRuntime || !dropdownForPanelRuntime) return;
-      wrapForPanelRuntime.classList.remove('open-upward');
-      wrapForPanelRuntime.classList.remove('open-downward');
-      dropdownForPanelRuntime.style.maxHeight = '';
-      dropdownForPanelRuntime.style.overflowY = '';
-
-      const messagesAreaForPanelRuntime = wrapForPanelRuntime.closest('.messages-area');
-      const messagesRectForPanelRuntime = messagesAreaForPanelRuntime
-        ? messagesAreaForPanelRuntime.getBoundingClientRect()
-        : { top: 0, bottom: window.innerHeight || document.documentElement.clientHeight || 0 };
-      const triggerWrapRectForPanelRuntime = wrapForPanelRuntime.getBoundingClientRect();
-      const dropdownHeightForPanelRuntime = measureMessageDropdownHeightForPanelRuntime(dropdownForPanelRuntime);
-      const edgeGapForPanelRuntime = 8;
-      const spaceBelowForPanelRuntime = Math.max(0, messagesRectForPanelRuntime.bottom - triggerWrapRectForPanelRuntime.bottom - edgeGapForPanelRuntime);
-      const spaceAboveForPanelRuntime = Math.max(0, triggerWrapRectForPanelRuntime.top - messagesRectForPanelRuntime.top - edgeGapForPanelRuntime);
-      const shouldOpenUpwardForPanelRuntime = spaceBelowForPanelRuntime < dropdownHeightForPanelRuntime && spaceAboveForPanelRuntime > spaceBelowForPanelRuntime;
-      const chosenSpaceForPanelRuntime = shouldOpenUpwardForPanelRuntime ? spaceAboveForPanelRuntime : spaceBelowForPanelRuntime;
-
-      wrapForPanelRuntime.classList.add(shouldOpenUpwardForPanelRuntime ? 'open-upward' : 'open-downward');
-
-      if (chosenSpaceForPanelRuntime > 0 && chosenSpaceForPanelRuntime < dropdownHeightForPanelRuntime) {
-        dropdownForPanelRuntime.style.maxHeight = Math.max(72, Math.floor(chosenSpaceForPanelRuntime)) + 'px';
-        dropdownForPanelRuntime.style.overflowY = 'auto';
-      }
-    }
-
-    function toggleMessageDropdown(btnForPanelRuntime) {
-      if (!btnForPanelRuntime) return;
-      const wasOpen = preclickOpenStateForPanelRuntime;
-      preclickOpenStateForPanelRuntime = null;
-      // closeAllDropdownsForPanelRuntime already ran via the root capture handler
-      if (!wasOpen) {
-        const wrapForPanelRuntime = btnForPanelRuntime.closest('.msg-options-wrap');
-        if (!wrapForPanelRuntime) return;
-        const dropdownForPanelRuntime = wrapForPanelRuntime.querySelector('.msg-options-dropdown');
-        if (!dropdownForPanelRuntime) return;
-        positionMessageDropdownForPanelRuntime(wrapForPanelRuntime, dropdownForPanelRuntime);
-        wrapForPanelRuntime.classList.add('open');
-        dropdownForPanelRuntime.classList.add('open');
-      }
     }
 
     async function renameChatItem(btn) {
@@ -4912,33 +4822,11 @@
       if (buttonForPanelRuntime.dataset.copyResetTimer) {
         clearTimeout(Number(buttonForPanelRuntime.dataset.copyResetTimer));
       }
-      if (buttonForPanelRuntime.dataset.copyCloseTimer) {
-        clearTimeout(Number(buttonForPanelRuntime.dataset.copyCloseTimer));
-      }
       const timerIdForPanelRuntime = setTimeout(function () {
         buttonForPanelRuntime.textContent = buttonForPanelRuntime.dataset.copyOriginalLabel || 'Copy';
         buttonForPanelRuntime.dataset.copyResetTimer = '';
       }, 1200);
       buttonForPanelRuntime.dataset.copyResetTimer = String(timerIdForPanelRuntime);
-
-      const dropdownWrapForPanelRuntime = buttonForPanelRuntime.closest
-        ? buttonForPanelRuntime.closest('.msg-options-wrap')
-        : null;
-      if (dropdownWrapForPanelRuntime && nextLabelForPanelRuntime === 'Copied') {
-        const closeTimerIdForPanelRuntime = setTimeout(function () {
-          dropdownWrapForPanelRuntime.classList.remove('open');
-          dropdownWrapForPanelRuntime.classList.remove('open-upward');
-          dropdownWrapForPanelRuntime.classList.remove('open-downward');
-          const dropdownForPanelRuntime = dropdownWrapForPanelRuntime.querySelector('.msg-options-dropdown');
-          if (dropdownForPanelRuntime) {
-            dropdownForPanelRuntime.classList.remove('open');
-            dropdownForPanelRuntime.style.maxHeight = '';
-            dropdownForPanelRuntime.style.overflowY = '';
-          }
-          buttonForPanelRuntime.dataset.copyCloseTimer = '';
-        }, 1000);
-        buttonForPanelRuntime.dataset.copyCloseTimer = String(closeTimerIdForPanelRuntime);
-      }
     }
 
     // ---- Read-aloud ----
@@ -22017,7 +21905,6 @@
             case 'exit-chat-select-mode':   setChatSelectModeForPanelRuntime(false); break;
             case 'toggle-chat-select':      toggleChatSelectForPanelRuntime(tgtForRuntime); break;
             case 'delete-selected-chats':   confirmDeleteSelectedChatsForPanelRuntime(); break;
-            case 'toggle-message-dropdown': toggleMessageDropdown(tgtForRuntime); evtForRuntime.stopPropagation(); break;
             case 'toggle-msg-sources': {
               const sourcesWrapForToggle = tgtForRuntime.closest('.msg-sources');
               if (!sourcesWrapForToggle) break;
@@ -22032,14 +21919,7 @@
             case 'start-chat-edit':      startChatEditForPanelRuntime(Number(tgtForRuntime.dataset.chatEditMsgId)); break;
             case 'save-chat-edit':       saveChatEditForPanelRuntime(Number(tgtForRuntime.dataset.chatEditMsgId)); break;
             case 'cancel-chat-edit':     cancelChatEditForPanelRuntime(); break;
-            case 'copy-message':         {
-              const isFromMessageDropdownForPanelRuntime = Boolean(tgtForRuntime.closest('.msg-options-dropdown'));
-              if (isFromMessageDropdownForPanelRuntime && evtForRuntime && typeof evtForRuntime.stopPropagation === 'function') {
-                evtForRuntime.stopPropagation();
-              }
-              copyMessageForPanelRuntime(Number(tgtForRuntime.dataset.messageId), tgtForRuntime);
-              break;
-            }
+            case 'copy-message':         copyMessageForPanelRuntime(Number(tgtForRuntime.dataset.messageId), tgtForRuntime); break;
             case 'read-message-aloud': {
               readMessageAloudForPanelRuntime(Number(tgtForRuntime.dataset.messageId));
               break;
@@ -22609,12 +22489,6 @@
           case 'toggle-chat-dropdown': {
             const ddForChat = tgtForMousedown.nextElementSibling;
             preclickOpenStateForPanelRuntime = ddForChat ? ddForChat.classList.contains('open') : false;
-            break;
-          }
-          case 'toggle-message-dropdown': {
-            const wrapForMsg = tgtForMousedown.closest('.msg-options-wrap');
-            const ddForMsg = wrapForMsg ? wrapForMsg.querySelector('.msg-options-dropdown') : null;
-            preclickOpenStateForPanelRuntime = ddForMsg ? ddForMsg.classList.contains('open') : false;
             break;
           }
           case 'toggle-attach-picker': {
