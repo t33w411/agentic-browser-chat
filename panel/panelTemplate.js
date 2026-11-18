@@ -192,6 +192,16 @@
                  it. Its visibility rides the row's :empty state in CSS, so no JS has to remember to
                  keep it in step with the chip count. -->
             <div class="input-chips-bar">
+              <!-- Deep research for this message. A sibling of the chips row for the same reason as
+                   the copy button, and placed before the row so the row's :empty rule still reaches
+                   the copy button. The slot takes a whole line of the bar, so the attachments below
+                   it keep their full width; nothing is added to the bottom row either. -->
+              <div class="composer-research-slot hidden" id="composer-research-chip">
+                <span class="composer-research-chip" title="Deep research is on: the reply will search and read several sources before answering">
+                  ${icForPanelTemplate.telescope12}<span class="composer-research-chip-label">Deep research</span>
+                  <button type="button" class="composer-research-chip-off" data-action="toggle-research-mode" title="Turn off Deep research" aria-label="Turn off Deep research">${icForPanelTemplate.x10}</button>
+                </span>
+              </div>
               <div class="input-chips-row"></div>
               <button type="button" class="chips-copy-btn" data-action="copy-composer" title="Copy message and attachments as Markdown" aria-label="Copy message and attachments">${icForPanelTemplate.copy12}</button>
             </div>
@@ -203,7 +213,7 @@
             <div class="input-bottom">
               <div class="input-left">
                 <div style="position:relative">
-                  <button class="attach-btn" id="attach-btn" data-action="toggle-attach-picker" title="Add context">
+                  <button class="attach-btn" id="attach-btn" data-action="toggle-attach-picker" title="Add context or turn on Deep research">
                     ${icForPanelTemplate.plus14}
                   </button>
                   <div class="attach-picker" id="attach-picker">
@@ -215,6 +225,8 @@
                     <button class="ap-item" data-action="open-clip-picker"><span class="ap-icon">${icForPanelTemplate.bookmark16}</span> Saved clip</button>
                     <button class="ap-item" data-action="open-chat-picker"><span class="ap-icon">${icForPanelTemplate.message16}</span> Chat summary</button>
                     <button class="ap-item" data-action="spreadsheet-from-clipboard"><span class="ap-icon">${icForPanelTemplate.spreadsheet16}</span> Spreadsheet in page</button>
+                    <div class="ap-sep" aria-hidden="true"></div>
+                    <button class="ap-item ap-research-item" id="ap-research-item" data-action="toggle-research-mode" aria-pressed="false" title="Search and read several sources before answering this message"><span class="ap-icon">${icForPanelTemplate.telescope16}</span> Deep research<span class="ap-check" aria-hidden="true">${icForPanelTemplate.check14}</span></button>
                   </div>
                   <input type="file" id="chat-image-input" data-action="chat-image-input-change" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml,.svg" multiple hidden>
                   <input type="file" id="chat-file-input" data-action="chat-file-input-change" accept=".txt,.md,.markdown,.json,.csv,.pdf,.docx,.xlsx,.xls,.ods,.pptx,text/*" multiple hidden>

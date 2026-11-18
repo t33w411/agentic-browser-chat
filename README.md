@@ -162,6 +162,7 @@ The page surface is **ref-based**: the model never writes CSS selectors or finge
 **Web**
 - `web_search` — search the web and return a grounded summary plus source URLs. Required gateway: the agent must search before it can fetch any URL it didn't already see.
 - `web_fetch` — fetch a URL and either summarize it or answer a specific prompt against it. Handles HTML, plain text, JSON, images (via a vision model), and documents (PDF, DOCX, XLSX, PPTX). Safeguard: the runtime rejects any URL that did not appear in the conversation context (user message or prior tool result), so the model cannot fabricate a URL and fetch it. The server has 15 seconds to respond and 30 more to send the body. A page over 10 MB, or one still arriving after those 30 seconds, is read only as far as it got, and the model is told so.
+- Deep research is chosen per message from the composer's "+" menu. The agent searches from several angles, reads the strongest sources, checks figures against a second source, and answers with links to the pages it read, marking any claim it found only in a search summary. The run must make at least 3 successful searches and 3 successful page reads before it may answer (it is sent `tool_choice: "required"` until then), may make several web calls in one step, and runs its searches on a low-cost model. The switch turns itself off when the message is sent.
 
 **Browser tabs**
 - `list_tabs` — list the user's open tabs across all windows (id, title, url, active, window, discarded, plus an `accessible` flag for pages extensions cannot read). Read-only.
@@ -399,6 +400,7 @@ agentic-browser-chat/
 │   ├── docxEdit.js            # In-place DOCX edits and the paragraph ids they use
 │   ├── documentPrint.js       # Lays out a PDF as a print page: HTML, CSS, and web fonts
 │   ├── compactor.js           # History compaction when context fills
+│   ├── researchMode.js        # Deep research: the floor, its progress count, the instructions
 │   ├── apiLogger.js           # Client side of the API log
 │   └── apiLogTurns.js         # How a run's turns are stored in the API log
 ├── shared/                    # Code used by both content scripts and the service worker

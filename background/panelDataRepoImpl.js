@@ -293,12 +293,15 @@
       usageCost: Number.isFinite(Number(inputForPanelDataRepo.usageCost)) ? Number(inputForPanelDataRepo.usageCost) : 0,
       searchSources: Array.isArray(inputForPanelDataRepo.searchSources)
         ? inputForPanelDataRepo.searchSources.map(function(s) {
-            return { url: String((s && s.url) || ''), title: String((s && s.title) || '') };
+            // A source marked read is a page web_fetch read, not only a search hit. The Sources list groups by it.
+            return { url: String((s && s.url) || ''), title: String((s && s.title) || ''), read: Boolean(s && s.read === true) };
           }).filter(function(s) { return Boolean(s.url); })
         : [],
       incomplete: Boolean(inputForPanelDataRepo.incomplete),
       systemNotice: Boolean(inputForPanelDataRepo.systemNotice),
       displayOnly: Boolean(inputForPanelDataRepo.displayOnly),
+      // A user message sent with Deep research on. The agent loop reads it from here.
+      research: inputForPanelDataRepo.research === true,
       createdAt: normalizeChatTimestampForPanelDataRepo(inputForPanelDataRepo.createdAt, fallbackTimestampForPanelDataRepo || getIsoNowForPanelDataRepo())
     };
   }

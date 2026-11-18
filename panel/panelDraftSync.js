@@ -44,10 +44,13 @@
 
   // Keeps every field a chip carries, including ones added later: the draft has to round-trip
   // whatever addInputChip wrote, and an allow-list here would silently drop a new field.
+  // `research` is the composer's Deep research switch. It lives in the draft so it follows the
+  // message across tabs and page loads, and a submit's clear turns it off like it removes chips.
   function normalizeDraftForDraftSync(draftForNormalize) {
     const draftForInput = draftForNormalize && typeof draftForNormalize === 'object' ? draftForNormalize : {};
     return {
       text: String(draftForInput.text || ''),
+      research: draftForInput.research === true,
       chips: Array.isArray(draftForInput.chips)
         ? draftForInput.chips.filter(function (chipForNormalize) {
             return chipForNormalize && typeof chipForNormalize === 'object';
@@ -73,6 +76,7 @@
     const normalizedForSerialize = normalizeDraftForDraftSync(draftForSerialize);
     return JSON.stringify({
       text: normalizedForSerialize.text,
+      research: normalizedForSerialize.research,
       chips: normalizedForSerialize.chips.map(canonicalizeChipForDraftSync)
     });
   }

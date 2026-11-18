@@ -1028,7 +1028,41 @@
       }
     }
 
+    appendNoteToLatestUserTurnForContextBuilder(apiMessages, optsForBuild.latestUserTurnNote);
     return apiMessages;
+  }
+
+  // Adds text the app wants the model to read with the latest user turn (the deep research
+  // instructions). It goes into this request's copy only: the saved message never holds it, so
+  // the note drops out of later requests once a newer user message arrives.
+  function appendNoteToLatestUserTurnForContextBuilder(apiMessagesForNote, noteForTurn) {
+    var noteTextForTurn = typeof noteForTurn === "string" ? noteForTurn.trim() : "";
+    if (!noteTextForTurn) return;
+    for (var nForNote = apiMessagesForNote.length - 1; nForNote >= 0; nForNote--) {
+      var messageForNote = apiMessagesForNote[nForNote];
+      if (!messageForNote || messageForNote.role !== "user") continue;
+      if (typeof messageForNote.content === "string") {
+        apiMessagesForNote[nForNote] = Object.assign({}, messageForNote, {
+          content: messageForNote.content ? messageForNote.content + "\n\n" + noteTextForTurn : noteTextForTurn
+        });
+        return;
+      }
+      var partsForNote = Array.isArray(messageForNote.content) ? messageForNote.content.slice() : [];
+      var lastTextIndexForNote = -1;
+      for (var pForNote = partsForNote.length - 1; pForNote >= 0; pForNote--) {
+        if (partsForNote[pForNote] && partsForNote[pForNote].type === "text") { lastTextIndexForNote = pForNote; break; }
+      }
+      if (lastTextIndexForNote >= 0) {
+        var textPartForNote = partsForNote[lastTextIndexForNote];
+        partsForNote[lastTextIndexForNote] = Object.assign({}, textPartForNote, {
+          text: (textPartForNote.text ? textPartForNote.text + "\n\n" : "") + noteTextForTurn
+        });
+      } else {
+        partsForNote.push({ type: "text", text: noteTextForTurn });
+      }
+      apiMessagesForNote[nForNote] = Object.assign({}, messageForNote, { content: partsForNote });
+      return;
+    }
   }
 
   nsForContextBuilder.contextBuilder = {

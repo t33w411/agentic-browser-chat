@@ -53,6 +53,7 @@
       messages,
       tools,
       tool_choice,
+      parallelToolCalls,
       onDelta,
       signal,
       sessionId
@@ -91,7 +92,9 @@
     if (Array.isArray(tools) && tools.length > 0) {
       bodyForClient.tools = tools;
       bodyForClient.tool_choice = tool_choice || "auto";
-      bodyForClient.parallel_tool_calls = false;
+      // One call per step unless the caller asks for more. Only a deep research run does, so its
+      // independent searches and page reads can go out together.
+      bodyForClient.parallel_tool_calls = parallelToolCalls === true;
     }
 
     const headersForClient = {

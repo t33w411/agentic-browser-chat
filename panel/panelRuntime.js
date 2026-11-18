@@ -578,12 +578,14 @@
         usageCost: Number.isFinite(Number(safeMessageForPanelRuntime.usageCost)) ? Number(safeMessageForPanelRuntime.usageCost) : 0,
         searchSources: Array.isArray(safeMessageForPanelRuntime.searchSources)
           ? safeMessageForPanelRuntime.searchSources.map(function(s) {
-              return { url: String((s && s.url) || ''), title: String((s && s.title) || '') };
+              // A source marked read is a page web_fetch read, not only a search hit. The Sources list groups by it.
+              return { url: String((s && s.url) || ''), title: String((s && s.title) || ''), read: Boolean(s && s.read === true) };
             }).filter(function(s) { return Boolean(s.url); })
           : [],
         incomplete: Boolean(safeMessageForPanelRuntime.incomplete),
         systemNotice: Boolean(safeMessageForPanelRuntime.systemNotice),
         displayOnly: Boolean(safeMessageForPanelRuntime.displayOnly),
+        research: safeMessageForPanelRuntime.research === true,
         createdAt: typeof safeMessageForPanelRuntime.createdAt === 'string' ? safeMessageForPanelRuntime.createdAt : '',
         _persistedToDb: safeMessageForPanelRuntime._persistedToDb === false ? false : true
       };
@@ -3173,24 +3175,46 @@
           + (showSavedSkillBadgeForFlush
             ? '<div class="msg-memory-badge" title="A skill was saved this turn"><span class="msg-memory-badge-dot"></span> Saved as skill</div>'
             : '');
+        // One entry per URL across the merged messages; a page read anywhere counts as read.
         const allSourcesForFlush = [];
+        const sourceIndexByUrlForFlush = new Map();
         asstMergeBuffer.forEach(function(b) {
           if (Array.isArray(b.searchSources)) {
             b.searchSources.forEach(function(s) {
               if (s && s.url && (s.url.indexOf('http://') === 0 || s.url.indexOf('https://') === 0)) {
-                allSourcesForFlush.push(s);
+                if (sourceIndexByUrlForFlush.has(s.url)) {
+                  if (s.read === true) allSourcesForFlush[sourceIndexByUrlForFlush.get(s.url)].read = true;
+                  return;
+                }
+                sourceIndexByUrlForFlush.set(s.url, allSourcesForFlush.length);
+                allSourcesForFlush.push({ url: s.url, title: s.title, read: s.read === true });
               }
             });
           }
         });
+        const sourceLinksHtmlForFlush = function(sourcesForLinks) {
+          return sourcesForLinks.map(function(s) {
+            const label = s.title ? escHtml(s.title) : escHtml(s.url);
+            return '<a href="' + escHtml(s.url) + '" target="_blank" rel="noopener noreferrer" class="msg-source-link">' + label + '</a>';
+          }).join('');
+        };
+        // A reply that read pages lists them apart from the hits it knows only through a search
+        // summary. A reply that read nothing keeps the single list.
+        const readSourcesForFlush = allSourcesForFlush.filter(function(s) { return s.read; });
+        const citedSourcesForFlush = allSourcesForFlush.filter(function(s) { return !s.read; });
+        const sourcesListInnerHtmlForFlush = readSourcesForFlush.length > 0
+          ? '<div class="msg-sources-group-label">Pages read (' + readSourcesForFlush.length + ')</div>' +
+            sourceLinksHtmlForFlush(readSourcesForFlush) +
+            (citedSourcesForFlush.length > 0
+              ? '<div class="msg-sources-group-label">Cited in search summaries (' + citedSourcesForFlush.length + ')</div>' +
+                sourceLinksHtmlForFlush(citedSourcesForFlush)
+              : '')
+          : sourceLinksHtmlForFlush(allSourcesForFlush);
         const sourcesHtml = allSourcesForFlush.length > 0
           ? '<div class="msg-sources">' +
               '<button class="msg-sources-toggle" data-action="toggle-msg-sources">&#9658; Sources (' + allSourcesForFlush.length + ')</button>' +
               '<div class="msg-sources-list">' +
-              allSourcesForFlush.map(function(s) {
-                const label = s.title ? escHtml(s.title) : escHtml(s.url);
-                return '<a href="' + escHtml(s.url) + '" target="_blank" rel="noopener noreferrer" class="msg-source-link">' + label + '</a>';
-              }).join('') +
+              sourcesListInnerHtmlForFlush +
               '</div>' +
             '</div>'
           : '';
@@ -3347,8 +3371,12 @@
 
         const isEditingMessageForPanelRuntime = S.chatEditingMsgId === msg.id;
 
-        const chipsHtml = (msg.chips || []).length
-          ? `<div class="msg-chips">${(msg.chips).map(function (c, chipIndexForPanelRuntime) {
+        // Not an attachment and not previewable, so it carries no data-action.
+        const researchChipHtmlForPanelRuntime = msg.research === true
+          ? `<span class="m-chip m-chip-research" title="Sent with Deep research">${ic.telescope12 || ''} Deep research</span>`
+          : '';
+        const chipsHtml = ((msg.chips || []).length || researchChipHtmlForPanelRuntime)
+          ? `<div class="msg-chips">${researchChipHtmlForPanelRuntime}${(msg.chips || []).map(function (c, chipIndexForPanelRuntime) {
               const chipTypeForPanelRuntime = String((c && c.type) || 'file').replace(/[^a-z0-9_-]/gi, '').toLowerCase();
               const chipLabelForPanelRuntime = escHtml(truncateChipLabelForPanelRuntime(String((c && c.label) || 'Attachment')));
               const chipKindForPanelRuntime = String((c && c.kind) || '').replace(/[^a-z0-9_-]/gi, '').toLowerCase();
@@ -14887,6 +14915,35 @@
     // Settles once the composer is bound to a scope and its stored draft has loaded. The libs
     // gate waits on it before enabling the input.
     var draftMountedPromiseForPanelRuntime = null;
+    // The composer's Deep research switch for the message being written. It is part of the draft,
+    // so it follows the message across tabs and page loads and is cleared by a send like the chips.
+    var composerResearchOnForPanelRuntime = false;
+
+    // The chip above the message box shows the switch is on and turns it off; the "+" menu item
+    // turns it on. Nothing in the bottom row changes, which has no width to spare on a narrow panel.
+    function syncComposerResearchUiForPanelRuntime() {
+      const chipForResearchUi = root.getElementById('composer-research-chip');
+      if (chipForResearchUi) chipForResearchUi.classList.toggle('hidden', !composerResearchOnForPanelRuntime);
+      const itemForResearchUi = root.getElementById('ap-research-item');
+      if (itemForResearchUi) {
+        itemForResearchUi.setAttribute('aria-pressed', composerResearchOnForPanelRuntime ? 'true' : 'false');
+        itemForResearchUi.classList.toggle('is-on', composerResearchOnForPanelRuntime);
+      }
+    }
+
+    function setComposerResearchForPanelRuntime(onForResearch) {
+      composerResearchOnForPanelRuntime = Boolean(onForResearch);
+      syncComposerResearchUiForPanelRuntime();
+    }
+
+    function toggleComposerResearchForPanelRuntime() {
+      // A submit owns the composer until it finishes, the same rule chip removal follows.
+      if (draftMountedScopeForPanelRuntime === draftScopeLockedForSendForPanelRuntime) return;
+      setComposerResearchForPanelRuntime(!composerResearchOnForPanelRuntime);
+      saveDraftForPanelRuntime();
+      const taForResearchToggle = root.querySelector('.chat-textarea');
+      if (taForResearchToggle && !taForResearchToggle.disabled) taForResearchToggle.focus();
+    }
 
     // Ordering rules live in panelDraftSync.js so they can be exercised without a browser. Read
     // from the namespace per call rather than cached, so a re-injection picks up the new copy.
@@ -14941,7 +14998,7 @@
 
     function normalizeInputDraftForPanelRuntime(draftForNormalize) {
       const rulesForNormalize = getDraftSyncRulesForPanelRuntime();
-      if (!rulesForNormalize) return { text: '', chips: [] };
+      if (!rulesForNormalize) return { text: '', research: false, chips: [] };
       return rulesForNormalize.normalizeDraft(draftForNormalize);
     }
 
@@ -14955,6 +15012,7 @@
       const taForDraft = root.querySelector('.chat-textarea');
       return normalizeInputDraftForPanelRuntime({
         text: taForDraft ? taForDraft.value : '',
+        research: composerResearchOnForPanelRuntime,
         chips: collectDraftChipsForPanelRuntime()
       });
     }
@@ -15079,9 +15137,15 @@
       // Repainting an unchanged composer would tear the chips row down and rebuild it for
       // nothing, and every rebuild loses per-chip DOM state. The metadata below is adopted
       // either way, since that is what records which payload the composer now reflects.
+      // The research switch is compared on its own, so a draft that only flips it never
+      // rebuilds the chips.
+      const currentForDraftApply = collectCurrentInputDraftForPanelRuntime();
       const contentChangedForApply =
-        serializeInputDraftForPanelRuntime(collectCurrentInputDraftForPanelRuntime())
-          !== serializeInputDraftForPanelRuntime(normalizedForDraftApply);
+        serializeInputDraftForPanelRuntime(Object.assign({}, currentForDraftApply, { research: false }))
+          !== serializeInputDraftForPanelRuntime(Object.assign({}, normalizedForDraftApply, { research: false }));
+      if (currentForDraftApply.research !== normalizedForDraftApply.research) {
+        setComposerResearchForPanelRuntime(normalizedForDraftApply.research);
+      }
       if (contentChangedForApply) {
         draftApplyingForPanelRuntime = true;
         try {
@@ -18447,9 +18511,12 @@
           draftStartedAtForSend
         );
         const chipsForOffscreen = collectInputChipsForPanelRuntime();
-        await appendMessageToChatForPanelRuntime(chatId, { role: "user", content: text, md: text, chips: chipsForOffscreen, pageContext: getCurrentPageContextForPanelRuntime(), _addedByThisTab: true }, { persistToDb: false });
+        // The offscreen loop reads this off the saved message, which is how a resend keeps it.
+        const researchForOffscreen = composerResearchOnForPanelRuntime;
+        await appendMessageToChatForPanelRuntime(chatId, { role: "user", content: text, md: text, chips: chipsForOffscreen, pageContext: getCurrentPageContextForPanelRuntime(), research: researchForOffscreen, _addedByThisTab: true }, { persistToDb: false });
         chatTaForSend.value = "";
         clearInputChipsForPanelRuntime();
+        setComposerResearchForPanelRuntime(false);
         draftLocalDirtyForPanelRuntime = false;
         await clearSubmittedDraftForPanelRuntime(draftScopeForSend, submittedDraftPayloadForSend);
         if (createdChatFromNewDraftForSend) {
@@ -22132,6 +22199,7 @@
             case 'copy-composer':        copyComposerToClipboardForPanelRuntime(tgtForRuntime); break;
             case 'preview-message-chip': previewMessageChipForPanelRuntime(tgtForRuntime.dataset.messageId, tgtForRuntime.dataset.chipIndex); break;
             case 'toggle-attach-picker': toggleAttachPicker(); evtForRuntime.stopPropagation(); break;
+            case 'toggle-research-mode': toggleComposerResearchForPanelRuntime(); break;
             case 'toggle-model-picker':  toggleModelPickerForPanelRuntime(); evtForRuntime.stopPropagation(); break;
             case 'toggle-reasoning-filter': toggleReasoningFilterForPanelRuntime(); break;
             case 'toggle-vision-filter': toggleVisionFilterForPanelRuntime(); break;

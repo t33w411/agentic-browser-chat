@@ -1449,11 +1449,15 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
   color: #f0cf7f;
 }
 
+/* The bar wraps only so the Deep research slot can take a line of its own. The row's basis is 0,
+   so it never forces a break and always shares its line with the copy button, filling the rest
+   of it as it did before the bar could wrap. A basis of auto would put a row of wide chips on a
+   line alone and push the copy button onto the next. */
 .input-chips-bar {
-  display: flex; align-items: flex-start; gap: 6px; margin-bottom: 8px;
+  display: flex; flex-wrap: wrap; align-items: flex-start; column-gap: 6px; row-gap: 0; margin-bottom: 8px;
 }
 .input-chips-row {
-  display: flex; flex-wrap: wrap; gap: 5px; flex: 1 1 auto; min-width: 0;
+  display: flex; flex-wrap: wrap; gap: 5px; flex: 1 1 0%; min-width: 0;
 }
 .chips-copy-btn {
   flex: 0 0 auto;
@@ -1475,6 +1479,39 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 /* No chips, no button. The row holds nothing but chips, so :empty is an exact test and it cannot
    drift out of step with the chip count the way a JS toggle at each mutation site would. */
 .input-chips-row:empty + .chips-copy-btn { display: none; }
+/* Deep research switch, shown only while it is on. It sits in the chips bar rather than the
+   bottom row, so turning it on costs one chip-height line and never squeezes the model picker,
+   mic or send button on a narrow panel. The slot is a whole line of the bar, so attachments go
+   below the chip at their usual width instead of sharing a line with it; sharing left them 87px
+   on a 300px panel. */
+.composer-research-slot { flex: 0 0 100%; display: flex; min-width: 0; }
+/* The gap between the switch and the attachments, only when both are shown, so a bar with no
+   attachments adds no height under the chip. */
+.composer-research-slot:not(.hidden) ~ .input-chips-row:not(:empty),
+.composer-research-slot:not(.hidden) ~ .input-chips-row:not(:empty) + .chips-copy-btn { margin-top: 6px; }
+/* Same height as an attachment chip. */
+.composer-research-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 26px;
+  padding: 0 4px 0 8px;
+  border: 1px solid #c7d2fe; border-radius: 99px;
+  background: #eef2ff; color: #3730a3;
+  font-size: 12px; font-weight: 500; line-height: 1; white-space: nowrap;
+}
+.composer-research-chip svg { flex-shrink: 0; }
+.composer-research-chip-off {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; padding: 0;
+  border: none; border-radius: 50%;
+  background: transparent; color: inherit;
+  opacity: 0.6; cursor: pointer;
+  transition: opacity 0.1s, background 0.1s;
+}
+.composer-research-chip-off:hover,
+.composer-research-chip-off:focus-visible { opacity: 1; background: rgba(55, 48, 163, 0.12); }
+.panel-host[data-theme="dark"] .composer-research-chip { background: #1e1b4b; color: #c7d2fe; border-color: #4338ca; }
+.panel-host[data-theme="dark"] .composer-research-chip-off:hover,
+.panel-host[data-theme="dark"] .composer-research-chip-off:focus-visible { background: rgba(199, 210, 254, 0.16); }
 .ic {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 3px 8px; border-radius: 99px;
@@ -1624,6 +1661,11 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 /* Clip chips are m-chip-note plus m-chip-clip, so these must stay after the note variants to win. */
 .m-chip-clip    { background:#fef3c7; color:#92400e; border-color:#fcd34d; }
 .panel-host[data-theme="dark"] .m-chip-clip    { background:#3a2a08; color:#fcd34d; border-color:#8a6a12; }
+/* Marks a sent message that asked for Deep research. Not an attachment, so it does not lift on hover. */
+.m-chip-research { background:#eef2ff; color:#3730a3; border-color:#c7d2fe; }
+.panel-host[data-theme="dark"] .m-chip-research { background:#1e1b4b; color:#c7d2fe; border-color:#4338ca; }
+.msg-chips .m-chip-research { cursor: default; }
+.msg-chips .m-chip-research:hover { filter: none; transform: none; }
 
 .chat-textarea {
   width: 100%;
@@ -1714,6 +1756,9 @@ pre code:not(.hljs) { border: 0 !important; border-color: transparent !important
 }
 .ap-item:hover { background: var(--abchat-bg-hover); }
 .ap-icon { width: 18px; height: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.ap-sep { height: 1px; margin: 4px 6px; background: var(--abchat-border); }
+.ap-research-item .ap-check { display: none; margin-left: auto; color: var(--abchat-accent); }
+.ap-research-item.is-on .ap-check { display: inline-flex; }
 
 /* The picker shrinks from 150px to no less than 100px, and only after the
    token counter beside it has given up its space. The floor sits on the
@@ -4753,6 +4798,9 @@ mark.abcs-hl-current { background: #f59e0b; color: #1f2937; box-shadow: 0 0 0 1p
 .msg-sources-list { display: none; flex-direction: column; align-items: flex-start; gap: 3px; margin-top: 6px; }
 .msg-source-link { font-size: 11.5px; color: var(--abchat-text-accent); text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-block; width: fit-content; max-width: 100%; }
 .msg-source-link:hover { text-decoration: underline; color: var(--abchat-accent-hover); }
+/* Splits a reply's sources into the pages it read and the hits it knows only from a search summary. */
+.msg-sources-group-label { font-size: 11px; font-weight: 600; line-height: 1.4; color: var(--abchat-text-muted); font-family: var(--abchat-font); }
+.msg-sources-group-label:not(:first-child) { margin-top: 6px; }
 .panel-host[data-theme="dark"] .msg-sources { border-top-color: #2d3f55; }
 .panel-host[data-theme="dark"] .msg-source-link { color: #6ab4ff; }
 .panel-host[data-theme="dark"] .msg-source-link:hover { color: #90cdff; }

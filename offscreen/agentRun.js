@@ -468,6 +468,35 @@
     });
   }
 
+  // A source's identity for matching a fetched page to a search hit. A #fragment and a trailing
+  // slash name the same page.
+  function sourceKeyForAgentRun(urlForKey) {
+    return String(urlForKey || '').trim().replace(/#.*$/, '').replace(/\/+$/, '');
+  }
+
+  // The Sources list saved on the final reply. Every web_search hit is listed, and each one a
+  // web_fetch call read successfully is marked read. A hit is known only through the search
+  // model's summary, while a read page went to the summarizer with the main model's own question.
+  // A page read that no search found, such as a URL the user gave, is listed after the hits.
+  function sourcesForReplyForAgentRun(searchHitsForReply, readPagesForReply) {
+    var readKeysForReply = new Set();
+    readPagesForReply.forEach(function (pageForKeys) {
+      pageForKeys.keys.forEach(function (keyForRead) { readKeysForReply.add(keyForRead); });
+    });
+    var listedKeysForReply = new Set();
+    var sourcesForReply = searchHitsForReply.map(function (hitForReply) {
+      var keyForHit = sourceKeyForAgentRun(hitForReply.url);
+      listedKeysForReply.add(keyForHit);
+      return { url: hitForReply.url, title: hitForReply.title, read: readKeysForReply.has(keyForHit) };
+    });
+    readPagesForReply.forEach(function (pageForReply) {
+      if (pageForReply.keys.some(function (keyForPage) { return listedKeysForReply.has(keyForPage); })) return;
+      pageForReply.keys.forEach(function (keyForPage) { listedKeysForReply.add(keyForPage); });
+      sourcesForReply.push({ url: pageForReply.url, title: pageForReply.title, read: true });
+    });
+    return sourcesForReply;
+  }
+
   // ---- main loop ----
 
   async function sendChatForOffscreen(paramsForRun) {
@@ -628,6 +657,8 @@
     }
     var accumulatedSearchSourcesForRun = [];
     var seenSearchUrlsForRun = new Set();
+    // Pages web_fetch read successfully in this send, as { url, title, keys }, for the Sources list.
+    var readPagesForRun = [];
     // Generated images actually shown to the user in this send, counted in the display phase after
     // the blob persists rather than on API success, so a generation whose blob store failed never
     // makes the next result claim an earlier image is on screen. A non-zero count tells the model
@@ -704,11 +735,22 @@
     // Read by the tool-call-cap PostModelResponse hook.
     if (turnContextForRun) turnContextForRun.maxToolCalls = runLimitsForRun.maxToolCalls;
 
+    // Deep research, read from the latest user message once the chat has loaded (agent/researchMode.js).
+    var researchModeApiForRun = agentNsForRun.researchMode || null;
+    var researchModeForRun = false;
+    var researchRequiredRoundsForRun = 0;
+    // Set when a provider refuses tool_choice "required" (Anthropic does while extended thinking
+    // is on). The run carries on with the instructions alone.
+    var researchToolChoiceRefusedForRun = false;
+
     try {
       var chatRecordForRun = await repoForRun.getChat(chatId);
       messagesForRun = (chatRecordForRun && Array.isArray(chatRecordForRun.messages)) ? chatRecordForRun.messages : [];
       compactionSummaryForRun = (chatRecordForRun && typeof chatRecordForRun.compactionSummary === 'string') ? chatRecordForRun.compactionSummary : '';
       compactedThroughMessageIdForRun = (chatRecordForRun && chatRecordForRun.compactedThroughMessageId != null) ? chatRecordForRun.compactedThroughMessageId : null;
+      researchModeForRun = Boolean(researchModeApiForRun
+        && typeof researchModeApiForRun.isResearchRun === 'function'
+        && researchModeApiForRun.isResearchRun(messagesForRun));
 
       // Cost already persisted on this chat before this run, for the live token/cost counter.
       // Mirrors the panel's sumPersistedChatCost baseline used by the stream_usage display.
@@ -835,7 +877,8 @@
               compactedThroughMessageId: compactedThroughMessageIdForRun,
               automationEnabled: automationEnabledForRun,
               pageNavigationAllowed: true,
-              costCategory: costCategoryForRun
+              costCategory: costCategoryForRun,
+              latestUserTurnNote: researchModeForRun ? researchModeApiForRun.instructions() : ''
             })
           : (function () {
               var msgsForFallbackForRun = messagesForRun.map(function (mForFallback) {
@@ -861,12 +904,23 @@
 
         if (turnContextForRun) turnContextForRun.iterIndex = iterCount - 1;
 
+        // A research run below its floor of searches and page reads must call a tool this step,
+        // so the model cannot answer before it has researched. Decided from the saved tool results.
+        // Assigned every iteration: a bare `var` here would keep the previous step's value.
+        var toolChoiceForIterForRun = undefined;
+        if (researchModeForRun && !researchToolChoiceRefusedForRun && toolDefsForRun.length > 0
+            && researchModeApiForRun.shouldRequireToolCall(researchModeApiForRun.progress(messagesForRun), researchRequiredRoundsForRun)) {
+          toolChoiceForIterForRun = 'required';
+          researchRequiredRoundsForRun++;
+        }
+
         if (iterCount === 1) {
           logFirstMessagesForRun = sanitizeMessagesForLogForAgentRun(apiMessages);
           logApiParamsForRun = {
             stream: true,
-            tool_choice: toolDefsForRun.length > 0 ? 'auto' : undefined,
-            parallel_tool_calls: toolDefsForRun.length > 0 ? false : undefined,
+            tool_choice: toolDefsForRun.length > 0 ? (toolChoiceForIterForRun || 'auto') : undefined,
+            parallel_tool_calls: toolDefsForRun.length > 0 ? researchModeForRun : undefined,
+            research: researchModeForRun || undefined,
             provider: { sort: 'throughput' },
             tools: toolDefsForRun.map(function (t) { return t && t.function ? t.function.name : (t.type || t.name || ''); })
           };
@@ -890,36 +944,57 @@
         armStreamIdleTimeoutForRun();
         var streamRetryCountForRun = 0;
         var resultForLoop;
-        do {
-          accTextForLoop = '';
-          resultForLoop = await clientForRun.streamCompletion({
-            model: model,
-            apiKey: apiKey,
-            messages: apiMessages,
-            sessionId: 'abchat-' + chatId,
-            tools: toolDefsForRun.length > 0 ? toolDefsForRun : undefined,
-            signal: controllerForRun.signal,
-            onDelta: function (deltaForLoop) {
-              armStreamIdleTimeoutForRun();
-              if (deltaForLoop.type === 'text' && deltaForLoop.text) {
-                accTextForLoop += deltaForLoop.text;
-                emitStreamTextDebouncedForAgentRun(chatId, accTextForLoop);
-              } else if (deltaForLoop.type === 'retry_notice') {
-                emitForAgentRun('stream_retry_notice', chatId, { attempt: deltaForLoop.attempt, maxAttempts: deltaForLoop.maxAttempts });
+        // Cleared in a finally. A request that throws leaves the loop without reaching the code
+        // after it, and a timer left armed would hold this run for 180 seconds after it ended and
+        // then abort its controller.
+        try {
+          do {
+            accTextForLoop = '';
+            try {
+              resultForLoop = await clientForRun.streamCompletion({
+                model: model,
+                apiKey: apiKey,
+                messages: apiMessages,
+                sessionId: 'abchat-' + chatId,
+                tools: toolDefsForRun.length > 0 ? toolDefsForRun : undefined,
+                tool_choice: toolChoiceForIterForRun,
+                parallelToolCalls: researchModeForRun,
+                signal: controllerForRun.signal,
+                onDelta: function (deltaForLoop) {
+                  armStreamIdleTimeoutForRun();
+                  if (deltaForLoop.type === 'text' && deltaForLoop.text) {
+                    accTextForLoop += deltaForLoop.text;
+                    emitStreamTextDebouncedForAgentRun(chatId, accTextForLoop);
+                  } else if (deltaForLoop.type === 'retry_notice') {
+                    emitForAgentRun('stream_retry_notice', chatId, { attempt: deltaForLoop.attempt, maxAttempts: deltaForLoop.maxAttempts });
+                  }
+                }
+              });
+            } catch (streamErrForRun) {
+              // A provider that cannot force a tool call rejects the request before streaming. Send
+              // the same step again without forcing, and stop forcing for the rest of the run. Any
+              // other error, or a second failure, goes to the run's normal error path.
+              var streamErrTextForRun = String((streamErrForRun && streamErrForRun.message) || '');
+              if (toolChoiceForIterForRun !== 'required' || !/^OpenRouter error (400|404|422)\b/.test(streamErrTextForRun)) {
+                throw streamErrForRun;
               }
+              researchToolChoiceRefusedForRun = true;
+              toolChoiceForIterForRun = undefined;
+              continue;
             }
-          });
-          if (resultForLoop && typeof resultForLoop.resolvedModel === 'string' && resultForLoop.resolvedModel) {
-            logResolvedModelForRun = resultForLoop.resolvedModel;
-          }
-          if (resultForLoop && !resultForLoop.cancelled && resultForLoop.incompleteStream && streamRetryCountForRun < MAX_STREAM_RETRIES_FOR_AGENT_RUN) {
-            streamRetryCountForRun++;
-            emitForAgentRun('stream_retry_notice', chatId, { attempt: streamRetryCountForRun, maxAttempts: MAX_STREAM_RETRIES_FOR_AGENT_RUN });
-          } else {
-            break;
-          }
-        } while (true);
-        clearTimeout(iterStreamTimeoutIdForRun);
+            if (resultForLoop && typeof resultForLoop.resolvedModel === 'string' && resultForLoop.resolvedModel) {
+              logResolvedModelForRun = resultForLoop.resolvedModel;
+            }
+            if (resultForLoop && !resultForLoop.cancelled && resultForLoop.incompleteStream && streamRetryCountForRun < MAX_STREAM_RETRIES_FOR_AGENT_RUN) {
+              streamRetryCountForRun++;
+              emitForAgentRun('stream_retry_notice', chatId, { attempt: streamRetryCountForRun, maxAttempts: MAX_STREAM_RETRIES_FOR_AGENT_RUN });
+            } else {
+              break;
+            }
+          } while (true);
+        } finally {
+          clearTimeout(iterStreamTimeoutIdForRun);
+        }
 
         var turnMessagesForLog = sanitizeMessagesForLogForAgentRun(apiMessages);
         var apiLogTurnsForRun = (globalThis.ABChatContent || {}).apiLogTurns;
@@ -929,7 +1004,8 @@
         logPreviousTurnMessagesForRun = turnMessagesForLog;
         logTurnsForRun.push(Object.assign({
           turnIndex: iterCount,
-          latencyMs: Date.now() - turnStartTimeForRun
+          latencyMs: Date.now() - turnStartTimeForRun,
+          toolChoice: toolChoiceForIterForRun || undefined
         }, turnRequestForLog, {
           responseText: resultForLoop && resultForLoop.message ? (resultForLoop.message.content || '') : '',
           responseToolCalls: resultForLoop && resultForLoop.message ? (resultForLoop.message.tool_calls || []) : [],
@@ -995,7 +1071,7 @@
           usageTotalTokens: logUsageForRun ? (Number(logUsageForRun.total_tokens) || 0) : 0,
           usageReasoningTokens: (logUsageForRun && logUsageForRun.completion_tokens_details) ? (Number(logUsageForRun.completion_tokens_details.reasoning_tokens) || 0) : 0,
           usageCost: !hasToolCalls ? (thisLLMCostForRun + sideCallCostForRun) : thisLLMCostForRun,
-          searchSources: (!hasToolCalls && accumulatedSearchSourcesForRun.length > 0) ? accumulatedSearchSourcesForRun.slice() : []
+          searchSources: !hasToolCalls ? sourcesForReplyForAgentRun(accumulatedSearchSourcesForRun, readPagesForRun) : []
         };
         var asstRecordPersisted = await repoForRun.createMessage(chatId, asstRecord, { touchChat: false });
         if (asstRecordPersisted) messagesForRun.push(asstRecordPersisted);
@@ -1127,6 +1203,7 @@
               imageModel: imageModelForRun,
               messages: apiMessages,
               model: model,
+              searchModel: researchModeForRun ? researchModeApiForRun.SEARCH_MODEL : '',
               chatId: chatId,
               runId: runIdForRun,
               toolCallId: tc.id,
@@ -1154,8 +1231,14 @@
           if (!timeoutReasonForRun) timeoutReasonForRun = 'tool';
           controllerForRun.abort();
         }, toolExecTimeoutMsForRun);
-        var toolResultsForRun = await Promise.all(toolExecPromisesForRun);
-        clearTimeout(iterToolTimeoutIdForRun);
+        // Cleared in a finally, like the stream timer. A round that rejects would otherwise go to
+        // the run's error path with this timer still armed.
+        var toolResultsForRun;
+        try {
+          toolResultsForRun = await Promise.all(toolExecPromisesForRun);
+        } finally {
+          clearTimeout(iterToolTimeoutIdForRun);
+        }
         if (controllerForRun.signal.aborted) {
           markRunStoppedForRun();
           break;
@@ -1210,6 +1293,25 @@
                 accumulatedSearchSourcesForRun.push({ url: String(r.url), title: String(r.title || '') });
               }
             });
+          }
+          // A page counts as read on the same test the research floor uses. Both the URL asked for
+          // and the one the result reports are kept, so a redirected page still matches its hit.
+          if (tcNameForResult === 'web_fetch' && toolResult && typeof toolResult === 'object' && toolResult.ok !== false && !toolResult.error) {
+            var fetchArgsForSources = {};
+            try { fetchArgsForSources = JSON.parse(String((tc.function && tc.function.arguments) || '{}')) || {}; } catch (eFetchArgsForSources) {}
+            var requestedUrlForSources = String(fetchArgsForSources.url || '').trim();
+            var resultUrlForSources = typeof toolResult.url === 'string' ? toolResult.url.trim() : '';
+            var pageUrlForSources = resultUrlForSources || requestedUrlForSources;
+            if (/^https?:\/\//i.test(pageUrlForSources)) {
+              var pageKeysForSources = [sourceKeyForAgentRun(requestedUrlForSources), sourceKeyForAgentRun(resultUrlForSources)]
+                .filter(function (keyForSources, idxForSources, allForSources) { return keyForSources && allForSources.indexOf(keyForSources) === idxForSources; });
+              var alreadyReadForSources = readPagesForRun.some(function (pageForSources) {
+                return pageForSources.keys.some(function (keyForSources) { return pageKeysForSources.indexOf(keyForSources) !== -1; });
+              });
+              if (!alreadyReadForSources) {
+                readPagesForRun.push({ url: pageUrlForSources, title: String(toolResult.title || ''), keys: pageKeysForSources });
+              }
+            }
           }
           var toolResultStr = typeof toolResultForModel === 'string' ? toolResultForModel : JSON.stringify(toolResultForModel);
           var isToolErrorForRun = toolResult && typeof toolResult === 'object' && toolResult.error;
