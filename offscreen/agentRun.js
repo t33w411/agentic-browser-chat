@@ -32,6 +32,8 @@
   var ITER_STREAM_TIMEOUT_MS_FOR_AGENT_RUN = 180 * 1000;
   var ITER_TOOL_STD_TIMEOUT_MS_FOR_AGENT_RUN = 90 * 1000;
   var ITER_TOOL_IMAGE_TIMEOUT_MS_FOR_AGENT_RUN = 3 * 60 * 1000;
+  // view_file on a Word file or a deck lays it out and has Chrome print it before drawing pages.
+  var ITER_TOOL_VIEW_TIMEOUT_MS_FOR_AGENT_RUN = 3 * 60 * 1000;
   // generate_questions makes up to three rounds of model calls in one tool call: the questions,
   // a review of them, and a fix for each one that fails its checks.
   var ITER_TOOL_QUIZ_TIMEOUT_MS_FOR_AGENT_RUN = 3 * 60 * 1000;
@@ -100,7 +102,18 @@
   // (characters a PDF could not show, rows it left out) are passed on, so the model can tell the
   // user and reuse the theme for the next file. A PDF made in the same call (also_pdf) is described
   // under pdf, with only the note and warnings the first file did not already give; when it could
-  // not be made, pdf_error says why and the first file still stands.
+  // not be made, pdf_error says why and the first file still stands. Nothing here says how to look
+  // at the file: the loop looks at every file it can draw (lookAtSavedFileForRun) and writes the
+  // outcome into this result once the file is saved.
+  // The formats the loop looks at when create_document or __document__ makes them. An HTML page is
+  // also looked at when edit saves a new copy of it.
+  var LOOKED_AT_FORMATS_FOR_AGENT_RUN = { pdf: true, docx: true, pptx: true, html: true };
+  // generate_image's for_document flag: true only when the model set it to true.
+  function isForDocumentImageCallForRun(toolCallForFlag) {
+    var argsForFlag = {};
+    try { argsForFlag = JSON.parse(String((toolCallForFlag && toolCallForFlag.function && toolCallForFlag.function.arguments) || '{}')) || {}; } catch (errForFlag) { argsForFlag = {}; }
+    return argsForFlag.for_document === true;
+  }
   function documentResultForModelForRun(documentForModel) {
     var safeDocumentForModel = documentForModel || {};
     var resultForModel = {
@@ -618,6 +631,29 @@
       } catch (noticePersistErrForRun) { /* the emitted notice is still on screen for this tab */ }
     }
 
+    // Side calls (an image, a summary, a tool's own model call) are saved on the reply that ends
+    // the run. A run that ends without one (stopped, at the step limit, on an error or an empty
+    // reply) would otherwise drop them from the chat total, which is the sum of the assistant
+    // messages' usageCost, though the live counter showed them. They go on the last assistant
+    // message the run saved, or, when it saved none, the chat's last earlier one. That case arises
+    // only when compaction ran and the run was stopped before its first reply, and compaction
+    // needs a long chat, so an earlier reply is there.
+    async function saveUnsavedSideCostForRun() {
+      var unsavedForSweep = sideCallCostForRun - sideCallCostSavedForRun;
+      if (!(unsavedForSweep > 0) || typeof repoForRun.updateMessage !== 'function') return;
+      for (var iForSweep = messagesForRun.length - 1; iForSweep >= 0; iForSweep--) {
+        var recordForSweep = messagesForRun[iForSweep];
+        if (!recordForSweep || recordForSweep.role !== 'assistant' || recordForSweep.id == null) continue;
+        var totalForSweep = (Number(recordForSweep.usageCost) || 0) + unsavedForSweep;
+        try {
+          await repoForRun.updateMessage(recordForSweep.id, { usageCost: totalForSweep });
+          recordForSweep.usageCost = totalForSweep;
+          sideCallCostSavedForRun = sideCallCostForRun;
+        } catch (errForSweep) { /* best effort: the live counter showed the cost during the run */ }
+        return;
+      }
+    }
+
     function markRunStoppedForRun() {
       if (logStopReasonForRun) return;
       var agentRunStopForMark = (globalThis.ABChatShared || {}).agentRunStop;
@@ -643,6 +679,8 @@
     var identicalErrorRoundCountForRun = 0;
     var errorFreeRoundsSinceErrorForRun = 0;
     var sideCallCostForRun = 0;
+    // How much of sideCallCostForRun is already on a saved message.
+    var sideCallCostSavedForRun = 0;
     var turnMainCostAccumForRun = 0;
     var prevTurnMainCostForRun = 0;
     var preSendCostForRun = 0;
@@ -727,9 +765,130 @@
     var costCategoryForRun = (contextBuilderForRun && typeof contextBuilderForRun.costCategoryFor === 'function')
       ? contextBuilderForRun.costCategoryFor(completionCostPerMillionForRun)
       : 'cheap';
+    // The panel sends true only for a model its list marks as taking no images. An unknown model
+    // is offered view_file, as an unknown model may be sent attached images.
+    var visionForRun = paramsForRun.modelKnownNonVision !== true;
     var toolDefsForRun = (agentNsForRun && typeof agentNsForRun.resolveAgentConfig === 'function')
-      ? agentNsForRun.resolveAgentConfig({ costCategory: costCategoryForRun, agentProfile: 'main' }).toolDefs
+      ? agentNsForRun.resolveAgentConfig({ costCategory: costCategoryForRun, agentProfile: 'main', vision: visionForRun }).toolDefs
       : (agentNsForRun.toolDefs || []).slice();
+    var viewFileOfferedForRun = toolDefsForRun.some(function (defForView) {
+      return defForView && defForView.function && defForView.function.name === 'view_file';
+    });
+
+    // view_file (agent/fileViewRules.js). The budget counts the pictures this reply has looked at.
+    // viewSources maps a deck's saved blob id to the drawing it was written from, which only this
+    // run holds. The pictures a round's view_file calls returned wait in pendingViewImages for the
+    // next request, and go into that request only; viewImagesMessageForIter is the message that
+    // carried them, so a provider's refusal can take it back out.
+    var fileViewRulesForRun = agentNsForRun.fileViewRules || null;
+    var viewBudgetForRun = fileViewRulesForRun ? fileViewRulesForRun.createBudget() : null;
+    var viewSourcesForRun = new Map();
+    var pendingViewImagesForRun = [];
+    var viewImagesMessageForIterForRun = null;
+    // The saved view_file results whose pictures are queued, and those whose pictures are in the
+    // request being sent. Each is saved saying its pictures are pending, and its `pictures` field
+    // is rewritten once the outcome is known: shown, refused, or never sent. Later requests leave
+    // the pictures out, so without that the model reads "the pictures follow" with nothing after
+    // it, decides it never saw them, and retracts a check it did make.
+    var pendingViewRecordsForRun = [];
+    var inFlightViewRecordsForRun = [];
+    var markViewRecordsForRun = async function (recordsForMark, stateForMark) {
+      if (!fileViewRulesForRun || !Array.isArray(recordsForMark)) return;
+      for (var iForMark = 0; iForMark < recordsForMark.length; iForMark++) {
+        var recordForMark = recordsForMark[iForMark];
+        if (!recordForMark) continue;
+        var updatedForMark = fileViewRulesForRun.markPictures(recordForMark.content, stateForMark);
+        if (updatedForMark === recordForMark.content) continue;
+        // The record is the one in messagesForRun, so the next build reads the new text.
+        recordForMark.content = updatedForMark;
+        if (Number.isFinite(Number(recordForMark.id)) && repoForRun && typeof repoForRun.updateMessage === 'function') {
+          try {
+            await repoForRun.updateMessage(recordForMark.id, { content: updatedForMark });
+          } catch (errForMark) { /* best effort: the in-memory copy still serves this reply */ }
+        }
+      }
+    };
+    // Looks at a file this run just saved, as if the model had called view_file on it: every DOCX,
+    // PDF, PPTX and HTML page that create_document or __document__ makes (LOOKED_AT_FORMATS_FOR_AGENT_RUN),
+    // every HTML copy edit saves, and every generated image not marked for_document. Left
+    // to the guide, a model skipped the look at a deck, whose slides can be drawn only in the reply
+    // that made it, and then offered the user a check the next reply would have refused; it also
+    // skipped the look at a "one-page" brief that prints on two pages. tool_choice cannot force the
+    // call, because Anthropic refuses a forced tool while extended thinking is on, so the loop makes
+    // it. The outcome goes into the file's saved result (fileViewRules.addFileLook), and its pictures
+    // join the round's other view_file pictures in the next request. The look has the same limit as
+    // a view_file call but its own timer, so a print that hangs costs the look, not the run.
+    var lookAtSavedFileForRun = async function (blobIdForLook, toolCallIdForLook, stepForLook) {
+      if (!fileViewRulesForRun || typeof fileViewRulesForRun.addFileLook !== 'function') return;
+      var recordForLook = null;
+      for (var iForLook = messagesForRun.length - 1; iForLook >= 0; iForLook--) {
+        var candidateForLook = messagesForRun[iForLook];
+        if (candidateForLook && candidateForLook.role === 'tool' && candidateForLook.tool_call_id === toolCallIdForLook) {
+          recordForLook = candidateForLook;
+          break;
+        }
+      }
+      if (!recordForLook) return;
+      var lookControllerForRun = new AbortController();
+      var onRunAbortForLook = function () { lookControllerForRun.abort(); };
+      controllerForRun.signal.addEventListener('abort', onRunAbortForLook, { once: true });
+      if (controllerForRun.signal.aborted) lookControllerForRun.abort();
+      var lookTimedOutForRun = false;
+      var lookTimerForRun = setTimeout(function () {
+        lookTimedOutForRun = true;
+        lookControllerForRun.abort();
+      }, ITER_TOOL_VIEW_TIMEOUT_MS_FOR_AGENT_RUN);
+      var lookResultForRun = null;
+      try {
+        lookResultForRun = await new Promise(function (resolveForLook) {
+          var settledForLook = false;
+          var settleForLook = function (valueForLook) {
+            if (settledForLook) return;
+            settledForLook = true;
+            lookControllerForRun.signal.removeEventListener('abort', onLookAbortForRun);
+            resolveForLook(valueForLook);
+          };
+          var onLookAbortForRun = function () { settleForLook({ ok: false, cancelled: true, error: 'Cancelled' }); };
+          if (lookControllerForRun.signal.aborted) { onLookAbortForRun(); return; }
+          lookControllerForRun.signal.addEventListener('abort', onLookAbortForRun, { once: true });
+          Promise.resolve(executeToolForAgentRun('view_file', { blob_id: blobIdForLook }, {
+            chatId: chatId,
+            runId: runIdForRun,
+            iteration: stepForLook,
+            signal: lookControllerForRun.signal,
+            viewBudget: viewBudgetForRun,
+            viewSources: viewSourcesForRun
+          })).then(settleForLook, function (errForLook) {
+            settleForLook({ ok: false, error: (errForLook && errForLook.message) || 'view_file failed.' });
+          });
+        });
+      } finally {
+        clearTimeout(lookTimerForRun);
+        controllerForRun.signal.removeEventListener('abort', onRunAbortForLook);
+      }
+      // A stopped run says nothing more to the model.
+      if (controllerForRun.signal.aborted) return;
+      if (lookTimedOutForRun) {
+        lookResultForRun = { ok: false, error: 'Drawing its slides took longer than ' + Math.round(ITER_TOOL_VIEW_TIMEOUT_MS_FOR_AGENT_RUN / 60000) + ' minutes.' };
+      }
+      var lookForFileForRun = Object.assign({}, lookResultForRun || { ok: false, error: 'view_file gave no answer.' });
+      var imagesForLookForRun = Array.isArray(lookForFileForRun._viewImages) ? lookForFileForRun._viewImages : [];
+      delete lookForFileForRun._viewImages;
+      var updatedForLook = fileViewRulesForRun.addFileLook(recordForLook.content, lookForFileForRun);
+      if (updatedForLook !== recordForLook.content) {
+        // The record is the one in messagesForRun, so the next build reads the new text.
+        recordForLook.content = updatedForLook;
+        if (Number.isFinite(Number(recordForLook.id)) && repoForRun && typeof repoForRun.updateMessage === 'function') {
+          try {
+            await repoForRun.updateMessage(recordForLook.id, { content: updatedForLook });
+          } catch (errForLookUpdate) { /* best effort: the in-memory copy still serves this reply */ }
+        }
+      }
+      if (lookForFileForRun.ok && imagesForLookForRun.length > 0) {
+        Array.prototype.push.apply(pendingViewImagesForRun, imagesForLookForRun);
+        pendingViewRecordsForRun.push(recordForLook);
+      }
+    };
     var runLimitsForRun = (completionCostKnownForRun && RUN_LIMITS_BY_COST_CATEGORY_FOR_AGENT_RUN[costCategoryForRun])
       || RUN_LIMITS_BY_COST_CATEGORY_FOR_AGENT_RUN.standard;
     // Read by the tool-call-cap PostModelResponse hook.
@@ -895,6 +1054,23 @@
               return msgsForFallbackForRun;
             }());
 
+        // The pictures the last round's view_file calls returned, right after their tool results.
+        // This request only: the next build starts from the saved messages, which never hold them.
+        // Assigned every iteration, so a refusal later in this step never reaches back to an older one.
+        viewImagesMessageForIterForRun = null;
+        if (pendingViewImagesForRun.length > 0) {
+          viewImagesMessageForIterForRun = fileViewRulesForRun ? fileViewRulesForRun.imagesMessage(pendingViewImagesForRun) : null;
+          pendingViewImagesForRun = [];
+          inFlightViewRecordsForRun = pendingViewRecordsForRun;
+          pendingViewRecordsForRun = [];
+          if (viewImagesMessageForIterForRun) {
+            apiMessages.push(viewImagesMessageForIterForRun);
+          } else {
+            await markViewRecordsForRun(inFlightViewRecordsForRun, 'unsent');
+            inFlightViewRecordsForRun = [];
+          }
+        }
+
         if (pendingSystemNotesForRun.length > 0) {
           apiMessages.push({ role: 'system', content: pendingSystemNotesForRun.join('\n\n') });
           pendingSystemNotesForRun = [];
@@ -971,10 +1147,26 @@
                 }
               });
             } catch (streamErrForRun) {
+              var streamErrTextForRun = String((streamErrForRun && streamErrForRun.message) || '');
+              // A provider that refuses pictures in this place (or the size of them) rejects the
+              // request before streaming. Send the step again with a note in their place, and turn
+              // view_file off for the rest of the run so the model does not keep paying to be refused.
+              if (viewImagesMessageForIterForRun && fileViewRulesForRun && /^OpenRouter error (400|404|413|422)\b/.test(streamErrTextForRun)) {
+                var viewIndexForRun = apiMessages.indexOf(viewImagesMessageForIterForRun);
+                if (viewIndexForRun !== -1) {
+                  apiMessages.splice(viewIndexForRun, 1, { role: 'user', content: fileViewRulesForRun.refusedNote(streamErrTextForRun) });
+                }
+                if (viewBudgetForRun) {
+                  viewBudgetForRun.refused = 'view_file is off for the rest of this reply: the model\'s provider refused the pictures it sent earlier. Do not tell the user you checked how the file looks.';
+                }
+                await markViewRecordsForRun(inFlightViewRecordsForRun, 'refused');
+                inFlightViewRecordsForRun = [];
+                viewImagesMessageForIterForRun = null;
+                continue;
+              }
               // A provider that cannot force a tool call rejects the request before streaming. Send
               // the same step again without forcing, and stop forcing for the rest of the run. Any
               // other error, or a second failure, goes to the run's normal error path.
-              var streamErrTextForRun = String((streamErrForRun && streamErrForRun.message) || '');
               if (toolChoiceForIterForRun !== 'required' || !/^OpenRouter error (400|404|422)\b/.test(streamErrTextForRun)) {
                 throw streamErrForRun;
               }
@@ -994,6 +1186,13 @@
           } while (true);
         } finally {
           clearTimeout(iterStreamTimeoutIdForRun);
+        }
+
+        // The request that carried the pictures was answered, so the model saw them. A cancelled
+        // stream leaves them marked unsent by the run's end, which never claims a look.
+        if (inFlightViewRecordsForRun.length > 0 && resultForLoop && !resultForLoop.cancelled) {
+          await markViewRecordsForRun(inFlightViewRecordsForRun, 'shown');
+          inFlightViewRecordsForRun = [];
         }
 
         var turnMessagesForLog = sanitizeMessagesForLogForAgentRun(apiMessages);
@@ -1061,6 +1260,9 @@
         }
 
         var thisLLMCostForRun = turnMainCostAccumForRun - prevTurnMainCostForRun;
+        // The reply that ends the run carries the side calls not saved yet, so each is counted
+        // once even when a hook sends the model back after a reply and a second one follows.
+        var unsavedSideCostForRecordForRun = !hasToolCalls ? Math.max(0, sideCallCostForRun - sideCallCostSavedForRun) : 0;
         var asstRecord = {
           role: 'assistant',
           content: assistantMsg.content || '',
@@ -1070,11 +1272,14 @@
           usageCompletionTokens: logUsageForRun ? (Number(logUsageForRun.completion_tokens) || 0) : 0,
           usageTotalTokens: logUsageForRun ? (Number(logUsageForRun.total_tokens) || 0) : 0,
           usageReasoningTokens: (logUsageForRun && logUsageForRun.completion_tokens_details) ? (Number(logUsageForRun.completion_tokens_details.reasoning_tokens) || 0) : 0,
-          usageCost: !hasToolCalls ? (thisLLMCostForRun + sideCallCostForRun) : thisLLMCostForRun,
+          usageCost: thisLLMCostForRun + unsavedSideCostForRecordForRun,
           searchSources: !hasToolCalls ? sourcesForReplyForAgentRun(accumulatedSearchSourcesForRun, readPagesForRun) : []
         };
         var asstRecordPersisted = await repoForRun.createMessage(chatId, asstRecord, { touchChat: false });
-        if (asstRecordPersisted) messagesForRun.push(asstRecordPersisted);
+        if (asstRecordPersisted) {
+          messagesForRun.push(asstRecordPersisted);
+          sideCallCostSavedForRun += unsavedSideCostForRecordForRun;
+        }
         prevTurnMainCostForRun = turnMainCostAccumForRun;
         if (hasContent) hasAppendedRenderableAssistantMessageForRun = true;
         emitForAgentRun('stream_message_persisted', chatId, null);
@@ -1211,7 +1416,9 @@
               tabId: runStateForRun.targetTabId,
               visualPreflightSessionId: visualPreflightSessionIdForRun,
               signal: controllerForRun.signal,
-              captureScreenshot: captureScreenshotForRun
+              captureScreenshot: captureScreenshotForRun,
+              viewBudget: viewBudgetForRun,
+              viewSources: viewSourcesForRun
             })
           );
         });
@@ -1222,6 +1429,8 @@
           var nameForTimeout = tcForTimeout.function && tcForTimeout.function.name;
           if (nameForTimeout === 'generate_image') {
             toolExecTimeoutMsForRun = Math.max(toolExecTimeoutMsForRun, ITER_TOOL_IMAGE_TIMEOUT_MS_FOR_AGENT_RUN);
+          } else if (nameForTimeout === 'view_file') {
+            toolExecTimeoutMsForRun = Math.max(toolExecTimeoutMsForRun, ITER_TOOL_VIEW_TIMEOUT_MS_FOR_AGENT_RUN);
           } else if (nameForTimeout === 'generate_questions') {
             toolExecTimeoutMsForRun = Math.max(toolExecTimeoutMsForRun, ITER_TOOL_QUIZ_TIMEOUT_MS_FOR_AGENT_RUN);
           }
@@ -1239,6 +1448,14 @@
         } finally {
           clearTimeout(iterToolTimeoutIdForRun);
         }
+        // Side-call cost from each tool's own model call (usage.cost only), counted before anything
+        // can leave the round: a tool that finished while the user pressed Stop was still billed.
+        // Read from the raw result, since generators replace the model-facing object and drop _usage.
+        toolResultsForRun.forEach(function (toolResultForCost) {
+          if (toolResultForCost && typeof toolResultForCost === 'object' && toolResultForCost._usage && costFromUsageForRun) {
+            sideCallCostForRun += costFromUsageForRun(toolResultForCost._usage);
+          }
+        });
         if (controllerForRun.signal.aborted) {
           markRunStoppedForRun();
           break;
@@ -1266,12 +1483,17 @@
           } else if (tcNameForResult === 'eval' && toolResult && toolResult.ok && toolResult._generatedDocument && typeof toolResult._generatedDocument.dataUrl === 'string') {
             toolResultForModel = { ok: true, result: toolResult.result, document: documentResultForModelForRun(toolResult._generatedDocument) };
           }
-          // Side-call cost from any secondary LLM usage on the tool result (usage.cost only).
-          // Read from toolResult (not toolResultForModel): generators replace the model-facing
-          // object and drop _usage. Then strip _usage before the model sees the result.
-          if (toolResult && typeof toolResult === 'object' && toolResult._usage && costFromUsageForRun) {
-            sideCallCostForRun += costFromUsageForRun(toolResult._usage);
+          // view_file's pictures wait for the next request and are never saved with the result.
+          var viewPicturesQueuedForCallForRun = false;
+          if (toolResultForModel && typeof toolResultForModel === 'object' && '_viewImages' in toolResultForModel) {
+            if (tcNameForResult === 'view_file' && Array.isArray(toolResultForModel._viewImages)) {
+              Array.prototype.push.apply(pendingViewImagesForRun, toolResultForModel._viewImages);
+              viewPicturesQueuedForCallForRun = toolResultForModel._viewImages.length > 0;
+            }
+            toolResultForModel = Object.assign({}, toolResultForModel);
+            delete toolResultForModel._viewImages;
           }
+          // _usage was counted when the round returned; strip it before the model sees the result.
           if (toolResultForModel && typeof toolResultForModel === 'object' && '_usage' in toolResultForModel) {
             toolResultForModel = Object.assign({}, toolResultForModel);
             delete toolResultForModel._usage;
@@ -1344,6 +1566,7 @@
             }
           }
           if (toolMsgPersisted) messagesForRun.push(toolMsgPersisted);
+          if (toolMsgPersisted && viewPicturesQueuedForCallForRun) pendingViewRecordsForRun.push(toolMsgPersisted);
           var parsedToolArgsForPostHook = {};
           try { parsedToolArgsForPostHook = JSON.parse(tc.function.arguments || '{}'); } catch (e) {}
           await dispatchHookForRun('PostToolUse', {
@@ -1403,6 +1626,11 @@
               }
               hasAppendedRenderableAssistantMessageForRun = true;
               emitForAgentRun('stream_message_persisted', chatId, null);
+              // An image for the user is looked at as soon as it is saved. One the model marked
+              // for_document is seen in the look at the file it goes into, so it is not paid for twice.
+              if (viewFileOfferedForRun && !isForDocumentImageCallForRun(toolCallsForLoop[gi])) {
+                await lookAtSavedFileForRun(blobIdForImage, toolCallsForLoop[gi].id, iterCount);
+              }
             }
           } catch (e) {}
         }
@@ -1441,6 +1669,10 @@
               }
               if (blobRecordForDoc && blobRecordForDoc.id != null) {
                 var blobIdForDoc = Number(blobRecordForDoc.id);
+                // A deck's drawing, so view_file can print its slides later in this reply.
+                if (docPayloadForRun._slideDrawing && typeof docPayloadForRun._slideDrawing === 'object') {
+                  viewSourcesForRun.set(blobIdForDoc, docPayloadForRun._slideDrawing);
+                }
                 var docMsgPersisted = await repoForRun.createMessage(chatId, {
                   role: 'assistant',
                   content: '',
@@ -1456,6 +1688,17 @@
                 if (docMsgPersisted) messagesForRun.push(docMsgPersisted);
                 hasAppendedRenderableAssistantMessageForRun = true;
                 emitForAgentRun('stream_message_persisted', chatId, null);
+                // One look per call, at the file the user asked for: a PDF made beside it (also_pdf)
+                // is not looked at, and neither is a file edit_document or convert_document made
+                // from the user's own document. A deck can be drawn only from the drawing it kept.
+                // An HTML page changed with edit is looked at again, since an edit can break it.
+                var formatForLookForRun = String(docPayloadForRun.format || '').toLowerCase();
+                if (viewFileOfferedForRun && gdpi === 0
+                    && (tcNameForDoc === 'create_document' || tcNameForDoc === 'eval' || (tcNameForDoc === 'edit' && formatForLookForRun === 'html'))
+                    && LOOKED_AT_FORMATS_FOR_AGENT_RUN[formatForLookForRun]
+                    && (formatForLookForRun !== 'pptx' || (docPayloadForRun._slideDrawing && typeof docPayloadForRun._slideDrawing === 'object'))) {
+                  await lookAtSavedFileForRun(blobIdForDoc, toolCallsForLoop[gdi].id, iterCount);
+                }
               }
             } catch (e) {}
           }
@@ -1639,6 +1882,14 @@
         await emitAndPersistSystemNoticeForRun('Error: ' + friendlyErrForRun);
       }
     } finally {
+      // Pictures queued or in a request that never got an answer were not seen.
+      if (inFlightViewRecordsForRun.length > 0 || pendingViewRecordsForRun.length > 0) {
+        try {
+          await markViewRecordsForRun(inFlightViewRecordsForRun.concat(pendingViewRecordsForRun), 'unsent');
+        } catch (errForUnsentForRun) { /* best effort */ }
+        inFlightViewRecordsForRun = [];
+        pendingViewRecordsForRun = [];
+      }
       if (runStateForRun.cdpLeaseHeld && cdpClientForRun && typeof cdpClientForRun.release === 'function') {
         try { cdpClientForRun.release(runStateForRun.targetTabId, true); } catch (eRelForRun) {}
         runStateForRun.cdpLeaseHeld = false;
@@ -1699,6 +1950,8 @@
           : AGENT_FALLBACK_RESPONSES_FOR_AGENT_RUN[Math.floor(Math.random() * AGENT_FALLBACK_RESPONSES_FOR_AGENT_RUN.length)];
         try { await repoForRun.createMessage(chatId, { role: 'assistant', content: fallbackTextForRun, md: fallbackTextForRun }); } catch (fallbackErrForRun) {}
       }
+      // Before stream_end, which makes every tab rebuild the chat total from the saved messages.
+      await saveUnsavedSideCostForRun();
       flushStreamTextForAgentRun(chatId);
       emitForAgentRun('stream_end', chatId, null);
       clearTimeout(turnTotalTimeoutIdForRun);

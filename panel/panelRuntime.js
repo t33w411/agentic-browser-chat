@@ -3155,6 +3155,18 @@
       }
     }
 
+    // Blob ids of the last reply's generated images to attach to the next message. Read per call,
+    // like the hidden indexes above; with the module missing nothing is attached.
+    function getImagesToStageForPanelRuntime(messagesForStage) {
+      const generatedFileLinksForStage = (globalThis.ABChatContent || {}).generatedFileLinks;
+      if (!generatedFileLinksForStage || typeof generatedFileLinksForStage.imagesToStage !== 'function') return [];
+      try {
+        return generatedFileLinksForStage.imagesToStage(messagesForStage);
+      } catch (errForStage) {
+        return [];
+      }
+    }
+
     function renderChatMessages() {
       const container = root.getElementById('chat-messages-content');
       if (!container) return;
@@ -16647,6 +16659,12 @@
           }
           return 'Taking a visual look';
         }
+        case 'view_file': {
+          var viewPagesForLt = Array.isArray(args.pages) ? args.pages.filter(function (p) { return Number.isInteger(Number(p)) && Number(p) > 0; }) : [];
+          if (viewPagesForLt.length === 1) return 'Checking page ' + Number(viewPagesForLt[0]) + ' of the file';
+          if (viewPagesForLt.length > 1) return 'Checking ' + viewPagesForLt.length + ' pages of the file';
+          return 'Checking how the file looks';
+        }
         case 'eval':
           return 'Computing';
         case 'web_fetch': {
@@ -18800,28 +18818,16 @@
 
       if (!isResendForPanelRuntime) {
         if (draftMountedScopeForPanelRuntime !== draftScopeForSend) return;
-        const msgsForAutoChipScanOffscreen = (CHAT_STORE_FOR_PANEL_RUNTIME[chatId] || {}).messages || [];
-        const blobIdPatternForAutoChipOffscreen = /__blob:(\d+)__/;
-        // A picture made for a document is shown in the document, not the chat, so it is not
-        // attached to the next message either.
-        const hiddenIndexesForAutoChipOffscreen = getHiddenGeneratedFileIndexesForPanelRuntime(msgsForAutoChipScanOffscreen);
-        let lastUserIndexForAutoChipOffscreen = -1;
-        for (var aciOffscreen = msgsForAutoChipScanOffscreen.length - 1; aciOffscreen >= 0; aciOffscreen--) {
-          const msgForAutoChipOffscreen = msgsForAutoChipScanOffscreen[aciOffscreen];
-          if (msgForAutoChipOffscreen && msgForAutoChipOffscreen.role === 'user') { lastUserIndexForAutoChipOffscreen = aciOffscreen; break; }
-        }
-        for (var acjOffscreen = lastUserIndexForAutoChipOffscreen + 1; acjOffscreen < msgsForAutoChipScanOffscreen.length; acjOffscreen++) {
-          const msgForAutoChipAssistantOffscreen = msgsForAutoChipScanOffscreen[acjOffscreen];
-          if (!msgForAutoChipAssistantOffscreen || msgForAutoChipAssistantOffscreen.role !== 'assistant') continue;
-          if (hiddenIndexesForAutoChipOffscreen.has(acjOffscreen)) continue;
-          const autoChipMatchOffscreen = blobIdPatternForAutoChipOffscreen.exec(String(msgForAutoChipAssistantOffscreen.md || ''));
-          if (!autoChipMatchOffscreen) continue;
-          const autoChipBlobIdOffscreen = Number(autoChipMatchOffscreen[1]);
-          if (!Number.isFinite(autoChipBlobIdOffscreen)) continue;
-          // Do not stage a generated image for a text-only model: it would be sent as an image_url
-          // the model cannot read. The image is still saved in the finished assistant turn.
-          if (isModelKnownNonVisionForPanelRuntime(modelForOffscreen)) continue;
-          addInputChipForPanelRuntime({ type: 'image', label: 'Generated image', mimeType: 'image/png', refId: autoChipBlobIdOffscreen, size: 0, kind: 'generated_image' }, { quietDuplicate: true });
+        // The images of the last reply that the model has not seen yet are attached to this message,
+        // so the model sees each image it made at least once. An image made for a document is shown
+        // in the document, and one the agent loop already showed the model is not sent again,
+        // since an attached image goes into every later request of the chat.
+        // Do not stage a generated image for a text-only model: it would be sent as an image_url
+        // the model cannot read. The image is still saved in the finished assistant turn.
+        if (!isModelKnownNonVisionForPanelRuntime(modelForOffscreen)) {
+          getImagesToStageForPanelRuntime((CHAT_STORE_FOR_PANEL_RUNTIME[chatId] || {}).messages || []).forEach(function (autoChipBlobIdOffscreen) {
+            addInputChipForPanelRuntime({ type: 'image', label: 'Generated image', mimeType: 'image/png', refId: autoChipBlobIdOffscreen, size: 0, kind: 'generated_image' }, { quietDuplicate: true });
+          });
         }
         // Last line of defence: a chip whose source is gone would otherwise be sent as a
         // <note_reference>/<chat_reference> the read tool cannot resolve. Broken chips are marked
@@ -18928,6 +18934,9 @@
             visualPreflightSessionId: 'vp_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2),
             isResend: isResendForPanelRuntime,
             contextWindow: modelObjForCostOffscreen ? modelObjForCostOffscreen.contextLength : null,
+            // True only when the cached model list says the model takes no images; the run then
+            // leaves out view_file, whose result is pictures. An unknown model is not marked.
+            modelKnownNonVision: !!(modelObjForCostOffscreen && modelObjForCostOffscreen.supportsVision === false),
             pricing: {
               completionCostPerMillion: completionCostPerMillionOffscreen,
               imageGenCost: imageGenCostOffscreen

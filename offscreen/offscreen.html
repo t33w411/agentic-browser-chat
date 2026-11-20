@@ -34,6 +34,11 @@
   <script src="pdfRaster.js"></script>
   <script src="pdfOcr.js"></script>
 
+  <!-- view_file: its rules (pure, also required by tests/fileView.test.js) and the canvas code that
+       draws its pictures through pdfRaster. Only the agent loop uses them. -->
+  <script src="../agent/fileViewRules.js"></script>
+  <script src="fileViewRender.js"></script>
+
   <script src="../agent/tools.js"></script>
   <script src="../agent/builtinGuides.js"></script>
   <script src="../agent/documentThemes.js"></script>

@@ -675,7 +675,7 @@
             <div class="stg-row">
               <div class="stg-label">
                 <strong>Print PDFs with Chrome</strong>
-                <span>Proper fonts for any language and cleaner layout. While a PDF prints, a tab opens briefly and Chrome shows a "debugging this browser" banner. Off uses the built-in writer, which has standard fonts and Western European characters only.</span>
+                <span>Proper fonts for any language and cleaner layout, and the assistant can check how its Word files, decks, and web pages look. While a PDF prints or a file is checked, a tab opens briefly and Chrome shows a "debugging this browser" banner. Off uses the built-in writer, which has standard fonts and Western European characters only.</span>
               </div>
               <label class="ts"><input type="checkbox" id="settings-pdf-print-toggle" data-action="toggle-pdf-print"><span class="ts-slider"></span></label>
             </div>

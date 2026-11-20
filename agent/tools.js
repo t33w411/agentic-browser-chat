@@ -669,9 +669,28 @@
             prompt: { type: 'string', description: 'What the image should show, or, with source_blob_id, only the change to make. Do not name a shape or size here; aspect_ratio sets it.' },
             source_blob_id: { type: 'integer', description: 'Optional. Blob id (a positive integer) of the image to change. Omit for a new image.' },
             reference_blob_ids: { type: 'array', items: { type: 'integer' }, description: 'Optional. Up to 3 blob ids of images in the conversation for a new image to draw on, such as a logo to include or a style to follow.' },
-            aspect_ratio: { type: 'string', enum: ['1:1', '16:9', '9:16', '4:3', '3:4'], description: 'Required. Sets the image\'s shape: "1:1" square, "16:9" and "4:3" landscape, "9:16" and "3:4" portrait.' }
+            aspect_ratio: { type: 'string', enum: ['1:1', '16:9', '9:16', '4:3', '3:4'], description: 'Required. Sets the image\'s shape: "1:1" square, "16:9" and "4:3" landscape, "9:16" and "3:4" portrait.' },
+            for_document: { type: 'boolean', description: 'Optional. true for a picture you will put in a document, deck, or HTML page; it is checked in that file\'s own look. Leave it out for an image the user sees and downloads in the chat.' }
           },
           required: ['prompt', 'aspect_ratio']
+        }
+      }
+    },
+
+    // ---- Looking at a file ----
+
+    {
+      type: 'function',
+      function: {
+        name: 'view_file',
+        description: 'Look at a file as the user will see it: an image (generated or attached), a PDF made in this chat, a DOCX, a PPTX made in this reply, or an HTML page made in this chat, which is loaded and shown as its first screen at desktop and phone width, with the errors its scripts reported. Use it to check your own work before you say a file or image is done; the document and image guides say when. The pictures come once, in a message right after this result, and later requests leave them out; the result\'s pictures field says whether you saw them. Four pages or fewer are shown full size. More pages, or a longer file with no pages given, come as contact sheets of six numbered thumbnails, up to 24 pages a call. A DOCX, PPTX or HTML page is drawn by Chrome in a background tab, so it needs Print PDFs with Chrome, and Word or PowerPoint can break lines a little differently. Each picture costs about as much as three pages of text, and one reply can look at 24. Returns { ok, file, kind, pages, shown, pictures, blank_pages?, not_shown?, errors?, note? } or { ok: false, error }.',
+        parameters: {
+          type: 'object',
+          properties: {
+            blob_id: { type: 'integer', description: 'The file\'s blob id. For a file or image you made, the number in its link in displayed_to_user (#abchat-docblob-12 or __blob:12__ is 12). For an attached file, the blob_id on its placeholder.' },
+            pages: { type: 'array', items: { type: 'integer' }, description: 'Optional page or slide numbers, from 1. Up to 4 are shown full size; more come as contact sheets. Omit to see the whole file. Not used for an image.' }
+          },
+          required: ['blob_id']
         }
       }
     },
@@ -799,12 +818,23 @@
     });
   }
 
-  // Forward-looking resolver. Today only costCategory shapes the result; agentProfile is accepted so
+  // Tools whose result is pictures the chat model itself must see. A model the model list marks as
+  // having no image input is not offered them: there is nothing it could do with the result.
+  var VISION_ONLY_TOOL_NAMES_FOR_TOOLS = { view_file: true };
+
+  // Forward-looking resolver. costCategory trims descriptions, and vision: false (a chat model
+  // known to take no images) drops the tools that only return pictures. agentProfile is accepted so
   // sub-agents can later request a tool subset, at which point unionRequiredCore would guarantee
-  // mandatory tools survive any subsetting. With no profile it is an identity pass-through.
+  // mandatory tools survive any subsetting.
   function resolveAgentConfigForTools(optionsForResolve) {
     var optsForResolve = optionsForResolve || {};
     var toolDefsForResolve = buildToolDefsForTools(optsForResolve.costCategory);
+    if (optsForResolve.vision === false) {
+      toolDefsForResolve = toolDefsForResolve.filter(function (defForVision) {
+        var nameForVision = defForVision && defForVision.function ? defForVision.function.name : '';
+        return !VISION_ONLY_TOOL_NAMES_FOR_TOOLS[nameForVision];
+      });
+    }
     return { toolDefs: toolDefsForResolve, systemPromptExtras: {} };
   }
 

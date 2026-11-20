@@ -10,9 +10,19 @@
 // and pushing the row past its edge. With the picker's floor set to 0, the 200px row and the short
 // name fail, at 88px and 67px. Removing the floor rule entirely is not the same test: .model-wrap
 // then keeps its automatic minimum, the full name's width, and the picker never shrinks.
+//
+// It also sends a message after a reply that made two images, one the agent loop showed the model
+// and one whose pictures the provider refused, and checks that only the second is attached. With
+// the shown check in panel/panelGeneratedFiles.js turned off (every shown image attached, as
+// before), that check fails with both images attached.
+import { createRequire } from 'node:module';
 import { waitUntil } from '../lib/cdp.mjs';
 import { checkList, startWithExtension } from '../lib/extension.mjs';
 import { openPage, panelHelpers, prepareExtension, togglePanel, waitForPanelReady } from '../lib/panelPage.mjs';
+
+// The texts the agent loop writes into an image's result, taken from the loop's own rules so this
+// check does not lean on the panel's copy.
+const fileViewRules = createRequire(import.meta.url)('../../../agent/fileViewRules.js');
 
 export async function run({ extPath, urls }) {
   const pageUrl = urls.qa;
@@ -45,6 +55,27 @@ export async function run({ extPath, urls }) {
         { url: 'https://e.example/two', title: 'Plain hit two' }
       ] }, { touchChat: false });
       return chat.id;
+    })()`);
+    // A reply that made two images. The agent loop showed the model the first; the provider refused
+    // the pictures for the second, so the model never saw it.
+    const imageChat = await chrome.evaluate(worker, `(async () => {
+      const repo = ABChatShared.panelDataRepo;
+      const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+      const seen = await repo.createAttachmentBlob({ name: 'generated-image', kind: 'generated_image', mimeType: 'image/png', dataUrl: png, size: png.length });
+      const unseen = await repo.createAttachmentBlob({ name: 'generated-image', kind: 'generated_image', mimeType: 'image/png', dataUrl: png, size: png.length });
+      const chat = await repo.createChat({ title: 'Image look', type: 'chat' });
+      const add = (m) => repo.createMessage(chat.id, m, { touchChat: false });
+      await add({ role: 'user', content: 'draw a lighthouse and a boat', md: 'draw a lighthouse and a boat' });
+      await add({ role: 'assistant', content: '', md: '', tool_calls: [
+        { id: 'img_seen', type: 'function', function: { name: 'generate_image', arguments: '{}' } },
+        { id: 'img_unseen', type: 'function', function: { name: 'generate_image', arguments: '{}' } }
+      ] });
+      await add({ role: 'tool', tool_call_id: 'img_seen', content: JSON.stringify({ ok: true, prompt: 'a lighthouse', aspect_ratio: '1:1', pictures: ${JSON.stringify(fileViewRules.PICTURE_STATES.shown)} }) });
+      await add({ role: 'tool', tool_call_id: 'img_unseen', content: JSON.stringify({ ok: true, prompt: 'a boat', aspect_ratio: '1:1', pictures: ${JSON.stringify(fileViewRules.PICTURE_STATES.refused)} }) });
+      await add({ role: 'assistant', content: '', md: '![Generated image](__blob:' + seen.id + '__)', displayOnly: true, tool_call_id: 'img_seen' });
+      await add({ role: 'assistant', content: '', md: '![Generated image](__blob:' + unseen.id + '__)', displayOnly: true, tool_call_id: 'img_unseen' });
+      await add({ role: 'assistant', content: 'Here are both pictures.', md: 'Here are both pictures.' });
+      return { chatId: chat.id, seen: seen.id, unseen: unseen.id };
     })()`);
     const page = await openPage(ext, pageUrl);
     await togglePanel(ext, pageUrl);
@@ -230,6 +261,19 @@ export async function run({ extPath, urls }) {
       const sent = chat.messages.filter((m) => m.role === 'user' && m.content === 'deep research send check');
       return sent.length === 1 && sent[0].research === true;
     })()`), (x) => x === true);
+
+    // The next message in the image chat carries only the image the model has not seen. The hand-off
+    // is still swallowed, so the saved user message is what the next request would be built from.
+    await setViewport(1600, 1000);
+    await clickWhenPresent(`[data-action="select-chat"][data-chat-id="${imageChat.chatId}"]`, 'image chat');
+    await waitUntil(() => inPanel(`const c = root.getElementById('chat-messages-content'); return !!c && c.textContent.indexOf('Here are both pictures.') !== -1;`), (x) => x === true);
+    await inPanel(`const ta = root.querySelector('.chat-textarea'); ta.value = 'image staging check'; ta.dispatchEvent(new Event('input', { bubbles: true })); return 1;`);
+    await mouseClick('.send-btn');
+    await checkSoon('the next message attaches the image the model was not shown, and not the one it was', () => chrome.evaluate(worker, `(async () => {
+      const chat = await ABChatShared.panelDataRepo.getChat(${imageChat.chatId});
+      const sent = chat.messages.filter((m) => m.role === 'user' && m.content === 'image staging check');
+      return sent.length === 1 ? (sent[0].chips || []).map((c) => Number(c.refId)) : null;
+    })()`), (x) => Array.isArray(x) && x.length === 1 && x[0] === imageChat.unseen);
     return checks;
   } finally {
     await chrome.close();

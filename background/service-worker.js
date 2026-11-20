@@ -5000,13 +5000,43 @@ chrome.runtime.onMessage.addListener((messageForServiceWorker, senderForServiceW
       html: messageForServiceWorker.html,
       title: messageForServiceWorker.title,
       fonts: messageForServiceWorker.fonts,
-      templates: messageForServiceWorker.templates
+      templates: messageForServiceWorker.templates,
+      noPrompt: messageForServiceWorker.noPrompt === true
     }).then(function (printedForServiceWorker) {
       releaseServiceWorkerKeepAliveForServiceWorker();
       sendResponseForServiceWorker(printedForServiceWorker);
     }, function (errorForPrint) {
       releaseServiceWorkerKeepAliveForServiceWorker();
       sendResponseForServiceWorker({ ok: false, code: "failed", error: errorForPrint && errorForPrint.message ? errorForPrint.message : "Printing failed." });
+    });
+    return true;
+  }
+
+  // view_file loads an HTML page made in this chat in a blank tab and draws it (documentPrinter).
+  if (messageForServiceWorker.action === (actionsForServiceWorker.snapshotHtmlPage || "snapshotHtmlPage")) {
+    var snapshotPrinterForServiceWorker = backgroundNamespaceForServiceWorker.documentPrinter;
+    // Only the agent loop (an extension page) loads a page for a look. A content script has no
+    // reason to, and a page could reach one.
+    if (senderForServiceWorker && senderForServiceWorker.tab) {
+      sendResponseForServiceWorker({ ok: false, code: "failed", error: "Only the extension's own pages can load a page for a look." });
+      return false;
+    }
+    if (!snapshotPrinterForServiceWorker || typeof snapshotPrinterForServiceWorker.snapshotHtml !== "function") {
+      sendResponseForServiceWorker({ ok: false, code: "failed", error: "The page loader is unavailable." });
+      return false;
+    }
+    acquireServiceWorkerKeepAliveForServiceWorker();
+    snapshotPrinterForServiceWorker.snapshotHtml({
+      html: messageForServiceWorker.html,
+      desktop: messageForServiceWorker.desktop,
+      phone: messageForServiceWorker.phone,
+      pictures: messageForServiceWorker.pictures !== false
+    }).then(function (snappedForServiceWorker) {
+      releaseServiceWorkerKeepAliveForServiceWorker();
+      sendResponseForServiceWorker(snappedForServiceWorker);
+    }, function (errorForSnapshot) {
+      releaseServiceWorkerKeepAliveForServiceWorker();
+      sendResponseForServiceWorker({ ok: false, code: "failed", error: errorForSnapshot && errorForSnapshot.message ? errorForSnapshot.message : "The page could not be loaded." });
     });
     return true;
   }

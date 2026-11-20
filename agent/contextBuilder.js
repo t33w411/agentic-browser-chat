@@ -294,6 +294,9 @@
     read_tab: true,
     get_environment: true,
     read_document_structure: true,
+    // A saved blob never changes, so two identical view_file results describe the same pictures.
+    // Its pictures are never in the saved result, only in the request after it.
+    view_file: true,
     eval: true,
     page_layout: true,
     skill: true

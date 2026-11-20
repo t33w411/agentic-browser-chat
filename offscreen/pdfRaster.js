@@ -5,11 +5,13 @@
 // which a service worker has no answer for. The offscreen document also gives pdf.js its proper
 // worker, so page rasterization does not run on the thread that is parsing the file.
 //
-// pdf.js is a megabyte of script that only scanned PDFs ever need, so it is loaded on first use
-// instead of at document creation, which happens for every agent run and every reminder beep.
+// pdf.js is a megabyte of script that only scanned PDFs and view_file need, so it is loaded on
+// first use instead of at document creation, which happens for every agent run and every reminder
+// beep.
 //
-// Callers are in this same document (pdfOcr.js), so this exposes plain functions rather than a
-// message listener: the encoded PDF never has to cross a message boundary to reach it.
+// Callers are in this same document (pdfOcr.js, and fileViewRender.js for view_file), so this
+// exposes plain functions rather than a message listener: the encoded PDF never has to cross a
+// message boundary to reach it.
 (function () {
   var globalScopeForPdfRaster = globalThis;
   var nsForPdfRaster = globalScopeForPdfRaster.ABChatOffscreen || {};
@@ -140,7 +142,8 @@
     }
   }
 
-  function renderSinglePageForPdfRaster(pdfForPdfRaster, pageNumberForPdfRaster, maxEdgeForPdfRaster, signalForPdfRaster) {
+  // qualityForPdfRaster is the JPEG quality; omitted, it is the transcription default.
+  function renderSinglePageForPdfRaster(pdfForPdfRaster, pageNumberForPdfRaster, maxEdgeForPdfRaster, signalForPdfRaster, qualityForPdfRaster) {
     return awaitWithDeadlineForPdfRaster(
       pdfForPdfRaster.getPage(pageNumberForPdfRaster),
       {
@@ -190,8 +193,14 @@
         var blankForPdfRaster = isRenderedPageBlankForPdfRaster(canvasForPdfRaster);
         var dataUrlForPdfRaster = blankForPdfRaster
           ? ''
-          : canvasForPdfRaster.toDataURL('image/jpeg', PDF_RASTER_JPEG_QUALITY_FOR_PDF_RASTER);
-        return { page: pageNumberForPdfRaster, dataUrl: dataUrlForPdfRaster, blank: blankForPdfRaster };
+          : canvasForPdfRaster.toDataURL('image/jpeg', Number(qualityForPdfRaster) > 0 ? Number(qualityForPdfRaster) : PDF_RASTER_JPEG_QUALITY_FOR_PDF_RASTER);
+        return {
+          page: pageNumberForPdfRaster,
+          dataUrl: dataUrlForPdfRaster,
+          blank: blankForPdfRaster,
+          width: canvasForPdfRaster.width,
+          height: canvasForPdfRaster.height
+        };
       }).finally(function () {
         if (typeof pageForPdfRaster.cleanup === 'function') pageForPdfRaster.cleanup();
         canvasForPdfRaster.width = 0;
@@ -305,7 +314,71 @@
     });
   }
 
+  // An open PDF for a caller that needs the page count before it can choose pages (view_file).
+  // Resolves to { numPages, pageSize(n), renderPage(n, { maxEdge, quality }), close() }.
+  // renderPage resolves to { page, dataUrl, blank, width, height }, with an empty dataUrl for a
+  // blank page. The caller must call close(), in a finally.
+  function openDocumentForPdfRaster(bytesForOpen, optionsForOpen) {
+    var optsForOpen = optionsForOpen || {};
+    var signalForOpen = optsForOpen.signal || null;
+    return awaitWithDeadlineForPdfRaster(
+      loadPdfLibraryForPdfRaster(),
+      {
+        signal: signalForOpen,
+        timeoutMs: PDF_RASTER_LIBRARY_TIMEOUT_MS_FOR_PDF_RASTER,
+        timeoutMessage: 'Loading the PDF rendering library timed out.',
+        cancel: function () {
+          pdfLibraryPromiseForPdfRaster = null;
+        }
+      }
+    ).then(function (pdfjsLibForOpen) {
+      var loadingTaskForOpen = pdfjsLibForOpen.getDocument({ data: new Uint8Array(bytesForOpen) });
+      return awaitWithDeadlineForPdfRaster(
+        loadingTaskForOpen.promise,
+        {
+          signal: signalForOpen,
+          timeoutMs: PDF_RASTER_DOCUMENT_TIMEOUT_MS_FOR_PDF_RASTER,
+          timeoutMessage: 'Loading the PDF for rendering timed out.',
+          cancel: function () {
+            if (loadingTaskForOpen && typeof loadingTaskForOpen.destroy === 'function') loadingTaskForOpen.destroy();
+          }
+        }
+      );
+    }).then(function (pdfForOpen) {
+      var closedForOpen = false;
+      return {
+        numPages: pdfForOpen.numPages,
+        pageSize: function (pageNumberForSize) {
+          return awaitWithDeadlineForPdfRaster(pdfForOpen.getPage(pageNumberForSize), {
+            signal: signalForOpen,
+            timeoutMs: PDF_RASTER_PAGE_TIMEOUT_MS_FOR_PDF_RASTER,
+            timeoutMessage: 'Loading PDF page ' + pageNumberForSize + ' timed out.'
+          }).then(function (pageForSize) {
+            var viewportForSize = pageForSize.getViewport({ scale: 1 });
+            return { width: viewportForSize.width, height: viewportForSize.height };
+          });
+        },
+        renderPage: function (pageNumberForRender, renderOptions) {
+          var renderOpts = renderOptions || {};
+          var maxEdgeForRender = Number(renderOpts.maxEdge) > 0 ? Number(renderOpts.maxEdge) : PDF_RASTER_DEFAULT_MAX_EDGE_FOR_PDF_RASTER;
+          return renderSinglePageForPdfRaster(pdfForOpen, pageNumberForRender, maxEdgeForRender, signalForOpen, renderOpts.quality);
+        },
+        close: function () {
+          if (closedForOpen) return;
+          closedForOpen = true;
+          if (typeof pdfForOpen.destroy === 'function') {
+            try {
+              var destroyedForOpen = pdfForOpen.destroy();
+              if (destroyedForOpen && typeof destroyedForOpen.catch === 'function') destroyedForOpen.catch(function () {});
+            } catch (errForClose) {}
+          }
+        }
+      };
+    });
+  }
+
   nsForPdfRaster.pdfRaster = {
+    openDocument: openDocumentForPdfRaster,
     rasterizePages: rasterizePagesForPdfRaster,
     defaultMaxEdge: PDF_RASTER_DEFAULT_MAX_EDGE_FOR_PDF_RASTER
   };

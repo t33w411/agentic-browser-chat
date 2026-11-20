@@ -101,7 +101,12 @@ You get back { totals } and a note that the document was shown; the user gets th
 The result has format, filename, size, and a note. A themed DOCX, PDF, XLSX, or PPTX also has theme. For edit_document the note says what was changed. For a PDF the note also says when the built-in writer made it, and why. It may have warnings: characters the built-in PDF writer could not show, blocks, table rows, or columns left out, XLSX formulas that give an error or were kept as text, a renamed sheet, slide content that was cut or does not fit, a picture that could not be used or will look soft, a cover that was left out, a DOCX font that is not in the list, a PDF font that could not be found or downloaded, a theme or page value that was not recognised, or a theme ignored for an edited document. Read them. When content was left out or changed, tell the user what and why, and offer the fix (another format, or splitting the document).
 With also_pdf, the result also has pdf, holding the PDF's filename and size and any note or warnings the first file did not already give, or pdf_error saying why the PDF could not be made. The first file is made either way, so do not make it again; tell the user why there is no PDF.
 
-## 8. Size limits
+## 8. Checking the file
+When you have view_file, every DOCX, PDF, and PPTX you make with create_document or __document__ is shown to you in the message after its result, with no call: up to four pages or slides full size, and a longer file as contact sheets of numbered thumbnails. The result's look field says what was shown, and its note says why when a file could not be shown. Check each file this way before you tell the user it is done, including a length the user set, such as one page. To read pages of a longer file closely, call view_file with the blob id in the result's displayed_to_user and up to four pages. With also_pdf only the first file is shown, and a file from edit_document or convert_document only when you call view_file. A deck can be looked at only in the reply that made it.
+Look for text cut off, running off the page or slide, or overlapping something; a blank or nearly empty page or slide; a picture that is missing, stretched, or badly cropped, such as a head cut off; text hard to read on its background; a table so narrow its words break; a heading alone at the foot of a page. Fix those and make the file again under the same filename; the new file is shown to you the same way. Change nothing for taste. A reply can look at one file three times.
+The pages are Chrome's drawing, and Word or PowerPoint can break lines and pages a little differently, so never say you opened the file in Word or PowerPoint. When a file was not shown to you, do not say you checked how it looks.
+
+## 9. Size limits
 Content past a limit is dropped, and the result's warnings say what was left out (the note counts images past 50). Plan a bigger document as parts. The guide for each format gives its limits.`;
 
   const DOCX_PDF_GUIDE_BODY_FOR_BUILTIN_GUIDES = String.raw`# Making a DOCX or PDF
@@ -173,7 +178,7 @@ cover adds a cover page before any of the three: { "title": "...", "subtitle": "
 - The cover is page 1, but it shows no page number or header.
 - Do not also open the content with a title block. One that repeats the cover's title is left out.
 - A document rebuilt from read_document_structure keeps its own first page and gets no cover.
-- For the photo, read the builtin-images guide and call generate_image with aspect_ratio "4:3" ("16:9" on a landscape page), a prompt giving the subject, mood, and colours to suit the theme, and no text, lettering, or logos in the image. Generate it in the same response as the document's other pictures, then make the document with their ids. If generate_image fails or is not available, make the document with the theme's cover and tell the user why it has no photo.
+- For the photo, read the builtin-images guide and call generate_image with aspect_ratio "4:3" ("16:9" on a landscape page), for_document true, a prompt giving the subject, mood, and colours to suit the theme, and no text, lettering, or logos in the image. Generate it in the same response as the document's other pictures, then make the document with their ids. If generate_image fails or is not available, make the document with the theme's cover and tell the user why it has no photo.
 
 A PDF printed by Chrome keeps all of the above. The built-in PDF writer does not: its table cells are plain text (no inline bold, italic, or links inside cells, though a cell's colour, fill, and alignment are kept), colspan merges are kept but a rowspan shows as empty cells below the first, and a table keeps its first 500 rows. If its warnings say rows were left out, use DOCX or XLSX for the full table.
 
@@ -251,7 +256,7 @@ Pass "slides": [{ "layout": "...", "title": "...", ... }]. The deck is 16:9 in t
 - One idea per slide, with a title that states its point ("Revenue beat plan by 9%" rather than "Revenue").
 - Three to six bullets of about one line each. Text is sized to fit, getting smaller as there is more of it, and a slide that does not fit even at the smallest size is named in the warnings. Split it across two slides.
 - Vary the layouts, with never more than two bullet slides in a row: a key figure on a big_number slide, a comparison in two_column, figures in a table, a picture beside its point.
-- Pictures: unless the deck is restrained (section 4 of builtin-documents) or the user asked for none, generate a photo for the title slide and one for each section slide, five at most. A deck with no title slide, such as the one or two slides the user asked for, still gets one photo: on an image slide beside three or four short points, or as the background of a slide with little text, such as big_number. Read the builtin-images guide, then make them all in one response, where the calls run at the same time: aspect_ratio "16:9", a prompt giving the subject, mood, and colours to suit the theme, and no text, lettering, or logos in the image. Then make the deck with their ids. Add a picture to another slide only where it carries the point: a product beside its features, a screenshot being explained. If generate_image fails or is not available, make the deck without photos rather than stopping, and tell the user why it has none.
+- Pictures: unless the deck is restrained (section 4 of builtin-documents) or the user asked for none, generate a photo for the title slide and one for each section slide, five at most. A deck with no title slide, such as the one or two slides the user asked for, still gets one photo: on an image slide beside three or four short points, or as the background of a slide with little text, such as big_number. Read the builtin-images guide, then make them all in one response, where the calls run at the same time: aspect_ratio "16:9", for_document true, a prompt giving the subject, mood, and colours to suit the theme, and no text, lettering, or logos in the image. Then make the deck with their ids. Add a picture to another slide only where it carries the point: a product beside its features, a screenshot being explained. If generate_image fails or is not available, make the deck without photos rather than stopping, and tell the user why it has none.
 - Keep text over a photo short.
 - No typed bullet characters; the slide draws its own.
 - Slides are numbered unless page_numbers is false. Title and section slides never show a number, and a deck of one slide is not numbered unless page_numbers is true.
@@ -408,6 +413,7 @@ Describe what the image should show. When changing an existing image, describe o
 - aspect_ratio still sets the output shape. Use the one closest to the source image unless the user asks for a new shape.
 - Pass a positive integer, or leave the field out for a new image. Never pass 0, null, or an empty value.
 - When you regenerate because an earlier image had the wrong aspect ratio, leave source_blob_id out. Starting from the wrong shape holds the new image to the old composition.
+- The image model gets the source image itself, so you do not need to see it to change it. To check something in an image from an earlier reply, call view_file with its blob id.
 
 ## 5. Reference images: reference_blob_ids
 - Up to 3 blob ids of images in the conversation for the new image to draw on: a logo to include, a product or person to match, a style to follow. Take them from the blob_id attribute on <image>, <screenshot>, and <file> placeholders, from a note's attachment list, or from an earlier generated image.
@@ -416,8 +422,10 @@ Describe what the image should show. When changing an existing image, describe o
 
 ## 6. The result
 - ok: true means the image was made and, unless a document uses it (section 1), is on screen. The result also gives prompt, aspect_ratio, and, when they could be measured, width and height in pixels. Check them against what the user asked for before you say the image is done.
+- When you have view_file, an image you make for the user is shown to you in the message after its result, with no call. Check it before you say it is done: lettering spelled right, the number of things the user asked for, the person, product, or layout they described, and the shape.
+- Set for_document to true on every picture you make for a document, deck, or HTML page. It is shown to you in that file's own look instead, so it is not paid for twice. Leave it out for an image the user asked for in the chat, even when a file will also use it.
 - When you already showed an image earlier while answering the same message, the result carries a note. If the new image replaces an earlier one, your reply must say so, why, and which one is final.
-- Do not regenerate to polish an image that succeeded. Regenerate only when it is wrong, such as the wrong shape or plainly not what was asked.
+- Do not regenerate to polish an image that succeeded. Regenerate only when it is wrong: misspelled or garbled text, a wrong count, the wrong subject, something the user asked for that is missing, or the wrong shape.
 - Errors about the setup (no API key, no image model selected, image generation on the free model) are for the user to fix. Tell them what to change and do not call again.
 
 ## 7. Examples
@@ -500,7 +508,7 @@ A page can show an image from this conversation, named by its blob id as abchat-
 - The downloaded file holds the pictures. The saved source keeps abchat-blob:N, which is what edit, grep, and read show.
 - Each abchat-blob:N is a full copy of the picture, so name a picture used in several places once, in a CSS class or a JavaScript constant.
 - Add pictures when the user asks, or when the page exists to be looked at, such as a landing page, a menu, or an invitation. A tool or a game needs none. Generated images have no transparent background, so draw game pieces and icons with SVG or canvas.
-- For new pictures, read the builtin-images guide, make them all in one response, then make the page with their ids. If generate_image fails or is not available, make the page without them and tell the user why.
+- For new pictures, read the builtin-images guide, make them all in one response with for_document true, then make the page with their ids. If generate_image fails or is not available, make the page without them and tell the user why.
 
 ## 4. Making it work the first time
 The user sees the page, not your code, and cannot fix it. Before you call:
@@ -525,10 +533,13 @@ The edit saves a new copy and shows it to the user. Its result has the new copy'
 Make the page again with create_document only when most of it changes, and give it the same filename, so the earlier version's html is left out of the conversation with a note in its place. Use a new filename only when the user wants to keep both versions, such as a light one and a dark one side by side; "redo it" or "make it light" replaces the page.
 Do not read back a file you just made to check it. It holds exactly the html you sent, apart from any repair the warnings name.
 
-## 7. The result
+## 7. Checking the page
+When you have view_file, every page you make or change with edit is loaded for you in a background tab, with no call. The message after the result shows its first screen at desktop and phone width, and the result's look.errors lists what its scripts reported while it loaded: uncaught errors, console errors, files that failed to load, and dialogs. Fix every error, and anything the pictures show broken: a blank or cut-off area, text overlapping, or a layout wider than the phone screen (look.phone_overflow). Nothing is clicked or typed, so check the logic behind each control by reading your code. A reply gets pictures of one page three times; after that, an edit still lists the errors. When a page was not loaded, do not say you checked how it looks.
+
+## 8. The result
 The result has format, filename, size, rev, and a note. It has warnings when the writer added a doctype or a charset line, or could not use a picture, which then shows as missing. The file is shown to the user, so do not repeat the code in your reply. To point to the file, copy the link from displayed_to_user, such as [budget-planner.html](#abchat-docblob-12), and tell the user to download it and open it in their browser. Make each file once. Call again only to fix a problem or to make a change the user asked for.
 
-## 8. Limits
+## 9. Limits
 A page can be up to 1,000,000 characters, and the file with its pictures up to 16 MB. A larger one is refused and nothing is made. Generate repeated markup with a script, or keep large data out of the page. A page shows up to 30 different pictures, and any more show as missing.`;
 
   const DOCUMENT_FORMATS_FOR_BUILTIN_GUIDES = ['docx', 'pdf', 'xlsx', 'csv', 'pptx', 'html'];

@@ -255,3 +255,85 @@ test('a document saved before it listed its pictures hides none', function () {
   ];
   assert.deepStrictEqual(hiddenIndexesForTest(messagesForTest), []);
 });
+
+// ---------------------------------------------------------------------------
+// imagesToStage: which images of the last reply are attached to the user's next message. The
+// agent loop shows the model each image it makes for the user once and marks the image's result;
+// an attached image is sent again on every later request, so a shown one is not attached.
+//
+// Checked against this module with the shown check turned off, which is the rule before this
+// change (every image the chat shows is attached): "an image the model was shown" and "a shown
+// result is matched" fail there, because the image the model was shown is attached.
+
+const fileViewRulesForTest = require('../agent/fileViewRules.js');
+
+function imageResultForTest(callId, pictures) {
+  const result = { ok: true, prompt: 'a lighthouse', aspect_ratio: '16:9', width: 1376, height: 768 };
+  if (pictures !== undefined) result.pictures = pictures;
+  return { role: 'tool', tool_call_id: callId, content: JSON.stringify(result), md: '' };
+}
+
+test('the panel\'s copy of the "shown" text is the text the agent loop writes', function () {
+  assert.strictEqual(generatedFileLinksForTest.SHOWN_PICTURES_TEXT, fileViewRulesForTest.PICTURE_STATES.shown);
+});
+
+test('an image the model was shown is not attached to the next message; one it was not shown is', function () {
+  const states = fileViewRulesForTest.PICTURE_STATES;
+  const messagesForTest = [
+    userMessageForTest('draw a lighthouse, a boat, a gull and a buoy'),
+    toolCallMessageForTest('g1', 'generate_image'),
+    imageResultForTest('g1', states.shown),
+    imageResultForTest('g2', states.refused),
+    imageResultForTest('g3', states.unsent),
+    imageResultForTest('g4'),
+    pictureMessageForTest('g1', 11),
+    pictureMessageForTest('g2', 12),
+    pictureMessageForTest('g3', 13),
+    pictureMessageForTest('g4', 14),
+    replyMessageForTest('Here are your four pictures.')
+  ];
+  assert.deepStrictEqual(generatedFileLinksForTest.imagesToStage(messagesForTest), [12, 13, 14],
+    'refused, never sent, and no look at all (marked for a document, or an older chat) are attached');
+});
+
+test('a result still pending, in older wording, or unreadable does not count as shown', function () {
+  const messagesForTest = [
+    userMessageForTest('draw three'),
+    imageResultForTest('a', fileViewRulesForTest.PICTURE_STATES.pending),
+    imageResultForTest('b', 'The pictures follow in the next message.'),
+    { role: 'tool', tool_call_id: 'c', content: '{"pictures": "Shown', md: '' },
+    pictureMessageForTest('a', 21),
+    pictureMessageForTest('b', 22),
+    pictureMessageForTest('c', 23)
+  ];
+  assert.deepStrictEqual(generatedFileLinksForTest.imagesToStage(messagesForTest), [21, 22, 23]);
+});
+
+test('only the last reply\'s images are attached, and not ones a document in it holds', function () {
+  const messagesForTest = [
+    userMessageForTest('draw a gull'),
+    imageResultForTest('old'),
+    pictureMessageForTest('old', 31),
+    userMessageForTest('now a flyer with a photo'),
+    imageResultForTest('p'),
+    pictureMessageForTest('p', 32),
+    toolResultMessageForTest('d'),
+    documentMessageForTest('d', 'flyer.pdf', 33, [32]),
+    imageResultForTest('q'),
+    pictureMessageForTest('q', 34)
+  ];
+  assert.deepStrictEqual(generatedFileLinksForTest.imagesToStage(messagesForTest), [34]);
+  assert.deepStrictEqual(generatedFileLinksForTest.imagesToStage([]), []);
+  assert.deepStrictEqual(generatedFileLinksForTest.imagesToStage(null), []);
+});
+
+test('a shown result is matched to its own image by tool_call_id, not by position', function () {
+  const messagesForTest = [
+    userMessageForTest('two images'),
+    imageResultForTest('x', undefined),
+    imageResultForTest('y', fileViewRulesForTest.PICTURE_STATES.shown),
+    pictureMessageForTest('y', 42),
+    pictureMessageForTest('x', 41)
+  ];
+  assert.deepStrictEqual(generatedFileLinksForTest.imagesToStage(messagesForTest), [41]);
+});

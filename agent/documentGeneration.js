@@ -7393,6 +7393,22 @@
     return 'A PDF of slides needs Chrome\'s printer, and ' + cause + '. Make the deck as a PPTX instead, and ' + settings + '.';
   }
 
+  // The print job for a deck already drawn ({ deck, records }, the keep of
+  // buildPptxForDocumentGeneration). The slide PDF and view_file's look at a deck both print
+  // through it, so the pages the agent looks at are the pages a slide PDF would hold. null when the
+  // slide renderer is not loaded.
+  function slidePrintJobForDocumentGeneration(drawnDeck, title) {
+    var printer = agentNamespaceForDocumentGeneration.documentPrint;
+    if (!drawnDeck || !drawnDeck.deck || !Array.isArray(drawnDeck.records)) return null;
+    if (!printer || typeof printer.renderSlides !== 'function') return null;
+    var navigator = globalScopeForDocumentGeneration.navigator;
+    var rendered = printer.renderSlides(pptxPrintDeckForDocumentGeneration(drawnDeck.deck, drawnDeck.records), {
+      title: title,
+      lang: navigator && navigator.language
+    });
+    return { html: rendered.html, title: title || '', fonts: rendered.fonts, templates: rendered.templates };
+  }
+
   function buildSlidePdfForDocumentGeneration(inputForDocumentGeneration, contextForPdf, depsForPdf, optionsForPdf) {
     var safeOptions = optionsForPdf || {};
     var warnings = (contextForPdf && contextForPdf.warnings) || [];
@@ -7411,12 +7427,7 @@
     });
     return drawing.then(function (drawnDeck) {
       pptxWarningsForDocumentGeneration(drawnDeck.deck.issues).forEach(function (warning) { warnings.push(warning); });
-      var navigator = globalScopeForDocumentGeneration.navigator;
-      var rendered = printer.renderSlides(pptxPrintDeckForDocumentGeneration(drawnDeck.deck, drawnDeck.records), {
-        title: safeOptions.title,
-        lang: navigator && navigator.language
-      });
-      return Promise.resolve(printPdf({ html: rendered.html, title: safeOptions.title || '', fonts: rendered.fonts, templates: rendered.templates }));
+      return Promise.resolve(printPdf(slidePrintJobForDocumentGeneration(drawnDeck, safeOptions.title)));
     }).then(function (printed) {
       if (!printed || !printed.ok || !printed.base64) throw new Error(slidePdfFailureForDocumentGeneration(printed, !!safeOptions.drawn));
       (Array.isArray(printed.warnings) ? printed.warnings : []).forEach(function (warning) { if (warning) warnings.push(String(warning)); });
@@ -7798,13 +7809,29 @@
   // from, so its pictures are loaded once and its slides match the PPTX's. The PDF carries only
   // the note and warnings the first file did not already give; when it cannot be made, the first
   // file still stands and companionError says why.
+  //
+  // A PPTX result also carries _slideDrawing, the drawing it was written from, with the title its
+  // slide PDF would have. It is never saved or sent to the model: the agent loop keeps it for the
+  // rest of the reply so view_file can print the deck's slides without drawing them again.
   function createDocumentForDocumentGeneration(inputForDocumentGeneration, depsForDocumentGeneration) {
     var safeInputForCompanion = inputForDocumentGeneration || {};
     var formatForCompanion = String(safeInputForCompanion.format || '').toLowerCase();
     var wantsCompanion = safeInputForCompanion.also_pdf === true && (formatForCompanion === 'docx' || formatForCompanion === 'pptx');
-    if (!wantsCompanion) return createSingleDocumentForDocumentGeneration(safeInputForCompanion, depsForDocumentGeneration, null);
     var keptDeck = formatForCompanion === 'pptx' ? {} : null;
-    return createSingleDocumentForDocumentGeneration(safeInputForCompanion, depsForDocumentGeneration, { keepDeck: keptDeck }).then(function (primaryResult) {
+    var keepSlideDrawing = function (primaryResult) {
+      if (keptDeck && keptDeck.deck && primaryResult && primaryResult.ok) {
+        primaryResult._slideDrawing = {
+          deck: keptDeck.deck,
+          records: keptDeck.records,
+          title: safeInputForCompanion.title || String(primaryResult.filename || '').replace(/\.pptx$/i, '')
+        };
+      }
+      return primaryResult;
+    };
+    if (!wantsCompanion) {
+      return createSingleDocumentForDocumentGeneration(safeInputForCompanion, depsForDocumentGeneration, keptDeck ? { keepDeck: keptDeck } : null).then(keepSlideDrawing);
+    }
+    return createSingleDocumentForDocumentGeneration(safeInputForCompanion, depsForDocumentGeneration, { keepDeck: keptDeck }).then(keepSlideDrawing).then(function (primaryResult) {
       var companionInput = Object.assign({}, safeInputForCompanion, {
         format: 'pdf',
         also_pdf: false,
@@ -7924,6 +7951,8 @@
 
   agentNamespaceForDocumentGeneration.documentGeneration = {
     createDocument: createDocumentForDocumentGeneration,
+    // view_file prints a deck made earlier in the reply from its _slideDrawing.
+    slidePrintJob: slidePrintJobForDocumentGeneration,
     // edit with type "attachment" builds a changed HTML file through this, as create_document does,
     // so the copy holds the pictures its source names.
     packHtmlFile: packHtmlFileForDocumentGeneration,

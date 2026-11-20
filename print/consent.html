@@ -31,19 +31,22 @@
       }
     }
     * { box-sizing: border-box; }
-    html, body { height: 100%; margin: 0; }
+    html { height: 100%; }
+    /* The card is centred by its auto margins, not by align-items: a card taller than the window
+       then starts at the top and scrolls, where centring pushed its heading out of reach above it. */
     body {
+      margin: 0;
+      min-height: 100%;
       background: var(--bg);
       color: var(--fg);
       font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       display: flex;
-      align-items: center;
-      justify-content: center;
       padding: 20px;
     }
     .card {
+      margin: auto;
       width: 100%;
-      max-width: 400px;
+      max-width: 480px;
       border: 1px solid var(--border);
       border-radius: 12px;
       padding: 22px;
@@ -101,7 +104,8 @@
   <div class="card">
     <h1>Print PDFs with Chrome?</h1>
     <p>ABChat can make PDFs with Chrome's own print engine. They get proper fonts for any language, cleaner page layout, and clickable links and bookmarks.</p>
-    <div class="warn">While a PDF prints, a tab opens and closes in the background and Chrome shows a banner saying ABChat "started debugging this browser". It lasts a few seconds. ABChat only uses it on that tab, never on your pages.</div>
+    <p>The assistant also uses it to check how its Word files, decks, and web pages look. A web page runs there as it would on your computer, with no access to ABChat or your other tabs.</p>
+    <div class="warn">While a PDF prints or a file is checked, a tab opens and closes in the background and Chrome shows a banner saying ABChat "started debugging this browser". It lasts a few seconds. ABChat only uses it on that tab, never on your pages.</div>
     <p>Fonts are downloaded from jsDelivr, a public font server. The built-in writer needs neither, but it only has standard fonts and Western European characters. You can change this any time in Settings.</p>
     <div class="actions">
       <button type="button" id="print-use-basic-btn">Use the built-in writer</button>

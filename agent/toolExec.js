@@ -8763,6 +8763,8 @@ self.onmessage = function (e) {
       // __document__ with also_pdf: the PDF rides along and is saved beside the first file.
       if (built.companion) baseResult._generatedDocument.companion = built.companion;
       if (built.companionError) baseResult._generatedDocument.companionError = built.companionError;
+      // A deck's drawing, kept by the agent loop for view_file and never saved.
+      if (built._slideDrawing) baseResult._generatedDocument._slideDrawing = built._slideDrawing;
       return baseResult;
     } catch (docErr) {
       baseResult.document_error = 'Document generation failed: ' + ((docErr && docErr.message) || String(docErr));
@@ -10582,7 +10584,8 @@ self.onmessage = function (e) {
 
   // Chrome prints a PDF in the service worker (background/documentPrinter.js). Only the
   // extension's own pages may ask, and the agent loop runs in one; elsewhere the built-in
-  // writer makes the PDF.
+  // writer makes the PDF. jobForPrint.noPrompt, for a print the user did not ask for, refuses
+  // instead of opening the consent window.
   function printPdfForToolExec(jobForPrint) {
     return new Promise(function (resolveForPrint) {
       var actionsForPrint = (globalScopeForToolExec.ABChatShared || {}).actions || {};
@@ -10592,7 +10595,8 @@ self.onmessage = function (e) {
           html: jobForPrint.html,
           title: jobForPrint.title,
           fonts: jobForPrint.fonts,
-          templates: jobForPrint.templates
+          templates: jobForPrint.templates,
+          noPrompt: jobForPrint.noPrompt === true
         }, function (responseForPrint) {
           if (chrome.runtime.lastError) {
             resolveForPrint({ ok: false, code: 'failed', error: chrome.runtime.lastError.message || 'the printer did not answer' });
@@ -10602,6 +10606,30 @@ self.onmessage = function (e) {
         });
       } catch (errForPrint) {
         resolveForPrint({ ok: false, code: 'failed', error: (errForPrint && errForPrint.message) || 'the printer could not be reached' });
+      }
+    });
+  }
+
+  // Asks the service worker to load an HTML page in a blank background tab and draw it.
+  function snapshotHtmlForToolExec(jobForSnapshot) {
+    return new Promise(function (resolveForSnapshot) {
+      var actionsForSnapshot = (globalScopeForToolExec.ABChatShared || {}).actions || {};
+      try {
+        chrome.runtime.sendMessage({
+          action: actionsForSnapshot.snapshotHtmlPage || 'snapshotHtmlPage',
+          html: jobForSnapshot.html,
+          desktop: jobForSnapshot.desktop,
+          phone: jobForSnapshot.phone,
+          pictures: jobForSnapshot.pictures !== false
+        }, function (responseForSnapshot) {
+          if (chrome.runtime.lastError) {
+            resolveForSnapshot({ ok: false, code: 'failed', error: chrome.runtime.lastError.message || 'the page loader did not answer' });
+            return;
+          }
+          resolveForSnapshot(responseForSnapshot || { ok: false, code: 'failed', error: 'the page loader did not answer' });
+        });
+      } catch (errForSnapshot) {
+        resolveForSnapshot({ ok: false, code: 'failed', error: (errForSnapshot && errForSnapshot.message) || 'the page loader could not be reached' });
       }
     });
   }
@@ -11525,6 +11553,254 @@ self.onmessage = function (e) {
     };
     if (warningsForConvert.length) resultForConvert.warnings = warningsForConvert;
     return resultForConvert;
+  }
+
+  // ---- Tool: view_file ----
+  // Shows the agent a file as pictures, so it can check what it made. agent/fileViewRules.js
+  // decides which pages and how many, and offscreen/fileViewRender.js draws them; both exist only
+  // in the offscreen document, where the agent loop runs. A DOCX is laid out by docxToPdf and a deck
+  // by the slide print, and either is printed by Chrome first. The pictures ride on the result as
+  // _viewImages: the agent loop takes them off, sends them in the next request only, and never saves
+  // them. The result the model keeps is text.
+  async function viewFileToolForToolExec(args, context) {
+    var signalForView = getAbortSignalForToolExec(context);
+    if (isAbortedForToolExec(signalForView)) return cancelledResultForToolExec();
+    var rulesForView = (globalScopeForToolExec.ABChatAgent || {}).fileViewRules;
+    var renderForView = (globalScopeForToolExec.ABChatOffscreen || {}).fileViewRender;
+    if (!rulesForView || !renderForView) return { ok: false, error: 'view_file is not available here.' };
+    var ctxForView = context || {};
+    var budgetForView = ctxForView.viewBudget || rulesForView.createBudget();
+
+    var blobIdForView = Number(args && args.blob_id);
+    if (!Number.isInteger(blobIdForView) || blobIdForView <= 0) {
+      return { ok: false, error: 'blob_id is required: the blob id of the file, a whole number from 1 up.' };
+    }
+    var pagesForView = rulesForView.parsePages(args ? args.pages : null);
+    if (pagesForView.error) return { ok: false, error: pagesForView.error };
+
+    var repoForView = getPanelDataRepoForToolExec();
+    if (!repoForView || typeof repoForView.getAttachmentBlob !== 'function') return { ok: false, error: 'Attachments are not available.' };
+    var recordForView = null;
+    try {
+      recordForView = await repoForView.getAttachmentBlob(blobIdForView);
+    } catch (errForRecord) {
+      recordForView = null;
+    }
+    if (!recordForView) return { ok: false, error: 'No file with blob id ' + blobIdForView + ' was found.' };
+    var nameForView = String(recordForView.name || ('blob ' + blobIdForView));
+    var kindForView = rulesForView.fileKind(recordForView);
+    var unsupportedForView = rulesForView.unsupportedReason(kindForView, nameForView);
+    if (unsupportedForView) return { ok: false, error: unsupportedForView };
+    // An HTML page is still loaded for its error list when no pictures may be sent.
+    if (budgetForView.refused && kindForView !== 'html') return { ok: false, error: budgetForView.refused };
+    var dataUrlForView = typeof recordForView.dataUrl === 'string' ? recordForView.dataUrl : '';
+    if (!dataUrlForView) return { ok: false, error: nameForView + ' ' + rulesForView.MESSAGES.noBytes };
+
+    var requestForView = {
+      step: ctxForView.iteration != null ? ctxForView.iteration : '',
+      fileKey: rulesForView.fileKey(recordForView, blobIdForView),
+      fileName: nameForView,
+      images: 1
+    };
+    var fileLabelForView = nameForView + ' (blob ' + blobIdForView + ')';
+    if (kindForView === 'html') return viewHtmlPageForToolExec(recordForView, dataUrlForView, Object.assign({ blobId: blobIdForView }, requestForView), fileLabelForView, budgetForView, rulesForView, renderForView, signalForView);
+
+    if (kindForView === 'image') {
+      if (dataUrlForView.indexOf('data:image/') !== 0) return { ok: false, error: nameForView + ' ' + rulesForView.MESSAGES.noBytes };
+      var reservedForImage = rulesForView.reserve(budgetForView, requestForView);
+      if (reservedForImage.error) return { ok: false, error: reservedForImage.error };
+      var scaledForView;
+      try {
+        scaledForView = await renderForView.scaleImage(dataUrlForView, {});
+      } catch (errForScale) {
+        rulesForView.release(budgetForView, requestForView.step, 1);
+        return { ok: false, error: 'The picture could not be drawn: ' + ((errForScale && errForScale.message) || 'unknown error') + '.' };
+      }
+      if (isAbortedForToolExec(signalForView)) return cancelledResultForToolExec();
+      return {
+        ok: true,
+        file: nameForView,
+        blob_id: blobIdForView,
+        kind: 'image',
+        width: scaledForView.width,
+        height: scaledForView.height,
+        pictures: rulesForView.PICTURE_STATES.pending,
+        _viewImages: [{ label: fileLabelForView, dataUrl: scaledForView.dataUrl }]
+      };
+    }
+
+    // A Word file or a deck is printed before its pages are known, and a print takes seconds, so
+    // a call the limits would refuse anyway is refused before it prints.
+    var precheckForView = rulesForView.check(budgetForView, requestForView);
+    if (precheckForView.error) return { ok: false, error: precheckForView.error };
+
+    var pdfBytesForView = null;
+    var drawnByChromeForView = false;
+    var warningsForView = [];
+    if (kindForView === 'pdf') {
+      pdfBytesForView = bytesFromDataUrlForToolExec(dataUrlForView);
+      if (!pdfBytesForView) return { ok: false, error: 'The PDF\'s contents could not be read.' };
+    } else {
+      var jobForView = null;
+      if (kindForView === 'docx') {
+        var converterForView = (globalScopeForToolExec.ABChatAgent || {}).docxToPdf;
+        if (!converterForView || typeof converterForView.convert !== 'function') return { ok: false, error: 'The Word layout engine is not available here.' };
+        var docxBytesForView = bytesFromDataUrlForToolExec(dataUrlForView);
+        if (!docxBytesForView) return { ok: false, error: 'The Word file\'s contents could not be read.' };
+        var navigatorForView = globalScopeForToolExec.navigator;
+        var convertedForView = await converterForView.convert(docxBytesForView, {
+          title: nameForView.replace(/\.docx$/i, ''),
+          lang: navigatorForView && navigatorForView.language
+        });
+        if (isAbortedForToolExec(signalForView)) return cancelledResultForToolExec();
+        if (!convertedForView || !convertedForView.ok) {
+          return { ok: false, error: 'This Word file could not be laid out for a look: ' + String((convertedForView && convertedForView.error) || 'unknown error') + ' It was not checked by eye; do not tell the user you checked how it looks.' };
+        }
+        warningsForView = Array.isArray(convertedForView.warnings) ? convertedForView.warnings.slice() : [];
+        jobForView = { html: convertedForView.html, title: nameForView.replace(/\.docx$/i, ''), fonts: convertedForView.fonts, templates: convertedForView.templates };
+      } else {
+        var drawingForView = ctxForView.viewSources && typeof ctxForView.viewSources.get === 'function'
+          ? ctxForView.viewSources.get(blobIdForView)
+          : null;
+        var generationForView = (globalScopeForToolExec.ABChatAgent || {}).documentGeneration;
+        jobForView = drawingForView && generationForView && typeof generationForView.slidePrintJob === 'function'
+          ? generationForView.slidePrintJob(drawingForView, drawingForView.title)
+          : null;
+        if (!jobForView) return { ok: false, error: rulesForView.MESSAGES.deckNotHere };
+      }
+      var printedForView = await printPdfForToolExec(Object.assign({}, jobForView, { noPrompt: true }));
+      if (isAbortedForToolExec(signalForView)) return cancelledResultForToolExec();
+      if (!printedForView || !printedForView.ok || !printedForView.base64) return { ok: false, error: rulesForView.printFailure(printedForView) };
+      (Array.isArray(printedForView.warnings) ? printedForView.warnings : []).forEach(function (warningForPrint) { if (warningForPrint) warningsForView.push(String(warningForPrint)); });
+      pdfBytesForView = bytesFromDataUrlForToolExec('data:application/pdf;base64,' + printedForView.base64);
+      if (!pdfBytesForView) return { ok: false, error: 'Chrome\'s print of the file could not be read, so it was not checked by eye.' };
+      drawnByChromeForView = true;
+    }
+
+    var plannedImagesForView = 0;
+    var renderedForView = await renderForView.renderPdf(pdfBytesForView, {
+      pages: pagesForView.pages,
+      signal: signalForView,
+      reserve: function (planForReserve) {
+        var reservedForPlan = rulesForView.reserve(budgetForView, Object.assign({}, requestForView, { images: planForReserve.images }));
+        if (reservedForPlan.error) return reservedForPlan.error;
+        plannedImagesForView = planForReserve.images;
+        return '';
+      }
+    });
+    if (isAbortedForToolExec(signalForView)) return cancelledResultForToolExec();
+    if (renderedForView.error) return { ok: false, error: renderedForView.error };
+    var picturesForView = renderedForView.pictures || [];
+    rulesForView.release(budgetForView, requestForView.step, plannedImagesForView - picturesForView.length);
+    var planForView = renderedForView.plan;
+    var failedForView = renderedForView.failed || [];
+    var blankForView = renderedForView.blank || [];
+    if (!picturesForView.length && !blankForView.length) {
+      return { ok: false, error: 'None of the pages asked for could be drawn, so the file was not checked by eye.' };
+    }
+
+    var resultForView = {
+      ok: true,
+      file: nameForView,
+      blob_id: blobIdForView,
+      kind: kindForView,
+      pages: renderedForView.numPages,
+      shown: rulesForView.shownSummary(planForView, kindForView)
+    };
+    if (blankForView.length) resultForView.blank_pages = blankForView.slice().sort(function (a, b) { return a - b; });
+    if (failedForView.length) resultForView.failed_pages = failedForView.slice().sort(function (a, b) { return a - b; });
+    if (planForView.missing && planForView.missing.length) resultForView.missing_pages = planForView.missing.slice();
+    if (planForView.notShown && planForView.notShown.length) {
+      resultForView.not_shown = rulesForView.formatPageList(planForView.notShown) + ' (ask for them with pages)';
+    }
+    // The loop rewrites `pictures` once it knows whether the pictures reached the model.
+    if (picturesForView.length) resultForView.pictures = rulesForView.PICTURE_STATES.pending;
+    else resultForView.note = 'There is nothing to show: every page asked for is blank.';
+    if (drawnByChromeForView) resultForView.note = (resultForView.note ? resultForView.note + ' ' : '') + rulesForView.MESSAGES.proxy;
+    if (warningsForView.length) resultForView.warnings = warningsForView.slice(0, 5);
+    resultForView._viewImages = picturesForView.map(function (pictureForView) {
+      return {
+        label: rulesForView.pictureLabel(fileLabelForView, kindForView, pictureForView, renderedForView.numPages),
+        dataUrl: pictureForView.dataUrl
+      };
+    });
+    return resultForView;
+  }
+
+  // view_file on an HTML page: loaded in a blank background tab by the service worker, drawn at a
+  // desktop and a phone width, with what its scripts reported while it loaded. Only a page made in
+  // this chat is loaded, because loading runs its scripts. When the limits allow no more pictures,
+  // or the provider refused them, the page is still loaded for its error list, which is a few lines
+  // of text: an HTML page is changed by many small edits, and a script that now fails on load is
+  // the commonest way an edit breaks it.
+  async function viewHtmlPageForToolExec(recordForHtml, dataUrlForHtml, requestForHtml, fileLabelForHtml, budgetForHtml, rulesForHtml, renderForHtml, signalForHtml) {
+    var nameForHtml = String(recordForHtml.name || fileLabelForHtml);
+    if (recordForHtml.kind !== 'generated_document') return { ok: false, error: rulesForHtml.MESSAGES.htmlNotMade };
+    var bytesForHtml = bytesFromDataUrlForToolExec(dataUrlForHtml);
+    if (!bytesForHtml) return { ok: false, error: nameForHtml + ' ' + rulesForHtml.MESSAGES.noBytes };
+    var htmlTextForHtml = '';
+    try {
+      htmlTextForHtml = new TextDecoder('utf-8').decode(bytesForHtml);
+    } catch (errForDecode) {
+      return { ok: false, error: 'The page\'s contents could not be read.' };
+    }
+    var pictureRequestForHtml = Object.assign({}, requestForHtml, { images: rulesForHtml.LIMITS.htmlImages });
+    var noPicturesForHtml = budgetForHtml.refused || rulesForHtml.check(budgetForHtml, pictureRequestForHtml).error || '';
+    var snappedForHtml = await snapshotHtmlForToolExec({
+      html: htmlTextForHtml,
+      desktop: rulesForHtml.LIMITS.htmlDesktop,
+      phone: rulesForHtml.LIMITS.htmlPhone,
+      pictures: !noPicturesForHtml
+    });
+    if (isAbortedForToolExec(signalForHtml)) return cancelledResultForToolExec();
+    if (!snappedForHtml || !snappedForHtml.ok) return { ok: false, error: rulesForHtml.printFailure(snappedForHtml, 'html') };
+
+    var picturesForHtml = [];
+    if (!noPicturesForHtml) {
+      var shotsForHtml = [
+        { which: 'desktop', base64: snappedForHtml.desktop },
+        { which: 'phone', base64: snappedForHtml.phone }
+      ].filter(function (shotForHtml) { return typeof shotForHtml.base64 === 'string' && shotForHtml.base64; });
+      for (var iForHtml = 0; iForHtml < shotsForHtml.length; iForHtml++) {
+        var scaledForHtml;
+        try {
+          // The phone picture is drawn at twice its width, and is brought to a page's size.
+          scaledForHtml = await renderForHtml.scaleImage('data:image/jpeg;base64,' + shotsForHtml[iForHtml].base64, { maxEdge: rulesForHtml.LIMITS.pageEdge });
+        } catch (errForScale) {
+          continue;
+        }
+        picturesForHtml.push({ label: rulesForHtml.htmlPictureLabel(fileLabelForHtml, shotsForHtml[iForHtml].which), dataUrl: scaledForHtml.dataUrl });
+      }
+      if (isAbortedForToolExec(signalForHtml)) return cancelledResultForToolExec();
+      if (picturesForHtml.length) {
+        var reservedForHtml = rulesForHtml.reserve(budgetForHtml, Object.assign({}, requestForHtml, { images: picturesForHtml.length }));
+        if (reservedForHtml.error) {
+          noPicturesForHtml = reservedForHtml.error;
+          picturesForHtml = [];
+        }
+      } else {
+        noPicturesForHtml = 'The page loaded, but its pictures could not be drawn.';
+      }
+    }
+
+    var errorsForHtml = rulesForHtml.pageErrors(snappedForHtml.reports);
+    var resultForHtml = {
+      ok: true,
+      file: nameForHtml,
+      blob_id: requestForHtml.blobId,
+      kind: 'html'
+    };
+    if (picturesForHtml.length) resultForHtml.shown = rulesForHtml.htmlShownSummary();
+    if (Number(snappedForHtml.pageHeight) > 0) resultForHtml.page_height = Number(snappedForHtml.pageHeight);
+    var overflowForHtml = rulesForHtml.phoneOverflow(snappedForHtml.phoneScrollWidth, picturesForHtml.length > 0);
+    if (overflowForHtml) resultForHtml.phone_overflow = overflowForHtml;
+    resultForHtml.errors = errorsForHtml.errors;
+    if (errorsForHtml.more) resultForHtml.errors_not_listed = errorsForHtml.more;
+    if (picturesForHtml.length) resultForHtml.pictures = rulesForHtml.PICTURE_STATES.pending;
+    else resultForHtml.no_pictures = String(noPicturesForHtml).trim();
+    resultForHtml.note = rulesForHtml.MESSAGES.htmlLoadOnly;
+    resultForHtml._viewImages = picturesForHtml;
+    return resultForHtml;
   }
 
   // ---- Trusted-input automation ----
@@ -13285,6 +13561,7 @@ self.onmessage = function (e) {
       case 'read_document_structure': return readDocumentStructureToolForToolExec(args);
       case 'edit_document':         return editDocumentToolForToolExec(args, context);
       case 'convert_document':      return convertDocumentToolForToolExec(args, context);
+      case 'view_file':             return viewFileToolForToolExec(args, context);
       case 'generate_image':        return generateImageToolForToolExec(args, context);
       case 'generate_questions':    return generateQuestionsToolForToolExec(args, context);
       case 'get_environment':       return getEnvironmentToolForToolExec();

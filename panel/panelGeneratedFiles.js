@@ -23,8 +23,17 @@
 // in an earlier reply keeps its link even when a later reply mentions it or reuses its name, and a
 // picture made in an earlier reply stays even when a later document uses it.
 //
-// Hiding is the only thing this decides, and a missed match leaves a link showing. So a reply's
-// link counts only when it renders as a link: text inside code is ignored, and so is image syntax.
+// Hiding is the only thing this decides about the chat, and a missed match leaves a link showing.
+// So a reply's link counts only when it renders as a link: text inside code is ignored, and so is
+// image syntax.
+//
+// It also decides which generated images of the latest reply are attached to the user's next
+// message (imagesToStage). An attached image is saved on that message and sent again on every
+// later request of the chat, so an image the model was already shown is not attached: the agent
+// loop shows the model each image it makes for the user once, in the request after it, and marks
+// the image's saved result when that request is answered. An image whose result does not say so
+// (the look was refused or never sent, the image was marked for a document, or the chat is older
+// than the look) is attached as before, so the model still sees it once.
 //
 // Nothing here touches the DOM or chrome.*, so it loads as an ordinary IIFE in the content script
 // and exports through the CommonJS tail under Node (`module` is undefined in the browser, so that
@@ -45,6 +54,16 @@
   // lookbehind drops image syntax, which renders as a broken image rather than a link.
   const REPLY_LINK_PATTERN_FOR_GENERATED_FILES =
     /(?<!!)\[[^\]]*\]\(\s*<?#abchat-docblob-(\d+)>?(?:\s+(?:"[^"]*"|'[^']*'))?\s*\)/g;
+
+  // The `pictures` text the agent loop writes into a result once the model has been shown its
+  // pictures: PICTURE_STATES.shown in agent/fileViewRules.js. A copy, because that file is loaded
+  // only in the offscreen document; tests/generatedFileLinks.test.js fails when the two differ. Any
+  // other text, including an older wording of this one, means the image is attached as before.
+  const SHOWN_PICTURES_TEXT_FOR_GENERATED_FILES = 'Shown to you once, in the message after this result. Later requests leave them out, so you will not see them again. '
+    + 'You looked at them then, and the note you wrote right after is your record of what you saw.';
+
+  // The blob marker as the panel has always matched it when attaching images: anywhere in md.
+  const STAGED_BLOB_PATTERN_FOR_GENERATED_FILES = /__blob:(\d+)__/;
 
   const FENCED_CODE_PATTERN_FOR_GENERATED_FILES = /(`{3,}|~{3,})[\s\S]*?(?:\1|$)/g;
   const INLINE_CODE_PATTERN_FOR_GENERATED_FILES = /`[^`\n]*`/g;
@@ -137,8 +156,54 @@
     return hiddenForMessages;
   }
 
+  function wasShownToModelForGeneratedFiles(contentForShown) {
+    if (typeof contentForShown !== 'string' || contentForShown.indexOf('"pictures"') === -1) return false;
+    try {
+      const parsedForShown = JSON.parse(contentForShown);
+      return !!parsedForShown && typeof parsedForShown === 'object'
+        && parsedForShown.pictures === SHOWN_PICTURES_TEXT_FOR_GENERATED_FILES;
+    } catch (errForShown) {
+      return false;
+    }
+  }
+
+  // Blob ids of the generated images to attach to the user's next message, in chat order: each
+  // image of the latest reply (the messages after the last user message) that the chat shows and
+  // the model has not been shown. The image's display message and its tool result share a
+  // tool_call_id, and the result is saved before the display message.
+  function imagesToStageForGeneratedFiles(messagesForStage) {
+    const idsForStage = [];
+    if (!Array.isArray(messagesForStage)) return idsForStage;
+    let startForStage = 0;
+    for (let indexForUser = messagesForStage.length - 1; indexForUser >= 0; indexForUser--) {
+      const messageForUser = messagesForStage[indexForUser];
+      if (messageForUser && messageForUser.role === 'user') { startForStage = indexForUser + 1; break; }
+    }
+    const hiddenForStage = hiddenDisplayIndexesForGeneratedFiles(messagesForStage);
+    const shownCallIdsForStage = new Set();
+    for (let indexForTool = startForStage; indexForTool < messagesForStage.length; indexForTool++) {
+      const messageForTool = messagesForStage[indexForTool];
+      if (!messageForTool || messageForTool.role !== 'tool' || messageForTool.tool_call_id == null) continue;
+      if (wasShownToModelForGeneratedFiles(messageForTool.content)) shownCallIdsForStage.add(String(messageForTool.tool_call_id));
+    }
+    for (let indexForImage = startForStage; indexForImage < messagesForStage.length; indexForImage++) {
+      const messageForImage = messagesForStage[indexForImage];
+      if (!messageForImage || messageForImage.role !== 'assistant') continue;
+      if (hiddenForStage.has(indexForImage)) continue;
+      const matchForImage = STAGED_BLOB_PATTERN_FOR_GENERATED_FILES.exec(String(messageForImage.md || ''));
+      if (!matchForImage) continue;
+      const blobIdForImage = Number(matchForImage[1]);
+      if (!Number.isFinite(blobIdForImage)) continue;
+      if (messageForImage.tool_call_id != null && shownCallIdsForStage.has(String(messageForImage.tool_call_id))) continue;
+      idsForStage.push(blobIdForImage);
+    }
+    return idsForStage;
+  }
+
   nsForGeneratedFiles.generatedFileLinks = {
-    hiddenDisplayIndexes: hiddenDisplayIndexesForGeneratedFiles
+    hiddenDisplayIndexes: hiddenDisplayIndexesForGeneratedFiles,
+    imagesToStage: imagesToStageForGeneratedFiles,
+    SHOWN_PICTURES_TEXT: SHOWN_PICTURES_TEXT_FOR_GENERATED_FILES
   };
   globalScopeForGeneratedFiles.ABChatContent = nsForGeneratedFiles;
 

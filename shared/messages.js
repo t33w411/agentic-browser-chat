@@ -39,6 +39,9 @@
     editDocx: "editDocx",
     // create_document (offscreen) asks the service worker to print a PDF with Chrome.
     printDocumentPdf: "printDocumentPdf",
+    // view_file (offscreen) asks the service worker to load an HTML page made in this chat in a
+    // blank background tab and draw it.
+    snapshotHtmlPage: "snapshotHtmlPage",
     // Scanned-PDF transcription, run as a job in the offscreen document. The pages of a PDF
     // that yielded no extractable text are transcribed by an OCR or vision model, which takes
     // long enough that hosting it in the service worker gets the worker killed mid-flight.
